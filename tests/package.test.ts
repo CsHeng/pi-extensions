@@ -6,12 +6,13 @@ interface PackageManifest {
 	name?: string;
 	private?: boolean;
 	type?: string;
+	peerDependencies?: Record<string, string>;
 	pi?: { extensions?: string[] };
 }
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes exactly one plan mode extension", async () => {
+test("package exposes the two maintained extensions and their Pi peers", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -21,5 +22,8 @@ test("package exposes exactly one plan mode extension", async () => {
 	assert.equal(manifest.type, "module");
 	assert.deepEqual(manifest.pi?.extensions, [
 		"./extensions/plan-mode/index.ts",
+		"./extensions/multi-skill-mentions/index.ts",
 	]);
+	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], "*");
+	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-tui"], "*");
 });

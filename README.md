@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, locally maintained Pi extensions. It currently exports one extension, `plan-mode`, which changes the active tool profile without replacing Pi's native agent loop.
+This repository contains small, locally maintained Pi extensions. It exports `plan-mode`, which changes the active tool profile without replacing Pi's native agent loop, and `multi-skill-mentions`, which adds explicit multi-skill selection to prompts.
 
 ## Plan Mode
 
@@ -8,15 +8,22 @@ This repository contains small, locally maintained Pi extensions. It currently e
 
 The extension stores only the selected profile and the tool set to restore. It does not own workflow phases, task graphs, review policy, approval gates, tool authorization, or settlement. Those decisions remain with the active coding agent, the user, and Pi's host loop.
 
+## Multi-skill Mentions
+
+Type `$` in the TUI to search loaded skills and insert one or more `$skill-name` mentions. On submission, the extension expands each uniquely mentioned loaded skill before the original prompt. Unknown names, escaped mentions such as `\$skill-name`, and ordinary shell variables remain unchanged.
+
+`/skill-mentions` shows a short usage reminder and the number of currently loaded skills. The extension does not discover skills independently; Pi's command registry remains authoritative for available skill names and source paths.
+
 ## Package
 
 The private package exposes exactly:
 
 ```text
 extensions/plan-mode/index.ts
+extensions/multi-skill-mentions/index.ts
 ```
 
-The repository may gain another extension only when the new capability has independent installation, configuration, state, tests, and removal behavior.
+Each extension keeps independent behavior, tests, and removal semantics while sharing one Pi package.
 
 ## Local Development
 
