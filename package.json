@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Independent Pi extensions with one generic workflow harness",
+  "description": "Small Pi loop profiles that preserve the host agent loop",
   "keywords": [
     "pi-package",
-    "workflow-harness"
+    "plan-mode"
   ],
   "scripts": {
     "check": "npm run typecheck && npm test && bash -n scripts/*.sh",
@@ -16,9 +16,6 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
-  "dependencies": {
-    "typebox": "1.3.7"
-  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@types/node": "^24.10.1",
@@ -26,7 +23,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/workflow-harness/index.ts"
+      "./extensions/plan-mode/index.ts"
     ]
   }
 }

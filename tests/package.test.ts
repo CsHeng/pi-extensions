@@ -11,7 +11,7 @@ interface PackageManifest {
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes exactly one generic workflow harness extension", async () => {
+test("package exposes exactly one plan mode extension", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -20,6 +20,6 @@ test("package exposes exactly one generic workflow harness extension", async () 
 	assert.equal(manifest.private, true);
 	assert.equal(manifest.type, "module");
 	assert.deepEqual(manifest.pi?.extensions, [
-		"./extensions/workflow-harness/index.ts",
+		"./extensions/plan-mode/index.ts",
 	]);
 });

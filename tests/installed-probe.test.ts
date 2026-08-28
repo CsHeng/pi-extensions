@@ -5,22 +5,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-const SCRIPT = new URL("../scripts/run-installed-workflow-probe.sh", import.meta.url).pathname;
+const SCRIPT = new URL("../scripts/run-installed-plan-mode-probe.sh", import.meta.url).pathname;
 
-test("installed probe distinguishes one installed instance from extension-off", async (t) => {
-	const shimRoot = await mkdtemp(join(tmpdir(), "workflow-pi-shim-"));
+test("installed probe distinguishes the plan mode package from extension-off", async (t) => {
+	const shimRoot = await mkdtemp(join(tmpdir(), "plan-mode-pi-shim-"));
 	t.after(async () => rm(shimRoot, { recursive: true, force: true }));
 	const shim = join(shimRoot, "pi");
 	await writeFile(shim, `#!/usr/bin/env bash
 set -euo pipefail
-input=$(cat)
-if [[ $input != '{"type":"get_commands"}' ]]; then exit 2; fi
 instance=1
 for argument in "$@"; do
 	if [[ $argument == --no-extensions ]]; then instance=0; fi
 done
 if [[ $instance == 1 ]]; then
-	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"workflow-harness-status"}]}}'
+	printf '%s\\n' \\
+		'{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"plan"},{"name":"default"}]}}' \\
+		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-plan-mode","data":{"profile":"plan"}}]}}' \\
+		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-plan-mode","data":{"profile":"default"}}]}}'
 else
 	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[]}}'
 fi
@@ -31,5 +32,11 @@ fi
 		env: { PATH: `${shimRoot}:${process.env.PATH ?? ""}` },
 	});
 	assert.equal(result.status, 0, result.stderr);
-	assert.deepEqual(JSON.parse(result.stdout), { status: "ok", installed_instances: 1, extension_off_instances: 0 });
+	assert.deepEqual(JSON.parse(result.stdout), {
+		result: "pass",
+		commands: 2,
+		plan_entries: "present",
+		default_entries: "present",
+		extension_off_commands: 0,
+	});
 });
