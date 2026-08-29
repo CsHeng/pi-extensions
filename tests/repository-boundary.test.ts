@@ -16,6 +16,13 @@ const FORBIDDEN = [
 	["src", "runtime", "harness"].join("/"),
 	["integrations", "pi"].join("/"),
 ] as const;
+const SUBAGENT_RUNTIME_FORBIDDEN = [
+	["pi", "subagents"].join("-"),
+	["workflow", "harness"].join("-"),
+	"discoverAgents",
+	"submit_task_graph",
+] as const;
+const CONCRETE_PROVIDER_MODEL = /\b(?:gpt-\d|claude-(?:\d|opus|sonnet|haiku)|gemini-(?:\d|pro|flash))/i;
 
 async function maintainedTextFiles(directory: string): Promise<string[]> {
 	const files: string[] = [];
@@ -36,5 +43,20 @@ test("maintained package has no collection-specific dependency", async () => {
 			if (text.includes(token)) violations.push(`${relative(ROOT, path)}: ${token}`);
 		}
 	}
+	assert.deepEqual(violations, []);
+});
+
+test("subagent runtime has fixed roles and provider-neutral authored defaults", async () => {
+	const runtimeRoot = join(ROOT, "extensions", "subagents");
+	const violations: string[] = [];
+	for (const path of await maintainedTextFiles(runtimeRoot)) {
+		const text = await readFile(path, "utf8");
+		for (const token of SUBAGENT_RUNTIME_FORBIDDEN) {
+			if (text.includes(token)) violations.push(`${relative(ROOT, path)}: ${token}`);
+		}
+		if (CONCRETE_PROVIDER_MODEL.test(text)) violations.push(`${relative(ROOT, path)}: concrete-provider-model`);
+	}
+	const manifest = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
+	assert.equal(manifest.dependencies?.[["pi", "subagents"].join("-")], undefined);
 	assert.deepEqual(violations, []);
 });

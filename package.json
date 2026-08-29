@@ -7,10 +7,12 @@
   "keywords": [
     "pi-package",
     "plan-mode",
-    "multi-skill-mentions"
+    "multi-skill-mentions",
+    "subagents"
   ],
   "scripts": {
     "check": "npm run typecheck && npm test && bash -n scripts/*.sh",
+    "e2e:subagents": "node --experimental-strip-types scripts/run-live-subagents-e2e.ts",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -27,7 +29,11 @@
   "pi": {
     "extensions": [
       "./extensions/plan-mode/index.ts",
-      "./extensions/multi-skill-mentions/index.ts"
+      "./extensions/multi-skill-mentions/index.ts",
+      "./extensions/subagents/index.ts"
     ]
+  },
+  "dependencies": {
+    "typebox": "1.3.7"
   }
 }

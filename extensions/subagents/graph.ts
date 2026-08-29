@@ -1,0 +1,147 @@
+import { isAbsolute, normalize, relative, sep } from "node:path";
+import { HARD_LIMITS, ROLE_NAMES, utf8Bytes, type RoleName, type SubagentTask, type SubagentToolInput, type TaskError } from "./contracts.ts";
+
+// Kept local to avoid making filesystem policy depend on graph topology.
+const ROLE_SET = new Set<RoleName>(ROLE_NAMES);
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const SAFE_LOCK = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+
+export interface NormalizedTask extends SubagentTask {
+	inputs: string[];
+	dependsOn: string[];
+	writePaths: string[];
+	verification: string[];
+	resourceLocks: string[];
+}
+
+export type GraphValidation =
+	| { ok: true; tasks: NormalizedTask[] }
+	| { ok: false; error: TaskError };
+
+function fail(code: string, message: string): GraphValidation {
+	return { ok: false, error: { code, message } };
+}
+
+export function normalizeRepositoryPath(value: string, allowRoot: boolean): string | undefined {
+	if (!value || value.includes("\0") || isAbsolute(value)) return undefined;
+	const normalized = normalize(value);
+	if (normalized === ".." || normalized.startsWith(`..${sep}`)) return undefined;
+	if (!allowRoot && (normalized === "." || normalized === sep)) return undefined;
+	return normalized;
+}
+
+function pathContains(root: string, child: string): boolean {
+	if (root === ".") return true;
+	const relation = relative(root, child);
+	return relation === "" || (!relation.startsWith("..") && !isAbsolute(relation));
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+	return pathContains(left, right) || pathContains(right, left);
+}
+
+function hasDependencyPath(from: string, to: string, dependencies: ReadonlyMap<string, readonly string[]>): boolean {
+	const visited = new Set<string>();
+	const stack = [...(dependencies.get(from) ?? [])];
+	while (stack.length > 0) {
+		const current = stack.pop();
+		if (!current || visited.has(current)) continue;
+		if (current === to) return true;
+		visited.add(current);
+		stack.push(...(dependencies.get(current) ?? []));
+	}
+	return false;
+}
+
+export function validateGraph(input: SubagentToolInput): GraphValidation {
+	if (!Array.isArray(input.tasks) || input.tasks.length < 1 || input.tasks.length > HARD_LIMITS.maxTasks) {
+		return fail("invalid_graph_size", `A graph must contain 1 through ${HARD_LIMITS.maxTasks} tasks.`);
+	}
+
+	const ids = new Set<string>();
+	const normalized: NormalizedTask[] = [];
+	for (const [index, task] of input.tasks.entries()) {
+		if (!SAFE_ID.test(task.id)) return fail("invalid_task_id", `Task at index ${index} has an invalid id.`);
+		if (ids.has(task.id)) return fail("duplicate_task_id", `Task id ${task.id} is duplicated.`);
+		ids.add(task.id);
+		if (!ROLE_SET.has(task.role)) return fail("invalid_role", `Task ${task.id} has an unsupported role.`);
+		if (!task.objective.trim() || utf8Bytes(task.objective) > HARD_LIMITS.maxObjectiveBytes) {
+			return fail("invalid_objective", `Task ${task.id} objective is empty or exceeds the byte limit.`);
+		}
+		const inputs = task.inputs ?? [];
+		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {
+			return fail("input_too_large", `Task ${task.id} inputs exceed the byte limit.`);
+		}
+		const scope = task.scope.map((entry) => normalizeRepositoryPath(entry, true));
+		if (scope.length < 1 || scope.some((entry) => entry === undefined)) {
+			return fail("invalid_scope", `Task ${task.id} has an unsafe repository scope.`);
+		}
+		const writePaths = (task.writePaths ?? []).map((entry) => normalizeRepositoryPath(entry, false));
+		if (writePaths.some((entry) => entry === undefined)) {
+			return fail("invalid_write_path", `Task ${task.id} has an unsafe write path.`);
+		}
+		const safeScope = scope as string[];
+		const safeWrites = writePaths as string[];
+		if (task.role === "worker" && safeWrites.length < 1) {
+			return fail("worker_write_paths_required", `Worker task ${task.id} requires exact write paths.`);
+		}
+		if (task.role !== "worker" && task.writePaths !== undefined) {
+			return fail("read_only_write_paths", `Read-only task ${task.id} cannot declare write paths.`);
+		}
+		if (new Set(safeWrites).size !== safeWrites.length) {
+			return fail("duplicate_write_path", `Task ${task.id} repeats a write path.`);
+		}
+		if (safeWrites.some((writePath) => !safeScope.some((root) => pathContains(root, writePath)))) {
+			return fail("write_outside_scope", `Task ${task.id} declares a write outside its read scope.`);
+		}
+		const dependsOn = task.dependsOn ?? [];
+		if (new Set(dependsOn).size !== dependsOn.length || dependsOn.includes(task.id)) {
+			return fail("invalid_dependencies", `Task ${task.id} has duplicate or self dependencies.`);
+		}
+		const resourceLocks = task.resourceLocks ?? [];
+		if (resourceLocks.some((lock) => !SAFE_LOCK.test(lock)) || new Set(resourceLocks).size !== resourceLocks.length) {
+			return fail("invalid_resource_lock", `Task ${task.id} has an invalid or duplicate resource lock.`);
+		}
+		const projectedPrompt = utf8Bytes(task.objective) + utf8Bytes(inputs.join("")) + dependsOn.length * HARD_LIMITS.maxPredecessorOutputBytes;
+		if (projectedPrompt > HARD_LIMITS.maxPromptBytes) {
+			return fail("prompt_too_large", `Task ${task.id} projected prompt exceeds the byte limit.`);
+		}
+		normalized.push({
+			...task,
+			scope: safeScope,
+			inputs: [...inputs],
+			dependsOn: [...dependsOn],
+			writePaths: safeWrites,
+			verification: [...(task.verification ?? [])],
+			resourceLocks: [...resourceLocks],
+		});
+	}
+
+	for (const task of normalized) {
+		const unknown = task.dependsOn.find((dependency) => !ids.has(dependency));
+		if (unknown) return fail("unknown_dependency", `Task ${task.id} depends on unknown task ${unknown}.`);
+	}
+
+	const dependencies = new Map(normalized.map((task) => [task.id, task.dependsOn] as const));
+	for (const task of normalized) {
+		if (hasDependencyPath(task.id, task.id, dependencies)) {
+			return fail("dependency_cycle", `Task graph contains a cycle involving ${task.id}.`);
+		}
+	}
+
+	for (let leftIndex = 0; leftIndex < normalized.length; leftIndex += 1) {
+		const left = normalized[leftIndex];
+		if (!left) continue;
+		for (let rightIndex = leftIndex + 1; rightIndex < normalized.length; rightIndex += 1) {
+			const right = normalized[rightIndex];
+			if (!right) continue;
+			const ordered = hasDependencyPath(left.id, right.id, dependencies) || hasDependencyPath(right.id, left.id, dependencies);
+			if (ordered) continue;
+			if (left.writePaths.some((leftPath) => right.writePaths.some((rightPath) => pathsOverlap(leftPath, rightPath)))) {
+				return fail("concurrent_write_conflict", `Potentially concurrent tasks ${left.id} and ${right.id} have overlapping write paths.`);
+			}
+		}
+	}
+
+	return { ok: true, tasks: normalized };
+}
