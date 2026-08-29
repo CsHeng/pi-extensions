@@ -52,9 +52,11 @@ Roles and prompts are code-owned. The package does not discover role files. No c
 
 ## Model routing
 
-The optional user-owned route file is `csheng-subagents.json` under Pi's public agent directory returned by `getAgentDir()`; the default location is `~/.pi/agent/csheng-subagents.json`. Project repositories cannot provide routes. The extension never creates or changes this file.
+The repository-owned default route projection is `config/csheng-subagents.json`. It declares `$parent` model and thinking for every role, global concurrency 4, explorer/reviewer concurrency 4, worker concurrency 2, and `aggressive` guidance. Runtime defaults remain available without filesystem access, and a contract test requires the packaged projection to parse to the same candidates, caps, and guidance.
 
-An absent file makes every role inherit the active parent model and thinking level exactly and is the canonical configuration when the current Pi default should serve every child. A valid file may provide ordered `{ model, thinking }` candidates, lower concurrency limits, and `off`, `balanced`, or `aggressive` guidance. `$parent` denotes the active parent value. `/subagents` reports effective routes and caps without printing raw configuration.
+The optional user-owned override is `csheng-subagents.json` under Pi's public agent directory returned by `getAgentDir()`; the default location is `~/.pi/agent/csheng-subagents.json`. Project repositories cannot provide routes. The extension never creates or changes the user file.
+
+An absent user file applies the packaged behavior: every role inherits the active parent model and thinking level exactly. A valid override may provide ordered `{ model, thinking }` candidates, lower concurrency limits, and `off`, `balanced`, or `aggressive` guidance. `$parent` denotes the active parent value. `/subagents` reports effective routes and caps without printing raw configuration.
 
 This has the model-routing purpose of `~/.codex/agents/*.toml`, but it is not a compatibility layer for those files. Codex agent files combine role instructions, sandbox policy, and optional routing; this extension keeps role instructions and capability ceilings in `roles.ts` and accepts only optional model routing from Pi's agent directory. Provider and model identifiers remain Pi-owned.
 

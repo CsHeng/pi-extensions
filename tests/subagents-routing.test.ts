@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
 import test from "node:test";
 import { defaultConfig, loadConfig, parseConfig } from "../extensions/subagents/config.ts";
 import { resolveRoute, type RouteModel, type RouteRegistry } from "../extensions/subagents/routing.ts";
@@ -20,6 +19,20 @@ function registry(models: RouteModel[], authenticated = new Set(models.map((mode
 
 const parent: RouteModel = { provider: "synthetic", id: "parent", reasoning: true };
 const fast: RouteModel = { provider: "synthetic", id: "fast", reasoning: true };
+
+test("packaged route configuration projects the code-owned defaults", async () => {
+	const packaged = parseConfig(
+		JSON.parse(await readFile(new URL("../config/csheng-subagents.json", import.meta.url), "utf8")) as unknown,
+		"/tmp/agent",
+	);
+	const defaults = defaultConfig("/tmp/agent");
+	assert.equal(packaged.guidance, defaults.guidance);
+	assert.equal(packaged.maxConcurrency, defaults.maxConcurrency);
+	for (const role of ["explorer", "reviewer", "worker"] as const) {
+		assert.deepEqual(packaged.routes[role].candidates, defaults.routes[role].candidates);
+		assert.equal(packaged.routes[role].maxConcurrency, defaults.routes[role].maxConcurrency);
+	}
+});
 
 test("absent configuration inherits the exact parent route", () => {
 	const config = defaultConfig("/tmp/agent");

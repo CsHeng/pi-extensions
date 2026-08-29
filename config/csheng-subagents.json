@@ -1,0 +1,33 @@
+{
+  "guidance": "aggressive",
+  "maxConcurrency": 4,
+  "routes": {
+    "explorer": {
+      "candidates": [
+        {
+          "model": "$parent",
+          "thinking": "$parent"
+        }
+      ],
+      "maxConcurrency": 4
+    },
+    "reviewer": {
+      "candidates": [
+        {
+          "model": "$parent",
+          "thinking": "$parent"
+        }
+      ],
+      "maxConcurrency": 4
+    },
+    "worker": {
+      "candidates": [
+        {
+          "model": "$parent",
+          "thinking": "$parent"
+        }
+      ],
+      "maxConcurrency": 2
+    }
+  }
+}

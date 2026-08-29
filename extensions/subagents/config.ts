@@ -34,7 +34,7 @@ export interface ConfigLoadResult {
 function defaultRoute(role: RoleName): RoleRouteConfig {
 	return {
 		candidates: [{ model: "$parent", thinking: "$parent" }],
-		maxConcurrency: role === "explorer" ? HARD_LIMITS.maxConcurrency : HARD_LIMITS.maxWorkers,
+		maxConcurrency: role === "worker" ? HARD_LIMITS.maxWorkers : HARD_LIMITS.maxConcurrency,
 		source: "parent",
 	};
 }

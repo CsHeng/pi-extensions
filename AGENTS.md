@@ -11,6 +11,7 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - `extensions/plan-mode/`: reversible read-only tool profile
 - `extensions/multi-skill-mentions/`: TUI completion and input expansion for loaded skills
 - `extensions/subagents/`: fixed child roles, routing, scheduling, subprocess, path guard, writable snapshots, and convergence
+- `config/csheng-subagents.json`: tracked default route projection for user overrides
 - `tests/`: deterministic, fake-Pi, subprocess, filesystem, and disposable-Git tests
 - `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes
 - `docs/architecture/`: stable product and maintenance truth
@@ -23,7 +24,7 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - A profile may select tools and append compact loop guidance. It must not introduce task graphs, schedulers, approval protocols, review gates, settlement, or a generic permission framework.
 - The subagent extension may validate and execute one foreground, hard-bounded, in-memory DAG submitted by the parent. It owns physical child routing, readiness, concurrency, locks, cancellation, path capabilities, isolated worker snapshots, and mechanical convergence; it owns no semantic lifecycle, approval, verification judgment, review adjudication, repair decision, continuation, or durable run state.
 - Pi's skill command registry remains authoritative for loaded Skill names and source paths. This package does not independently discover, execute, or enforce a Skill repository, and subagent children load no Skills.
-- Child roles are code-owned and fixed. Concrete child routes are optional user-owned input under Pi's agent directory; project repositories cannot provide routes, and the package never changes the parent model or provider settings.
+- Child roles are code-owned and fixed. The repository ships a tested default route projection; concrete route overrides remain optional user-owned input under Pi's agent directory. Project repositories cannot provide routes, and the package never changes the parent model or provider settings.
 - Missing declared plan-mode tools, invalid route configuration, project distrust, unsafe graphs, path escape, writable isolation failure, child failure, and convergence drift fail visibly without widening authority.
 
 ## Working Rules
