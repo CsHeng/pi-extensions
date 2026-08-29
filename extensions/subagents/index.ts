@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	SUBAGENT_STATUS_COMMAND,
 	SUBAGENT_TOOL_NAME,
@@ -19,7 +19,7 @@ import {
 } from "./contracts.ts";
 import { loadConfig, type ConfigLoadResult, type EffectiveSubagentConfig } from "./config.ts";
 import { validateGraph, type NormalizedTask } from "./graph.ts";
-import { formatProgress, formatRunResult } from "./render.ts";
+import { boundToolContent, formatProgress, formatRunResult } from "./render.ts";
 import { resolveRoute, type RouteContext, type RouteResolution } from "./routing.ts";
 import { getRole } from "./roles.ts";
 import { runChild, type ChildRunOptions } from "./runner.ts";
@@ -101,6 +101,21 @@ function aggregateFailure(
 	};
 }
 
+function finalToolResult(result: SubagentRunResult, text = formatRunResult(result)): AgentToolResult<SubagentRunResult> {
+	return { content: [{ type: "text", text: boundToolContent(text) }], details: result };
+}
+
+function isSubagentRunResult(value: unknown): value is SubagentRunResult {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		(record.status === "succeeded" || record.status === "partial" || record.status === "failed" || record.status === "aborted") &&
+		Array.isArray(record.tasks) &&
+		typeof record.usage === "object" && record.usage !== null &&
+		typeof record.telemetry === "object" && record.telemetry !== null
+	);
+}
+
 function routeContext(ctx: ExtensionContext): RouteContext {
 	return {
 		...(ctx.model === undefined ? {} : { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> }),
@@ -148,6 +163,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 	const dependencies = { ...DEFAULT_DEPENDENCIES, ...overrides };
 	return function subagentsExtension(pi: ExtensionAPI): void {
 		let activeController: AbortController | undefined;
+		let activeRun: Promise<void> | undefined;
 		let activeChildren = 0;
 
 		pi.registerTool({
@@ -170,28 +186,27 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						usage: emptyUsage(),
 						telemetry: failedTelemetry(identity, 0, validation.error.code),
 					};
-					return {
-						content: [{ type: "text", text: `Subagent graph rejected (${validation.error.code}): ${validation.error.message}` }],
-						details: result,
-						isError: true,
-					};
+					return finalToolResult(result, `Subagent graph rejected (${validation.error.code}): ${validation.error.message}`);
 				}
 				if (!ctx.isProjectTrusted()) {
 					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.", identity);
-					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
+					return finalToolResult(result);
 				}
 				if (activeController) {
 					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.", identity);
-					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
+					return finalToolResult(result);
 				}
 				const controller = new AbortController();
 				const unlink = linkAbort(signal, controller);
+				let settleActiveRun: (() => void) | undefined;
+				const runSettlement = new Promise<void>((resolve) => { settleActiveRun = resolve; });
 				activeController = controller;
+				activeRun = runSettlement;
 				try {
 				const loaded = await dependencies.loadConfig();
 				if (!loaded.config) {
 					const result = aggregateFailure(validation.tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity);
-					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
+					return finalToolResult(result);
 				}
 				const config = loaded.config;
 				const routes = new Map<string, Extract<RouteResolution, { ok: true }>>();
@@ -202,7 +217,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					});
 					if (!selected.ok) {
 						const result = aggregateFailure(validation.tasks, selected.error.code, selected.error.message, identity);
-						return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
+						return finalToolResult(result);
 					}
 					routes.set(task.id, selected);
 				}
@@ -212,7 +227,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					readOnlyRoot = await realpath(ctx.cwd);
 				} catch (error) {
 					const result = aggregateFailure(validation.tasks, "workspace_unavailable", error instanceof Error ? error.message : String(error), identity);
-					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
+					return finalToolResult(result);
 				}
 
 					const result = await runScheduledTasks(validation.tasks, {
@@ -299,13 +314,20 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							}
 						},
 					});
-					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: result.status !== "succeeded" };
+					return finalToolResult(result);
 				} finally {
 					activeChildren = 0;
 					unlink();
 					activeController = undefined;
+					if (activeRun === runSettlement) activeRun = undefined;
+					settleActiveRun?.();
 				}
 			},
+		});
+
+		pi.on("tool_result", async (event) => {
+			if (event.toolName !== SUBAGENT_TOOL_NAME || !isSubagentRunResult(event.details)) return undefined;
+			return { isError: event.details.status !== "succeeded" };
 		});
 
 		pi.registerCommand(SUBAGENT_STATUS_COMMAND, {
@@ -336,7 +358,9 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 		});
 
 		pi.on("session_shutdown", async () => {
+			const settlingRun = activeRun;
 			activeController?.abort();
+			await settlingRun;
 		});
 	};
 }

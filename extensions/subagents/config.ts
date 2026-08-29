@@ -44,7 +44,6 @@ export interface EffectiveSubagentConfig {
 	routes: Record<RoleName, RoleRouteConfig>;
 	reasoningProfiles: Partial<Record<ReasoningProfile, ConfiguredThinking>>;
 	reasoningProfileSources: Partial<Record<ReasoningProfile, RouteSource>>;
-	configPath: string;
 }
 
 export interface ConfigLoadResult {
@@ -66,7 +65,7 @@ function neutralRoute(role: RoleName): RoleRouteConfig {
 	};
 }
 
-export function defaultConfig(agentDir = getAgentDir()): EffectiveSubagentConfig {
+export function defaultConfig(): EffectiveSubagentConfig {
 	return {
 		guidance: "aggressive",
 		maxConcurrency: HARD_LIMITS.maxConcurrency,
@@ -77,11 +76,10 @@ export function defaultConfig(agentDir = getAgentDir()): EffectiveSubagentConfig
 		},
 		reasoningProfiles: {},
 		reasoningProfileSources: {},
-		configPath: join(agentDir, ROUTE_CONFIG_FILE),
 	};
 }
 
-function cloneConfig(config: EffectiveSubagentConfig, agentDir: string): EffectiveSubagentConfig {
+function cloneConfig(config: EffectiveSubagentConfig): EffectiveSubagentConfig {
 	return {
 		guidance: config.guidance,
 		maxConcurrency: config.maxConcurrency,
@@ -95,7 +93,6 @@ function cloneConfig(config: EffectiveSubagentConfig, agentDir: string): Effecti
 		}])) as Record<RoleName, RoleRouteConfig>,
 		reasoningProfiles: { ...config.reasoningProfiles },
 		reasoningProfileSources: { ...config.reasoningProfileSources },
-		configPath: join(agentDir, ROUTE_CONFIG_FILE),
 	};
 }
 
@@ -180,11 +177,11 @@ function parseRoute(value: unknown, role: RoleName, source: RouteSource, base: R
 	};
 }
 
-export function parseConfig(value: unknown, agentDir = getAgentDir(), options: ParseOptions = {}): EffectiveSubagentConfig {
+export function parseConfig(value: unknown, options: ParseOptions = {}): EffectiveSubagentConfig {
 	if (!isRecord(value)) throw new Error("route configuration must be an object");
 	assertKnownKeys(value, ["guidance", "maxConcurrency", "routes", "reasoningProfiles"], "configuration");
 	const source = options.source ?? "user-config";
-	const base = cloneConfig(options.base ?? defaultConfig(agentDir), agentDir);
+	const base = cloneConfig(options.base ?? defaultConfig());
 	if (value.guidance !== undefined) {
 		if (value.guidance !== "off" && value.guidance !== "balanced" && value.guidance !== "aggressive") {
 			throw new Error("guidance must be off, balanced, or aggressive");
@@ -228,10 +225,10 @@ export async function loadConfig(agentDir = getAgentDir()): Promise<ConfigLoadRe
 	const configPath = join(agentDir, ROUTE_CONFIG_FILE);
 	try {
 		const packageValue = await loadRegularJson(PACKAGE_CONFIG_PATH, "packaged route configuration");
-		const packaged = parseConfig(packageValue, agentDir, { source: "package-default" });
+		const packaged = parseConfig(packageValue, { source: "package-default" });
 		try {
 			const userValue = await loadRegularJson(configPath, "route configuration");
-			return { config: parseConfig(userValue, agentDir, { base: packaged, source: "user-config" }) };
+			return { config: parseConfig(userValue, { base: packaged, source: "user-config" }) };
 		} catch (error) {
 			if (isNodeError(error) && error.code === "ENOENT") return { config: packaged };
 			throw error;

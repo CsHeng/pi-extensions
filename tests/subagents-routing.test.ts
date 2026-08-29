@@ -37,6 +37,7 @@ test("packaged route configuration owns role preferences and ten-way global capa
 	assert.equal(loaded.diagnostic, undefined);
 	const config = loaded.config;
 	assert.ok(config);
+	assert.equal("configPath" in config, false);
 	assert.equal(config.maxConcurrency, 10);
 	assert.equal(config.routes.explorer.candidates[0]?.model, "openai-codex/gpt-5.6-luna");
 	assert.equal(config.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
@@ -46,10 +47,11 @@ test("packaged route configuration owns role preferences and ten-way global capa
 });
 
 test("neutral configuration inherits the exact parent route when explicitly used", () => {
-	const config = defaultConfig("/tmp/agent");
+	const config = defaultConfig();
 	const result = resolveRoute("worker", config, context([parent]));
 	assert.equal(result.ok, true);
 	if (result.ok) {
+		assert.equal("model" in result, false);
 		assert.deepEqual(result.route, {
 			provider: "synthetic",
 			model: "parent",
@@ -75,7 +77,7 @@ test("ordered user candidates respect authentication, scope, and thinking pins",
 				maxConcurrency: 2,
 			},
 		},
-	}, "/tmp/agent");
+	});
 	const result = resolveRoute("explorer", config, context([parent, fast], [{ model: fast, thinkingLevel: "low" }]));
 	assert.equal(result.ok, true);
 	if (result.ok) {
@@ -96,7 +98,7 @@ test("semantic profiles select configured candidates and reasoning while unmappe
 				},
 			},
 		},
-	}, "/tmp/agent");
+	});
 	const mapped = resolveRoute("explorer", config, context([fast, deep]), {
 		executionProfile: "deep",
 		reasoningProfile: "deep",
@@ -138,7 +140,7 @@ test("user overlay can lower caps without replacing unmentioned packaged routes"
 test("route fails without silent fallback when scope or thinking is incompatible", () => {
 	const config = parseConfig({
 		routes: { reviewer: { candidates: [{ model: "synthetic/fast", thinking: "high" }] } },
-	}, "/tmp/agent");
+	});
 	const result = resolveRoute("reviewer", config, context([fast], [{ model: fast, thinkingLevel: "low" }]));
 	assert.deepEqual(result, {
 		ok: false,
@@ -150,11 +152,11 @@ test("route fails without silent fallback when scope or thinking is incompatible
 });
 
 test("configuration cannot raise hard limits or add unknown fields", () => {
-	assert.throws(() => parseConfig({ maxConcurrency: 11 }, "/tmp/agent"), /1 through 10/);
-	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 5 } } }, "/tmp/agent"), /1 through 4/);
-	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: 3 } } }, "/tmp/agent"), /1 through 2/);
-	assert.throws(() => parseConfig({ model: "synthetic/fast" }, "/tmp/agent"), /unsupported fields/);
-	assert.throws(() => parseConfig({ reasoningProfiles: { extreme: "max" } }, "/tmp/agent"), /unsupported fields/);
+	assert.throws(() => parseConfig({ maxConcurrency: 11 }), /1 through 10/);
+	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 5 } } }), /1 through 4/);
+	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: 3 } } }), /1 through 2/);
+	assert.throws(() => parseConfig({ model: "synthetic/fast" }), /unsupported fields/);
+	assert.throws(() => parseConfig({ reasoningProfiles: { extreme: "max" } }), /unsupported fields/);
 });
 
 test("loader isolates malformed and symlinked user configuration", async (t) => {
@@ -175,6 +177,6 @@ test("loader isolates malformed and symlinked user configuration", async (t) => 
 
 test("packaged JSON parses through the strict package source", async () => {
 	const value = JSON.parse(await readFile(new URL("../config/csheng-subagents.json", import.meta.url), "utf8")) as unknown;
-	const parsed = parseConfig(value, "/tmp/agent", { source: "package-default" });
+	const parsed = parseConfig(value, { source: "package-default" });
 	assert.equal(parsed.routes.worker.source, "package-default");
 });

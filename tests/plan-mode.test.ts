@@ -28,6 +28,7 @@ class FakePi {
 	readonly toolSources = new Map<string, string>();
 	activeTools = ["read", "bash", "edit", "write", "custom-tool"];
 	branch: FakeEntry[] = [];
+	allEntries: FakeEntry[] = [];
 	allTools = ["read", "bash", "edit", "write", "grep", "find", "ls", "custom-tool"];
 
 	appendEntry(customType: string, data: unknown): void {
@@ -75,7 +76,12 @@ function context(pi: FakePi): ExtensionContext {
 		cwd: "/workspace",
 		hasUI: true,
 		mode: "rpc",
-		sessionManager: { getEntries: () => pi.branch },
+		sessionManager: {
+			getBranch: () => pi.branch,
+			getEntries: () => {
+				throw new Error("plan mode must restore from the active branch, not the complete session tree");
+			},
+		},
 		ui: {
 			notify: (message: string) => pi.notifications.push(message),
 			setStatus: (_key: string, value: string | undefined) => pi.statuses.push(value),
@@ -110,8 +116,9 @@ test("plan profile uses exact read-only tools and default restores the prior set
 	assert.deepEqual(pi.entries, [{
 		customType: PLAN_MODE_ENTRY_TYPE,
 		data: {
+			version: 2,
 			profile: "plan",
-			toolsBeforePlan: ["read", "bash", "edit", "write", "custom-tool"],
+			restoreTools: ["read", "bash", "edit", "write", "custom-tool"],
 		},
 	}]);
 
@@ -121,7 +128,11 @@ test("plan profile uses exact read-only tools and default restores the prior set
 	assert.deepEqual(pi.activeTools, ["read", "bash", "edit", "write", "custom-tool"]);
 	assert.deepEqual(pi.entries.at(-1), {
 		customType: PLAN_MODE_ENTRY_TYPE,
-		data: { profile: "default", toolsBeforePlan: null },
+		data: {
+			version: 2,
+			profile: "default",
+			restoreTools: ["read", "bash", "edit", "write", "custom-tool"],
+		},
 	});
 });
 
@@ -159,8 +170,9 @@ test("startup flag enters plan profile and missing read-only tools fail closed",
 	assert.deepEqual(pi.entries.at(-1), {
 		customType: PLAN_MODE_ENTRY_TYPE,
 		data: {
+			version: 2,
 			profile: "plan",
-			toolsBeforePlan: ["read", "bash", "edit", "write", "custom-tool"],
+			restoreTools: ["read", "bash", "edit", "write", "custom-tool"],
 		},
 	});
 });
@@ -176,4 +188,123 @@ test("plan profile excludes a custom tool that shadows a read-only built-in name
 
 	assert.deepEqual(pi.activeTools, ["grep", "find", "ls"]);
 	assert.match(pi.notifications.at(-1) ?? "", /missing read-only tools: read/);
+});
+
+test("active branch state wins over later entries elsewhere in the session tree", async () => {
+	const pi = new FakePi();
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "plan", restoreTools: ["read", "bash", "edit", "write"] },
+	}];
+	pi.allEntries = [
+		...pi.branch,
+		{ type: "custom", customType: PLAN_MODE_ENTRY_TYPE, data: { version: 2, profile: "default", restoreTools: ["read"] } },
+	];
+	planMode(pi as unknown as ExtensionAPI);
+	const ctx = context(pi);
+
+	await invoke(pi, "session_start", { type: "session_start", reason: "resume" }, ctx);
+	assert.deepEqual(pi.activeTools, PLAN_MODE_TOOLS);
+	assert.equal(pi.entries.length, 0);
+});
+
+test("session tree navigation restores each branch without appending valid state", async () => {
+	const pi = new FakePi();
+	planMode(pi as unknown as ExtensionAPI);
+	const ctx = context(pi);
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "plan", restoreTools: ["read", "bash", "edit", "write", "custom-tool"] },
+	}];
+	await invoke(pi, "session_start", { type: "session_start", reason: "resume" }, ctx);
+	assert.deepEqual(pi.activeTools, PLAN_MODE_TOOLS);
+
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "default", restoreTools: ["read", "bash", "custom-tool"] },
+	}];
+	await invoke(pi, "session_tree", { type: "session_tree" }, ctx);
+	assert.deepEqual(pi.activeTools, ["read", "bash", "custom-tool"]);
+
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "plan", restoreTools: ["read", "bash", "edit", "write", "custom-tool"] },
+	}];
+	await invoke(pi, "session_tree", { type: "session_tree" }, ctx);
+	assert.deepEqual(pi.activeTools, PLAN_MODE_TOOLS);
+	assert.equal(pi.entries.length, 0);
+});
+
+test("legacy default state derives its exact tools from the nearest earlier plan entry", async () => {
+	const pi = new FakePi();
+	pi.activeTools = ["read"];
+	pi.branch = [
+		{
+			type: "custom",
+			customType: PLAN_MODE_ENTRY_TYPE,
+			data: { profile: "plan", toolsBeforePlan: ["read", "bash", "custom-tool"] },
+		},
+		{
+			type: "custom",
+			customType: PLAN_MODE_ENTRY_TYPE,
+			data: { profile: "default", toolsBeforePlan: null },
+		},
+	];
+	planMode(pi as unknown as ExtensionAPI);
+	const ctx = context(pi);
+
+	await invoke(pi, "session_start", { type: "session_start", reason: "resume" }, ctx);
+	assert.deepEqual(pi.activeTools, ["read", "bash", "custom-tool"]);
+	assert.equal(pi.entries.length, 0);
+});
+
+test("invalid latest branch state fails closed and persists one repaired version-two entry", async () => {
+	const pi = new FakePi();
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "plan", restoreTools: "invalid" },
+	}];
+	planMode(pi as unknown as ExtensionAPI);
+	const ctx = context(pi);
+
+	await invoke(pi, "session_start", { type: "session_start", reason: "resume" }, ctx);
+	assert.deepEqual(pi.activeTools, PLAN_MODE_TOOLS);
+	assert.match(pi.notifications.at(-1) ?? "", /Invalid plan-profile state/);
+	assert.deepEqual(pi.entries.at(-1), {
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: {
+			version: 2,
+			profile: "plan",
+			restoreTools: ["read", "bash", "edit", "write", "custom-tool"],
+		},
+	});
+});
+
+test("startup flag applies once and does not override explicit default after tree navigation", async () => {
+	const pi = new FakePi();
+	pi.flags.set("plan", true);
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "default", restoreTools: ["read", "bash", "edit", "write", "custom-tool"] },
+	}];
+	planMode(pi as unknown as ExtensionAPI);
+	const ctx = context(pi);
+	await invoke(pi, "session_start", { type: "session_start", reason: "startup" }, ctx);
+	assert.deepEqual(pi.activeTools, PLAN_MODE_TOOLS);
+
+	await command(pi, "default", ctx);
+	assert.deepEqual(pi.activeTools, ["read", "bash", "edit", "write", "custom-tool"]);
+	pi.branch = [{
+		type: "custom",
+		customType: PLAN_MODE_ENTRY_TYPE,
+		data: { version: 2, profile: "default", restoreTools: ["read", "bash", "edit", "write", "custom-tool"] },
+	}];
+	await invoke(pi, "session_tree", { type: "session_tree" }, ctx);
+	assert.deepEqual(pi.activeTools, ["read", "bash", "edit", "write", "custom-tool"]);
 });

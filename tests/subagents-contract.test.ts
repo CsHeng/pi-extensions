@@ -4,6 +4,7 @@ import { Check } from "typebox/value";
 import {
 	HARD_LIMITS,
 	ROLE_NAMES,
+	SubagentTaskSchema,
 	SubagentToolSchema,
 	truncateUtf8,
 } from "../extensions/subagents/contracts.ts";
@@ -15,9 +16,21 @@ test("subagent roles have fixed least-authority tool sets", () => {
 	assert.deepEqual(ROLES.reviewer.tools, ["read", "grep", "find", "ls"]);
 	assert.deepEqual(ROLES.worker.tools, ["read", "grep", "find", "ls", "edit", "write"]);
 	for (const role of Object.values(ROLES)) {
+		assert.equal("name" in role, false);
+		assert.equal("canWrite" in role, false);
 		assert.equal(role.tools.includes("bash"), false);
 		assert.match(role.systemPrompt, /Do not delegate/);
 	}
+});
+
+test("model-facing string choices serialize as provider-compatible enums", () => {
+	const properties = (SubagentTaskSchema as unknown as {
+		properties: Record<string, { enum?: unknown; anyOf?: unknown }>;
+	}).properties;
+	assert.deepEqual(properties.role?.enum, ROLE_NAMES);
+	assert.deepEqual(properties.executionProfile?.enum, ["fast", "balanced", "deep"]);
+	assert.deepEqual(properties.reasoningProfile?.enum, ["light", "standard", "deep"]);
+	assert.equal(properties.role?.anyOf, undefined);
 });
 
 test("tool schema accepts one bounded task array and rejects arbitrary runtime fields", () => {

@@ -1,3 +1,4 @@
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 export const SUBAGENT_TOOL_NAME = "csheng_subagents";
@@ -31,9 +32,9 @@ export type ReasoningProfile = (typeof REASONING_PROFILES)[number];
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
 export type RunStatus = "succeeded" | "partial" | "failed" | "aborted";
 
-const RoleSchema = Type.Union(ROLE_NAMES.map((role) => Type.Literal(role)));
-const ExecutionProfileSchema = Type.Union(EXECUTION_PROFILES.map((profile) => Type.Literal(profile)));
-const ReasoningProfileSchema = Type.Union(REASONING_PROFILES.map((profile) => Type.Literal(profile)));
+const RoleSchema = StringEnum(ROLE_NAMES);
+const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES);
+const ReasoningProfileSchema = StringEnum(REASONING_PROFILES);
 const BoundedStringArray = Type.Array(Type.String(), { maxItems: 32 });
 
 export const SubagentTaskSchema = Type.Object(

@@ -7,7 +7,9 @@ interface PackageManifest {
 	private?: boolean;
 	type?: string;
 	files?: string[];
+	dependencies?: Record<string, string>;
 	peerDependencies?: Record<string, string>;
+	devDependencies?: Record<string, string>;
 	scripts?: Record<string, string>;
 	pi?: { extensions?: string[] };
 }
@@ -28,7 +30,16 @@ test("package exposes the three maintained extensions and their Pi peers", async
 		"./extensions/multi-skill-mentions/index.ts",
 		"./extensions/subagents/index.ts",
 	]);
-	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], "*");
-	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-tui"], "*");
+	assert.deepEqual(manifest.peerDependencies, {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		typebox: "*",
+	});
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-ai"], "0.84.4");
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.84.4");
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-tui"], "0.84.4");
+	assert.equal(manifest.devDependencies?.typebox, "1.3.7");
+	assert.equal(manifest.dependencies, undefined);
 	assert.equal(manifest.scripts?.["e2e:subagents"], "node --experimental-strip-types scripts/run-live-subagents-e2e.ts");
 });

@@ -1,0 +1,89 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import {
+	TELEMETRY_SCHEMA_VERSION,
+	emptyUsage,
+	type SubagentRunResult,
+	type TaskResult,
+} from "../extensions/subagents/contracts.ts";
+import { boundToolContent, formatDuration, formatProgress, formatRunResult } from "../extensions/subagents/render.ts";
+
+function task(index: number, output: string): TaskResult {
+	return {
+		id: `task-${index}`,
+		role: index % 3 === 0 ? "worker" : index % 2 === 0 ? "reviewer" : "explorer",
+		status: index === 8 ? "failed" : "succeeded",
+		output,
+		stderr: "",
+		usage: emptyUsage(),
+		durationMs: 1_500 + index,
+		changedPaths: Array.from({ length: 32 }, (_, pathIndex) => `src/${index}/${"p".repeat(300)}-${pathIndex}.ts`),
+		convergence: index % 3 === 0 ? "applied" : "not-applicable",
+		route: {
+			provider: "synthetic",
+			model: `model-${"m".repeat(800)}`,
+			thinking: "high",
+			source: "package-default",
+			candidateIndex: 0,
+			executionProfileApplied: false,
+			reasoningProfileApplied: false,
+			profileFallbacks: [],
+		},
+		...(index === 8 ? { error: { code: "synthetic_failure", message: `failure ${"e".repeat(10_000)}` } } : {}),
+	};
+}
+
+function run(tasks: TaskResult[]): SubagentRunResult {
+	return {
+		status: "partial",
+		tasks,
+		usage: emptyUsage(),
+		telemetry: {
+			schemaVersion: TELEMETRY_SCHEMA_VERSION,
+			runId: "render-contract",
+			runDurationMs: 61_500,
+			requestedTasks: tasks.length,
+			admittedTasks: tasks.length,
+			launchedChildren: tasks.length,
+			peakConcurrency: tasks.length,
+			peakConcurrencyByRole: { explorer: 4, reviewer: 4, worker: 2 },
+		},
+	};
+}
+
+test("duration rendering is deterministic and compact", () => {
+	assert.equal(formatDuration(0), "0ms");
+	assert.equal(formatDuration(999), "999ms");
+	assert.equal(formatDuration(1_000), "1.0s");
+	assert.equal(formatDuration(61_500), "1m 1.5s");
+});
+
+test("aggregate rendering obeys Pi byte and line limits while retaining every task summary", () => {
+	const lineHeavy = Array.from({ length: 2_500 }, (_, index) => `line-${index} 😀`).join("\n");
+	const longLine = `${"界".repeat(30_000)} end`;
+	const result = formatRunResult(run(Array.from({ length: 10 }, (_, index) => task(index, index % 2 === 0 ? lineHeavy : longLine))));
+
+	assert.ok(Buffer.byteLength(result, "utf8") <= DEFAULT_MAX_BYTES);
+	assert.ok(result.split("\n").length <= DEFAULT_MAX_LINES);
+	for (let index = 0; index < 10; index += 1) {
+		assert.match(result, new RegExp(`^\\[task-${index}\\] (?:explorer|reviewer|worker) (?:succeeded|failed) elapsed=`, "m"));
+	}
+	assert.match(result, /elapsed=1\.5s/);
+	assert.match(result, /Task details truncated/);
+});
+
+test("arbitrary final tool text is bounded even when its first line exceeds the byte limit", () => {
+	const bounded = boundToolContent("界".repeat(30_000));
+	assert.ok(Buffer.byteLength(bounded, "utf8") <= DEFAULT_MAX_BYTES);
+	assert.ok(bounded.split("\n").length <= DEFAULT_MAX_LINES);
+	assert.match(bounded, /Tool result truncated/);
+});
+
+test("progress includes known elapsed duration without a ticking timer", () => {
+	const results = [task(0, "done"), { ...task(1, ""), status: "running" as const, durationMs: 0 }];
+	const progress = formatProgress(results);
+	assert.match(progress, /1\/2 settled, 1 running/);
+	assert.match(progress, /task-0.*elapsed=1\.5s/);
+	assert.doesNotMatch(progress, /task-1.*elapsed=/);
+});

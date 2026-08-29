@@ -3,11 +3,16 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 export const PLAN_MODE_ENTRY_TYPE = "csheng-plan-mode";
 export const PLAN_MODE_TOOLS = ["read", "grep", "find", "ls"] as const;
 
+const PLAN_MODE_STATE_VERSION = 2 as const;
 type Profile = "default" | "plan";
 
 interface PlanModeState {
 	profile: Profile;
-	toolsBeforePlan: string[] | null;
+	restoreTools: string[];
+}
+
+interface PersistedPlanModeState extends PlanModeState {
+	version: typeof PLAN_MODE_STATE_VERSION;
 }
 
 const PLAN_INSTRUCTION = `[PLAN PROFILE ACTIVE]
@@ -18,20 +23,58 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function parseState(value: unknown): PlanModeState | undefined {
+function parseCurrentState(value: unknown): PlanModeState | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const record = value as Record<string, unknown>;
-	if (record.profile === "default" && record.toolsBeforePlan === null) {
-		return { profile: "default", toolsBeforePlan: null };
+	if (
+		record.version !== PLAN_MODE_STATE_VERSION ||
+		(record.profile !== "default" && record.profile !== "plan") ||
+		!isStringArray(record.restoreTools)
+	) return undefined;
+	return { profile: record.profile, restoreTools: [...record.restoreTools] };
+}
+
+function parseLegacyPlanState(value: unknown): PlanModeState | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.profile !== "plan" || !isStringArray(record.toolsBeforePlan)) return undefined;
+	return { profile: "plan", restoreTools: [...record.toolsBeforePlan] };
+}
+
+function isLegacyDefaultState(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	return record.profile === "default" && record.toolsBeforePlan === null;
+}
+
+function restoredBranchState(entries: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>, baselineTools: readonly string[]): PlanModeState | "invalid" {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry?.type !== "custom" || entry.customType !== PLAN_MODE_ENTRY_TYPE) continue;
+		const current = parseCurrentState(entry.data);
+		if (current) return current;
+		const legacyPlan = parseLegacyPlanState(entry.data);
+		if (legacyPlan) return legacyPlan;
+		if (!isLegacyDefaultState(entry.data)) return "invalid";
+
+		for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
+			const previous = entries[previousIndex];
+			if (previous?.type !== "custom" || previous.customType !== PLAN_MODE_ENTRY_TYPE) continue;
+			const previousCurrent = parseCurrentState(previous.data);
+			if (previousCurrent?.profile === "plan") {
+				return { profile: "default", restoreTools: [...previousCurrent.restoreTools] };
+			}
+			const previousLegacy = parseLegacyPlanState(previous.data);
+			if (previousLegacy) return { profile: "default", restoreTools: [...previousLegacy.restoreTools] };
+		}
+		return { profile: "default", restoreTools: [...baselineTools] };
 	}
-	if (record.profile === "plan" && isStringArray(record.toolsBeforePlan)) {
-		return { profile: "plan", toolsBeforePlan: [...record.toolsBeforePlan] };
-	}
-	return undefined;
+	return { profile: "default", restoreTools: [...baselineTools] };
 }
 
 export default function planModeExtension(pi: ExtensionAPI): void {
-	let state: PlanModeState = { profile: "default", toolsBeforePlan: null };
+	let state: PlanModeState = { profile: "default", restoreTools: [] };
+	let startupBaselineTools: string[] | undefined;
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const value = state.profile === "plan" ? ctx.ui.theme.fg("warning", "plan") : undefined;
@@ -39,10 +82,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	}
 
 	function persistState(): void {
-		pi.appendEntry(PLAN_MODE_ENTRY_TYPE, {
+		const persisted: PersistedPlanModeState = {
+			version: PLAN_MODE_STATE_VERSION,
 			profile: state.profile,
-			toolsBeforePlan: state.toolsBeforePlan === null ? null : [...state.toolsBeforePlan],
-		});
+			restoreTools: [...state.restoreTools],
+		};
+		pi.appendEntry(PLAN_MODE_ENTRY_TYPE, persisted);
 	}
 
 	function applyPlanTools(ctx: ExtensionContext): string[] {
@@ -60,16 +105,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		return missing;
 	}
 
-	function enterPlan(ctx: ExtensionContext, persist = true): void {
+	function applyState(ctx: ExtensionContext): string[] {
+		if (state.profile === "plan") return applyPlanTools(ctx);
+		pi.setActiveTools([...state.restoreTools]);
+		return [];
+	}
+
+	function enterPlan(ctx: ExtensionContext): void {
 		if (state.profile === "plan") {
 			applyPlanTools(ctx);
 			updateStatus(ctx);
 			return;
 		}
-		state = { profile: "plan", toolsBeforePlan: pi.getActiveTools() };
+		state = { profile: "plan", restoreTools: pi.getActiveTools() };
 		const missing = applyPlanTools(ctx);
 		updateStatus(ctx);
-		if (persist) persistState();
+		persistState();
 		if (missing.length === 0) {
 			ctx.ui.notify("Plan profile enabled. Workspace mutation tools are inactive.", "info");
 		}
@@ -77,15 +128,37 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	function enterDefault(ctx: ExtensionContext): void {
 		if (state.profile === "default") {
+			applyState(ctx);
 			updateStatus(ctx);
 			return;
 		}
-		const toolsToRestore = state.toolsBeforePlan ?? [];
-		pi.setActiveTools([...toolsToRestore]);
-		state = { profile: "default", toolsBeforePlan: null };
+		const restoreTools = [...state.restoreTools];
+		pi.setActiveTools(restoreTools);
+		state = { profile: "default", restoreTools };
 		updateStatus(ctx);
 		persistState();
 		ctx.ui.notify("Default profile restored.", "info");
+	}
+
+	function restoreActiveBranch(ctx: ExtensionContext, applyStartupFlag: boolean): void {
+		const baselineTools = startupBaselineTools ?? pi.getActiveTools();
+		const restored = restoredBranchState(ctx.sessionManager.getBranch(), baselineTools);
+		if (restored === "invalid") {
+			state = { profile: "plan", restoreTools: [...baselineTools] };
+			applyPlanTools(ctx);
+			updateStatus(ctx);
+			persistState();
+			ctx.ui.notify("Invalid plan-profile state was replaced with a fail-closed plan profile.", "error");
+			return;
+		}
+
+		state = restored;
+		applyState(ctx);
+		if (applyStartupFlag && pi.getFlag("plan") === true && state.profile !== "plan") {
+			enterPlan(ctx);
+			return;
+		}
+		updateStatus(ctx);
 	}
 
 	pi.registerFlag("plan", {
@@ -110,32 +183,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const entries = ctx.sessionManager.getEntries();
-		let latestData: unknown;
-		let hasLatest = false;
-		for (const entry of entries) {
-			if (entry.type === "custom" && entry.customType === PLAN_MODE_ENTRY_TYPE) {
-				latestData = entry.data;
-				hasLatest = true;
-			}
-		}
-		const restored = parseState(latestData);
+		startupBaselineTools = pi.getActiveTools();
+		restoreActiveBranch(ctx, true);
+	});
 
-		if (hasLatest && restored === undefined) {
-			state = { profile: "plan", toolsBeforePlan: pi.getActiveTools() };
-			applyPlanTools(ctx);
-			updateStatus(ctx);
-			persistState();
-			ctx.ui.notify("Invalid plan-profile state was replaced with a fail-closed plan profile.", "error");
-			return;
-		}
-
-		if (restored !== undefined) state = restored;
-		if (pi.getFlag("plan") === true && state.profile !== "plan") {
-			enterPlan(ctx);
-			return;
-		}
-		if (state.profile === "plan") applyPlanTools(ctx);
-		updateStatus(ctx);
+	pi.on("session_tree", async (_event, ctx) => {
+		restoreActiveBranch(ctx, false);
 	});
 }

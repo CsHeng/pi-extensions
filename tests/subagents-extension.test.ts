@@ -65,7 +65,7 @@ function successful(task: NormalizedTask): TaskResult {
 
 function dependencies(overrides: Partial<SubagentDependencies> = {}): Partial<SubagentDependencies> {
 	return {
-		loadConfig: async () => ({ config: defaultConfig("/tmp/agent") }),
+		loadConfig: async () => ({ config: defaultConfig() }),
 		runChild: async (options) => ({ ...successful(options.task), route: options.route }),
 		guardExtensionPath: "/tmp/guard.ts",
 		...overrides,
@@ -90,7 +90,7 @@ test("untrusted projects fail before a child starts", async () => {
 	const result = await state.tool.execute("call", {
 		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
 	}, undefined, undefined, context(false));
-	assert.equal(result.isError, true);
+	assert.equal("isError" in result, false);
 	assert.match(result.content[0].text, /project_trust_required/);
 	assert.equal(result.details.telemetry.runErrorCode, "project_trust_required");
 	assert.equal(result.details.telemetry.launchedChildren, 0);
@@ -113,7 +113,7 @@ test("trusted graph inherits parent route and passes explicit child approval", a
 			{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
 		],
 	}, undefined, (update: any) => updates.push(update.content[0].text), context());
-	assert.equal(result.isError, false);
+	assert.equal("isError" in result, false);
 	assert.equal(result.details.status, "succeeded");
 	assert.equal(seen.length, 2);
 	assert.equal(seen[0].approveProject, true);
@@ -133,7 +133,7 @@ test("task semantic profiles are projected into route resolution without plan co
 				},
 			},
 		},
-	}, "/tmp/agent");
+	});
 	let route: TaskResult["route"];
 	const state = harness();
 	createSubagentsExtension(dependencies({
@@ -155,7 +155,7 @@ test("task semantic profiles are projected into route resolution without plan co
 			reasoningProfile: "deep",
 		}],
 	}, undefined, undefined, ctx);
-	assert.equal(result.isError, false);
+	assert.equal("isError" in result, false);
 	assert.equal(route?.model, "deep");
 	assert.equal(route?.thinking, "high");
 	assert.equal(route?.executionProfileApplied, true);
@@ -180,7 +180,7 @@ test("a concurrent graph is rejected before it can exceed session caps", async (
 	const first = state.tool.execute("first", input, undefined, undefined, context());
 	await childStarted;
 	const second = await state.tool.execute("second", input, undefined, undefined, context());
-	assert.equal(second.isError, true);
+	assert.equal("isError" in second, false);
 	assert.match(second.content[0].text, /subagent_run_active/);
 	releaseChild?.();
 	assert.equal((await first).details.status, "succeeded");
@@ -215,26 +215,56 @@ test("aggressive guidance appears only while the tool is active", async () => {
 	assert.equal(await handler?.({ systemPrompt: "base" }), undefined);
 });
 
-test("session shutdown aborts a running child", async () => {
-	let aborted = false;
+test("session shutdown waits for the aborted run and workspace cleanup", async () => {
 	let markStarted: (() => void) | undefined;
+	let markAborted: (() => void) | undefined;
+	let releaseCleanup: (() => void) | undefined;
+	let childRuns = 0;
 	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
+	const cleanupReleased = new Promise<void>((resolve) => { releaseCleanup = resolve; });
 	const state = harness();
 	createSubagentsExtension(dependencies({
-		runChild: async (options) => new Promise<TaskResult>((resolve) => {
-			markStarted?.();
-			options.signal?.addEventListener("abort", () => {
-				aborted = true;
-				resolve({ ...successful(options.task), status: "aborted", error: { code: "aborted", message: "aborted" } });
-			}, { once: true });
+		createWorkerWorkspace: async (_cwd, task) => ({
+			sourceRoot: process.cwd(),
+			root: process.cwd(),
+			task,
+			parentBaselines: new Map(),
+			workspaceBaseline: new Map(),
+			cleanup: async () => cleanupReleased,
 		}),
+		runChild: async (options) => {
+			childRuns += 1;
+			if (childRuns > 1) return successful(options.task);
+			return new Promise<TaskResult>((resolve) => {
+				markStarted?.();
+				options.signal?.addEventListener("abort", () => {
+					markAborted?.();
+					resolve({ ...successful(options.task), status: "aborted", error: { code: "aborted", message: "aborted" } });
+				}, { once: true });
+			});
+		},
 	}))(state.pi);
 	const execution = state.tool.execute("call", {
-		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
+		tasks: [{ id: "write", role: "worker", objective: "write", scope: ["."], writePaths: ["result.txt"] }],
 	}, undefined, undefined, context());
 	await started;
-	await state.handlers.get("session_shutdown")?.[0]?.({});
+
+	let shutdownSettled = false;
+	const shutdown = state.handlers.get("session_shutdown")?.[0]?.({}).then(() => { shutdownSettled = true; });
+	await aborted;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(shutdownSettled, false);
+
+	releaseCleanup?.();
+	await shutdown;
 	const result = await execution;
-	assert.equal(aborted, true);
+	assert.equal(shutdownSettled, true);
 	assert.equal(result.details.status, "aborted");
+
+	const next = await state.tool.execute("next", {
+		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
+	}, undefined, undefined, context());
+	assert.equal(next.details.status, "succeeded");
+	assert.equal(childRuns, 2);
 });

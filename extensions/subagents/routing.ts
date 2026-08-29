@@ -32,7 +32,7 @@ export interface TaskRouteProfiles {
 }
 
 export type RouteResolution =
-	| { ok: true; route: EffectiveRoute; model: RouteModel }
+	| { ok: true; route: EffectiveRoute }
 	| { ok: false; error: TaskError };
 
 function parseModelReference(reference: string): { provider: string; model: string } | undefined {
@@ -93,7 +93,6 @@ export function resolveRoute(
 			: config.reasoningProfileSources[profiles.reasoningProfile];
 		return {
 			ok: true,
-			model,
 			route: {
 				provider: model.provider,
 				model: model.id,
