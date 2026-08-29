@@ -46,6 +46,10 @@ extensions/subagents/index.ts
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.
 
+## Documentation
+
+`docs/architecture/` owns stable extension truth, `docs/evaluations/` retains bounded redacted evidence, and `docs/plans/` retains stage history outside default documentation search. See [`docs/README.md`](docs/README.md) for the search boundary.
+
 ## Local Development
 
 ```bash
@@ -53,7 +57,9 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. The opt-in live E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all three package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
+Temporary-load and installed-package probes live under `scripts/`. Plan-mode and subagent probes use RPC fixtures without model calls. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
+
+The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all three package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents

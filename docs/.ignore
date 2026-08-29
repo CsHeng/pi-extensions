@@ -1,0 +1,2 @@
+# Stage artifacts stay in Git for history but should not pollute default docs search.
+plans/

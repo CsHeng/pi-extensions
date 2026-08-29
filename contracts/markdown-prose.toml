@@ -1,0 +1,9 @@
+version = 1
+
+[[exceptions]]
+path = "docs/plans/changes/2026-08-28-workflow-harness-design.md"
+sha256 = "4d8c202b5f221138c4ee5936b12454b0741db79c5d56d85560ecc3e7f8e1586c"
+
+[[exceptions]]
+path = "docs/plans/changes/2026-08-28-workflow-harness-plan.md"
+sha256 = "3476b2790f404328617767c297265f5baef345e27dcc32338e908046a27d08ac"

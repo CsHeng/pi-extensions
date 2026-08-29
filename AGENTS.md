@@ -16,7 +16,10 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - `tests/`: deterministic, fake-Pi, subprocess, filesystem, evaluator, and disposable-Git tests
 - `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes
 - `docs/architecture/`: stable product and maintenance truth
+- `docs/evaluations/`: bounded retained evidence, not a second truth owner
 - `docs/plans/`: stage artifacts and migration history, not runtime input
+- `docs/.ignore`: default search boundary that excludes stage history without affecting Git tracking
+- `contracts/markdown-prose.toml`: exact immutable prose-format exceptions for retained historical artifacts
 
 ## Boundaries
 
@@ -48,13 +51,18 @@ npm ci --ignore-scripts
 npm run check
 bash scripts/run-temporary-plan-mode-probe.sh
 bash scripts/run-installed-plan-mode-probe.sh
-bash scripts/run-temporary-multi-skill-mentions-probe.sh
-bash scripts/run-installed-multi-skill-mentions-probe.sh
 bash scripts/run-temporary-subagents-probe.sh
 bash scripts/run-installed-subagents-probe.sh
 ```
 
-The live provider lane is separately authorized and never belongs to `npm test`:
+The multi-skill mention probes use Pi print mode and cross model/provider preflight. `PI_OFFLINE=1` does not disable inference, so these probes require explicit provider-call authority and do not belong to the deterministic offline lane:
+
+```bash
+bash scripts/run-temporary-multi-skill-mentions-probe.sh
+bash scripts/run-installed-multi-skill-mentions-probe.sh
+```
+
+The live subagent provider lane is separately authorized and never belongs to `npm test`:
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
