@@ -10,6 +10,11 @@ const MAX_STDERR_BYTES = 64 * 1024;
 const TIMEOUT_MS = 20 * 60 * 1000;
 const KILL_GRACE_MS = 5_000;
 const REQUIRED_COMMANDS = ["default", "plan", "skill-mentions", "subagents"] as const;
+const EXPECTED_ROLE_ROUTES = {
+	explorer: "openai-codex/gpt-5.6-luna:medium",
+	reviewer: "openai-codex/gpt-5.6-sol:high",
+	worker: "openai-codex/gpt-5.6-terra:high",
+} as const;
 
 interface ToolTaskResult {
 	id?: unknown;
@@ -19,7 +24,10 @@ interface ToolTaskResult {
 	route?: {
 		provider?: unknown;
 		model?: unknown;
+		thinking?: unknown;
 		source?: unknown;
+		executionProfileRequested?: unknown;
+		reasoningProfileRequested?: unknown;
 	};
 }
 
@@ -41,8 +49,9 @@ export interface LiveE2eSummary {
 	packageExtensions: 3;
 	tasks: 3;
 	roles: ["explorer", "reviewer", "worker"];
-	routeSource: "parent";
-	sharedParentRoute: true;
+	routeSource: "package-default";
+	roleRoutes: typeof EXPECTED_ROLE_ROUTES;
+	profileMode: "role-default";
 	workerConvergence: "applied";
 }
 
@@ -104,11 +113,16 @@ export function validateLiveRun(
 		if ("outputToken" in item && (typeof task.output !== "string" || !task.output.includes(item.outputToken))) {
 			fail(`role_${item.role}_token_missing`);
 		}
-		if (task.route?.source !== "parent") fail(`role_${item.role}_route_not_parent`);
-		if (typeof task.route.provider !== "string" || typeof task.route.model !== "string") fail(`role_${item.role}_route_missing`);
+		if (task.route?.source !== "package-default") fail(`role_${item.role}_route_not_package_default`);
+		if (typeof task.route.provider !== "string" || typeof task.route.model !== "string" || typeof task.route.thinking !== "string") {
+			fail(`role_${item.role}_route_missing`);
+		}
+		const route = `${task.route.provider}/${task.route.model}:${task.route.thinking}`;
+		if (route !== EXPECTED_ROLE_ROUTES[item.role]) fail(`role_${item.role}_route_mismatch`);
+		if (task.route.executionProfileRequested !== undefined || task.route.reasoningProfileRequested !== undefined) {
+			fail(`role_${item.role}_unexpected_profile`);
+		}
 	}
-	const routes = tasks.map((task) => `${task.route?.provider}/${task.route?.model}`);
-	if (new Set(routes).size !== 1) fail("roles_did_not_share_parent_route");
 	if (workerContent.trim() !== expectedTokens.worker) fail("worker_content_mismatch");
 	const worker = tasks.find((task) => task.id === "worker") as ToolTaskResult & { convergence?: unknown };
 	if (worker.convergence !== "applied") fail("worker_convergence_not_applied");
@@ -118,8 +132,9 @@ export function validateLiveRun(
 		packageExtensions: 3,
 		tasks: 3,
 		roles: ["explorer", "reviewer", "worker"],
-		routeSource: "parent",
-		sharedParentRoute: true,
+		routeSource: "package-default",
+		roleRoutes: EXPECTED_ROLE_ROUTES,
+		profileMode: "role-default",
 		workerConvergence: "applied",
 	};
 }

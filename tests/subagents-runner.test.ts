@@ -9,7 +9,16 @@ import { getRole } from "../extensions/subagents/roles.ts";
 import { runChild } from "../extensions/subagents/runner.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;
-const route: EffectiveRoute = { provider: "synthetic", model: "child", thinking: "low", source: "user-config", candidateIndex: 0 };
+const route: EffectiveRoute = {
+	provider: "synthetic",
+	model: "child",
+	thinking: "low",
+	source: "user-config",
+	candidateIndex: 0,
+	executionProfileApplied: false,
+	reasoningProfileApplied: false,
+	profileFallbacks: [],
+};
 const task: NormalizedTask = {
 	id: "scan",
 	role: "explorer",
@@ -68,6 +77,7 @@ test("runner classifies malformed protocol, child exit, and spawn failure", asyn
 	assert.equal((await runChild(options("nonzero"))).error?.code, "child_exit");
 	const failed = await runChild(options("normal", { invocation: { command: "/definitely/missing/pi", args: [] } }));
 	assert.equal(failed.error?.code, "spawn_failure");
+	assert.equal(failed.telemetry?.childStarted, false);
 });
 
 test("runner caps output and stderr by UTF-8 bytes", async () => {

@@ -1,5 +1,11 @@
-import type { EffectiveRoute, RoleName, TaskError } from "./contracts.ts";
-import type { EffectiveSubagentConfig } from "./config.ts";
+import type {
+	EffectiveRoute,
+	ExecutionProfile,
+	ReasoningProfile,
+	RoleName,
+	TaskError,
+} from "./contracts.ts";
+import type { EffectiveSubagentConfig, RouteCandidateConfig } from "./config.ts";
 
 export interface RouteModel {
 	provider: string;
@@ -18,6 +24,11 @@ export interface RouteContext {
 	parentThinking?: string;
 	scopedModels: readonly { model: RouteModel; thinkingLevel?: string }[];
 	modelRegistry: RouteRegistry;
+}
+
+export interface TaskRouteProfiles {
+	executionProfile?: ExecutionProfile;
+	reasoningProfile?: ReasoningProfile;
 }
 
 export type RouteResolution =
@@ -39,10 +50,27 @@ function supportsThinking(model: RouteModel, thinking: string): boolean {
 	return true;
 }
 
-export function resolveRoute(role: RoleName, config: EffectiveSubagentConfig, context: RouteContext): RouteResolution {
+function resolveThinking(candidate: RouteCandidateConfig, profileThinking: string | undefined, context: RouteContext): string | undefined {
+	const configured = profileThinking ?? candidate.thinking;
+	return configured === "$parent" ? context.parentThinking : configured;
+}
+
+export function resolveRoute(
+	role: RoleName,
+	config: EffectiveSubagentConfig,
+	context: RouteContext,
+	profiles: TaskRouteProfiles = {},
+): RouteResolution {
 	const roleRoute = config.routes[role];
-	for (let index = 0; index < roleRoute.candidates.length; index += 1) {
-		const candidate = roleRoute.candidates[index];
+	const executionRoute = profiles.executionProfile === undefined ? undefined : roleRoute.executionProfiles[profiles.executionProfile];
+	const candidates = executionRoute?.candidates ?? roleRoute.candidates;
+	const reasoningThinking = profiles.reasoningProfile === undefined ? undefined : config.reasoningProfiles[profiles.reasoningProfile];
+	const profileFallbacks: EffectiveRoute["profileFallbacks"] = [];
+	if (profiles.executionProfile !== undefined && executionRoute === undefined) profileFallbacks.push("execution-role-default");
+	if (profiles.reasoningProfile !== undefined && reasoningThinking === undefined) profileFallbacks.push("reasoning-role-default");
+
+	for (let index = 0; index < candidates.length; index += 1) {
+		const candidate = candidates[index];
 		if (!candidate) continue;
 		const reference = candidate.model === "$parent"
 			? context.parentModel && { provider: context.parentModel.provider, model: context.parentModel.id }
@@ -56,10 +84,13 @@ export function resolveRoute(role: RoleName, config: EffectiveSubagentConfig, co
 			: context.scopedModels.find((item) => item.model.provider === model.provider && item.model.id === model.id);
 		if (context.scopedModels.length > 0 && !scoped) continue;
 
-		const thinking = candidate.thinking === "$parent" ? context.parentThinking : candidate.thinking;
+		const thinking = resolveThinking(candidate, reasoningThinking, context);
 		if (!thinking || !supportsThinking(model, thinking)) continue;
 		if (scoped?.thinkingLevel !== undefined && scoped.thinkingLevel !== thinking) continue;
 
+		const reasoningSource = profiles.reasoningProfile === undefined
+			? undefined
+			: config.reasoningProfileSources[profiles.reasoningProfile];
 		return {
 			ok: true,
 			model,
@@ -67,8 +98,13 @@ export function resolveRoute(role: RoleName, config: EffectiveSubagentConfig, co
 				provider: model.provider,
 				model: model.id,
 				thinking,
-				source: roleRoute.source,
+				source: reasoningSource ?? executionRoute?.source ?? roleRoute.source,
 				candidateIndex: index,
+				...(profiles.executionProfile === undefined ? {} : { executionProfileRequested: profiles.executionProfile }),
+				executionProfileApplied: executionRoute !== undefined,
+				...(profiles.reasoningProfile === undefined ? {} : { reasoningProfileRequested: profiles.reasoningProfile }),
+				reasoningProfileApplied: reasoningThinking !== undefined,
+				profileFallbacks,
 			},
 		};
 	}

@@ -1,8 +1,22 @@
 import { isAbsolute, normalize, relative, sep } from "node:path";
-import { HARD_LIMITS, ROLE_NAMES, utf8Bytes, type RoleName, type SubagentTask, type SubagentToolInput, type TaskError } from "./contracts.ts";
+import {
+	EXECUTION_PROFILES,
+	HARD_LIMITS,
+	REASONING_PROFILES,
+	ROLE_NAMES,
+	utf8Bytes,
+	type ExecutionProfile,
+	type ReasoningProfile,
+	type RoleName,
+	type SubagentTask,
+	type SubagentToolInput,
+	type TaskError,
+} from "./contracts.ts";
 
 // Kept local to avoid making filesystem policy depend on graph topology.
 const ROLE_SET = new Set<RoleName>(ROLE_NAMES);
+const EXECUTION_PROFILE_SET = new Set<ExecutionProfile>(EXECUTION_PROFILES);
+const REASONING_PROFILE_SET = new Set<ReasoningProfile>(REASONING_PROFILES);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SAFE_LOCK = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
@@ -67,6 +81,12 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		if (!ROLE_SET.has(task.role)) return fail("invalid_role", `Task ${task.id} has an unsupported role.`);
 		if (!task.objective.trim() || utf8Bytes(task.objective) > HARD_LIMITS.maxObjectiveBytes) {
 			return fail("invalid_objective", `Task ${task.id} objective is empty or exceeds the byte limit.`);
+		}
+		if (task.executionProfile !== undefined && !EXECUTION_PROFILE_SET.has(task.executionProfile)) {
+			return fail("invalid_execution_profile", `Task ${task.id} has an unsupported execution profile.`);
+		}
+		if (task.reasoningProfile !== undefined && !REASONING_PROFILE_SET.has(task.reasoningProfile)) {
+			return fail("invalid_reasoning_profile", `Task ${task.id} has an unsupported reasoning profile.`);
 		}
 		const inputs = task.inputs ?? [];
 		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {

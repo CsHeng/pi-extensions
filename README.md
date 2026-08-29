@@ -26,13 +26,13 @@ Fixed roles are:
 
 Loading the extension registers the tool, `/subagents` status command, and delegation guidance. It starts no child and changes no workspace until the parent calls the tool. Dispatch requires a trusted project. `plan-mode` continues to expose only its original four tools, so subagent dispatch is unavailable while that profile is active.
 
-The repository ships its explicit default route projection at [`config/csheng-subagents.json`](config/csheng-subagents.json). It selects `$parent` model and thinking for all roles, with global concurrency 4, explorer/reviewer concurrency 4, worker concurrency 2, and `aggressive` guidance. A contract test keeps this file aligned with the code-owned runtime defaults.
+The repository ships its route baseline at [`config/csheng-subagents.json`](config/csheng-subagents.json). It prefers explorer Luna medium, worker Terra high, and reviewer Sol high, with explicit peer fallback order, global concurrency 10, role ceilings `4/4/2`, reasoning-profile mappings, and `aggressive` guidance. Model names remain opaque configuration; extension code does not rank the peer families.
 
-The optional user override is `csheng-subagents.json` under Pi's agent directory, normally `~/.pi/agent/csheng-subagents.json`. An absent override applies the packaged defaults and therefore inherits the active parent model and thinking level for every role. Users may copy and edit the packaged file to provide ordered role candidates or lower concurrency limits. This serves the model-routing purpose of per-role Codex agent files, but the extension does not read `~/.codex/agents/*.toml`: Pi role prompts and tool ceilings remain code-owned, while JSON contains routing only. The package never creates the user override or changes the parent session model or provider settings.
+The optional user override is `csheng-subagents.json` under Pi's agent directory, normally `~/.pi/agent/csheng-subagents.json`. An absent override applies the package baseline. A strict overlay may replace role candidates, add execution-profile candidate lists, override reasoning-profile entries, or lower concurrency. Tasks may provide optional provider-neutral `executionProfile` and `reasoningProfile` values; missing or unmapped values visibly use the role default. The extension never reads a plan or Skill. This serves the model-routing purpose of per-role Codex agent files, but the extension does not read `~/.codex/agents/*.toml`: Pi role prompts and tool ceilings remain code-owned, while JSON contains routing only. The package never creates the user override or changes the parent session model or provider settings.
 
 Workers operate in private snapshots of tracked and non-ignored repository files. The extension accepts only declared create-or-modify results and applies them after exact parent-baseline checks. Parent drift, undeclared changes, symlink writes, deletion, rename, or mode changes fail closed. Writable delegation requires Git; read-only delegation does not.
 
-See [`docs/architecture/subagents.md`](docs/architecture/subagents.md) for the three-owner boundary, complete tool contract, routing, scheduling, isolation, failure behavior, and removal semantics.
+See [`docs/architecture/subagents.md`](docs/architecture/subagents.md) for the three-owner boundary, complete tool contract, routing, scheduling, isolation, telemetry, evaluation, failure behavior, and removal semantics.
 
 ## Package
 
@@ -53,7 +53,7 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. The opt-in live E2E uses Pi's ambient default provider and authentication, creates and removes a disposable Git repository under `~/tmp`, loads all three package extensions together, and requires successful `explorer`, `reviewer`, and converged `worker` results on one inherited parent route:
+Temporary-load and installed-package probes live under `scripts/`. The opt-in live E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all three package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
@@ -61,6 +61,8 @@ CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
 ```
 
 The first command temporary-loads the complete package with ordinary global extensions disabled. The second verifies the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `npm test`.
+
+Maintainers can evaluate an explicitly selected persisted run with `.agents/skills/evaluate-subagent-runs/`. The extractor emits redacted route, usage, timing, concurrency, convergence, and error metrics without retaining prompts, task IDs, child output, paths, credentials, or external content.
 
 ## Safety
 

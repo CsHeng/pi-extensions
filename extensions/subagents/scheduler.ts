@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
 import {
 	HARD_LIMITS,
+	TELEMETRY_SCHEMA_VERSION,
+	emptyTaskTelemetry,
 	emptyUsage,
+	roleConcurrencyCeiling,
 	truncateUtf8,
 	type RoleName,
 	type SubagentRunResult,
@@ -9,12 +13,26 @@ import {
 } from "./contracts.ts";
 import type { NormalizedTask } from "./graph.ts";
 
+export interface ChildLifecycle {
+	childStarted(): void;
+	childSettled(): void;
+}
+
 export interface SchedulerOptions {
 	maxConcurrency?: number;
 	roleLimits?: Partial<Record<RoleName, number>>;
 	signal?: AbortSignal;
-	execute(task: NormalizedTask, predecessors: readonly TaskResult[], signal: AbortSignal): Promise<TaskResult>;
+	runId?: string;
+	requestedTasks?: number;
+	now?: () => number;
+	execute(
+		task: NormalizedTask,
+		predecessors: readonly TaskResult[],
+		signal: AbortSignal,
+		lifecycle: ChildLifecycle,
+	): Promise<TaskResult>;
 	onUpdate?(results: readonly TaskResult[]): void;
+	onChildConcurrency?(activeChildren: number): void;
 }
 
 function pendingResult(task: NormalizedTask): TaskResult {
@@ -28,6 +46,7 @@ function pendingResult(task: NormalizedTask): TaskResult {
 		durationMs: 0,
 		changedPaths: [],
 		convergence: "not-applicable",
+		telemetry: emptyTaskTelemetry(),
 	};
 }
 
@@ -40,7 +59,18 @@ function addUsage(target: UsageTotals, source: UsageTotals): void {
 	target.turns += source.turns;
 }
 
-function aggregate(results: readonly TaskResult[], aborted: boolean): SubagentRunResult {
+function aggregate(
+	results: readonly TaskResult[],
+	aborted: boolean,
+	metrics: {
+		runId: string;
+		started: number;
+		now: () => number;
+		requestedTasks: number;
+		peakConcurrency: number;
+		peakConcurrencyByRole: Record<RoleName, number>;
+	},
+): SubagentRunResult {
 	const usage = emptyUsage();
 	for (const result of results) addUsage(usage, result.usage);
 	let status: SubagentRunResult["status"];
@@ -48,7 +78,26 @@ function aggregate(results: readonly TaskResult[], aborted: boolean): SubagentRu
 	else if (results.every((result) => result.status === "succeeded")) status = "succeeded";
 	else if (results.some((result) => result.status === "succeeded")) status = "partial";
 	else status = "failed";
-	return { status, tasks: [...results], usage };
+	const launchedChildren = results.filter((result) => result.telemetry?.childStarted).length;
+	const runErrorCode = status === "failed" && launchedChildren === 0
+		? results.find((result) => result.error)?.error?.code
+		: undefined;
+	return {
+		status,
+		tasks: [...results],
+		usage,
+		telemetry: {
+			schemaVersion: TELEMETRY_SCHEMA_VERSION,
+			runId: metrics.runId,
+			runDurationMs: Math.max(0, metrics.now() - metrics.started),
+			requestedTasks: metrics.requestedTasks,
+			admittedTasks: results.length,
+			launchedChildren,
+			peakConcurrency: metrics.peakConcurrency,
+			peakConcurrencyByRole: { ...metrics.peakConcurrencyByRole },
+			...(runErrorCode === undefined ? {} : { runErrorCode }),
+		},
+	};
 }
 
 function boundedPredecessor(result: TaskResult): TaskResult {
@@ -56,14 +105,25 @@ function boundedPredecessor(result: TaskResult): TaskResult {
 }
 
 export async function runScheduledTasks(tasks: readonly NormalizedTask[], options: SchedulerOptions): Promise<SubagentRunResult> {
+	const now = options.now ?? Date.now;
+	const started = now();
+	const metrics = {
+		runId: options.runId ?? randomUUID(),
+		started,
+		now,
+		requestedTasks: options.requestedTasks ?? tasks.length,
+		peakConcurrency: 0,
+		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
+	};
 	const maxConcurrency = Math.max(1, Math.min(options.maxConcurrency ?? HARD_LIMITS.maxConcurrency, HARD_LIMITS.maxConcurrency));
 	const results = new Map(tasks.map((task) => [task.id, pendingResult(task)] as const));
-	const tasksById = new Map(tasks.map((task) => [task.id, task] as const));
 	const active = new Map<string, Promise<void>>();
 	const activeLocks = new Set<string>();
 	const activeRoles = new Map<RoleName, number>();
 	const controller = new AbortController();
 	let externallyAborted = options.signal?.aborted ?? false;
+	let activeChildren = 0;
+	const activeChildRoles = new Map<RoleName, number>();
 
 	const emit = () => options.onUpdate?.(tasks.map((task) => results.get(task.id) as TaskResult));
 	const abort = () => {
@@ -73,9 +133,8 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 	options.signal?.addEventListener("abort", abort, { once: true });
 
 	function roleLimit(role: RoleName): number {
-		const configured = options.roleLimits?.[role];
-		const hard = role === "worker" ? HARD_LIMITS.maxWorkers : HARD_LIMITS.maxConcurrency;
-		return Math.max(1, Math.min(configured ?? hard, hard));
+		const hard = roleConcurrencyCeiling(role);
+		return Math.max(1, Math.min(options.roleLimits?.[role] ?? hard, hard));
 	}
 
 	function release(task: NormalizedTask): void {
@@ -85,17 +144,52 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 
 	function launch(task: NormalizedTask): void {
 		for (const lock of task.resourceLocks) activeLocks.add(lock);
-		activeRoles.set(task.role, (activeRoles.get(task.role) ?? 0) + 1);
-		results.set(task.id, { ...pendingResult(task), status: "running" });
+		const roleActive = (activeRoles.get(task.role) ?? 0) + 1;
+		activeRoles.set(task.role, roleActive);
+		const queueMs = Math.max(0, now() - started);
+		results.set(task.id, {
+			...pendingResult(task),
+			status: "running",
+			telemetry: { ...emptyTaskTelemetry(), queueMs },
+		});
 		emit();
 		const predecessors = task.dependsOn.map((id) => boundedPredecessor(results.get(id) as TaskResult));
-		const started = Date.now();
-		const promise = options.execute(task, predecessors, controller.signal)
+		const taskStarted = now();
+		let childActive = false;
+		const lifecycle: ChildLifecycle = {
+			childStarted() {
+				if (childActive) return;
+				childActive = true;
+				activeChildren += 1;
+				metrics.peakConcurrency = Math.max(metrics.peakConcurrency, activeChildren);
+				const roleChildren = (activeChildRoles.get(task.role) ?? 0) + 1;
+				activeChildRoles.set(task.role, roleChildren);
+				metrics.peakConcurrencyByRole[task.role] = Math.max(metrics.peakConcurrencyByRole[task.role], roleChildren);
+				const running = results.get(task.id);
+				if (running?.telemetry) running.telemetry.childStarted = true;
+				options.onChildConcurrency?.(activeChildren);
+			},
+			childSettled() {
+				if (!childActive) return;
+				childActive = false;
+				activeChildren = Math.max(0, activeChildren - 1);
+				activeChildRoles.set(task.role, Math.max(0, (activeChildRoles.get(task.role) ?? 1) - 1));
+				options.onChildConcurrency?.(activeChildren);
+			},
+		};
+		const promise = options.execute(task, predecessors, controller.signal, lifecycle)
 			.then((result) => {
 				const allowedStatus = result.status === "succeeded" || result.status === "failed" || result.status === "aborted";
-				results.set(task.id, allowedStatus ? result : {
+				const telemetry = {
+					...emptyTaskTelemetry(),
+					childStarted: result.telemetry?.childStarted ?? true,
+					...result.telemetry,
+					queueMs,
+				};
+				results.set(task.id, allowedStatus ? { ...result, telemetry } : {
 					...result,
 					status: "failed",
+					telemetry,
 					error: { code: "invalid_executor_result", message: `Executor returned invalid status ${result.status}.` },
 				});
 			})
@@ -103,7 +197,8 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				results.set(task.id, {
 					...pendingResult(task),
 					status: controller.signal.aborted ? "aborted" : "failed",
-					durationMs: Date.now() - started,
+					durationMs: Math.max(0, now() - taskStarted),
+					telemetry: { ...emptyTaskTelemetry(), queueMs },
 					error: {
 						code: controller.signal.aborted ? "aborted" : "executor_failure",
 						message: error instanceof Error ? error.message : String(error),
@@ -111,6 +206,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				});
 			})
 			.finally(() => {
+				lifecycle.childSettled();
 				release(task);
 				active.delete(task.id);
 				emit();
@@ -130,7 +226,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				}
 				emit();
 				await Promise.all(active.values());
-				return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), true);
+				return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), true, metrics);
 			}
 
 			let changed = false;
@@ -159,14 +255,14 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				const status = results.get(task.id)?.status;
 				return status !== "pending" && status !== "running";
 			});
-			if (settled) return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), false);
+			if (settled) return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), false, metrics);
 			if (active.size === 0) {
 				for (const task of tasks) {
 					const result = results.get(task.id) as TaskResult;
 					if (result.status === "pending") results.set(task.id, { ...result, status: "failed", error: { code: "scheduler_stalled", message: "No pending task can become ready." } });
 				}
 				emit();
-				return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), false);
+				return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), false, metrics);
 			}
 			await Promise.race(active.values());
 		}

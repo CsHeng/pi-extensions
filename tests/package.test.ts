@@ -6,6 +6,7 @@ interface PackageManifest {
 	name?: string;
 	private?: boolean;
 	type?: string;
+	files?: string[];
 	peerDependencies?: Record<string, string>;
 	scripts?: Record<string, string>;
 	pi?: { extensions?: string[] };
@@ -21,6 +22,7 @@ test("package exposes the three maintained extensions and their Pi peers", async
 	assert.equal(manifest.name, "@csheng/pi-extensions");
 	assert.equal(manifest.private, true);
 	assert.equal(manifest.type, "module");
+	assert.deepEqual(manifest.files, ["config/", "extensions/"]);
 	assert.deepEqual(manifest.pi?.extensions, [
 		"./extensions/plan-mode/index.ts",
 		"./extensions/multi-skill-mentions/index.ts",

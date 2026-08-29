@@ -4,10 +4,13 @@ export const SUBAGENT_TOOL_NAME = "csheng_subagents";
 export const SUBAGENT_STATUS_COMMAND = "subagents";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
+export const TELEMETRY_SCHEMA_VERSION = 1 as const;
 
 export const HARD_LIMITS = Object.freeze({
-	maxTasks: 8,
-	maxConcurrency: 4,
+	maxTasks: 10,
+	maxConcurrency: 10,
+	maxExplorers: 4,
+	maxReviewers: 4,
 	maxWorkers: 2,
 	maxObjectiveBytes: 16 * 1024,
 	maxInputBytes: 64 * 1024,
@@ -20,11 +23,17 @@ export const HARD_LIMITS = Object.freeze({
 });
 
 export const ROLE_NAMES = ["explorer", "reviewer", "worker"] as const;
+export const EXECUTION_PROFILES = ["fast", "balanced", "deep"] as const;
+export const REASONING_PROFILES = ["light", "standard", "deep"] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
+export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
+export type ReasoningProfile = (typeof REASONING_PROFILES)[number];
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
 export type RunStatus = "succeeded" | "partial" | "failed" | "aborted";
 
 const RoleSchema = Type.Union(ROLE_NAMES.map((role) => Type.Literal(role)));
+const ExecutionProfileSchema = Type.Union(EXECUTION_PROFILES.map((profile) => Type.Literal(profile)));
+const ReasoningProfileSchema = Type.Union(REASONING_PROFILES.map((profile) => Type.Literal(profile)));
 const BoundedStringArray = Type.Array(Type.String(), { maxItems: 32 });
 
 export const SubagentTaskSchema = Type.Object(
@@ -38,6 +47,8 @@ export const SubagentTaskSchema = Type.Object(
 		writePaths: Type.Optional(BoundedStringArray),
 		verification: Type.Optional(BoundedStringArray),
 		resourceLocks: Type.Optional(BoundedStringArray),
+		executionProfile: Type.Optional(ExecutionProfileSchema),
+		reasoningProfile: Type.Optional(ReasoningProfileSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -59,6 +70,8 @@ export interface SubagentTask {
 	writePaths?: string[];
 	verification?: string[];
 	resourceLocks?: string[];
+	executionProfile?: ExecutionProfile;
+	reasoningProfile?: ReasoningProfile;
 }
 
 export interface SubagentToolInput {
@@ -74,17 +87,33 @@ export interface UsageTotals {
 	turns: number;
 }
 
+export type RouteSource = "parent" | "package-default" | "user-config";
+export type ProfileFallback = "execution-role-default" | "reasoning-role-default";
+
 export interface EffectiveRoute {
 	provider: string;
 	model: string;
 	thinking: string;
-	source: "parent" | "user-config";
+	source: RouteSource;
 	candidateIndex: number;
+	executionProfileRequested?: ExecutionProfile;
+	executionProfileApplied: boolean;
+	reasoningProfileRequested?: ReasoningProfile;
+	reasoningProfileApplied: boolean;
+	profileFallbacks: ProfileFallback[];
 }
 
 export interface TaskError {
 	code: string;
 	message: string;
+}
+
+export interface TaskTelemetry {
+	childStarted: boolean;
+	queueMs: number;
+	workspaceMs: number;
+	childMs: number;
+	convergenceMs: number;
 }
 
 export interface TaskResult {
@@ -97,15 +126,29 @@ export interface TaskResult {
 	durationMs: number;
 	changedPaths: string[];
 	convergence: "not-applicable" | "applied" | "not-applied" | "conflict";
+	telemetry?: TaskTelemetry;
 	route?: EffectiveRoute;
 	stopReason?: string;
 	error?: TaskError;
+}
+
+export interface RunTelemetry {
+	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION;
+	runId: string;
+	runDurationMs: number;
+	requestedTasks: number;
+	admittedTasks: number;
+	launchedChildren: number;
+	peakConcurrency: number;
+	peakConcurrencyByRole: Record<RoleName, number>;
+	runErrorCode?: string;
 }
 
 export interface SubagentRunResult {
 	status: RunStatus;
 	tasks: TaskResult[];
 	usage: UsageTotals;
+	telemetry: RunTelemetry;
 }
 
 export interface ChildCapabilityManifest {
@@ -116,8 +159,18 @@ export interface ChildCapabilityManifest {
 	writePaths: string[];
 }
 
+export function roleConcurrencyCeiling(role: RoleName): number {
+	if (role === "worker") return HARD_LIMITS.maxWorkers;
+	if (role === "reviewer") return HARD_LIMITS.maxReviewers;
+	return HARD_LIMITS.maxExplorers;
+}
+
 export function emptyUsage(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+
+export function emptyTaskTelemetry(): TaskTelemetry {
+	return { childStarted: false, queueMs: 0, workspaceMs: 0, childMs: 0, convergenceMs: 0 };
 }
 
 export function utf8Bytes(value: string): number {

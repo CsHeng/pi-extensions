@@ -41,6 +41,15 @@ test("graph admission rejects cycles, unknown dependencies, role writes, and con
 	] }).ok, false);
 });
 
+test("graph admission rejects unknown semantic profiles before scheduling", () => {
+	assert.deepEqual(validateGraph({ tasks: [
+		{ id: "a", role: "explorer", objective: "a", scope: ["."], executionProfile: "extreme" as never },
+	] }), {
+		ok: false,
+		error: { code: "invalid_execution_profile", message: "Task a has an unsupported execution profile." },
+	});
+});
+
 test("scheduler runs independent tasks concurrently and joins predecessors in stable order", async () => {
 	const tasks = graph([
 		{ id: "a", role: "explorer", objective: "a", scope: ["."] },
@@ -51,12 +60,14 @@ test("scheduler runs independent tasks concurrently and joins predecessors in st
 	let peak = 0;
 	const starts: string[] = [];
 	const result = await runScheduledTasks(tasks, {
-		async execute(task, predecessors) {
+		async execute(task, predecessors, _signal, lifecycle) {
 			starts.push(task.id);
 			active += 1;
+			lifecycle.childStarted();
 			peak = Math.max(peak, active);
 			await new Promise((resolve) => setTimeout(resolve, task.id === "join" ? 1 : 15));
 			active -= 1;
+			lifecycle.childSettled();
 			if (task.id === "join") assert.deepEqual(predecessors.map((item) => item.id), ["a", "b"]);
 			return success(task);
 		},
@@ -65,6 +76,8 @@ test("scheduler runs independent tasks concurrently and joins predecessors in st
 	assert.deepEqual(starts, ["a", "b", "join"]);
 	assert.equal(result.status, "succeeded");
 	assert.equal(result.usage.turns, 3);
+	assert.equal(result.telemetry.launchedChildren, 3);
+	assert.equal(result.telemetry.peakConcurrency, 2);
 });
 
 test("resource locks serialize peers without reducing unrelated capacity", async () => {
@@ -108,6 +121,35 @@ test("failure blocks dependents while independent work succeeds", async () => {
 		["blocked", "blocked"],
 		["good", "succeeded"],
 	]);
+});
+
+test("mixed ready tasks can reach ten while role ceilings remain four, four, and two", async () => {
+	const tasks = graph([
+		...Array.from({ length: 4 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", scope: ["."] })),
+		...Array.from({ length: 4 }, (_, index) => ({ id: `r${index}`, role: "reviewer", objective: "r", scope: ["."] })),
+		...Array.from({ length: 2 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", scope: ["src"], writePaths: [`src/w${index}.ts`] })),
+	]);
+	let release: (() => void) | undefined;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let started = 0;
+	let allStarted: (() => void) | undefined;
+	const startedGate = new Promise<void>((resolve) => { allStarted = resolve; });
+	const run = runScheduledTasks(tasks, {
+		async execute(task, _predecessors, _signal, lifecycle) {
+			started += 1;
+			lifecycle.childStarted();
+			if (started === 10) allStarted?.();
+			await gate;
+			lifecycle.childSettled();
+			return success(task);
+		},
+	});
+	await startedGate;
+	release?.();
+	const result = await run;
+	assert.equal(result.telemetry.peakConcurrency, 10);
+	assert.deepEqual(result.telemetry.peakConcurrencyByRole, { explorer: 4, reviewer: 4, worker: 2 });
+	assert.equal(result.telemetry.launchedChildren, 10);
 });
 
 test("abort stops pending work and forwards one signal to running tasks", async () => {

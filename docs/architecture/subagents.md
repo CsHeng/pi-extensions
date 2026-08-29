@@ -33,10 +33,12 @@ The tool accepts one `tasks` array. A task contains:
 - `writePaths`: exact repository-relative files, required only for workers
 - `verification`: expected parent evidence, never a child command
 - `resourceLocks`: names that prevent simultaneous execution
+- `executionProfile`: optional `fast`, `balanced`, or `deep` route intent
+- `reasoningProfile`: optional `light`, `standard`, or `deep` reasoning intent
 
 Dependencies express single work, serial chains, flat parallel work, fan-out, and fan-in through one schema. The tool does not accept arbitrary working directories, concrete task models, tool lists, commands, extensions, Skills, retries, background flags, or nested graphs.
 
-Hard ceilings are eight tasks, four concurrent children, two concurrent workers, a 15-minute task timeout, and a five-second TERM-to-KILL grace period. Prompt, predecessor, output, and stderr byte limits are exported from `contracts.ts` and tested. User configuration may lower but not raise concurrency ceilings.
+Hard ceilings are ten tasks and ten concurrent children, with role ceilings of four explorers, four reviewers, and two workers, a 15-minute task timeout, and a five-second TERM-to-KILL grace period. A mixed ready graph may therefore reach `4 + 4 + 2`; no graph may run ten workers. Prompt, predecessor, output, and stderr byte limits are exported from `contracts.ts` and tested. User configuration may lower but not raise concurrency ceilings.
 
 Admission rejects duplicate IDs, unknown dependencies, cycles, unsafe paths, role-incompatible fields, missing worker writes, projected prompt overflow, invalid locks, and overlapping write paths between potentially concurrent tasks before any child starts.
 
@@ -52,11 +54,11 @@ Roles and prompts are code-owned. The package does not discover role files. No c
 
 ## Model routing
 
-The repository-owned default route projection is `config/csheng-subagents.json`. It declares `$parent` model and thinking for every role, global concurrency 4, explorer/reviewer concurrency 4, worker concurrency 2, and `aggressive` guidance. Runtime defaults remain available without filesystem access, and a contract test requires the packaged projection to parse to the same candidates, caps, and guidance.
+The repository-owned `config/csheng-subagents.json` is the packaged route baseline. Its role preferences are explorer Luna medium, worker Terra high, and reviewer Sol high, followed by the other two peer families in explicit role-owned order. The order is configuration preference and availability fallback, not a code-owned capability ranking. It also declares global concurrency 10, role concurrency `4/4/2`, `aggressive` guidance, and reasoning mappings `light=low`, `standard=medium`, and `deep=high`.
 
-The optional user-owned override is `csheng-subagents.json` under Pi's public agent directory returned by `getAgentDir()`; the default location is `~/.pi/agent/csheng-subagents.json`. Project repositories cannot provide routes. The extension never creates or changes the user file.
+The optional user-owned override is `csheng-subagents.json` under Pi's public agent directory returned by `getAgentDir()`; the default location is `~/.pi/agent/csheng-subagents.json`. Project repositories cannot provide routes. The extension never creates or changes the user file. Missing user configuration applies the package baseline. A valid strict overlay may replace ordered `{ model, thinking }` candidates, add role execution-profile candidate lists, replace reasoning-profile mappings, lower concurrency limits, and select `off`, `balanced`, or `aggressive` guidance. Unmentioned package fields remain active. `$parent` remains available only when explicitly configured.
 
-An absent user file applies the packaged behavior: every role inherits the active parent model and thinking level exactly. A valid override may provide ordered `{ model, thinking }` candidates, lower concurrency limits, and `off`, `balanced`, or `aggressive` guidance. `$parent` denotes the active parent value. `/subagents` reports effective routes and caps without printing raw configuration.
+The parent may copy optional provider-neutral task intensity into `executionProfile` and `reasoningProfile`; the extension never discovers or parses a plan or Skill. A configured execution profile selects another role candidate list, then a configured reasoning profile overrides thinking. Missing task profiles use the role default. A known profile without a configured mapping visibly falls back to that default. `/subagents` reports effective default routes and caps without printing raw configuration.
 
 This has the model-routing purpose of `~/.codex/agents/*.toml`, but it is not a compatibility layer for those files. Codex agent files combine role instructions, sandbox policy, and optional routing; this extension keeps role instructions and capability ceilings in `roles.ts` and accepts only optional model routing from Pi's agent directory. Provider and model identifiers remain Pi-owned.
 
@@ -82,7 +84,7 @@ Before applying bytes, the extension compares each parent path with its launch b
 
 Only one subagent graph may be active per extension session, so separate parent tool calls cannot bypass global concurrency, lock, or write-conflict controls. Ready tasks have every dependency succeeded and no active global, role, lock, or write conflict. Stable input order breaks ties. A failed task blocks its transitive dependents, while unrelated branches continue. There is no automatic retry or rollback. Successful independent writes may remain converged when another branch fails, and the parent receives `partial` for fix-forward handling.
 
-The aggregate result records per-task status, effective route, bounded output, usage, duration, changed paths, convergence state, stop reason, and typed error. Child prose cannot modify graph state.
+The aggregate result records per-task status, effective route and profile decision, bounded output, usage, duration, changed paths, convergence state, stop reason, and typed error. Version-one redacted telemetry adds an invocation-local run ID, requested/admitted/launched counts, run duration, peak global and role concurrency, structured run errors, and task queue/workspace/child/convergence durations. It remains inside Pi's persisted tool result; there is no second ledger. Child prose cannot modify graph state.
 
 Abort stops new scheduling, terminates live children, escalates to KILL after the grace period, and removes private resources. `session_shutdown` uses the same idempotent cancellation path.
 
@@ -102,7 +104,9 @@ bash scripts/run-temporary-subagents-probe.sh
 bash scripts/run-installed-subagents-probe.sh
 ```
 
-Unit and component tests own schema, routing, graph, process, guard, snapshot, convergence, extension, cancellation, and regression behavior. The subagent probes are offline and report fixed counts only; they do not start a model child.
+Unit and component tests own schema, routing, graph, process, guard, snapshot, convergence, telemetry, evaluator, extension, cancellation, and regression behavior. The subagent probes are offline and report fixed counts only; they do not start a model child.
+
+The project-local `.agents/skills/evaluate-subagent-runs/` Skill reads one explicitly selected Pi session JSONL and emits a versioned redacted metric document. It never reads Pi SQLite, settings, credentials, logs, or unrelated sessions; never copies prompts, task IDs, child output, stderr, paths, environment values, or external content; and labels legacy launch/concurrency derivation as inference. Reports are written only to an explicit new output path. The first redacted production baseline is retained under `docs/evaluations/subagents/`.
 
 The manual release/runtime lane is:
 
@@ -111,6 +115,6 @@ CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
 CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
 ```
 
-The live E2E intentionally inherits the ambient Pi environment because current default provider selection and authentication are the boundary under test. It creates a disposable Git repository under `~/tmp`, temporary-loads the complete package or uses the installed package, and adds a test-only observer that blocks delegation unless `plan-mode`, `multi-skill-mentions`, and `subagents` are loaded together. Its single graph requires successful `explorer`, `reviewer`, and `worker` children, exact parent-route inheritance, and worker convergence. It has a 20-minute process deadline, bounded capture, cleanup, no retry, and redacted fixed-shape output. It is never part of `npm test` because it consumes provider capacity and ambient authentication.
+The live E2E intentionally inherits the ambient Pi environment because current default provider selection and authentication are the boundary under test. It creates a disposable Git repository under `~/tmp`, temporary-loads the complete package or uses the installed package, and adds a test-only observer that blocks delegation unless `plan-mode`, `multi-skill-mentions`, and `subagents` are loaded together. Its single graph requires successful `explorer`, `reviewer`, and `worker` children, exact package-default role routes without task profiles, and worker convergence. It has a 20-minute process deadline, bounded capture, cleanup, no retry, and redacted fixed-shape output. It is never part of `npm test` because it consumes provider capacity and ambient authentication.
 
 Removing only `./extensions/subagents/index.ts` from the package extension list and reloading Pi removes the tool and guidance. The other extensions, parent sessions, repository files, and any user-owned route file remain unchanged.

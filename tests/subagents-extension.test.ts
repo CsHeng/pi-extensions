@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultConfig } from "../extensions/subagents/config.ts";
+import { defaultConfig, parseConfig } from "../extensions/subagents/config.ts";
 import { emptyUsage, SUBAGENT_TOOL_NAME, type TaskResult } from "../extensions/subagents/contracts.ts";
 import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
@@ -92,6 +92,8 @@ test("untrusted projects fail before a child starts", async () => {
 	}, undefined, undefined, context(false));
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /project_trust_required/);
+	assert.equal(result.details.telemetry.runErrorCode, "project_trust_required");
+	assert.equal(result.details.telemetry.launchedChildren, 0);
 	assert.equal(calls, 0);
 });
 
@@ -118,6 +120,47 @@ test("trusted graph inherits parent route and passes explicit child approval", a
 	assert.equal(seen[0].route.model, "parent");
 	assert.match(seen[1].prompt, /Predecessor a/);
 	assert.ok(updates.some((message) => /running/.test(message)));
+});
+
+test("task semantic profiles are projected into route resolution without plan coupling", async () => {
+	const deepModel = { provider: "synthetic", id: "deep", reasoning: true };
+	const config = parseConfig({
+		reasoningProfiles: { deep: "high" },
+		routes: {
+			explorer: {
+				executionProfiles: {
+					deep: { candidates: [{ model: "synthetic/deep", thinking: "medium" }] },
+				},
+			},
+		},
+	}, "/tmp/agent");
+	let route: TaskResult["route"];
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		loadConfig: async () => ({ config }),
+		runChild: async (options) => {
+			route = options.route;
+			return { ...successful(options.task), route: options.route };
+		},
+	}))(state.pi);
+	const ctx = context();
+	ctx.modelRegistry.find = (provider: string, id: string) => provider === "synthetic" && id === "deep" ? deepModel : undefined;
+	const result = await state.tool.execute("call", {
+		tasks: [{
+			id: "scan",
+			role: "explorer",
+			objective: "scan",
+			scope: ["."],
+			executionProfile: "deep",
+			reasoningProfile: "deep",
+		}],
+	}, undefined, undefined, ctx);
+	assert.equal(result.isError, false);
+	assert.equal(route?.model, "deep");
+	assert.equal(route?.thinking, "high");
+	assert.equal(route?.executionProfileApplied, true);
+	assert.equal(route?.reasoningProfileApplied, true);
+	assert.equal(result.details.telemetry.launchedChildren, 1);
 });
 
 test("a concurrent graph is rejected before it can exceed session caps", async () => {
@@ -174,9 +217,12 @@ test("aggressive guidance appears only while the tool is active", async () => {
 
 test("session shutdown aborts a running child", async () => {
 	let aborted = false;
+	let markStarted: (() => void) | undefined;
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
 	const state = harness();
 	createSubagentsExtension(dependencies({
 		runChild: async (options) => new Promise<TaskResult>((resolve) => {
+			markStarted?.();
 			options.signal?.addEventListener("abort", () => {
 				aborted = true;
 				resolve({ ...successful(options.task), status: "aborted", error: { code: "aborted", message: "aborted" } });
@@ -186,7 +232,7 @@ test("session shutdown aborts a running child", async () => {
 	const execution = state.tool.execute("call", {
 		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
 	}, undefined, undefined, context());
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	await started;
 	await state.handlers.get("session_shutdown")?.[0]?.({});
 	const result = await execution;
 	assert.equal(aborted, true);

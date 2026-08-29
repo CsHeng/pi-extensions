@@ -22,12 +22,25 @@ test("subagent roles have fixed least-authority tool sets", () => {
 
 test("tool schema accepts one bounded task array and rejects arbitrary runtime fields", () => {
 	const valid = {
-		tasks: [{ id: "scan", role: "explorer", objective: "Find evidence", scope: ["src"] }],
+		tasks: [{
+			id: "scan",
+			role: "explorer",
+			objective: "Find evidence",
+			scope: ["src"],
+			executionProfile: "fast",
+			reasoningProfile: "light",
+		}],
 	};
 	assert.equal(Check(SubagentToolSchema, valid), true);
 	assert.equal(Check(SubagentToolSchema, { ...valid, model: "some-model" }), false);
 	assert.equal(Check(SubagentToolSchema, {
 		tasks: [{ ...valid.tasks[0], cwd: "/tmp" }],
+	}), false);
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{ ...valid.tasks[0], executionProfile: "extreme" }],
+	}), false);
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{ ...valid.tasks[0], model: "provider/model" }],
 	}), false);
 	assert.equal(Check(SubagentToolSchema, { tasks: [] }), false);
 	assert.equal(Check(SubagentToolSchema, {

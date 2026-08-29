@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "description": "Small locally maintained Pi extensions that preserve the host agent loop",
+  "files": [
+    "config/",
+    "extensions/"
+  ],
   "keywords": [
     "pi-package",
     "plan-mode",

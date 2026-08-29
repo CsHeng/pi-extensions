@@ -19,29 +19,35 @@ function registry(models: RouteModel[], authenticated = new Set(models.map((mode
 
 const parent: RouteModel = { provider: "synthetic", id: "parent", reasoning: true };
 const fast: RouteModel = { provider: "synthetic", id: "fast", reasoning: true };
+const deep: RouteModel = { provider: "synthetic", id: "deep", reasoning: true };
 
-test("packaged route configuration projects the code-owned defaults", async () => {
-	const packaged = parseConfig(
-		JSON.parse(await readFile(new URL("../config/csheng-subagents.json", import.meta.url), "utf8")) as unknown,
-		"/tmp/agent",
-	);
-	const defaults = defaultConfig("/tmp/agent");
-	assert.equal(packaged.guidance, defaults.guidance);
-	assert.equal(packaged.maxConcurrency, defaults.maxConcurrency);
-	for (const role of ["explorer", "reviewer", "worker"] as const) {
-		assert.deepEqual(packaged.routes[role].candidates, defaults.routes[role].candidates);
-		assert.equal(packaged.routes[role].maxConcurrency, defaults.routes[role].maxConcurrency);
-	}
-});
-
-test("absent configuration inherits the exact parent route", () => {
-	const config = defaultConfig("/tmp/agent");
-	const result = resolveRoute("worker", config, {
+function context(models: RouteModel[], scopedModels: Array<{ model: RouteModel; thinkingLevel?: string }> = []) {
+	return {
 		parentModel: parent,
 		parentThinking: "high",
-		scopedModels: [],
-		modelRegistry: registry([parent]),
-	});
+		scopedModels,
+		modelRegistry: registry(models),
+	};
+}
+
+test("packaged route configuration owns role preferences and ten-way global capacity", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "subagent-package-routing-"));
+	t.after(async () => rm(root, { recursive: true, force: true }));
+	const loaded = await loadConfig(root);
+	assert.equal(loaded.diagnostic, undefined);
+	const config = loaded.config;
+	assert.ok(config);
+	assert.equal(config.maxConcurrency, 10);
+	assert.equal(config.routes.explorer.candidates[0]?.model, "openai-codex/gpt-5.6-luna");
+	assert.equal(config.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
+	assert.equal(config.routes.reviewer.candidates[0]?.model, "openai-codex/gpt-5.6-sol");
+	assert.equal(config.routes.explorer.source, "package-default");
+	assert.deepEqual(config.reasoningProfiles, { light: "low", standard: "medium", deep: "high" });
+});
+
+test("neutral configuration inherits the exact parent route when explicitly used", () => {
+	const config = defaultConfig("/tmp/agent");
+	const result = resolveRoute("worker", config, context([parent]));
 	assert.equal(result.ok, true);
 	if (result.ok) {
 		assert.deepEqual(result.route, {
@@ -50,6 +56,9 @@ test("absent configuration inherits the exact parent route", () => {
 			thinking: "high",
 			source: "parent",
 			candidateIndex: 0,
+			executionProfileApplied: false,
+			reasoningProfileApplied: false,
+			profileFallbacks: [],
 		});
 	}
 });
@@ -67,12 +76,7 @@ test("ordered user candidates respect authentication, scope, and thinking pins",
 			},
 		},
 	}, "/tmp/agent");
-	const result = resolveRoute("explorer", config, {
-		parentModel: parent,
-		parentThinking: "high",
-		scopedModels: [{ model: fast, thinkingLevel: "low" }],
-		modelRegistry: registry([parent, fast]),
-	});
+	const result = resolveRoute("explorer", config, context([parent, fast], [{ model: fast, thinkingLevel: "low" }]));
 	assert.equal(result.ok, true);
 	if (result.ok) {
 		assert.equal(result.route.model, "fast");
@@ -81,16 +85,61 @@ test("ordered user candidates respect authentication, scope, and thinking pins",
 	}
 });
 
+test("semantic profiles select configured candidates and reasoning while unmapped profiles visibly fall back", () => {
+	const config = parseConfig({
+		reasoningProfiles: { deep: "high" },
+		routes: {
+			explorer: {
+				candidates: [{ model: "synthetic/fast", thinking: "medium" }],
+				executionProfiles: {
+					deep: { candidates: [{ model: "synthetic/deep", thinking: "medium" }] },
+				},
+			},
+		},
+	}, "/tmp/agent");
+	const mapped = resolveRoute("explorer", config, context([fast, deep]), {
+		executionProfile: "deep",
+		reasoningProfile: "deep",
+	});
+	assert.equal(mapped.ok, true);
+	if (mapped.ok) {
+		assert.equal(mapped.route.model, "deep");
+		assert.equal(mapped.route.thinking, "high");
+		assert.equal(mapped.route.executionProfileApplied, true);
+		assert.equal(mapped.route.reasoningProfileApplied, true);
+		assert.deepEqual(mapped.route.profileFallbacks, []);
+	}
+	const fallback = resolveRoute("explorer", config, context([fast, deep]), {
+		executionProfile: "fast",
+		reasoningProfile: "light",
+	});
+	assert.equal(fallback.ok, true);
+	if (fallback.ok) {
+		assert.equal(fallback.route.model, "fast");
+		assert.equal(fallback.route.thinking, "medium");
+		assert.deepEqual(fallback.route.profileFallbacks, ["execution-role-default", "reasoning-role-default"]);
+	}
+});
+
+test("user overlay can lower caps without replacing unmentioned packaged routes", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "subagent-user-overlay-"));
+	t.after(async () => rm(root, { recursive: true, force: true }));
+	await writeFile(join(root, "csheng-subagents.json"), JSON.stringify({
+		maxConcurrency: 3,
+		routes: { explorer: { maxConcurrency: 2 } },
+	}));
+	const loaded = await loadConfig(root);
+	assert.equal(loaded.config?.maxConcurrency, 3);
+	assert.equal(loaded.config?.routes.explorer.maxConcurrency, 2);
+	assert.equal(loaded.config?.routes.explorer.source, "package-default");
+	assert.equal(loaded.config?.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
+});
+
 test("route fails without silent fallback when scope or thinking is incompatible", () => {
 	const config = parseConfig({
 		routes: { reviewer: { candidates: [{ model: "synthetic/fast", thinking: "high" }] } },
 	}, "/tmp/agent");
-	const result = resolveRoute("reviewer", config, {
-		parentModel: parent,
-		parentThinking: "high",
-		scopedModels: [{ model: fast, thinkingLevel: "low" }],
-		modelRegistry: registry([fast]),
-	});
+	const result = resolveRoute("reviewer", config, context([fast], [{ model: fast, thinkingLevel: "low" }]));
 	assert.deepEqual(result, {
 		ok: false,
 		error: {
@@ -101,17 +150,16 @@ test("route fails without silent fallback when scope or thinking is incompatible
 });
 
 test("configuration cannot raise hard limits or add unknown fields", () => {
-	assert.throws(() => parseConfig({ maxConcurrency: 5 }, "/tmp/agent"), /1 through 4/);
-	assert.throws(() => parseConfig({ routes: { worker: { candidates: [{ model: "$parent", thinking: "$parent" }], maxConcurrency: 3 } } }, "/tmp/agent"), /1 through 2/);
+	assert.throws(() => parseConfig({ maxConcurrency: 11 }, "/tmp/agent"), /1 through 10/);
+	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 5 } } }, "/tmp/agent"), /1 through 4/);
+	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: 3 } } }, "/tmp/agent"), /1 through 2/);
 	assert.throws(() => parseConfig({ model: "synthetic/fast" }, "/tmp/agent"), /unsupported fields/);
+	assert.throws(() => parseConfig({ reasoningProfiles: { extreme: "max" } }, "/tmp/agent"), /unsupported fields/);
 });
 
-test("loader isolates missing, malformed, and symlinked user configuration", async (t) => {
+test("loader isolates malformed and symlinked user configuration", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-routing-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
-	const missing = await loadConfig(root);
-	assert.equal(missing.config?.guidance, "aggressive");
-
 	await writeFile(join(root, "csheng-subagents.json"), "{");
 	const malformed = await loadConfig(root);
 	assert.equal(malformed.diagnostic?.code, "invalid_route_config");
@@ -123,4 +171,10 @@ test("loader isolates missing, malformed, and symlinked user configuration", asy
 	await symlink(join(root, "actual", "config.json"), join(root, "csheng-subagents.json"));
 	const linked = await loadConfig(root);
 	assert.match(linked.diagnostic?.message ?? "", /non-symlink/);
+});
+
+test("packaged JSON parses through the strict package source", async () => {
+	const value = JSON.parse(await readFile(new URL("../config/csheng-subagents.json", import.meta.url), "utf8")) as unknown;
+	const parsed = parseConfig(value, "/tmp/agent", { source: "package-default" });
+	assert.equal(parsed.routes.worker.source, "package-default");
 });

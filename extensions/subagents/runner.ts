@@ -7,6 +7,7 @@ import {
 	CHILD_CAPABILITY_ENV,
 	CHILD_MARKER_ENV,
 	HARD_LIMITS,
+	emptyTaskTelemetry,
 	emptyUsage,
 	truncateUtf8,
 	type ChildCapabilityManifest,
@@ -36,6 +37,8 @@ export interface ChildRunOptions {
 	killGraceMs?: number;
 	invocation?: PiInvocation;
 	env?: NodeJS.ProcessEnv;
+	onChildStarted?(): void;
+	onChildSettled?(): void;
 }
 
 const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE"]);
@@ -78,6 +81,8 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	let timedOut = false;
 	let aborted = options.signal?.aborted ?? false;
 	let spawnError: Error | undefined;
+	let childDidStart = false;
+	let childDurationMs = 0;
 
 	try {
 		const completePrompt = buildPrompt(options.task, options.prompt);
@@ -112,6 +117,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				env: childEnvironment(options.env ?? process.env, capabilityPath),
 			});
 			let closed = false;
+			let childStartedAt: number | undefined;
 			let killTimer: NodeJS.Timeout | undefined;
 			const stop = () => {
 				if (closed) return;
@@ -133,6 +139,11 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			}, options.timeoutMs ?? HARD_LIMITS.taskTimeoutMs);
 			timeout.unref();
 
+			child.once("spawn", () => {
+				childDidStart = true;
+				childStartedAt = Date.now();
+				options.onChildStarted?.();
+			});
 			child.stdout.on("data", (chunk: Buffer | string) => parser.push(chunk.toString()));
 			child.stderr.on("data", (chunk: Buffer | string) => {
 				stderr = truncateUtf8(stderr + chunk.toString(), HARD_LIMITS.maxStderrBytes).text;
@@ -142,6 +153,10 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			});
 			child.once("close", (code, signal) => {
 				closed = true;
+				if (childStartedAt !== undefined) {
+					childDurationMs = Math.max(0, Date.now() - childStartedAt);
+					options.onChildSettled?.();
+				}
 				clearTimeout(timeout);
 				if (killTimer) clearTimeout(killTimer);
 				options.signal?.removeEventListener("abort", abort);
@@ -152,6 +167,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const parsed = parser.finish();
 		const output = truncateUtf8(parsed.output, HARD_LIMITS.maxFinalOutputBytes);
 		const suffix = output.truncatedBytes > 0 ? `\n\n[Output truncated: ${output.truncatedBytes} bytes omitted.]` : "";
+		const durationMs = Date.now() - started;
 		const base: TaskResult = {
 			id: options.task.id,
 			role: options.task.role,
@@ -159,8 +175,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			output: `${output.text}${suffix}`,
 			stderr,
 			usage: parsed.usage,
-			durationMs: Date.now() - started,
+			durationMs,
 			changedPaths: [],
+			telemetry: { ...emptyTaskTelemetry(), childStarted: childDidStart, childMs: childDurationMs },
 			convergence: "not-applicable",
 			route: options.route,
 			...(parsed.stopReason === undefined ? {} : { stopReason: parsed.stopReason }),
@@ -189,6 +206,7 @@ function failure(options: ChildRunOptions, started: number, code: string, messag
 		usage: emptyUsage(),
 		durationMs: Date.now() - started,
 		changedPaths: [],
+		telemetry: emptyTaskTelemetry(),
 		convergence: "not-applicable",
 		route: options.route,
 		error: { code, message },

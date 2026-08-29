@@ -20,6 +20,7 @@
     ]
   },
   "include": [
+    ".agents/**/*.ts",
     "extensions/**/*.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts"

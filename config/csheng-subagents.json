@@ -1,12 +1,25 @@
 {
   "guidance": "aggressive",
-  "maxConcurrency": 4,
+  "maxConcurrency": 10,
+  "reasoningProfiles": {
+    "light": "low",
+    "standard": "medium",
+    "deep": "high"
+  },
   "routes": {
     "explorer": {
       "candidates": [
         {
-          "model": "$parent",
-          "thinking": "$parent"
+          "model": "openai-codex/gpt-5.6-luna",
+          "thinking": "medium"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-terra",
+          "thinking": "medium"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "medium"
         }
       ],
       "maxConcurrency": 4
@@ -14,8 +27,16 @@
     "reviewer": {
       "candidates": [
         {
-          "model": "$parent",
-          "thinking": "$parent"
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-terra",
+          "thinking": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-luna",
+          "thinking": "high"
         }
       ],
       "maxConcurrency": 4
@@ -23,8 +44,16 @@
     "worker": {
       "candidates": [
         {
-          "model": "$parent",
-          "thinking": "$parent"
+          "model": "openai-codex/gpt-5.6-terra",
+          "thinking": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-luna",
+          "thinking": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "high"
         }
       ],
       "maxConcurrency": 2

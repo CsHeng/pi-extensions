@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,8 +7,11 @@ import {
 	SUBAGENT_STATUS_COMMAND,
 	SUBAGENT_TOOL_NAME,
 	SubagentToolSchema,
+	TELEMETRY_SCHEMA_VERSION,
+	emptyTaskTelemetry,
 	emptyUsage,
 	type ChildCapabilityManifest,
+	type RunTelemetry,
 	type RoleName,
 	type SubagentRunResult,
 	type SubagentToolInput,
@@ -56,13 +60,45 @@ function failureResult(task: NormalizedTask, code: string, message: string, rout
 		durationMs: 0,
 		changedPaths: [],
 		convergence: "not-applicable",
+		telemetry: emptyTaskTelemetry(),
 		...(route === undefined ? {} : { route }),
 		error: { code, message },
 	};
 }
 
-function aggregateFailure(tasks: readonly NormalizedTask[], code: string, message: string): SubagentRunResult {
-	return { status: "failed", tasks: tasks.map((task) => failureResult(task, code, message)), usage: emptyUsage() };
+interface RunIdentity {
+	runId: string;
+	started: number;
+	requestedTasks: number;
+}
+
+function failedTelemetry(identity: RunIdentity, admittedTasks: number, code: string): RunTelemetry {
+	return {
+		schemaVersion: TELEMETRY_SCHEMA_VERSION,
+		runId: identity.runId,
+		runDurationMs: Math.max(0, Date.now() - identity.started),
+		requestedTasks: identity.requestedTasks,
+		admittedTasks,
+		launchedChildren: 0,
+		peakConcurrency: 0,
+		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
+		runErrorCode: code,
+	};
+}
+
+function aggregateFailure(
+	tasks: readonly NormalizedTask[],
+	code: string,
+	message: string,
+	identity: RunIdentity,
+	admittedTasks = tasks.length,
+): SubagentRunResult {
+	return {
+		status: "failed",
+		tasks: tasks.map((task) => failureResult(task, code, message)),
+		usage: emptyUsage(),
+		telemetry: failedTelemetry(identity, admittedTasks, code),
+	};
 }
 
 function routeContext(ctx: ExtensionContext): RouteContext {
@@ -121,20 +157,31 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 			parameters: SubagentToolSchema,
 			async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 				const params = rawParams as SubagentToolInput;
+				const identity: RunIdentity = {
+					runId: randomUUID(),
+					started: Date.now(),
+					requestedTasks: Array.isArray(params.tasks) ? params.tasks.length : 0,
+				};
 				const validation = validateGraph(params);
 				if (!validation.ok) {
+					const result: SubagentRunResult = {
+						status: "failed",
+						tasks: [],
+						usage: emptyUsage(),
+						telemetry: failedTelemetry(identity, 0, validation.error.code),
+					};
 					return {
 						content: [{ type: "text", text: `Subagent graph rejected (${validation.error.code}): ${validation.error.message}` }],
-						details: { status: "failed", tasks: [], usage: emptyUsage() },
+						details: result,
 						isError: true,
 					};
 				}
 				if (!ctx.isProjectTrusted()) {
-					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.");
+					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.", identity);
 					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
 				}
 				if (activeController) {
-					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.");
+					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.", identity);
 					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
 				}
 				const controller = new AbortController();
@@ -143,15 +190,18 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 				try {
 				const loaded = await dependencies.loadConfig();
 				if (!loaded.config) {
-					const result = aggregateFailure(validation.tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.");
+					const result = aggregateFailure(validation.tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity);
 					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
 				}
 				const config = loaded.config;
 				const routes = new Map<string, Extract<RouteResolution, { ok: true }>>();
 				for (const task of validation.tasks) {
-					const selected = resolveRoute(task.role, config, routeContext(ctx));
+					const selected = resolveRoute(task.role, config, routeContext(ctx), {
+						...(task.executionProfile === undefined ? {} : { executionProfile: task.executionProfile }),
+						...(task.reasoningProfile === undefined ? {} : { reasoningProfile: task.reasoningProfile }),
+					});
 					if (!selected.ok) {
-						const result = aggregateFailure(validation.tasks, selected.error.code, selected.error.message);
+						const result = aggregateFailure(validation.tasks, selected.error.code, selected.error.message, identity);
 						return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
 					}
 					routes.set(task.id, selected);
@@ -161,11 +211,13 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 				try {
 					readOnlyRoot = await realpath(ctx.cwd);
 				} catch (error) {
-					const result = aggregateFailure(validation.tasks, "workspace_unavailable", error instanceof Error ? error.message : String(error));
+					const result = aggregateFailure(validation.tasks, "workspace_unavailable", error instanceof Error ? error.message : String(error), identity);
 					return { content: [{ type: "text", text: formatRunResult(result) }], details: result, isError: true };
 				}
 
 					const result = await runScheduledTasks(validation.tasks, {
+						runId: identity.runId,
+						requestedTasks: identity.requestedTasks,
 						maxConcurrency: config.maxConcurrency,
 						roleLimits: {
 							explorer: config.routes.explorer.maxConcurrency,
@@ -173,16 +225,25 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							worker: config.routes.worker.maxConcurrency,
 						},
 						signal: controller.signal,
+						onChildConcurrency(count) {
+							activeChildren = count;
+						},
 						onUpdate(results) {
-							activeChildren = results.filter((item) => item.status === "running").length;
 							onUpdate?.({ content: [{ type: "text", text: formatProgress(results) }], details: { status: "running", tasks: results, usage: emptyUsage() } });
 						},
-						async execute(task, predecessors, childSignal) {
+						async execute(task, predecessors, childSignal, lifecycle) {
 							const selected = routes.get(task.id) as Extract<RouteResolution, { ok: true }>;
 							let workspace: WorkerWorkspace | undefined;
+							let workspaceMs = 0;
+							let workspaceStarted: number | undefined;
 							try {
-								if (task.role === "worker") workspace = await dependencies.createWorkerWorkspace(ctx.cwd, task);
+								if (task.role === "worker") {
+									workspaceStarted = Date.now();
+									workspace = await dependencies.createWorkerWorkspace(ctx.cwd, task);
+									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
+								}
 								const root = workspace?.root ?? readOnlyRoot;
+								const childStarted = Date.now();
 								const childResult = await dependencies.runChild({
 									task,
 									role: getRole(task.role),
@@ -193,24 +254,46 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									prompt: buildInputs(task, predecessors),
 									approveProject: true,
 									signal: childSignal,
+									onChildStarted: lifecycle.childStarted,
+									onChildSettled: lifecycle.childSettled,
 								});
+								const telemetry = {
+									...emptyTaskTelemetry(),
+									...childResult.telemetry,
+									childStarted: childResult.telemetry?.childStarted ?? true,
+									workspaceMs,
+									childMs: childResult.telemetry?.childMs ?? Math.max(0, Date.now() - childStarted),
+								};
 								if (!workspace || childResult.status !== "succeeded") {
-									return workspace ? { ...childResult, convergence: "not-applied" as const } : childResult;
+									return {
+										...childResult,
+										telemetry,
+										...(workspace ? { convergence: "not-applied" as const } : {}),
+									};
 								}
+								const convergenceStarted = Date.now();
 								const converged = await dependencies.convergeWorkerWorkspace(workspace);
+								telemetry.convergenceMs = Math.max(0, Date.now() - convergenceStarted);
 								if (!converged.ok) {
 									return {
 										...childResult,
 										status: "failed" as const,
 										changedPaths: converged.changedPaths,
 										convergence: converged.error?.code === "convergence_conflict" ? "conflict" as const : "not-applied" as const,
+										telemetry,
 										error: converged.error ?? { code: "convergence_failed", message: "Worker convergence failed." },
 									};
 								}
-								return { ...childResult, changedPaths: converged.changedPaths, convergence: "applied" as const };
+								return { ...childResult, changedPaths: converged.changedPaths, convergence: "applied" as const, telemetry };
 							} catch (error) {
+								if (workspaceStarted !== undefined && workspaceMs === 0) {
+									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
+								}
 								const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "worker_execution_failed";
-								return failureResult(task, code, error instanceof Error ? error.message : String(error), selected.route);
+								return {
+									...failureResult(task, code, error instanceof Error ? error.message : String(error), selected.route),
+									telemetry: { ...emptyTaskTelemetry(), workspaceMs },
+								};
 							} finally {
 								await workspace?.cleanup();
 							}
