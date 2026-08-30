@@ -7,16 +7,18 @@ import {
 	HARD_LIMITS,
 	REASONING_PROFILES,
 	ROLE_NAMES,
+	THINKING_LEVELS,
 	roleConcurrencyCeiling,
 	type ExecutionProfile,
 	type ReasoningProfile,
 	type RoleName,
 	type RouteSource,
+	type ThinkingLevel,
 } from "./contracts.ts";
 
+export { THINKING_LEVELS } from "./contracts.ts";
 export const ROUTE_CONFIG_FILE = "csheng-subagents.json";
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type ConfiguredThinking = "$parent" | (typeof THINKING_LEVELS)[number];
+export type ConfiguredThinking = "$parent" | ThinkingLevel;
 export type DelegationGuidance = "off" | "balanced" | "aggressive";
 
 const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/csheng-subagents.json", import.meta.url));

@@ -26,9 +26,14 @@ function task(index: number, output: string): TaskResult {
 			thinking: "high",
 			source: "package-default",
 			candidateIndex: 0,
+			executionProfileRequested: "deep",
 			executionProfileApplied: false,
-			reasoningProfileApplied: false,
-			profileFallbacks: [],
+			reasoningProfileRequested: "deep",
+			reasoningProfileApplied: true,
+			profileFallbacks: ["execution-role-default"],
+			selectionSource: "role-default",
+			modelOverrideRequested: false,
+			thinkingOverrideRequested: false,
 		},
 		...(index === 8 ? { error: { code: "synthetic_failure", message: `failure ${"e".repeat(10_000)}` } } : {}),
 	};
@@ -45,6 +50,10 @@ function run(tasks: TaskResult[]): SubagentRunResult {
 			runDurationMs: 61_500,
 			requestedTasks: tasks.length,
 			admittedTasks: tasks.length,
+			requestedDependencyEdges: 0,
+			admittedDependencyEdges: 0,
+			explicitModelTasks: 0,
+			explicitThinkingTasks: 0,
 			launchedChildren: tasks.length,
 			peakConcurrency: tasks.length,
 			peakConcurrencyByRole: { explorer: 4, reviewer: 4, worker: 2 },
@@ -70,6 +79,8 @@ test("aggregate rendering obeys Pi byte and line limits while retaining every ta
 		assert.match(result, new RegExp(`^\\[task-${index}\\] (?:explorer|reviewer|worker) (?:succeeded|failed) elapsed=`, "m"));
 	}
 	assert.match(result, /elapsed=1\.5s/);
+	assert.match(result, /source=package-default selection=role-default/);
+	assert.match(result, /profiles=execution:deep\/not-applied;reasoning:deep\/applied;fallbacks:execution-role-default/);
 	assert.match(result, /Task details truncated/);
 });
 

@@ -16,7 +16,7 @@ Type `$` in the TUI to search loaded skills and insert one or more `$skill-name`
 
 ## Subagents
 
-`csheng_subagents` is a model-callable foreground delegation tool for one bounded task DAG. It supports deterministic fan-out, dependency joins, resource locks, fixed per-role model routes, isolated writable workers, bounded output, and cancellation. The parent Pi supplies the tasks and retains synthesis, verification, review adjudication, repair decisions, continuation, and the final response.
+`csheng_subagents` is a model-callable foreground delegation tool for one bounded task batch. Ordinary delegation is a flat batch; optional hard predecessor edges support approved implementation order with no intervening parent decision. The tool supports deterministic fan-out, dependency joins, resource locks, default per-role model routes, isolated writable workers, bounded output, and cancellation. The parent Pi supplies the tasks and retains synthesis, verification, review adjudication, repair decisions, continuation, and the final response.
 
 Fixed roles are:
 
@@ -28,9 +28,11 @@ Loading the extension registers the tool, `/subagents` status command, and deleg
 
 The repository ships its route baseline at [`config/csheng-subagents.json`](config/csheng-subagents.json). It prefers explorer Luna medium, worker Terra high, and reviewer Sol high, with explicit peer fallback order, global concurrency 10, role ceilings `4/4/2`, reasoning-profile mappings, and `aggressive` guidance. Model names remain opaque configuration; extension code does not rank the peer families.
 
-The optional user override is `csheng-subagents.json` under Pi's agent directory, normally `~/.pi/agent/csheng-subagents.json`. An absent override applies the package baseline. A strict overlay may replace role candidates, add execution-profile candidate lists, override reasoning-profile entries, or lower concurrency. Tasks may provide optional provider-neutral `executionProfile` and `reasoningProfile` values; missing or unmapped values visibly use the role default. The extension never reads a plan or Skill. This serves the model-routing purpose of per-role Codex agent files, but the extension does not read `~/.codex/agents/*.toml`: Pi role prompts and tool ceilings remain code-owned, while JSON contains routing only. The package never creates the user override or changes the parent session model or provider settings.
+The optional user override is `csheng-subagents.json` under Pi's agent directory, normally `~/.pi/agent/csheng-subagents.json`. An absent override applies the package baseline. A strict overlay may replace role candidates, add execution-profile candidate lists, override reasoning-profile entries, or lower concurrency. Package and user files are read-only persistent defaults: the extension never creates, edits, or deletes them.
 
-Workers operate in private snapshots of tracked and non-ignored repository files. The extension accepts only declared create-or-modify results and applies them after exact parent-baseline checks. Parent drift, undeclared changes, symlink writes, deletion, rename, or mode changes fail closed. Writable delegation requires Git; read-only delegation does not.
+Tasks may provide optional provider-neutral `executionProfile` and `reasoningProfile` values; missing or unmapped values visibly use the role default. When the user explicitly selects a concrete model or Pi thinking level, any role may also receive ephemeral `model` and `thinking` task fields. Exact explicit selection resolves against Pi's model registry, overrides role/profile defaults, and either launches that route or returns a typed pre-launch failure with no fallback. The extension never reads a plan or Skill. This serves the model-routing purpose of per-role Codex agent files, but the extension does not read `~/.codex/agents/*.toml`: Pi role prompts and tool ceilings remain code-owned, while JSON contains persistent routing defaults only. The package never changes the parent session model or provider settings.
+
+Workers operate in private snapshots of tracked and non-ignored repository files. The extension accepts only declared create-or-modify results and applies them after exact parent-baseline checks. Parent drift, undeclared changes, symlink writes, deletion, rename, mode changes, or a true zero-diff worker fail closed. Writable delegation requires Git; read-only delegation does not.
 
 See [`docs/architecture/subagents.md`](docs/architecture/subagents.md) for the three-owner boundary, complete tool contract, routing, scheduling, isolation, telemetry, evaluation, failure behavior, and removal semantics.
 
@@ -68,7 +70,7 @@ CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
 
 The first command temporary-loads the complete package with ordinary global extensions disabled. The second verifies the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `npm test`.
 
-Maintainers can evaluate an explicitly selected persisted run with `.agents/skills/evaluate-subagent-runs/`. The extractor emits redacted route, usage, timing, concurrency, convergence, and error metrics without retaining prompts, task IDs, child output, paths, credentials, or external content.
+Maintainers can evaluate an explicitly selected persisted run with `.agents/skills/evaluate-subagent-runs/`. Metric schema version two adds requested/admitted tasks, singleton calls, hard dependency edges, explicit-route attribution, and zero-change workers while reading older telemetry with explicit unavailable evidence. The extractor remains redacted and does not retain raw model selectors, prompts, task IDs, child output, paths, credentials, or external content.
 
 ## Safety
 

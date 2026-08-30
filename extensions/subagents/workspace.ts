@@ -162,7 +162,9 @@ async function scan(root: string): Promise<Map<string, FileState>> {
 }
 
 export async function createWorkerWorkspace(cwd: string, task: NormalizedTask): Promise<WorkerWorkspace> {
-	if (task.role !== "worker" || task.writePaths.length < 1) throw new WorkspaceError("worker_write_paths_required", "Writable workspace requires a worker task.");
+	if (task.role !== "worker" || task.writePaths.length < 1) {
+		throw new WorkspaceError("worker_write_paths_required", "Writable workspace requires a worker with exact repository-relative writePaths; write paths are not inferred.");
+	}
 	const sourceRoot = await findGitRoot(cwd);
 	const root = await mkdtemp(join(tmpdir(), "csheng-worker-"));
 	await chmod(root, 0o700);
@@ -219,12 +221,20 @@ export async function convergeWorkerWorkspace(workspace: WorkerWorkspace): Promi
 		}
 	}
 
-	for (const relativePath of changed) {
+	for (const relativePath of workspace.task.writePaths) {
 		const parentPath = resolve(workspace.sourceRoot, relativePath);
 		const baseline = workspace.parentBaselines.get(relativePath) as FileState;
 		if (!sameState(baseline, await state(parentPath))) {
 			return { ok: false, changedPaths: changed, error: { code: "convergence_conflict", message: `Parent path ${relativePath} changed after worker launch.` } };
 		}
+	}
+
+	if (changed.length === 0) {
+		return {
+			ok: false,
+			changedPaths: [],
+			error: { code: "worker_no_changes", message: "Worker completed without changing any repository file." },
+		};
 	}
 
 	const staged: Array<{ temporary: string; target: string }> = [];

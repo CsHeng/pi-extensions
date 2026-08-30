@@ -94,7 +94,7 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		}
 		const scope = task.scope.map((entry) => normalizeRepositoryPath(entry, true));
 		if (scope.length < 1 || scope.some((entry) => entry === undefined)) {
-			return fail("invalid_scope", `Task ${task.id} has an unsafe repository scope.`);
+			return fail("invalid_scope", `Task ${task.id} scope must contain only repository-relative paths. Use '.' for the repository root; absolute paths and parent traversal are rejected.`);
 		}
 		const writePaths = (task.writePaths ?? []).map((entry) => normalizeRepositoryPath(entry, false));
 		if (writePaths.some((entry) => entry === undefined)) {
@@ -103,7 +103,7 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		const safeScope = scope as string[];
 		const safeWrites = writePaths as string[];
 		if (task.role === "worker" && safeWrites.length < 1) {
-			return fail("worker_write_paths_required", `Worker task ${task.id} requires exact write paths.`);
+			return fail("worker_write_paths_required", `Worker task ${task.id} must declare its exact repository-relative files in writePaths; write paths are not inferred.`);
 		}
 		if (task.role !== "worker" && task.writePaths !== undefined) {
 			return fail("read_only_write_paths", `Read-only task ${task.id} cannot declare write paths.`);

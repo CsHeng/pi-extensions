@@ -3,11 +3,16 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const OUTPUT_SCHEMA_VERSION = 1;
+const OUTPUT_SCHEMA_VERSION = 2;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
 const TOOL_NAME = "csheng_subagents";
+const MAX_RUN_RECORDS = 1_000;
 const ROLES = ["explorer", "reviewer", "worker"] as const;
+const RUN_STATUSES = ["succeeded", "partial", "failed", "aborted"] as const;
+const ROUTE_SOURCES = ["parent", "package-default", "user-config"] as const;
+const SELECTION_SOURCES = ["role-default", "explicit-task"] as const;
 type Role = (typeof ROLES)[number];
+type RunStatus = (typeof RUN_STATUSES)[number];
 
 interface Usage {
 	input: number;
@@ -33,17 +38,29 @@ interface RouteMetrics extends RoleMetrics {
 	model: string;
 	thinking: string;
 	source: string;
+	selectionSource: string;
+}
+
+interface EvidenceTotal {
+	known: number;
+	unavailableRuns: number;
 }
 
 interface RunMetrics {
 	ordinal: number;
-	status: string;
+	status: RunStatus;
 	telemetryAuthority: "authoritative" | "legacy-inferred";
-	requestedTasks: number;
-	admittedTasks: number;
+	telemetrySchemaVersion: 1 | 2 | null;
+	requestedTasks: number | null;
+	admittedTasks: number | null;
 	launchedChildren: number;
+	requestedDependencyEdges: number | null;
+	admittedDependencyEdges: number | null;
+	explicitModelTasks: number | null;
+	explicitThinkingTasks: number | null;
 	runDurationMs: number;
 	peakConcurrency: number | null;
+	roles: Record<Role, RoleMetrics>;
 	errorCodes: string[];
 }
 
@@ -59,8 +76,15 @@ export interface SessionMetrics {
 		partialRuns: number;
 		failedRuns: number;
 		abortedRuns: number;
+		requestedTasks: number;
+		admittedTasks: number;
 		tasks: number;
 		launchedChildren: number;
+		singletonRuns: number;
+		zeroChangeWorkers: number;
+		hardDependencyEdges: EvidenceTotal;
+		explicitModelTasks: EvidenceTotal;
+		explicitThinkingTasks: EvidenceTotal;
 		mechanicalDispatchCorrectionCandidates: number;
 		semanticRepairs: null;
 		semanticRepairEvidence: "unavailable";
@@ -94,6 +118,14 @@ function emptyRoleMetrics(): RoleMetrics {
 	};
 }
 
+function emptyRunRoles(): Record<Role, RoleMetrics> {
+	return {
+		explorer: emptyRoleMetrics(),
+		reviewer: emptyRoleMetrics(),
+		worker: emptyRoleMetrics(),
+	};
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? value as Record<string, unknown>
@@ -104,8 +136,34 @@ function number(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function nonNegativeInteger(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function string(value: unknown, fallback = "unknown"): string {
 	return typeof value === "string" && value ? value : fallback;
+}
+
+function runStatus(value: unknown): RunStatus {
+	return typeof value === "string" && RUN_STATUSES.includes(value as RunStatus)
+		? value as RunStatus
+		: "failed";
+}
+
+function routeSource(value: unknown): string {
+	return typeof value === "string" && ROUTE_SOURCES.includes(value as (typeof ROUTE_SOURCES)[number])
+		? value
+		: "unknown";
+}
+
+function selectionSource(value: unknown): string {
+	return typeof value === "string" && SELECTION_SOURCES.includes(value as (typeof SELECTION_SOURCES)[number])
+		? value
+		: "unavailable";
+}
+
+function safeErrorCode(value: unknown): string | undefined {
+	return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
 }
 
 function usage(value: unknown): Usage {
@@ -135,7 +193,8 @@ function errorCodeFromContent(content: unknown): string | undefined {
 		const text = record(part)?.text;
 		if (typeof text !== "string") continue;
 		const match = /\(([A-Za-z0-9_-]+)\):/.exec(text) ?? /Error \(([A-Za-z0-9_-]+)\):/.exec(text);
-		if (match?.[1]) return match[1];
+		const code = safeErrorCode(match?.[1]);
+		if (code) return code;
 	}
 	return undefined;
 }
@@ -200,8 +259,15 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		partialRuns: 0,
 		failedRuns: 0,
 		abortedRuns: 0,
+		requestedTasks: 0,
+		admittedTasks: 0,
 		tasks: 0,
 		launchedChildren: 0,
+		singletonRuns: 0,
+		zeroChangeWorkers: 0,
+		hardDependencyEdges: { known: 0, unavailableRuns: 0 },
+		explicitModelTasks: { known: 0, unavailableRuns: 0 },
+		explicitThinkingTasks: { known: 0, unavailableRuns: 0 },
 		mechanicalDispatchCorrectionCandidates: 0,
 		semanticRepairs: null,
 		semanticRepairEvidence: "unavailable" as const,
@@ -209,11 +275,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		changedPaths: 0,
 		usage: emptyUsage(),
 	};
-	const roles: Record<Role, RoleMetrics> = {
-		explorer: emptyRoleMetrics(),
-		reviewer: emptyRoleMetrics(),
-		worker: emptyRoleMetrics(),
-	};
+	const roles = emptyRunRoles();
 	const routes = new Map<string, RouteMetrics>();
 	const errors = new Map<string, number>();
 	const runs: RunMetrics[] = [];
@@ -227,28 +289,50 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		const details = record(message.details) ?? {};
 		const telemetry = record(details.telemetry);
 		const tasks = Array.isArray(details.tasks) ? details.tasks.map(record).filter((task): task is Record<string, unknown> => task !== undefined) : [];
-		const isAuthoritative = telemetry?.schemaVersion === 1;
+		const telemetryVersion = telemetry?.schemaVersion === 2 ? 2 : telemetry?.schemaVersion === 1 ? 1 : null;
+		const isAuthoritative = telemetryVersion !== null;
+		const isSchemaTwo = telemetryVersion === 2;
 		if (isAuthoritative) authoritative += 1;
 		else legacy += 1;
-		const runStatus = string(details.status);
-		if (runStatus === "succeeded") totals.succeededRuns += 1;
-		else if (runStatus === "partial") totals.partialRuns += 1;
-		else if (runStatus === "aborted") totals.abortedRuns += 1;
+		const status = runStatus(details.status);
+		if (status === "succeeded") totals.succeededRuns += 1;
+		else if (status === "partial") totals.partialRuns += 1;
+		else if (status === "aborted") totals.abortedRuns += 1;
 		else totals.failedRuns += 1;
 
 		const errorCodes = new Set<string>();
 		const contentError = errorCodeFromContent(message.content);
-		const requestedTasks = isAuthoritative ? number(telemetry.requestedTasks) : tasks.length;
-		const admittedTasks = isAuthoritative ? number(telemetry.admittedTasks) : tasks.length;
-		let launchedChildren = isAuthoritative ? number(telemetry.launchedChildren) : 0;
-		let runDurationMs = isAuthoritative ? number(telemetry.runDurationMs) : 0;
-		const peakConcurrency = isAuthoritative ? number(telemetry.peakConcurrency) : null;
-		requestedPeak = Math.max(requestedPeak, requestedTasks);
+		const runError = (isAuthoritative ? safeErrorCode(telemetry?.runErrorCode) : undefined) ?? contentError;
+		const requestedTasks = isAuthoritative ? nonNegativeInteger(telemetry?.requestedTasks) : tasks.length > 0 ? tasks.length : null;
+		const admittedTasks = isAuthoritative ? nonNegativeInteger(telemetry?.admittedTasks) : tasks.length > 0 ? tasks.length : null;
+		let launchedChildren = isAuthoritative ? nonNegativeInteger(telemetry?.launchedChildren) : 0;
+		let runDurationMs = isAuthoritative ? number(telemetry?.runDurationMs) : 0;
+		const peakConcurrency = isAuthoritative ? nonNegativeInteger(telemetry?.peakConcurrency) : null;
+		const requestedDependencyEdges = isSchemaTwo ? nonNegativeInteger(telemetry?.requestedDependencyEdges) : null;
+		const admittedDependencyEdges = isSchemaTwo ? nonNegativeInteger(telemetry?.admittedDependencyEdges) : null;
+		const explicitModelTasks = isSchemaTwo ? nonNegativeInteger(telemetry?.explicitModelTasks) : null;
+		const explicitThinkingTasks = isSchemaTwo ? nonNegativeInteger(telemetry?.explicitThinkingTasks) : null;
+		if (requestedTasks !== null) {
+			totals.requestedTasks += requestedTasks;
+			requestedPeak = Math.max(requestedPeak, requestedTasks);
+			if (requestedTasks === 1) totals.singletonRuns += 1;
+		}
+		if (admittedTasks !== null) totals.admittedTasks += admittedTasks;
+		if (isSchemaTwo) {
+			totals.hardDependencyEdges.known += requestedDependencyEdges as number;
+			totals.explicitModelTasks.known += explicitModelTasks as number;
+			totals.explicitThinkingTasks.known += explicitThinkingTasks as number;
+		} else {
+			totals.hardDependencyEdges.unavailableRuns += 1;
+			totals.explicitModelTasks.unavailableRuns += 1;
+			totals.explicitThinkingTasks.unavailableRuns += 1;
+		}
 		if (peakConcurrency !== null) {
 			hasObservedPeak = true;
 			observedPeak = Math.max(observedPeak, peakConcurrency);
 		}
 
+		const runRoles = emptyRunRoles();
 		for (const task of tasks) {
 			const roleValue = string(task.role);
 			if (!ROLES.includes(roleValue as Role)) continue;
@@ -261,62 +345,77 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 			if (!isAuthoritative && launched) launchedChildren += 1;
 			const durationMs = number(task.durationMs);
 			if (!isAuthoritative) runDurationMs = Math.max(runDurationMs, durationMs);
-			const changedPaths = Array.isArray(task.changedPaths) ? task.changedPaths.length : 0;
-			const status = string(task.status);
-			const taskError = string(record(task.error)?.code, "");
+			const changedPathsValue = task.changedPaths;
+			const hasChangedPaths = Array.isArray(changedPathsValue);
+			const changedPaths = hasChangedPaths ? changedPathsValue.length : 0;
+			const taskStatus = string(task.status);
+			const taskError = safeErrorCode(record(task.error)?.code);
 			if (taskError) {
 				errorCodes.add(taskError);
 				errors.set(taskError, (errors.get(taskError) ?? 0) + 1);
+			}
+			if (role === "worker" && taskStatus === "succeeded" && hasChangedPaths && changedPaths === 0) {
+				totals.zeroChangeWorkers += 1;
 			}
 
 			totals.tasks += 1;
 			totals.durationMs += durationMs;
 			totals.changedPaths += changedPaths;
 			addUsage(totals.usage, taskUsage);
-			const roleMetric = roles[role];
-			roleMetric.tasks += 1;
-			roleMetric.launchedChildren += launched ? 1 : 0;
-			roleMetric.succeeded += status === "succeeded" ? 1 : 0;
-			roleMetric.failed += status === "failed" ? 1 : 0;
-			roleMetric.durationMs += durationMs;
-			roleMetric.changedPaths += changedPaths;
-			addUsage(roleMetric.usage, taskUsage);
+			for (const roleMetric of [roles[role], runRoles[role]]) {
+				roleMetric.tasks += 1;
+				roleMetric.launchedChildren += launched ? 1 : 0;
+				roleMetric.succeeded += taskStatus === "succeeded" ? 1 : 0;
+				roleMetric.failed += taskStatus === "failed" ? 1 : 0;
+				roleMetric.durationMs += durationMs;
+				roleMetric.changedPaths += changedPaths;
+				addUsage(roleMetric.usage, taskUsage);
+			}
 
 			const route = record(task.route);
 			if (route) {
 				const provider = string(route.provider);
 				const model = string(route.model);
 				const thinking = string(route.thinking);
-				const source = string(route.source);
-				const key = `${provider}\u0000${model}\u0000${thinking}\u0000${source}`;
-				const metric = routes.get(key) ?? { provider, model, thinking, source, ...emptyRoleMetrics() };
+				const source = routeSource(route.source);
+				const routeSelectionSource = selectionSource(route.selectionSource);
+				const key = `${provider}\u0000${model}\u0000${thinking}\u0000${source}\u0000${routeSelectionSource}`;
+				const metric = routes.get(key) ?? { provider, model, thinking, source, selectionSource: routeSelectionSource, ...emptyRoleMetrics() };
 				metric.tasks += 1;
 				metric.launchedChildren += launched ? 1 : 0;
-				metric.succeeded += status === "succeeded" ? 1 : 0;
-				metric.failed += status === "failed" ? 1 : 0;
+				metric.succeeded += taskStatus === "succeeded" ? 1 : 0;
+				metric.failed += taskStatus === "failed" ? 1 : 0;
 				metric.durationMs += durationMs;
 				metric.changedPaths += changedPaths;
 				addUsage(metric.usage, taskUsage);
 				routes.set(key, metric);
 			}
 		}
-		if (contentError && !errorCodes.has(contentError)) {
-			errorCodes.add(contentError);
-			errors.set(contentError, (errors.get(contentError) ?? 0) + 1);
+		if (runError && !errorCodes.has(runError)) {
+			errorCodes.add(runError);
+			errors.set(runError, (errors.get(runError) ?? 0) + 1);
 		}
 		totals.launchedChildren += launchedChildren;
-		if (launchedChildren === 0 && runStatus === "failed") totals.mechanicalDispatchCorrectionCandidates += 1;
-		runs.push({
-			ordinal: index + 1,
-			status: runStatus,
-			telemetryAuthority: isAuthoritative ? "authoritative" : "legacy-inferred",
-			requestedTasks,
-			admittedTasks,
-			launchedChildren,
-			runDurationMs,
-			peakConcurrency,
-			errorCodes: [...errorCodes].sort(),
-		});
+		if (launchedChildren === 0 && status === "failed") totals.mechanicalDispatchCorrectionCandidates += 1;
+		if (runs.length < MAX_RUN_RECORDS) {
+			runs.push({
+				ordinal: index + 1,
+				status,
+				telemetryAuthority: isAuthoritative ? "authoritative" : "legacy-inferred",
+				telemetrySchemaVersion: telemetryVersion,
+				requestedTasks,
+				admittedTasks,
+				launchedChildren,
+				requestedDependencyEdges,
+				admittedDependencyEdges,
+				explicitModelTasks,
+				explicitThinkingTasks,
+				runDurationMs,
+				peakConcurrency,
+				roles: runRoles,
+				errorCodes: [...errorCodes].sort(),
+			});
+		}
 	}
 
 	return {
@@ -328,7 +427,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		totals,
 		roles,
 		routes: [...routes.values()].sort((left, right) =>
-			`${left.provider}/${left.model}:${left.thinking}:${left.source}`.localeCompare(`${right.provider}/${right.model}:${right.thinking}:${right.source}`)),
+			`${left.provider}/${left.model}:${left.thinking}:${left.source}:${left.selectionSource}`.localeCompare(`${right.provider}/${right.model}:${right.thinking}:${right.source}:${right.selectionSource}`)),
 		errors: [...errors.entries()].map(([code, count]) => ({ code, count })).sort((left, right) => left.code.localeCompare(right.code)),
 		concurrency: { requestedPeak, observedPeak: hasObservedPeak ? observedPeak : null },
 		runs,

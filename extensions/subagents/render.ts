@@ -25,12 +25,25 @@ export function formatDuration(durationMs: number): string {
 	return `${minutes}m ${seconds.toFixed(1)}s`;
 }
 
+function profileSummary(task: TaskResult): string {
+	if (!task.route) return "";
+	const profiles: string[] = [];
+	if (task.route.executionProfileRequested) {
+		profiles.push(`execution:${task.route.executionProfileRequested}/${task.route.executionProfileApplied ? "applied" : "not-applied"}`);
+	}
+	if (task.route.reasoningProfileRequested) {
+		profiles.push(`reasoning:${task.route.reasoningProfileRequested}/${task.route.reasoningProfileApplied ? "applied" : "not-applied"}`);
+	}
+	if (task.route.profileFallbacks.length > 0) profiles.push(`fallbacks:${task.route.profileFallbacks.join(",")}`);
+	return profiles.length === 0 ? "" : ` profiles=${singleLine(profiles.join(";"))}`;
+}
+
 function taskSummary(task: TaskResult): string {
 	const route = task.route
-		? ` route=${singleLine(`${task.route.provider}/${task.route.model}:${task.route.thinking}`)}`
+		? ` route=${singleLine(`${task.route.provider}/${task.route.model}:${task.route.thinking}`)} source=${task.route.source} selection=${task.route.selectionSource ?? "unavailable"}`
 		: "";
 	const error = task.error ? ` error=${singleLine(task.error.code)}` : "";
-	return `[${singleLine(task.id)}] ${task.role} ${task.status} elapsed=${formatDuration(task.durationMs)}${route} convergence=${task.convergence} changed=${task.changedPaths.length}${error}`;
+	return `[${singleLine(task.id)}] ${task.role} ${task.status} elapsed=${formatDuration(task.durationMs)}${route}${profileSummary(task)} convergence=${task.convergence} changed=${task.changedPaths.length}${error}`;
 }
 
 function taskBody(task: TaskResult): string {

@@ -70,15 +70,31 @@ interface RunIdentity {
 	runId: string;
 	started: number;
 	requestedTasks: number;
+	requestedDependencyEdges: number;
+	explicitModelTasks: number;
+	explicitThinkingTasks: number;
 }
 
-function failedTelemetry(identity: RunIdentity, admittedTasks: number, code: string): RunTelemetry {
+function dependencyEdges(tasks: readonly Pick<SubagentToolInput["tasks"][number], "dependsOn">[]): number {
+	return tasks.reduce((total, task) => total + (task.dependsOn?.length ?? 0), 0);
+}
+
+function failedTelemetry(
+	identity: RunIdentity,
+	admittedTasks: number,
+	admittedDependencyEdges: number,
+	code: string,
+): RunTelemetry {
 	return {
 		schemaVersion: TELEMETRY_SCHEMA_VERSION,
 		runId: identity.runId,
 		runDurationMs: Math.max(0, Date.now() - identity.started),
 		requestedTasks: identity.requestedTasks,
 		admittedTasks,
+		requestedDependencyEdges: identity.requestedDependencyEdges,
+		admittedDependencyEdges,
+		explicitModelTasks: identity.explicitModelTasks,
+		explicitThinkingTasks: identity.explicitThinkingTasks,
 		launchedChildren: 0,
 		peakConcurrency: 0,
 		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
@@ -97,7 +113,7 @@ function aggregateFailure(
 		status: "failed",
 		tasks: tasks.map((task) => failureResult(task, code, message)),
 		usage: emptyUsage(),
-		telemetry: failedTelemetry(identity, admittedTasks, code),
+		telemetry: failedTelemetry(identity, admittedTasks, dependencyEdges(tasks), code),
 	};
 }
 
@@ -133,6 +149,16 @@ function buildInputs(task: NormalizedTask, predecessors: readonly TaskResult[]):
 	return blocks.join("\n\n");
 }
 
+function attachResolvedRoutes(
+	results: readonly TaskResult[],
+	routes: ReadonlyMap<string, Extract<RouteResolution, { ok: true }>>,
+): TaskResult[] {
+	return results.map((result) => {
+		const selected = routes.get(result.id);
+		return result.route || !selected ? result : { ...result, route: selected.route };
+	});
+}
+
 function capability(root: string, task: NormalizedTask): ChildCapabilityManifest {
 	return {
 		version: 1,
@@ -146,9 +172,9 @@ function capability(root: string, task: NormalizedTask): ChildCapabilityManifest
 function guidance(config: EffectiveSubagentConfig): string | undefined {
 	if (config.guidance === "off") return undefined;
 	if (config.guidance === "balanced") {
-		return "When repository work has clearly independent bounded slices, consider csheng_subagents. Keep synthesis, verification, authority, and continuation in the parent turn.";
+		return "When repository work has two or more clearly independent bounded slices, consider one flat csheng_subagents batch. A singleton is for a required isolated worker or independent reviewer, not ordinary offload. Keep synthesis, verification, authority, and continuation in the parent turn.";
 	}
-	return "Prefer csheng_subagents when two or more independent bounded repository slices can run concurrently. Do not delegate trivial work or parent-owned synthesis, verification, authority, adjudication, repair decisions, continuation, or the final response.";
+	return "Prefer one flat csheng_subagents batch when two or more independent bounded repository slices can run concurrently. Reserve singletons for a required isolated worker or independent reviewer. Do not delegate trivial work or parent-owned synthesis, verification, authority, adjudication, repair decisions, continuation, or the final response.";
 }
 
 function linkAbort(source: AbortSignal | undefined, target: AbortController): () => void {
@@ -169,14 +195,18 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 		pi.registerTool({
 			name: SUBAGENT_TOOL_NAME,
 			label: "Csheng Subagents",
-			description: "Run one bounded foreground DAG of fixed explorer, reviewer, or isolated worker children. Use it proactively for independent slices; the parent retains synthesis, verification, authority, review adjudication, continuation, and the final response.",
+			description: "Run one bounded foreground batch of fixed explorer, reviewer, or isolated worker children. Keep ordinary work flat; use hard predecessor edges only for approved implementation order with no intervening parent decision.",
 			parameters: SubagentToolSchema,
 			async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 				const params = rawParams as SubagentToolInput;
+				const requestedTasks = Array.isArray(params.tasks) ? params.tasks : [];
 				const identity: RunIdentity = {
 					runId: randomUUID(),
 					started: Date.now(),
-					requestedTasks: Array.isArray(params.tasks) ? params.tasks.length : 0,
+					requestedTasks: requestedTasks.length,
+					requestedDependencyEdges: dependencyEdges(requestedTasks),
+					explicitModelTasks: requestedTasks.filter((task) => task.model !== undefined).length,
+					explicitThinkingTasks: requestedTasks.filter((task) => task.thinking !== undefined).length,
 				};
 				const validation = validateGraph(params);
 				if (!validation.ok) {
@@ -184,7 +214,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						status: "failed",
 						tasks: [],
 						usage: emptyUsage(),
-						telemetry: failedTelemetry(identity, 0, validation.error.code),
+						telemetry: failedTelemetry(identity, 0, 0, validation.error.code),
 					};
 					return finalToolResult(result, `Subagent graph rejected (${validation.error.code}): ${validation.error.message}`);
 				}
@@ -214,6 +244,8 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					const selected = resolveRoute(task.role, config, routeContext(ctx), {
 						...(task.executionProfile === undefined ? {} : { executionProfile: task.executionProfile }),
 						...(task.reasoningProfile === undefined ? {} : { reasoningProfile: task.reasoningProfile }),
+						...(task.model === undefined ? {} : { model: task.model }),
+						...(task.thinking === undefined ? {} : { thinking: task.thinking }),
 					});
 					if (!selected.ok) {
 						const result = aggregateFailure(validation.tasks, selected.error.code, selected.error.message, identity);
@@ -230,7 +262,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					return finalToolResult(result);
 				}
 
-					const result = await runScheduledTasks(validation.tasks, {
+					const scheduled = await runScheduledTasks(validation.tasks, {
 						runId: identity.runId,
 						requestedTasks: identity.requestedTasks,
 						maxConcurrency: config.maxConcurrency,
@@ -244,7 +276,8 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							activeChildren = count;
 						},
 						onUpdate(results) {
-							onUpdate?.({ content: [{ type: "text", text: formatProgress(results) }], details: { status: "running", tasks: results, usage: emptyUsage() } });
+							const routedResults = attachResolvedRoutes(results, routes);
+							onUpdate?.({ content: [{ type: "text", text: formatProgress(routedResults) }], details: { status: "running", tasks: routedResults, usage: emptyUsage() } });
 						},
 						async execute(task, predecessors, childSignal, lifecycle) {
 							const selected = routes.get(task.id) as Extract<RouteResolution, { ok: true }>;
@@ -314,6 +347,17 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							}
 						},
 					});
+					const result: SubagentRunResult = {
+						...scheduled,
+						tasks: attachResolvedRoutes(scheduled.tasks, routes),
+						telemetry: {
+							...scheduled.telemetry,
+							requestedDependencyEdges: identity.requestedDependencyEdges,
+							admittedDependencyEdges: dependencyEdges(validation.tasks),
+							explicitModelTasks: identity.explicitModelTasks,
+							explicitThinkingTasks: identity.explicitThinkingTasks,
+						},
+					};
 					return finalToolResult(result);
 				} finally {
 					activeChildren = 0;

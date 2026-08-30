@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import type { NormalizedTask } from "../extensions/subagents/graph.ts";
+import { validateGraph, type NormalizedTask } from "../extensions/subagents/graph.ts";
 import { convergeWorkerWorkspace, createWorkerWorkspace, WorkspaceError } from "../extensions/subagents/workspace.ts";
 
 const exec = promisify(execFile);
@@ -66,6 +66,39 @@ test("convergence atomically applies exact create and modify operations with mod
 	assert.equal(await readFile(join(root, "src", "new.ts"), "utf8"), "new\n");
 });
 
+test("empty complete worker diff fails without mutating the parent", async (t) => {
+	const root = await repository(t);
+	const workspace = await createWorkerWorkspace(root, worker(["src/tracked.ts"]));
+	t.after(() => workspace.cleanup());
+	const result = await convergeWorkerWorkspace(workspace);
+	assert.equal(result.ok, false);
+	assert.deepEqual(result.changedPaths, []);
+	assert.equal(result.error?.code, "worker_no_changes");
+	assert.equal(await readFile(join(root, "src", "tracked.ts"), "utf8"), "working\n");
+});
+
+test("declared parent drift takes precedence over the empty-worker diagnostic", async (t) => {
+	const root = await repository(t);
+	const workspace = await createWorkerWorkspace(root, worker(["src/tracked.ts"]));
+	t.after(() => workspace.cleanup());
+	await writeFile(join(root, "src", "tracked.ts"), "external\n");
+	const result = await convergeWorkerWorkspace(workspace);
+	assert.equal(result.error?.code, "convergence_conflict");
+	assert.deepEqual(result.changedPaths, []);
+	assert.equal(await readFile(join(root, "src", "tracked.ts"), "utf8"), "external\n");
+});
+
+test("undeclared mutation takes precedence over the empty-worker diagnostic", async (t) => {
+	const root = await repository(t);
+	const workspace = await createWorkerWorkspace(root, worker(["src/tracked.ts"]));
+	t.after(() => workspace.cleanup());
+	await writeFile(join(workspace.root, "src", "untracked.ts"), "bad\n");
+	const result = await convergeWorkerWorkspace(workspace);
+	assert.equal(result.error?.code, "unexpected_worker_change");
+	assert.deepEqual(result.changedPaths, ["src/untracked.ts"]);
+	assert.equal(await readFile(join(root, "src", "untracked.ts"), "utf8"), "untracked\n");
+});
+
 test("unexpected mutation and parent drift fail without overwriting parent state", async (t) => {
 	const root = await repository(t);
 	const unexpected = await createWorkerWorkspace(root, worker(["src/tracked.ts"]));
@@ -82,6 +115,27 @@ test("unexpected mutation and parent drift fail without overwriting parent state
 	const conflicted = await convergeWorkerWorkspace(conflict);
 	assert.equal(conflicted.error?.code, "convergence_conflict");
 	assert.equal(await readFile(join(root, "src", "tracked.ts"), "utf8"), "external\n");
+});
+
+test("graph path diagnostics explain strict repository-relative correction", () => {
+	const invalidScope = validateGraph({
+		tasks: [{ id: "absolute", role: "explorer", objective: "inspect", scope: ["/tmp/repository"] }],
+	});
+	assert.equal(invalidScope.ok, false);
+	if (invalidScope.ok) return;
+	assert.equal(invalidScope.error.code, "invalid_scope");
+	assert.match(invalidScope.error.message, /repository-relative/);
+	assert.match(invalidScope.error.message, /Use '\.' for the repository root/);
+	assert.match(invalidScope.error.message, /absolute paths and parent traversal are rejected/);
+
+	const missingWrites = validateGraph({
+		tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."] }],
+	});
+	assert.equal(missingWrites.ok, false);
+	if (missingWrites.ok) return;
+	assert.equal(missingWrites.error.code, "worker_write_paths_required");
+	assert.match(missingWrites.error.message, /exact repository-relative files in writePaths/);
+	assert.match(missingWrites.error.message, /not inferred/);
 });
 
 test("snapshot rejects escaping write symlinks and non-Git workspaces", async (t) => {

@@ -26,10 +26,10 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - Pi's public extension API, active tool set, model context and registry, project trust, session events, and startup flags are runtime inputs.
 - The host Pi loop remains authoritative for parent model turns, tool execution, persistence, user interaction, and final responses.
 - A profile may select tools and append compact loop guidance. It must not introduce task graphs, schedulers, approval protocols, review gates, settlement, or a generic permission framework.
-- The subagent extension may validate and execute one foreground, hard-bounded, in-memory DAG submitted by the parent. It owns physical child routing, readiness, concurrency, locks, cancellation, path capabilities, isolated worker snapshots, and mechanical convergence; it owns no semantic lifecycle, approval, verification judgment, review adjudication, repair decision, continuation, or durable run state.
+- The subagent extension may validate and execute one foreground, hard-bounded, in-memory task batch with optional hard predecessor edges submitted by the parent. Ordinary delegation stays flat; semantic hard-edge eligibility remains parent-owned. The extension owns physical child routing, readiness, concurrency, locks, cancellation, path capabilities, isolated worker snapshots, and mechanical convergence; it owns no semantic lifecycle, approval, verification judgment, review adjudication, repair decision, continuation, or durable run state.
 - Pi's skill command registry remains authoritative for loaded Skill names and source paths. This package does not independently discover, execute, or enforce a Skill repository, and subagent children load no Skills.
-- Child roles are code-owned and fixed. The repository ships tested role-preferred peer routes and optional semantic profile mappings; concrete route overrides remain optional user-owned input under Pi's agent directory. Project repositories cannot provide routes, and the package never changes the parent model or provider settings.
-- A task may provide only the fixed provider-neutral execution and reasoning profiles. The parent owns semantic projection; the extension never reads a plan or Skill, and model identifiers remain route configuration rather than task fields.
+- Child roles are code-owned and fixed. The repository ships tested role-preferred peer routes and optional semantic profile mappings; a user-owned Pi-agent-directory overlay may change persistent defaults. Project repositories cannot provide routes, and the package never changes the parent model or provider settings.
+- A task may provide fixed provider-neutral execution and reasoning profiles. When the user explicitly selects a concrete model or Pi thinking level, the parent may also pass ephemeral task `model` and `thinking` overrides for any role. Those fields override default selection without mutating package or user route configuration. The parent owns semantic projection; the extension never reads a plan or Skill.
 - Missing declared plan-mode tools, invalid route configuration, project distrust, unsafe graphs, path escape, writable isolation failure, child failure, and convergence drift fail visibly without widening authority.
 
 ## Working Rules
@@ -38,7 +38,8 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - Persist only the minimum state needed to restore host behavior; subagent runs remain foreground and memory-only.
 - Preserve ordinary Pi behavior outside each selected profile or explicit tool call and when an extension is disabled.
 - Keep child prompts, capability files, snapshots, and process output bounded; clean private resources on success, failure, timeout, abort, and session shutdown.
-- Keep probe and evaluator output redacted. Never print raw user settings, route files, prompts, task IDs, credentials, environment values, session paths, or external file content.
+- Keep probe and evaluator output redacted. Never print raw user settings, route files, model selectors, prompts, task IDs, credentials, environment values, session paths, or external file content.
+- Treat package and user route files as read-only persistent defaults. Never create, edit, or delete either file to satisfy one dispatch; explicit task route failure is typed and has no fallback or retry.
 - Do not add dynamic roles, child shell, background missions, durable task ledgers, hidden model fallback, automatic retry, or a Skill-specific runtime contract without a separately approved design.
 - Do not commit, push, publish, deploy, create a remote, install packages globally, create a user route file, or change provider/model settings without explicit authority.
 

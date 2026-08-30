@@ -1,6 +1,6 @@
 # Subagents
 
-`extensions/subagents/index.ts` registers `csheng_subagents`, a bounded foreground delegation tool. One parent tool call may run a small directed acyclic graph of isolated Pi child processes. The extension owns execution mechanics only; it is not a second coding-agent lifecycle.
+`extensions/subagents/index.ts` registers `csheng_subagents`, a bounded foreground delegation tool. One parent tool call runs a flat task batch by default and may include mechanically validated hard predecessor edges. The extension owns execution mechanics only; it is not a second coding-agent lifecycle.
 
 ## Ownership boundary
 
@@ -16,7 +16,7 @@ The user remains the approval and cost authority. The parent Pi selects tasks an
 
 Loading the extension registers the tool, `/subagents` status command, and configured delegation guidance. It starts no child and changes no workspace until the parent calls the tool. Dispatch requires `ctx.isProjectTrusted()`.
 
-The default guidance is `aggressive`: prefer delegation when at least two independent bounded repository slices can run concurrently. It does not delegate trivial work or parent-owned synthesis, verification, authority, adjudication, repair decisions, continuation, or the final response. A graph must stop before any such parent decision point; later work uses another parent tool call.
+The default guidance is `aggressive`: prefer one flat delegation batch when at least two independent bounded repository slices can run concurrently. A singleton remains valid for a required isolated worker or one independent reviewer, not ordinary parent-work offload. Guidance does not delegate trivial work or parent-owned synthesis, verification, authority, adjudication, repair decisions, continuation, or the final response. A batch must stop before any such parent decision point; later work uses another parent tool call.
 
 `plan-mode` remains independent. Its exact `read`, `grep`, `find`, and `ls` profile excludes the subagent tool while plan mode is active.
 
@@ -27,16 +27,18 @@ The tool accepts one `tasks` array. A task contains:
 - `id`: unique invocation-local identifier
 - `role`: `explorer`, `reviewer`, or `worker`
 - `objective`: bounded outcome
-- `scope`: repository-relative read roots
+- `scope`: repository-relative read roots; `.` means the repository root
 - `inputs`: optional bounded parent-supplied text
-- `dependsOn`: predecessor IDs
+- `dependsOn`: optional hard predecessor IDs
 - `writePaths`: exact repository-relative files, required only for workers
 - `verification`: expected parent evidence, never a child command
 - `resourceLocks`: names that prevent simultaneous execution
 - `executionProfile`: optional `fast`, `balanced`, or `deep` route intent
 - `reasoningProfile`: optional `light`, `standard`, or `deep` reasoning intent
+- `model`: optional exact ephemeral model selector for an explicit user choice
+- `thinking`: optional exact Pi level from `off` through `max` for an explicit user choice
 
-Dependencies express single work, serial chains, flat parallel work, fan-out, and fan-in through one schema. The tool does not accept arbitrary working directories, concrete task models, tool lists, commands, extensions, Skills, retries, background flags, or nested graphs. Model-facing role, execution-profile, and reasoning-profile choices serialize as direct string enums through Pi's provider-compatible `StringEnum` helper.
+Ordinary tasks omit `dependsOn` and run as a flat batch. Hard edges represent only approved implementation order with no intervening parent decision; the extension validates mechanics but never detects an active Skill. The tool does not accept arbitrary working directories, tool lists, commands, extensions, Skills, retries, background flags, or nested graphs. Model-facing role, execution-profile, reasoning-profile, and thinking choices serialize as direct string enums where bounded through Pi's provider-compatible `StringEnum` helper. Absolute and parent-traversing paths remain rejected rather than rewritten, and worker write files are never inferred.
 
 Hard ceilings are ten tasks and ten concurrent children, with role ceilings of four explorers, four reviewers, and two workers, a 15-minute task timeout, and a five-second TERM-to-KILL grace period. A mixed ready graph may therefore reach `4 + 4 + 2`; no graph may run ten workers. Prompt, predecessor, output, and stderr byte limits are exported from `contracts.ts` and tested. User configuration may lower but not raise concurrency ceilings.
 
@@ -60,9 +62,13 @@ The optional user-owned override is `csheng-subagents.json` under Pi's public ag
 
 The parent may copy optional provider-neutral task intensity into `executionProfile` and `reasoningProfile`; the extension never discovers or parses a plan or Skill. A configured execution profile selects another role candidate list, then a configured reasoning profile overrides thinking. Missing task profiles use the role default. A known profile without a configured mapping visibly falls back to that default. `/subagents` reports effective default routes and caps without printing raw configuration.
 
+When the user explicitly names a model or exact thinking level, the parent may pass task `model` and `thinking` for explorer, reviewer, or worker. Explicit `model` supersedes role candidates, execution-profile model mapping, and session cycling scope; role still owns tools, paths, concurrency, isolation, and convergence. Explicit `thinking` supersedes `reasoningProfile`; with a default route it may select the first ordered candidate supporting that exact level, while an explicit model never falls back to another model or level. An explicit model without a task reasoning override inherits the parent turn's exact thinking level.
+
 This has the model-routing purpose of `~/.codex/agents/*.toml`, but it is not a compatibility layer for those files. Codex agent files combine role instructions, sandbox policy, and optional routing; this extension keeps role instructions and capability ceilings in `roles.ts` and accepts only optional model routing from Pi's agent directory. Provider and model identifiers remain Pi-owned.
 
-Resolution checks the parent model, current thinking level, scoped models, authentication, and thinking support. The registry model object remains resolver-local; callers receive only the effective provider, model identifier, thinking level, source, candidate index, and semantic-profile decision needed for child execution and evidence. The child receives explicit `--model` and `--thinking` arguments. Unavailable candidates produce a typed failure unless the user listed another candidate; runtime errors do not trigger hidden fallback or retry. Child routing never changes the parent model or provider settings.
+Default resolution checks the parent model, current thinking level, scoped models, authentication, and thinking support. Explicit model resolution takes one public `getAll()` and `getAvailable()` registry snapshot. It tries case-insensitive exact `provider/model`, normalized exact bare ID, then normalized exact display name; normalization applies Unicode NFKC, lowercase, punctuation-run collapse, and trim. It never uses partial or catalogue-order matching. Missing, unavailable, ambiguous, and unsupported-thinking choices return typed `model_not_found`, `model_unavailable`, `ambiguous_model`, or `thinking_unavailable` failures before child launch. Ambiguous and unavailable diagnostics retain at most eight sorted canonical candidates.
+
+The registry model object remains resolver-local; callers receive only the effective provider, model identifier, thinking level, persistent configuration source, selection source, candidate index, and semantic-profile decision needed for child execution and evidence. `selectionSource` is `role-default` or `explicit-task`; it does not independently prove user intent. The child receives explicit `--model` and `--thinking` arguments. Runtime errors do not trigger hidden fallback or retry. Routing never writes the packaged or user route file and never changes the parent model or provider settings.
 
 ## Child process and path capability
 
@@ -76,15 +82,15 @@ Prompt, capability, and workspace directories are private temporary resources. C
 
 Read-only children use the trusted parent repository directly. A worker requires a Git repository and receives a private snapshot containing current tracked files and non-ignored untracked files. The snapshot excludes `.git`, ignored material, escaping symlinks, external files, and special files.
 
-The extension records existence, type, mode, and content digests for every write path. A successful worker is eligible for convergence only when its complete snapshot diff contains create-or-modify operations on declared regular files. Deletion, rename, mode change, symlink write, or another changed path fails the task.
+The extension records existence, type, mode, and content digests for every write path. A successful worker is eligible for convergence only when its complete snapshot diff contains create-or-modify operations on declared regular files. Deletion, rename, mode change, symlink write, or another changed path fails with its specific safety error. After those checks, a truly empty complete diff fails with `worker_no_changes` and `not-applied` convergence rather than reporting successful implementation.
 
 Before applying bytes, the extension compares each parent path with its launch baseline. Matching paths receive a same-directory staged file and atomic rename with mode preservation. Parent drift returns `convergence_conflict`; the extension never merges or overwrites it. A non-Git writable task returns `writable_isolation_unavailable`, while read-only delegation remains available.
 
 ## Scheduling and failure behavior
 
-Only one subagent graph may be active per extension session, so separate parent tool calls cannot bypass global concurrency, lock, or write-conflict controls. Ready tasks have every dependency succeeded and no active global, role, lock, or write conflict. Stable input order breaks ties. A failed task blocks its transitive dependents, while unrelated branches continue. There is no automatic retry or rollback. Successful independent writes may remain converged when another branch fails, and the parent receives `partial` for fix-forward handling.
+Only one subagent batch may be active per extension session, so separate parent tool calls cannot bypass global concurrency, lock, or write-conflict controls. Ready tasks have every dependency succeeded and no active global, role, lock, or write conflict. Stable input order breaks ties. A failed task blocks its transitive dependents, while unrelated branches continue. There is no automatic retry or rollback. Successful independent writes may remain converged when another branch fails, and the parent receives `partial` for fix-forward handling.
 
-The structured aggregate result records per-task status, effective route and profile decision, bounded output, usage, duration, changed paths, convergence state, stop reason, and typed error. Version-one redacted telemetry adds an invocation-local run ID, requested/admitted/launched counts, run duration, peak global and role concurrency, structured run errors, and task queue/workspace/child/convergence durations. It remains inside Pi's persisted tool result; there is no second ledger. Child prose cannot modify graph state.
+The structured aggregate result records per-task status, effective route and profile decision, bounded output, usage, duration, changed paths, convergence state, stop reason, and typed error. Version-two redacted telemetry adds an invocation-local run ID, requested/admitted/launched counts, requested/admitted hard-edge counts, explicit model/thinking task counts, run duration, peak global and role concurrency, route selection source, structured run errors, and task queue/workspace/child/convergence durations. It remains inside Pi's persisted tool result; there is no second ledger. Child prose cannot modify graph state.
 
 Model-visible result text is independently capped at Pi's default 50 KiB and 2,000 complete lines. The renderer reserves a compact summary for every admitted task, including status, elapsed duration, effective route, convergence, changed-path count, and typed error code, then allocates the remaining byte and line budget fairly across task details with explicit truncation evidence. Structured details remain the authoritative per-task evidence.
 
@@ -110,7 +116,7 @@ bash scripts/run-installed-subagents-probe.sh
 
 Unit and component tests own provider-compatible schema shape, routing, graph, process, guard, snapshot, convergence, telemetry, evaluator, aggregate renderer bounds, elapsed output, official host result interception, awaited shutdown cleanup, package peer ownership, extension behavior, cancellation, and regression behavior. Pi core packages imported by extension source are peer dependencies and exact development dependencies; clean `npm ci --ignore-scripts` plus typecheck proves local resolution without bundling another host copy. The subagent probes are offline and report fixed counts only; they do not start a model child.
 
-The project-local `.agents/skills/evaluate-subagent-runs/` Skill reads one explicitly selected Pi session JSONL and emits a versioned redacted metric document. It never reads Pi SQLite, settings, credentials, logs, or unrelated sessions; never copies prompts, task IDs, child output, stderr, paths, environment values, or external content; and labels legacy launch/concurrency derivation as inference. Reports are written only to an explicit new output path. The first redacted production baseline is retained under `docs/evaluations/subagents/`.
+The project-local `.agents/skills/evaluate-subagent-runs/` Skill reads one explicitly selected Pi session JSONL and emits metric schema version two. It aggregates requested/admitted/launched tasks, singletons, hard edges, explicit-route attribution, and historical zero-change workers. Runtime telemetry versions one and two remain authoritative only for fields they declare; unavailable old-session evidence stays nullable and is never reconstructed from assistant arguments. The evaluator never reads Pi SQLite, settings, credentials, logs, or unrelated sessions; never copies raw selectors, prompts, task IDs, child output, stderr, paths, environment values, or external content. Reports are written only to an explicit new output path. The first redacted production baseline is retained under `docs/evaluations/subagents/`.
 
 The manual release/runtime lane is:
 
