@@ -7,7 +7,7 @@ import test, { after } from "node:test";
 import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
-import { runChild } from "../extensions/subagents/runner.ts";
+import { buildChildPrompt, runChild } from "../extensions/subagents/runner.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;
 const DIAGNOSTIC_DIR = mkdtempSync(join(tmpdir(), "subagent-runner-diagnostics-"));
@@ -34,8 +34,16 @@ const task: NormalizedTask = {
 	writePaths: [],
 	verification: [],
 	resourceLocks: [],
+	externalReadRoots: [],
 };
-const capability: ChildCapabilityManifest = { version: 1, root: process.cwd(), role: "explorer", readRoots: [process.cwd()], writePaths: [] };
+const capability: ChildCapabilityManifest = {
+	version: 2,
+	root: process.cwd(),
+	role: "explorer",
+	readRoots: [process.cwd()],
+	writePaths: [],
+	externalReadRoots: [],
+};
 
 function options(mode: string, extra: Record<string, unknown> = {}) {
 	const sessionPath = join(DIAGNOSTIC_DIR, `${diagnosticIndex++}.jsonl`);
@@ -59,6 +67,22 @@ function options(mode: string, extra: Record<string, unknown> = {}) {
 		...extra,
 	} as Parameters<typeof runChild>[0];
 }
+
+test("child prompt renders canonical external roots without changing write or evidence blocks", () => {
+	const none = buildChildPrompt(task, "bounded input");
+	assert.match(none, /Read scope:\n- \./);
+	assert.match(none, /External read roots:\n- none\nWrite paths:\n- none/);
+	assert.equal(none.includes("Expected parent evidence"), false);
+	const withRoots = buildChildPrompt({
+		...task,
+		writePaths: ["src/file.ts"],
+		verification: ["focused test"],
+		externalReadRoots: ["/other/repo/src"],
+	}, "bounded input");
+	assert.match(withRoots, /External read roots:\n- \/other\/repo\/src\nWrite paths:\n- src\/file.ts/);
+	assert.match(withRoots, /Expected parent evidence:\n- focused test/);
+	assert.match(withRoots, /\n\nInputs:\nbounded input$/);
+});
 
 test("runner parses fragmented JSONL and aggregates usage", async () => {
 	const result = await runChild(options("fragmented"));
@@ -86,6 +110,21 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	assert.ok(recorded.args.includes("low"));
 	assert.ok(recorded.args.includes("read,grep,find,ls"));
 	await assert.rejects(readFile(recorded.capability, "utf8"), /ENOENT/);
+
+	const withExternal = await runChild(options("normal", {
+		task: { ...task, externalReadRoots: ["/other/repo"] },
+		capability: { ...capability, externalReadRoots: ["/other/repo"] },
+		cwd: process.cwd(),
+		env: { ...process.env, FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me" },
+	}));
+	assert.equal(withExternal.status, "succeeded");
+	const recordedExternal = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; sessionPath: string };
+	assert.ok(recordedExternal.args.includes("read,grep,find,ls"));
+	assert.ok(recordedExternal.args.includes("--approve"));
+	assert.ok(recordedExternal.args.includes("synthetic/child"));
+	assert.ok(recordedExternal.args.includes("low"));
+	const session = JSON.parse((await readFile(recordedExternal.sessionPath, "utf8")).split("\n")[0] ?? "{}") as { cwd?: string };
+	assert.equal(session.cwd, process.cwd());
 });
 
 test("runner classifies malformed protocol, child exit, and spawn failure", async () => {

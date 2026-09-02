@@ -75,9 +75,11 @@ function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string): No
 	return env;
 }
 
-function buildPrompt(task: NormalizedTask, prompt: string): string {
+export function buildChildPrompt(task: NormalizedTask, prompt: string): string {
 	const verification = task.verification.length > 0 ? `\nExpected parent evidence:\n- ${task.verification.join("\n- ")}` : "";
-	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nRead scope:\n- ${task.scope.join("\n- ")}\nWrite paths:\n- ${task.writePaths.length > 0 ? task.writePaths.join("\n- ") : "none"}${verification}\n\nInputs:\n${prompt}`;
+	const externalRoots = task.externalReadRoots ?? [];
+	const external = externalRoots.length > 0 ? externalRoots.join("\n- ") : "none";
+	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nRead scope:\n- ${task.scope.join("\n- ")}\nExternal read roots:\n- ${external}\nWrite paths:\n- ${task.writePaths.length > 0 ? task.writePaths.join("\n- ") : "none"}${verification}\n\nInputs:\n${prompt}`;
 }
 
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
@@ -104,7 +106,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	});
 
 	try {
-		const completePrompt = buildPrompt(options.task, options.prompt);
+		const completePrompt = buildChildPrompt(options.task, options.prompt);
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}

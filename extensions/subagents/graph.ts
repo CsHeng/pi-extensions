@@ -4,6 +4,7 @@ import {
 	HARD_LIMITS,
 	REASONING_PROFILES,
 	ROLE_NAMES,
+	isSafePathGrammar,
 	utf8Bytes,
 	type ExecutionProfile,
 	type ReasoningProfile,
@@ -47,7 +48,7 @@ export function normalizeRepositoryPath(value: string, allowRoot: boolean): stri
 function pathContains(root: string, child: string): boolean {
 	if (root === ".") return true;
 	const relation = relative(root, child);
-	return relation === "" || (!relation.startsWith("..") && !isAbsolute(relation));
+	return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 function pathsOverlap(left: string, right: string): boolean {
@@ -67,7 +68,7 @@ function hasDependencyPath(from: string, to: string, dependencies: ReadonlyMap<s
 	return false;
 }
 
-export function validateGraph(input: SubagentToolInput): GraphValidation {
+export function validateGraphStructure(input: SubagentToolInput): GraphValidation {
 	if (!Array.isArray(input.tasks) || input.tasks.length < 1 || input.tasks.length > HARD_LIMITS.maxTasks) {
 		return fail("invalid_graph_size", `A graph must contain 1 through ${HARD_LIMITS.maxTasks} tasks.`);
 	}
@@ -92,15 +93,23 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {
 			return fail("input_too_large", `Task ${task.id} inputs exceed the byte limit.`);
 		}
-		const scope = task.scope.map((entry) => normalizeRepositoryPath(entry, true));
-		if (scope.length < 1 || scope.some((entry) => entry === undefined)) {
-			return fail("invalid_scope", `Task ${task.id} scope must contain only repository-relative paths. Use '.' for the repository root; absolute paths and parent traversal are rejected.`);
+		if (task.scope.length < 1 || task.scope.some((entry) => !isSafePathGrammar(entry))) {
+			return fail("invalid_scope", `Task ${task.id} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`);
 		}
-		const writePaths = (task.writePaths ?? []).map((entry) => normalizeRepositoryPath(entry, false));
+		if (task.role === "worker" && task.externalReadRoots !== undefined) {
+			return fail("external_read_roots_forbidden", `Worker task ${task.id} cannot declare externalReadRoots.`);
+		}
+		const externalReadRoots = [...(task.externalReadRoots ?? [])];
+		if (externalReadRoots.length > HARD_LIMITS.maxExternalReadRoots) {
+			return fail("invalid_external_read_root", `Task ${task.id} exceeds the external read root limit.`);
+		}
+		if (externalReadRoots.some((entry) => !isSafePathGrammar(entry) || !isAbsolute(entry))) {
+			return fail("invalid_external_read_root", `Task ${task.id} external read root must be an absolute safe path.`);
+		}
+		const writePaths = (task.writePaths ?? []).map((entry) => isSafePathGrammar(entry) ? normalizeRepositoryPath(entry, false) : undefined);
 		if (writePaths.some((entry) => entry === undefined)) {
 			return fail("invalid_write_path", `Task ${task.id} has an unsafe write path.`);
 		}
-		const safeScope = scope as string[];
 		const safeWrites = writePaths as string[];
 		if (task.role === "worker" && safeWrites.length < 1) {
 			return fail("worker_write_paths_required", `Worker task ${task.id} must declare its exact repository-relative files in writePaths; write paths are not inferred.`);
@@ -110,9 +119,6 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		}
 		if (new Set(safeWrites).size !== safeWrites.length) {
 			return fail("duplicate_write_path", `Task ${task.id} repeats a write path.`);
-		}
-		if (safeWrites.some((writePath) => !safeScope.some((root) => pathContains(root, writePath)))) {
-			return fail("write_outside_scope", `Task ${task.id} declares a write outside its read scope.`);
 		}
 		const dependsOn = task.dependsOn ?? [];
 		if (new Set(dependsOn).size !== dependsOn.length || dependsOn.includes(task.id)) {
@@ -128,12 +134,13 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 		}
 		normalized.push({
 			...task,
-			scope: safeScope,
+			scope: [...task.scope],
 			inputs: [...inputs],
 			dependsOn: [...dependsOn],
 			writePaths: safeWrites,
 			verification: [...(task.verification ?? [])],
 			resourceLocks: [...resourceLocks],
+			externalReadRoots,
 		});
 	}
 
@@ -164,4 +171,19 @@ export function validateGraph(input: SubagentToolInput): GraphValidation {
 	}
 
 	return { ok: true, tasks: normalized };
+}
+
+export function validateGraphRelationships(tasks: readonly NormalizedTask[]): GraphValidation {
+	for (const task of tasks) {
+		if (task.writePaths.some((writePath) => !task.scope.some((root) => pathContains(root, writePath)))) {
+			return fail("write_outside_scope", `Task ${task.id} declares a write outside its read scope.`);
+		}
+	}
+	return { ok: true, tasks: [...tasks] };
+}
+
+export function validateGraph(input: SubagentToolInput): GraphValidation {
+	const structural = validateGraphStructure(input);
+	if (!structural.ok) return structural;
+	return validateGraphRelationships(structural.tasks);
 }

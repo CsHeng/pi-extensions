@@ -9,7 +9,6 @@ import {
 	readFile,
 	readdir,
 	readlink,
-	realpath,
 	rename,
 	rm,
 	symlink,
@@ -18,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { NormalizedTask } from "./graph.ts";
+import { findCanonicalGitRoot, RepositoryPolicyError } from "./repository-policy.ts";
 
 interface FileState {
 	kind: "file" | "symlink" | "absent";
@@ -53,7 +53,7 @@ export class WorkspaceError extends Error {
 
 function contains(root: string, target: string): boolean {
 	const relation = relative(root, target);
-	return relation === "" || (!relation.startsWith("..") && !isAbsolute(relation));
+	return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 function digest(content: Buffer): string {
@@ -98,16 +98,18 @@ async function runGit(cwd: string, args: string[]): Promise<Buffer> {
 
 export async function findGitRoot(cwd: string): Promise<string> {
 	try {
-		const output = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
-		return await realpath(output.toString("utf8").trim());
+		return await findCanonicalGitRoot(cwd);
 	} catch (error) {
-		throw new WorkspaceError("writable_isolation_unavailable", error instanceof Error ? error.message : String(error));
+		const message = error instanceof RepositoryPolicyError
+			? error.message
+			: error instanceof Error ? error.message : String(error);
+		throw new WorkspaceError("writable_isolation_unavailable", message);
 	}
 }
 
 async function assertNoSymlinkComponent(root: string, target: string): Promise<void> {
 	const relation = relative(root, target);
-	if (relation.startsWith("..") || isAbsolute(relation)) throw new WorkspaceError("write_path_escape", "Write path escapes the repository root.");
+	if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) throw new WorkspaceError("write_path_escape", "Write path escapes the repository root.");
 	let current = root;
 	for (const component of relation.split(sep)) {
 		if (!component) continue;

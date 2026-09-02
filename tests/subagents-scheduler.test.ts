@@ -24,6 +24,22 @@ function graph(tasks: Array<Record<string, unknown>>): NormalizedTask[] {
 	return result.ok ? result.tasks : [];
 }
 
+test("canonical repository-relative writes stay contained and still conflict when overlapping", () => {
+	assert.equal(validateGraph({ tasks: [
+		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["lib/a.ts"] },
+	] }).ok, false);
+	assert.equal(validateGraph({ tasks: [
+		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
+		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
+	] }).ok, false);
+	assert.equal(validateGraph({ tasks: [
+		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
+	] }).ok, true);
+	assert.equal(validateGraph({ tasks: [
+		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/..config/a.ts"] },
+	] }).ok, true);
+});
+
 test("graph admission rejects cycles, unknown dependencies, role writes, and concurrent write overlap", () => {
 	assert.equal(validateGraph({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },

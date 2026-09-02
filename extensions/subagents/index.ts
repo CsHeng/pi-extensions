@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	HARD_LIMITS,
 	SUBAGENT_DEBUG_COMMAND,
 	SUBAGENT_STATUS_COMMAND,
 	SUBAGENT_TOOL_NAME,
@@ -11,7 +11,7 @@ import {
 	TELEMETRY_SCHEMA_VERSION,
 	emptyTaskTelemetry,
 	emptyUsage,
-	type ChildCapabilityManifest,
+	type NormalizedChildCapability,
 	type RunTelemetry,
 	type RoleName,
 	type SubagentRunResult,
@@ -20,11 +20,12 @@ import {
 } from "./contracts.ts";
 import { loadConfig, type ConfigLoadResult, type EffectiveSubagentConfig } from "./config.ts";
 import { DiagnosticStore, renderDiagnosticInspection, type DiagnosticRun, type DiagnosticStoreLike } from "./diagnostics.ts";
-import { validateGraph, type NormalizedTask } from "./graph.ts";
+import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
+import { admitRepositoryTasks, defaultRepositoryHost, type RepositoryHost } from "./repository-policy.ts";
 import { boundToolContent, formatProgress, formatRunResult } from "./render.ts";
 import { resolveRoute, type RouteContext, type RouteResolution } from "./routing.ts";
 import { getRole } from "./roles.ts";
-import { runChild, type ChildRunOptions } from "./runner.ts";
+import { buildChildPrompt, runChild, type ChildRunOptions } from "./runner.ts";
 import { runScheduledTasks } from "./scheduler.ts";
 import {
 	convergeWorkerWorkspace,
@@ -42,6 +43,7 @@ export interface SubagentDependencies {
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
 	createDiagnosticStore(): DiagnosticStoreLike;
 	guardExtensionPath: string;
+	repositoryHost: RepositoryHost;
 }
 
 const DEFAULT_DEPENDENCIES: SubagentDependencies = {
@@ -51,6 +53,7 @@ const DEFAULT_DEPENDENCIES: SubagentDependencies = {
 	runChild,
 	createDiagnosticStore: () => new DiagnosticStore(getAgentDir()),
 	guardExtensionPath: GUARD_EXTENSION_PATH,
+	repositoryHost: defaultRepositoryHost,
 };
 
 function failureResult(task: NormalizedTask, code: string, message: string, route?: TaskResult["route"]): TaskResult {
@@ -153,6 +156,16 @@ function buildInputs(task: NormalizedTask, predecessors: readonly TaskResult[]):
 	return blocks.join("\n\n");
 }
 
+const MAXIMUM_PREDECESSOR_OUTPUT = "x".repeat(HARD_LIMITS.maxPredecessorOutputBytes);
+
+function projectedCompletePrompt(task: NormalizedTask): string {
+	const blocks = [...task.inputs];
+	for (const dependency of task.dependsOn) {
+		blocks.push(`Predecessor ${dependency} (succeeded):\n${MAXIMUM_PREDECESSOR_OUTPUT}`);
+	}
+	return buildChildPrompt(task, blocks.join("\n\n"));
+}
+
 function attachResolvedRoutes(
 	results: readonly TaskResult[],
 	routes: ReadonlyMap<string, Extract<RouteResolution, { ok: true }>>,
@@ -163,13 +176,14 @@ function attachResolvedRoutes(
 	});
 }
 
-function capability(root: string, task: NormalizedTask): ChildCapabilityManifest {
+function capability(root: string, task: NormalizedTask): NormalizedChildCapability {
 	return {
-		version: 1,
+		version: 2,
 		root,
 		role: task.role,
 		readRoots: task.scope.map((entry) => resolve(root, entry)),
 		writePaths: task.writePaths.map((entry) => resolve(root, entry)),
+		externalReadRoots: task.role === "worker" ? [] : [...(task.externalReadRoots ?? [])],
 	};
 }
 
@@ -213,7 +227,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					explicitModelTasks: requestedTasks.filter((task) => task.model !== undefined).length,
 					explicitThinkingTasks: requestedTasks.filter((task) => task.thinking !== undefined).length,
 				};
-				const validation = validateGraph(params);
+				const validation = validateGraphStructure(params);
 				if (!validation.ok) {
 					const result: SubagentRunResult = {
 						status: "failed",
@@ -243,14 +257,45 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 				const limitedTaskIds = new Set<string>();
 				const taskDiagnosticChecks = new Map<string, { sessionPath: string; controller: AbortController; checking: boolean }>();
 				try {
+				const admitted = await admitRepositoryTasks(ctx.cwd, validation.tasks, dependencies.repositoryHost);
+				if (!admitted.ok) {
+					const result: SubagentRunResult = {
+						status: "failed",
+						tasks: [],
+						usage: emptyUsage(),
+						telemetry: failedTelemetry(identity, 0, 0, admitted.error.code),
+					};
+					return finalToolResult(result, `Subagent graph rejected (${admitted.error.code}): ${admitted.error.message}`);
+				}
+				const related = validateGraphRelationships(admitted.tasks);
+				if (!related.ok) {
+					const result: SubagentRunResult = {
+						status: "failed",
+						tasks: [],
+						usage: emptyUsage(),
+						telemetry: failedTelemetry(identity, 0, 0, related.error.code),
+					};
+					return finalToolResult(result, `Subagent graph rejected (${related.error.code}): ${related.error.message}`);
+				}
+				const tasks = related.tasks;
+				const oversizedPrompt = tasks.find((task) => Buffer.byteLength(projectedCompletePrompt(task), "utf8") > HARD_LIMITS.maxPromptBytes);
+				if (oversizedPrompt) {
+					const result: SubagentRunResult = {
+						status: "failed",
+						tasks: [],
+						usage: emptyUsage(),
+						telemetry: failedTelemetry(identity, 0, 0, "prompt_too_large"),
+					};
+					return finalToolResult(result, `Subagent graph rejected (prompt_too_large): Task ${oversizedPrompt.id} complete projected prompt exceeds the byte limit.`);
+				}
 				const loaded = await dependencies.loadConfig();
 				if (!loaded.config) {
-					const result = aggregateFailure(validation.tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity);
+					const result = aggregateFailure(tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity);
 					return finalToolResult(result);
 				}
 				const config = loaded.config;
 				const routes = new Map<string, Extract<RouteResolution, { ok: true }>>();
-				for (const task of validation.tasks) {
+				for (const task of tasks) {
 					const selected = resolveRoute(task.role, config, routeContext(ctx), {
 						...(task.executionProfile === undefined ? {} : { executionProfile: task.executionProfile }),
 						...(task.reasoningProfile === undefined ? {} : { reasoningProfile: task.reasoningProfile }),
@@ -258,29 +303,23 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						...(task.thinking === undefined ? {} : { thinking: task.thinking }),
 					});
 					if (!selected.ok) {
-						const result = aggregateFailure(validation.tasks, selected.error.code, selected.error.message, identity);
+						const result = aggregateFailure(tasks, selected.error.code, selected.error.message, identity);
 						return finalToolResult(result);
 					}
 					routes.set(task.id, selected);
 				}
 
-				let readOnlyRoot: string;
-				try {
-					readOnlyRoot = await realpath(ctx.cwd);
-				} catch (error) {
-					const result = aggregateFailure(validation.tasks, "workspace_unavailable", error instanceof Error ? error.message : String(error), identity);
-					return finalToolResult(result);
-				}
+				const readOnlyRoot = admitted.gitRoot;
 				try {
 					diagnosticRun = await diagnosticStore.allocateRun(ctx.sessionManager.getSessionId(), identity.runId);
 				} catch (error) {
 					const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "diagnostic_session_unavailable";
-					const result = aggregateFailure(validation.tasks, code, "Private diagnostic storage is unavailable.", identity);
+					const result = aggregateFailure(tasks, code, "Private diagnostic storage is unavailable.", identity);
 					return finalToolResult(result);
 				}
 				const activeDiagnosticRun = diagnosticRun as DiagnosticRun;
 
-					const scheduled = await runScheduledTasks(validation.tasks, {
+					const scheduled = await runScheduledTasks(tasks, {
 						runId: identity.runId,
 						requestedTasks: identity.requestedTasks,
 						maxConcurrency: config.maxConcurrency,
@@ -424,7 +463,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						telemetry: {
 							...scheduled.telemetry,
 							requestedDependencyEdges: identity.requestedDependencyEdges,
-							admittedDependencyEdges: dependencyEdges(validation.tasks),
+							admittedDependencyEdges: dependencyEdges(tasks),
 							explicitModelTasks: identity.explicitModelTasks,
 							explicitThinkingTasks: identity.explicitThinkingTasks,
 						},

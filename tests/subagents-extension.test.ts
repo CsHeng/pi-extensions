@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/subagents/config.ts";
-import { emptyUsage, SUBAGENT_TOOL_NAME, type TaskResult } from "../extensions/subagents/contracts.ts";
+import { emptyUsage, HARD_LIMITS, SUBAGENT_TOOL_NAME, type TaskResult } from "../extensions/subagents/contracts.ts";
 import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
+
+const exec = promisify(execFile);
 
 interface Harness {
 	tool?: any;
@@ -33,10 +37,10 @@ function harness(): Harness {
 
 const parentModel = { provider: "synthetic", id: "parent", reasoning: true };
 
-function context(trusted = true, models = [parentModel]) {
+function context(trusted = true, models = [parentModel], cwd = process.cwd()) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	return {
-		cwd: process.cwd(),
+		cwd,
 		model: parentModel,
 		thinkingLevel: "high",
 		scopedModels: [],
@@ -122,8 +126,16 @@ test("debug command renders user-only bounded metadata and not raw session conte
 
 test("untrusted projects fail before a child starts", async () => {
 	let calls = 0;
+	let probes = 0;
 	const state = harness();
-	createSubagentsExtension(dependencies({ runChild: async (options) => { calls += 1; return successful(options.task); } }))(state.pi);
+	createSubagentsExtension(dependencies({
+		runChild: async (options) => { calls += 1; return successful(options.task); },
+		repositoryHost: {
+			async findGitToplevel() { probes += 1; throw new Error("probed"); },
+			async realpath() { probes += 1; throw new Error("probed"); },
+			async lstat() { probes += 1; throw new Error("probed"); },
+		},
+	}))(state.pi);
 	const result = await state.tool.execute("call", {
 		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
 	}, undefined, undefined, context(false));
@@ -136,6 +148,7 @@ test("untrusted projects fail before a child starts", async () => {
 	assert.equal(result.details.telemetry.explicitModelTasks, 0);
 	assert.equal(result.details.telemetry.explicitThinkingTasks, 0);
 	assert.equal(calls, 0);
+	assert.equal(probes, 0);
 });
 
 test("diagnostic admission failure blocks every child without fallback", async () => {
@@ -502,4 +515,223 @@ test("session shutdown waits for the aborted run and workspace cleanup", async (
 	}, undefined, undefined, context());
 	assert.equal(next.details.status, "succeeded");
 	assert.equal(childRuns, 2);
+});
+
+async function gitPair(t: test.TestContext): Promise<{ current: string; sibling: string; siblingFile: string }> {
+	const parent = await mkdtemp(join(tmpdir(), "subagent-ext-repo-"));
+	t.after(async () => rm(parent, { recursive: true, force: true }));
+	const current = join(parent, "current");
+	const sibling = join(parent, "sibling");
+	await mkdir(join(current, "src"), { recursive: true });
+	await mkdir(sibling);
+	await exec("git", ["init", "-q", current]);
+	await exec("git", ["init", "-q", sibling]);
+	await writeFile(join(current, "src", "tracked.ts"), "tracked\n");
+	const siblingFile = join(sibling, "secret.ts");
+	await writeFile(siblingFile, "secret\n");
+	return { current, sibling, siblingFile: await realpath(siblingFile) };
+}
+
+test("current-repository absolute and returning-parent scope reach children in canonical form", async (t) => {
+	const { current } = await gitPair(t);
+	const gitRoot = await realpath(current);
+	const seen: any[] = [];
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		runChild: async (options) => {
+			seen.push(options);
+			return { ...successful(options.task), route: options.route };
+		},
+	}))(state.pi);
+	const result = await state.tool.execute("call", {
+		tasks: [{
+			id: "scan",
+			role: "explorer",
+			objective: "scan",
+			scope: [gitRoot, join(gitRoot, "src"), `../${basename(current)}/src/tracked.ts`],
+		}],
+	}, undefined, undefined, context(true, [parentModel], current));
+	assert.equal(result.details.status, "succeeded");
+	assert.deepEqual(seen[0]?.task.scope, [".", "src", "src/tracked.ts"]);
+	assert.equal(seen[0]?.cwd, gitRoot);
+	assert.equal(seen[0]?.capability.version, 2);
+	assert.deepEqual(seen[0]?.capability.externalReadRoots, []);
+});
+
+test("missing internal new-file worker scope remains admissible", async (t) => {
+	const { current } = await gitPair(t);
+	let workspaceCreated = 0;
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		createWorkerWorkspace: async (_cwd, task) => {
+			workspaceCreated += 1;
+			return {
+				sourceRoot: current,
+				root: current,
+				task,
+				parentBaselines: new Map(),
+				workspaceBaseline: new Map(),
+				cleanup: async () => {},
+			};
+		},
+		convergeWorkerWorkspace: async () => ({ ok: true, changedPaths: ["src/new.ts"] }),
+	}))(state.pi);
+	const result = await state.tool.execute("call", {
+		tasks: [{ id: "write", role: "worker", objective: "write", scope: ["src/new.ts"], writePaths: ["src/new.ts"] }],
+	}, undefined, undefined, context(true, [parentModel], current));
+	assert.equal(result.details.status, "succeeded");
+	assert.equal(workspaceCreated, 1);
+});
+
+test("sibling, non-Git, unsafe, and invalid external roots fail before config and child work", async (t) => {
+	const { current, sibling } = await gitPair(t);
+	const plain = await mkdtemp(join(tmpdir(), "subagent-ext-plain-"));
+	t.after(async () => rm(plain, { recursive: true, force: true }));
+	for (const [cwd, tasks, code] of [
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: [sibling] }], "scope_outside_repository"],
+		[plain, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }], "repository_root_unavailable"],
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["bad\0path"] }], "invalid_scope"],
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [join(current, "src")] }], "external_read_root_not_external"],
+	] as const) {
+		let configCalls = 0;
+		let diagnosticCalls = 0;
+		let childCalls = 0;
+		const state = harness();
+		createSubagentsExtension(dependencies({
+			loadConfig: async () => {
+				configCalls += 1;
+				return { config: defaultConfig() };
+			},
+			createDiagnosticStore: () => ({
+				async allocateRun() {
+					diagnosticCalls += 1;
+					throw new Error("unused");
+				},
+				async discover() { return []; },
+				async inspect() { throw new Error("unused"); },
+			}),
+			runChild: async (options) => {
+				childCalls += 1;
+				return successful(options.task);
+			},
+		}))(state.pi);
+		const result = await state.tool.execute("call", { tasks: [...tasks] }, undefined, undefined, context(true, [parentModel], cwd));
+		assert.equal(result.details.telemetry.runErrorCode, code, code);
+		assert.equal(result.details.telemetry.admittedTasks, 0);
+		assert.equal(result.details.telemetry.launchedChildren, 0);
+		assert.equal(result.details.tasks.length, 0);
+		assert.doesNotMatch(result.content[0].text, /\/tmp\/|secret\.ts/);
+		assert.equal(configCalls, 0);
+		assert.equal(diagnosticCalls, 0);
+		assert.equal(childCalls, 0);
+	}
+});
+
+test("canonical complete prompt bounds reject the whole batch before config or launch", async () => {
+	const longRelative = "a".repeat(HARD_LIMITS.maxPathBytes);
+	let configCalls = 0;
+	let diagnosticAllocations = 0;
+	let childCalls = 0;
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		loadConfig: async () => {
+			configCalls += 1;
+			return { config: defaultConfig() };
+		},
+		createDiagnosticStore: () => ({
+			async allocateRun() {
+				diagnosticAllocations += 1;
+				throw new Error("unused");
+			},
+			async discover() { return []; },
+			async inspect() { throw new Error("unused"); },
+		}),
+		runChild: async (options) => {
+			childCalls += 1;
+			return successful(options.task);
+		},
+		repositoryHost: {
+			async findGitToplevel() { return "/repo"; },
+			async realpath(path) { return path === "/repo/alias" ? `/repo/${longRelative}` : path; },
+			async lstat() { return {} as never; },
+		},
+	}))(state.pi);
+	const result = await state.tool.execute("call", {
+		tasks: [
+			{ id: "small", role: "explorer", objective: "small", scope: ["."] },
+			{ id: "oversized", role: "reviewer", objective: "review", scope: Array.from({ length: 32 }, () => "alias") },
+		],
+	}, undefined, undefined, context(true, [parentModel], "/repo"));
+	assert.equal(result.details.telemetry.runErrorCode, "prompt_too_large");
+	assert.equal(result.details.telemetry.admittedTasks, 0);
+	assert.equal(result.details.telemetry.launchedChildren, 0);
+	assert.deepEqual(result.details.tasks, []);
+	assert.equal(configCalls, 0);
+	assert.equal(diagnosticAllocations, 0);
+	assert.equal(childCalls, 0);
+});
+
+test("explorer and reviewer external roots reach only task and capability fields", async (t) => {
+	const { current, siblingFile } = await gitPair(t);
+	const seen: any[] = [];
+	const updates: string[] = [];
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		runChild: async (options) => {
+			seen.push(options);
+			return {
+				...successful(options.task),
+				output: `echo:${siblingFile}`,
+				route: options.route,
+			};
+		},
+	}))(state.pi);
+	const result = await state.tool.execute("call", {
+		tasks: [
+			{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [siblingFile] },
+			{ id: "review", role: "reviewer", objective: "review", scope: ["src"], externalReadRoots: [siblingFile] },
+		],
+	}, undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
+	assert.equal(result.details.status, "succeeded");
+	assert.equal(result.details.telemetry.schemaVersion, 2);
+	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
+	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
+	assert.equal(seen[0]?.cwd, await realpath(current));
+	assert.deepEqual(seen[0]?.capability.writePaths, []);
+	assert.deepEqual(seen[1]?.task.externalReadRoots, [siblingFile]);
+	assert.ok(updates.every((message) => !message.includes(siblingFile)));
+	assert.equal(JSON.stringify(result.details.telemetry).includes(siblingFile), false);
+	assert.equal(result.details.tasks[0]?.output, `echo:${siblingFile}`);
+});
+
+test("worker external roots are rejected before workspace creation", async (t) => {
+	const { current, siblingFile } = await gitPair(t);
+	let workspaceCalls = 0;
+	const state = harness();
+	createSubagentsExtension(dependencies({
+		createWorkerWorkspace: async (_cwd, task) => {
+			workspaceCalls += 1;
+			return {
+				sourceRoot: current,
+				root: current,
+				task,
+				parentBaselines: new Map(),
+				workspaceBaseline: new Map(),
+				cleanup: async () => {},
+			};
+		},
+	}))(state.pi);
+	const result = await state.tool.execute("call", {
+		tasks: [{
+			id: "write",
+			role: "worker",
+			objective: "write",
+			scope: ["."],
+			writePaths: ["src/tracked.ts"],
+			externalReadRoots: [siblingFile],
+		}],
+	}, undefined, undefined, context(true, [parentModel], current));
+	assert.equal(result.details.telemetry.runErrorCode, "external_read_roots_forbidden");
+	assert.equal(result.details.telemetry.launchedChildren, 0);
+	assert.equal(workspaceCalls, 0);
 });

@@ -14,6 +14,8 @@ export const HARD_LIMITS = Object.freeze({
 	maxExplorers: 4,
 	maxReviewers: 4,
 	maxWorkers: 2,
+	maxExternalReadRoots: 8,
+	maxPathBytes: 4096,
 	maxObjectiveBytes: 16 * 1024,
 	maxInputBytes: 64 * 1024,
 	maxPredecessorOutputBytes: 16 * 1024,
@@ -50,7 +52,16 @@ export const STABLE_TASK_ERROR_CODES = [
 	"diagnostic_storage_unavailable",
 	"diagnostic_session_limit",
 	"child_exit_stalled",
+	"repository_root_unavailable",
+	"scope_outside_repository",
+	"external_read_roots_forbidden",
+	"invalid_external_read_root",
+	"external_read_root_unavailable",
+	"external_read_root_not_external",
+	"duplicate_external_read_root",
 ] as const;
+export const CHILD_CAPABILITY_MANIFEST_V1 = 1 as const;
+export const CHILD_CAPABILITY_MANIFEST_V2 = 2 as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
 export type ReasoningProfile = (typeof REASONING_PROFILES)[number];
@@ -97,7 +108,7 @@ export const SubagentTaskSchema = Type.Object(
 		scope: Type.Array(Type.String({ minLength: 1 }), {
 			minItems: 1,
 			maxItems: 32,
-			description: "Repository-relative paths this task may read. Use '.' for the repository root; absolute paths and parent traversal are rejected.",
+			description: "Repository-relative paths this task may read. Prefer '.' for the repository root. Physically contained absolute or parent-traversing spellings are canonicalized to repository-relative form; declare Git-contained paths outside the current repository in externalReadRoots.",
 		}),
 		inputs: Type.Optional(BoundedStringArray),
 		dependsOn: Type.Optional(Type.Array(Type.String(), {
@@ -107,6 +118,10 @@ export const SubagentTaskSchema = Type.Object(
 		writePaths: Type.Optional(Type.Array(Type.String(), {
 			maxItems: 32,
 			description: "Exact repository-relative files this task may write. Every worker must declare its exact write files; directories, absolute paths, and parent traversal are rejected.",
+		})),
+		externalReadRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+			maxItems: HARD_LIMITS.maxExternalReadRoots,
+			description: "Explorer/reviewer-only exact absolute Git-contained read roots outside the current repository. At most eight entries. Omit for ordinary current-repository work; workers cannot declare this field.",
 		})),
 		verification: Type.Optional(BoundedStringArray),
 		resourceLocks: Type.Optional(BoundedStringArray),
@@ -143,6 +158,7 @@ export interface SubagentTask {
 	inputs?: string[];
 	dependsOn?: string[];
 	writePaths?: string[];
+	externalReadRoots?: string[];
 	verification?: string[];
 	resourceLocks?: string[];
 	executionProfile?: ExecutionProfile;
@@ -271,13 +287,31 @@ export interface SubagentRunResult {
 	telemetry: RunTelemetry;
 }
 
-export interface ChildCapabilityManifest {
-	version: 1;
+export interface ChildCapabilityManifestV1 {
+	version: typeof CHILD_CAPABILITY_MANIFEST_V1;
 	root: string;
 	role: RoleName;
 	readRoots: string[];
 	writePaths: string[];
 }
+
+export interface ChildCapabilityManifestV2 {
+	version: typeof CHILD_CAPABILITY_MANIFEST_V2;
+	root: string;
+	role: RoleName;
+	readRoots: string[];
+	writePaths: string[];
+	externalReadRoots: string[];
+}
+
+/** Normalized runtime capability after exact v1 or v2 parse. */
+export type NormalizedChildCapability = ChildCapabilityManifestV2;
+
+/**
+ * Producer/runtime capability shape. Existing v1 literals remain valid until
+ * the guard and runner slices migrate to normalized v2.
+ */
+export type ChildCapabilityManifest = ChildCapabilityManifestV1 | ChildCapabilityManifestV2;
 
 export function isSafeDiagnosticRef(value: string): boolean {
 	if (value.length === 0 || value.startsWith("/") || value.includes("\\")) return false;
@@ -301,6 +335,12 @@ export function emptyTaskTelemetry(): TaskTelemetry {
 
 export function utf8Bytes(value: string): number {
 	return Buffer.byteLength(value, "utf8");
+}
+
+const UNSAFE_PATH_CHARS = /[\u0000-\u001F\u007F\u2028\u2029]/;
+
+export function isSafePathGrammar(value: string): boolean {
+	return value.length > 0 && utf8Bytes(value) <= HARD_LIMITS.maxPathBytes && !UNSAFE_PATH_CHARS.test(value);
 }
 
 export function truncateUtf8(value: string, maxBytes: number): { text: string; truncatedBytes: number } {

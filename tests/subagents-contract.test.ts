@@ -3,6 +3,8 @@ import test from "node:test";
 import { Check } from "typebox/value";
 import {
 	CHILD_ACTIVITY_PHASES,
+	CHILD_CAPABILITY_MANIFEST_V1,
+	CHILD_CAPABILITY_MANIFEST_V2,
 	HARD_LIMITS,
 	PROFILE_FALLBACKS,
 	ROLE_NAMES,
@@ -13,10 +15,14 @@ import {
 	TELEMETRY_SCHEMA_VERSION,
 	THINKING_LEVELS,
 	isSafeDiagnosticRef,
+	isSafePathGrammar,
 	truncateUtf8,
 } from "../extensions/subagents/contracts.ts";
 import type {
+	ChildCapabilityManifestV1,
+	ChildCapabilityManifestV2,
 	EffectiveRouteV2,
+	NormalizedChildCapability,
 	RunTelemetryV2,
 } from "../extensions/subagents/contracts.ts";
 import { ROLES } from "../extensions/subagents/roles.ts";
@@ -96,6 +102,35 @@ test("tool schema preserves old task shapes and accepts exact ephemeral override
 	assert.equal(Check(SubagentToolSchema, {
 		tasks: [{ ...valid.tasks[0], model: "provider/model", unknown: true }],
 	}), false);
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{ ...valid.tasks[0], externalReadRoots: [] }],
+	}), true);
+	for (const count of [0, 1, 8]) {
+		assert.equal(Check(SubagentToolSchema, {
+			tasks: [{
+				...valid.tasks[0],
+				externalReadRoots: Array.from({ length: count }, (_, index) => `/external/root-${index}`),
+			}],
+		}), true);
+	}
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{
+			id: "review",
+			role: "reviewer",
+			objective: "Review evidence",
+			scope: ["."],
+			externalReadRoots: Array.from({ length: 8 }, (_, index) => `/external/root-${index}`),
+		}],
+	}), true);
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{
+			...valid.tasks[0],
+			externalReadRoots: Array.from({ length: 9 }, (_, index) => `/external/root-${index}`),
+		}],
+	}), false);
+	assert.equal(Check(SubagentToolSchema, {
+		tasks: [{ ...valid.tasks[0], externalReadRoots: [""] }],
+	}), false);
 	assert.equal(Check(SubagentToolSchema, { tasks: [] }), false);
 	assert.equal(Check(SubagentToolSchema, {
 		tasks: Array.from({ length: HARD_LIMITS.maxTasks + 1 }, (_, index) => ({
@@ -119,6 +154,7 @@ test("model-facing capability fields retain descriptions without freezing prose"
 		taskProperties.dependsOn?.description,
 		taskProperties.scope?.description,
 		taskProperties.writePaths?.description,
+		taskProperties.externalReadRoots?.description,
 		taskProperties.model?.description,
 		taskProperties.thinking?.description,
 	]) {
@@ -175,7 +211,62 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		"diagnostic_storage_unavailable",
 		"diagnostic_session_limit",
 		"child_exit_stalled",
+		"repository_root_unavailable",
+		"scope_outside_repository",
+		"external_read_roots_forbidden",
+		"invalid_external_read_root",
+		"external_read_root_unavailable",
+		"external_read_root_not_external",
+		"duplicate_external_read_root",
 	]);
+	assert.equal("pathCount" in telemetry, false);
+	assert.equal("externalReadRootCount" in telemetry, false);
+	assert.equal("repositoryCount" in telemetry, false);
+});
+
+test("path grammar and private capability manifests are exact and additive", () => {
+	assert.equal(HARD_LIMITS.maxExternalReadRoots, 8);
+	assert.equal(HARD_LIMITS.maxPathBytes, 4096);
+	assert.equal(CHILD_CAPABILITY_MANIFEST_V1, 1);
+	assert.equal(CHILD_CAPABILITY_MANIFEST_V2, 2);
+	assert.equal(isSafePathGrammar("src/file.ts"), true);
+	assert.equal(isSafePathGrammar("."), true);
+	assert.equal(isSafePathGrammar(""), false);
+	assert.equal(isSafePathGrammar("bad\0path"), false);
+	assert.equal(isSafePathGrammar("bad\u0001path"), false);
+	assert.equal(isSafePathGrammar("bad\u007Fpath"), false);
+	assert.equal(isSafePathGrammar("bad\u2028path"), false);
+	assert.equal(isSafePathGrammar("bad\u2029path"), false);
+	assert.equal(isSafePathGrammar("x".repeat(HARD_LIMITS.maxPathBytes)), true);
+	assert.equal(isSafePathGrammar("x".repeat(HARD_LIMITS.maxPathBytes + 1)), false);
+	const v1: ChildCapabilityManifestV1 = {
+		version: 1,
+		root: "/repo",
+		role: "explorer",
+		readRoots: ["/repo"],
+		writePaths: [],
+	};
+	const v2: ChildCapabilityManifestV2 = {
+		version: 2,
+		root: "/repo",
+		role: "reviewer",
+		readRoots: ["/repo"],
+		writePaths: [],
+		externalReadRoots: ["/other"],
+	};
+	const runtime: NormalizedChildCapability = {
+		version: 2,
+		root: "/repo",
+		role: "explorer",
+		readRoots: ["/repo"],
+		writePaths: [],
+		externalReadRoots: [],
+	};
+	assert.equal(v1.version, CHILD_CAPABILITY_MANIFEST_V1);
+	assert.equal(v2.version, CHILD_CAPABILITY_MANIFEST_V2);
+	assert.equal("externalReadRoots" in v1, false);
+	assert.deepEqual(runtime.externalReadRoots, []);
+	assert.equal(runtime.version, 2);
 });
 
 test("diagnostic and activity contracts are bounded and additive", () => {

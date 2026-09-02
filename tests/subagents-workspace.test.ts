@@ -21,6 +21,7 @@ function worker(writePaths: string[]): NormalizedTask {
 		writePaths,
 		verification: [],
 		resourceLocks: [],
+		externalReadRoots: [],
 	};
 }
 
@@ -51,6 +52,16 @@ test("snapshot preserves dirty, staged, and eligible untracked state while exclu
 	await assert.rejects(lstat(join(workspace.root, ".git")), /ENOENT/);
 	await assert.rejects(lstat(join(workspace.root, "ignored.txt")), /ENOENT/);
 	await assert.rejects(lstat(join(workspace.root, "src", "deleted.ts")), /ENOENT/);
+});
+
+test("snapshot permits repository components beginning with two dots", async (t) => {
+	const root = await repository(t);
+	await mkdir(join(root, "..state"));
+	await writeFile(join(root, "..state", "tracked.ts"), "state\n");
+	await exec("git", ["-C", root, "add", "..state/tracked.ts"]);
+	const workspace = await createWorkerWorkspace(root, worker(["..state/tracked.ts"]));
+	t.after(() => workspace.cleanup());
+	assert.equal(await readFile(join(workspace.root, "..state", "tracked.ts"), "utf8"), "state\n");
 });
 
 test("convergence atomically applies exact create and modify operations with mode preservation", async (t) => {
@@ -117,16 +128,14 @@ test("unexpected mutation and parent drift fail without overwriting parent state
 	assert.equal(await readFile(join(root, "src", "tracked.ts"), "utf8"), "external\n");
 });
 
-test("graph path diagnostics explain strict repository-relative correction", () => {
-	const invalidScope = validateGraph({
-		tasks: [{ id: "absolute", role: "explorer", objective: "inspect", scope: ["/tmp/repository"] }],
+test("graph path diagnostics keep write paths exact and repository-relative", () => {
+	const absoluteWrite = validateGraph({
+		tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."], writePaths: ["/tmp/file.ts"] }],
 	});
-	assert.equal(invalidScope.ok, false);
-	if (invalidScope.ok) return;
-	assert.equal(invalidScope.error.code, "invalid_scope");
-	assert.match(invalidScope.error.message, /repository-relative/);
-	assert.match(invalidScope.error.message, /Use '\.' for the repository root/);
-	assert.match(invalidScope.error.message, /absolute paths and parent traversal are rejected/);
+	assert.equal(absoluteWrite.ok, false);
+	if (absoluteWrite.ok) return;
+	assert.equal(absoluteWrite.error.code, "invalid_write_path");
+	assert.match(absoluteWrite.error.message, /unsafe write path/);
 
 	const missingWrites = validateGraph({
 		tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."] }],
