@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -213,7 +213,7 @@ test("repository-relative plan files resolve from the Git root when Pi cwd is ne
 	assert.equal(result.workspaceStatus, "within_declared_writes");
 });
 
-test("continuation preserves the original baseline and refuses concurrent outside drift", async (t) => {
+test("continuation refuses concurrent outside drift before capturing its fresh baseline", async (t) => {
 	const root = await repository(t);
 	const recipient = await linkedWorktree(t, root);
 	const { coord, fake } = await coordinator(t, recipient, {}, async () => {
@@ -232,6 +232,57 @@ test("continuation preserves the original baseline and refuses concurrent outsid
 	assert.equal(continued.workspaceStatus, "scope_violation");
 	const log = await fake.log();
 	assert.equal(log.filter((entry) => entry.argv[1] === "prompt").length, 1);
+});
+
+test("continuation postflight uses a fresh baseline after prior accepted changes", async (t) => {
+	const root = await repository(t);
+	const recipient = await linkedWorktree(t, root);
+	const { coord, fake } = await coordinator(t, recipient, {}, async () => {
+		await writeFile(join(recipient, "src.ts"), "changed\n");
+	});
+	const first = await coord.dispatch(beginInput("codex-worker"), { cwd: root, trusted: true });
+	assert.equal(first.bridgeStatus, "returned");
+	await writeFile(join(fake.dir, "scenario.json"), JSON.stringify({
+		version: "herdr 0.8.2",
+		agent: {
+			name: "codex-worker",
+			kind: "codex",
+			status: "idle",
+			pane_id: "w2:p1",
+			workspace_id: "w2",
+			tab_id: "w2:t1",
+			cwd: recipient,
+			session: { source: "test", agent: "codex", kind: "id", value: "sess-1" },
+		},
+		promptStatus: "idle",
+		readText: envelope("hid-1", []),
+	}));
+	const continued = await coord.dispatch({
+		action: "continue",
+		handle: first.handle?.token as string,
+		intent: "repair",
+		message: "Confirm the accepted change without another edit.",
+	}, { cwd: root, trusted: true });
+	assert.equal(continued.bridgeStatus, "returned");
+	assert.equal(continued.workspaceStatus, "within_declared_writes");
+	assert.equal(continued.error, undefined);
+});
+
+test("a settled return permits a new begin and replaces the old handoff", async (t) => {
+	const root = await repository(t);
+	const recipient = await linkedWorktree(t, root);
+	let prompts = 0;
+	const { coord, fake } = await coordinator(t, recipient, {}, async () => {
+		prompts += 1;
+		await writeFile(join(recipient, "src.ts"), `changed-${prompts}\n`);
+	});
+	const first = await coord.dispatch(beginInput("codex-worker"), { cwd: root, trusted: true });
+	assert.equal(first.bridgeStatus, "returned");
+	const second = await coord.dispatch(beginInput("codex-worker"), { cwd: root, trusted: true });
+	assert.equal(second.bridgeStatus, "returned");
+	assert.equal(second.error, undefined);
+	const log = await fake.log();
+	assert.equal(log.filter((entry) => entry.argv[1] === "prompt").length, 2);
 });
 
 test("start-and-ask revalidates the live started target before prompt delivery", async (t) => {
@@ -271,6 +322,20 @@ test("start-and-ask revalidates the live started target before prompt delivery",
 	input.target = { type: "start-and-ask", profileId: "deep" };
 	const result = await coord.dispatch(input, { cwd: root, trusted: true });
 	assert.equal(result.error?.code, "stale_handle");
+	const log = await fake.log();
+	assert.equal(log.filter((entry) => entry.argv[1] === "prompt").length, 0);
+});
+
+test("transfer validates allowed writes against the recipient checkout", async (t) => {
+	const root = await repository(t);
+	const recipient = await linkedWorktree(t, root);
+	await rm(join(recipient, "src.ts"));
+	await symlink("target.ts", join(recipient, "src.ts"));
+	await git(recipient, ["add", "src.ts"]);
+	await git(recipient, ["commit", "-qm", "replace allowed path with symlink"]);
+	const { coord, fake } = await coordinator(t, recipient);
+	const result = await coord.dispatch(beginInput("codex-worker", "transfer"), { cwd: root, trusted: true });
+	assert.equal(result.error?.code, "invalid_write_path");
 	const log = await fake.log();
 	assert.equal(log.filter((entry) => entry.argv[1] === "prompt").length, 0);
 });

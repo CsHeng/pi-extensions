@@ -206,6 +206,12 @@ export class HandoffCoordinator {
 				this.machine = initialHandoffMachine();
 				return this.fail("begin", input.mode, handoffId, plan.plan.planSha256, started, resolved.code);
 			}
+			try {
+				allowedWrites = await validateAllowedWrites(resolved.recipientCwd, allowedWrites);
+			} catch (error) {
+				this.machine = initialHandoffMachine();
+				return this.fail("begin", input.mode, handoffId, plan.plan.planSha256, started, codeOf(error));
+			}
 
 			let baseline: WorkspaceBaseline | undefined;
 			if (input.mode === "delegate-return") {
@@ -282,6 +288,12 @@ export class HandoffCoordinator {
 					error: beforeContinuation.error,
 				});
 			}
+			try {
+				prepared.session.baseline = await captureBaseline(prepared.session.recipientCwd, prepared.session.allowedWrites);
+			} catch (error) {
+				this.apply("operation_failed");
+				return this.fail("continue", prepared.session.mode, prepared.session.handoffId, prepared.session.planSha256, started, codeOf(error));
+			}
 			const prompted = await this.dependencies.client.promptAgent({
 				target: prepared.session.handle.recipientName ?? prepared.session.handle.paneId,
 				text: input.message,
@@ -332,7 +344,7 @@ export class HandoffCoordinator {
 	private beginBlocked(): HandoffErrorCode | undefined {
 		if (this.active) return "handoff_active";
 		if (this.machine.unresolvedCancellation) return "cancel_unconfirmed";
-		if (this.session && ownsLiveHandle(this.machine)) return "handoff_active";
+		if (this.session && ownsLiveHandle(this.machine) && this.machine.status !== "returned") return "handoff_active";
 		return undefined;
 	}
 

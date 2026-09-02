@@ -238,27 +238,33 @@ function capReturnText(text: string): string {
 	return limited.slice(-low);
 }
 
-function sentinelCandidates(text: string): unknown[] {
+function sentinelCandidates(text: string): { candidates: unknown[]; malformed: boolean } {
 	const candidates: unknown[] = [];
 	let cursor = 0;
 	while (cursor < text.length) {
 		const start = text.indexOf(RETURN_START_SENTINEL, cursor);
-		if (start < 0) break;
+		const end = text.indexOf(RETURN_END_SENTINEL, cursor);
+		if (start < 0 && end < 0) break;
+		if (start < 0 || end < start) return { candidates, malformed: true };
 		const bodyStart = start + RETURN_START_SENTINEL.length;
-		const end = text.indexOf(RETURN_END_SENTINEL, bodyStart);
-		if (end < 0) break;
+		const bodyEnd = text.indexOf(RETURN_END_SENTINEL, bodyStart);
+		if (bodyEnd < 0) return { candidates, malformed: true };
+		const body = text.slice(bodyStart, bodyEnd);
+		if (body.includes(RETURN_START_SENTINEL)) return { candidates, malformed: true };
 		try {
-			candidates.push(JSON.parse(text.slice(bodyStart, end).trim()) as unknown);
+			candidates.push(JSON.parse(body.trim()) as unknown);
 		} catch {
 			candidates.push(undefined);
 		}
-		cursor = end + RETURN_END_SENTINEL.length;
+		cursor = bodyEnd + RETURN_END_SENTINEL.length;
 	}
-	return candidates;
+	return { candidates, malformed: false };
 }
 
 export function parseRecipientReturn(text: string, handoffId: string): ReturnParseResult {
-	const candidates = sentinelCandidates(capReturnText(text));
+	const scan = sentinelCandidates(capReturnText(text));
+	if (scan.malformed) return { ok: false, code: "malformed_return", message: MALFORMED };
+	const { candidates } = scan;
 	const matching = candidates
 		.map((candidate, index) => ({ candidate, index }))
 		.filter(({ candidate }) => isRecord(candidate)

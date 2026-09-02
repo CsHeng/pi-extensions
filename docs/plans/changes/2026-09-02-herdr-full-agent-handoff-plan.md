@@ -4,7 +4,7 @@ plan_version = 1
 approval_status = "ready_for_approval"
 decision_state = "ready_for_approval"
 design_ref = "docs/plans/changes/2026-09-02-herdr-full-agent-handoff-design.md"
-design_sha256 = "04778455a9a5af46ff4ceed8245bcdd4b0a1f6441c26f470f48a9128ac623ba8"
+design_sha256 = "8b348e495ee8c34f021de72b76f396037578cf243eb7e86cb1aca0a63f8b2945"
 design_approval_status = "ready_for_approval"
 implementation_authority = false
 truth_sync_required = true
@@ -371,7 +371,7 @@ npm run typecheck
 - started isolated delegate-return;
 - started isolated transfer returned after delivery plus observed `working`, with no semantic-acceptance claim, read, or postflight;
 - every mode rejected on the parent checkout and transfer rejected on a dirty existing worktree;
-- blocked before prompt, blocked after partial work, needs-authority envelope, recipient failure, no changes, malformed return, claim mismatch, scope violation, index/history change;
+- blocked before prompt, blocked after partial work, needs-authority envelope, recipient failure, no changes, malformed return, claim mismatch, scope violation, index/history change, and a new begin after a settled return invalidating the old handle;
 - observation timeout then one recovery wait success and second wait rejection;
 - blocked return, manual UI resolution, one recovery wait to valid return, and still-blocked recovery exhaustion;
 - one clarification and one repair in either valid order, duplicate intent rejection, and repeated failure stop;

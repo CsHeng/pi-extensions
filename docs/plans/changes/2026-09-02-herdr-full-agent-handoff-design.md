@@ -278,7 +278,7 @@ Herdr's five-second `agent_prompt_stalled` behavior remains authoritative. The e
 
 ## Bounded clarification and repair
 
-The extension stores only bounded in-memory handle state for the current Pi session: target identity fingerprint, workspace identity, request hash and exact write set, mode, prompt count, one clarification bit, one repair bit, one recovery-wait bit, unresolved-cancellation state, and active-operation state. It persists no external ledger and writes no state into Skills, hooks, Herdr config, or the repository.
+The extension stores only bounded in-memory handle state for the current Pi session: target identity fingerprint, workspace identity, request hash and exact write set, mode, prompt count, one clarification bit, one repair bit, one recovery-wait bit, unresolved-cancellation state, and active-operation state. A new `begin` after a settled `returned` result atomically invalidates its old continuation handle; active, blocked, timed-out, transferred, and unresolved-cancellation states do not admit replacement. The extension persists no external ledger and writes no state into Skills, hooks, Herdr config, or the repository.
 
 Pi may use one clarification continuation when the answer is already authorized by the canonical plan or read-only repository evidence. A question that needs product intent, additional files, a destructive action, credentials, cost, publication, deployment, or another external side effect is returned to the user.
 

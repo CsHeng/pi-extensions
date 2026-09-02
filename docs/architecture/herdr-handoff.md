@@ -53,7 +53,7 @@ Results separate `bridgeStatus`, untrusted `agentOutcome`, and `workspaceStatus`
 
 ## Continuations, timeout, and cancellation
 
-One clarification, one repair, and one blocked-or-timeout recovery wait are allowed per delegate-return handle. Transfer admits no continuation or cancellation. Handles are in-memory only; reload invalidates opaque tokens while public Herdr coordinates remain for manual recovery.
+One clarification, one repair, and one blocked-or-timeout recovery wait are allowed per delegate-return handle. A new `begin` after a settled `returned` result invalidates that old handle; active, blocked, timed-out, transferred, and unresolved-cancellation states remain closed to replacement. Transfer admits no continuation or cancellation. Handles are in-memory only; reload invalidates opaque tokens while public Herdr coordinates remain for manual recovery.
 
 A wait timeout is an observation deadline, not implicit cancellation. Cancel and session shutdown revalidate pane, kind, session fingerprint, and worktree identity before sending `ctrl+c`. Confirmed settlement runs postflight. Unconfirmed cancellation preserves an unresolved owned handle and blocks a new `begin` until manual recovery. The extension never closes panes, kills processes, removes worktrees, or answers a blocked UI.
 

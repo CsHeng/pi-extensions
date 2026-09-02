@@ -132,6 +132,8 @@ test("duplicate current, missing, truncated, malformed, trailing, and mismatched
 	const valid = wrap(returnEnvelope("id-1"));
 	assert.equal(parseRecipientReturn("no sentinels", "id-1").ok, false);
 	assert.equal(parseRecipientReturn(valid + valid, "id-1").ok, false);
+	assert.equal(parseRecipientReturn(valid + RETURN_START_SENTINEL, "id-1").ok, false);
+	assert.equal(parseRecipientReturn(RETURN_END_SENTINEL + valid, "id-1").ok, false);
 	assert.equal(parseRecipientReturn(valid + `${RETURN_START_SENTINEL}{${RETURN_END_SENTINEL}`, "id-1").ok, false);
 	assert.equal(parseRecipientReturn(`${RETURN_START_SENTINEL}{${RETURN_END_SENTINEL}`, "id-1").ok, false);
 	assert.equal(parseRecipientReturn(wrap({ ...returnEnvelope("id-1"), protocol: "other" }), "id-1").ok, false);
