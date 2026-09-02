@@ -16,7 +16,7 @@ interface PackageManifest {
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes the four maintained extensions and their Pi peers", async () => {
+test("package exposes the five maintained extensions and their Pi peers", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -28,6 +28,7 @@ test("package exposes the four maintained extensions and their Pi peers", async 
 	assert.deepEqual(manifest.pi?.extensions, [
 		"./extensions/plan-mode/index.ts",
 		"./extensions/multi-skill-mentions/index.ts",
+		"./extensions/fast-gpt/index.ts",
 		"./extensions/subagents/index.ts",
 		"./extensions/herdr-handoff/index.ts",
 	]);

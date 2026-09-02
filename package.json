@@ -12,6 +12,7 @@
     "pi-package",
     "plan-mode",
     "multi-skill-mentions",
+    "fast-gpt",
     "subagents",
     "herdr-handoff"
   ],
@@ -39,6 +40,7 @@
     "extensions": [
       "./extensions/plan-mode/index.ts",
       "./extensions/multi-skill-mentions/index.ts",
+      "./extensions/fast-gpt/index.ts",
       "./extensions/subagents/index.ts",
       "./extensions/herdr-handoff/index.ts"
     ]

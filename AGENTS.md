@@ -2,14 +2,15 @@
 
 ## Project
 
-This repository is the authored source for small local Pi extensions. Extensions may change the host loop's active tools, prompt context, editor completion behavior, or execute one bounded foreground delegation call, but must not replace the coding agent with a second lifecycle engine.
+This repository is the authored source for small local Pi extensions. Extensions may change the host loop's active tools, prompt context, editor completion behavior, provider request payload, or execute one bounded foreground delegation call, but must not replace the coding agent with a second lifecycle engine.
 
-The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, `subagents` as a bounded in-memory delegation DAG executor, and `herdr-handoff` as an explicit-user-only bridge to one persistent Herdr-managed full agent. Keep each extension's behavior, state, tests, and removal semantics independent.
+The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, `fast-gpt` as a branch-local request profile, `subagents` as a bounded in-memory delegation DAG executor, and `herdr-handoff` as an explicit-user-only bridge to one persistent Herdr-managed full agent. Keep each extension's behavior, state, tests, and removal semantics independent.
 
 ## Layout
 
 - `extensions/plan-mode/`: reversible read-only tool profile
 - `extensions/multi-skill-mentions/`: TUI completion and input expansion for loaded skills
+- `extensions/fast-gpt/`: branch-local OpenAI Responses service-tier request profile
 - `extensions/subagents/`: fixed child roles, routing, scheduling, subprocess, path guard, writable snapshots, and convergence
 - `extensions/herdr-handoff/`: explicit-user-only Herdr CLI adapter, launch profiles, isolated-worktree evidence, and bounded continuations
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
@@ -27,6 +28,7 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - Pi's public extension API, active tool set, model context and registry, project trust, session events, and startup flags are runtime inputs.
 - The host Pi loop remains authoritative for parent model turns, tool execution, persistence, user interaction, and final responses.
 - A profile may select tools and append compact loop guidance. It must not introduce task graphs, schedulers, approval protocols, review gates, settlement, or a generic permission framework.
+- The fast-gpt extension may toggle branch-local official OpenAI and OpenAI-Codex Responses requests between top-level `service_tier: priority` and explicit `default`. Until the first `/fast-gpt` command, and for unsupported provider/API/model correlations, requests remain unchanged. Pi and the provider remain authoritative for usage and cost; the extension owns no model alias, provider override, pricing parser, live call, or workflow.
 - The subagent extension may validate and execute one foreground, hard-bounded, in-memory task batch with optional hard predecessor edges submitted by the parent. Ordinary delegation stays flat; semantic hard-edge eligibility remains parent-owned. The extension owns physical child routing, readiness, concurrency, locks, cancellation, path capabilities, isolated worker snapshots, and mechanical convergence; it owns no semantic lifecycle, approval, verification judgment, review adjudication, repair decision, continuation, or durable run state.
 - The herdr-handoff extension may validate and execute one explicit-user-only foreground handoff to a persistent full coding agent through Herdr. Recipients are not capability-sandboxed; write authority is cooperative and detective via isolated linked worktrees and Git postflight. The extension owns the request/return bridge, launch-profile loading, CLI adaptation, identity checks, one blocking wait, bounded continuations, cancellation request, and redaction. It owns no semantic eligibility, plan approval, verification judgment, review adjudication, repair decision, automatic UI answers, automatic convergence, or completion claim. There is no fallback to `csheng_subagents`, another profile, or direct harness execution. Managed Herdr hooks and the official `herdr` Skill remain outside this package.
 - Pi's skill command registry remains authoritative for loaded Skill names and source paths. This package does not independently discover, execute, or enforce a Skill repository, and subagent children load no Skills.

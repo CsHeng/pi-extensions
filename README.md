@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `subagents`, and `herdr-handoff` while preserving Pi's authoritative host agent loop.
+This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, and `herdr-handoff` while preserving Pi's authoritative host agent loop.
 
 ## Plan Mode
 
@@ -13,6 +13,12 @@ The extension stores only the selected profile and the tool set to restore. It d
 Type `$` in the TUI to search loaded skills and insert one or more `$skill-name` mentions. On submission, the extension expands each uniquely mentioned loaded skill before the original prompt. Unknown names, escaped mentions such as `\$skill-name`, and ordinary shell variables remain unchanged.
 
 `/skill-mentions` shows a short usage reminder and the number of currently loaded skills. The extension does not discover skills independently; Pi's command registry remains authoritative for available skill names and source paths.
+
+## Fast GPT
+
+`/fast-gpt` toggles a branch-local request profile between priority and explicit default service tiers. The extension leaves requests untouched until the first command. In priority mode it adds top-level `service_tier: priority` to correlated official OpenAI and OpenAI-Codex Responses requests; the next toggle sends top-level `service_tier: default`. Unsupported provider, API, or model correlations remain unchanged.
+
+This is only a request payload profile. Its status confirms that priority was requested, not that the provider served it. Pi's extension API does not expose the final response body's `service_tier`, and the OpenAI-Codex endpoint has an additional response-accounting caveat. Pi and provider-side billing remain authoritative for usage and cost. The extension supplies no model alias, provider override, pricing parser, live call, or workflow behavior. See [`docs/architecture/fast-gpt.md`](docs/architecture/fast-gpt.md) for state, correlation, response observability, ownership, and removal contracts.
 
 ## Subagents
 
@@ -55,6 +61,7 @@ The private package exposes exactly:
 ```text
 extensions/plan-mode/index.ts
 extensions/multi-skill-mentions/index.ts
+extensions/fast-gpt/index.ts
 extensions/subagents/index.ts
 extensions/herdr-handoff/index.ts
 ```
@@ -72,7 +79,7 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
+Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt payload boundary is owned by deterministic unit tests and adds no probe command. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
 The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads the complete package, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 
@@ -87,4 +94,4 @@ Maintainers can evaluate an explicitly selected persisted run with `.agents/skil
 
 ## Safety
 
-If a future Pi release does not expose one of the declared plan-mode read-only tools, plan mode activates only the available subset and reports the mismatch. Subagent graph, route, path, process, and convergence failures return typed bounded evidence and do not widen authority or trigger hidden retries. Herdr handoff failures return typed bridge, recipient, and workspace evidence without treating settlement as verification or falling back to another agent. Probe output contains fixed redacted fields rather than prompts, user settings, credentials, or external file content.
+If a future Pi release does not expose one of the declared plan-mode read-only tools, plan mode activates only the available subset and reports the mismatch. Fast-gpt leaves unsupported request correlations unchanged and defers usage and cost truth to Pi and the provider response. Subagent graph, route, path, process, and convergence failures return typed bounded evidence and do not widen authority or trigger hidden retries. Herdr handoff failures return typed bridge, recipient, and workspace evidence without treating settlement as verification or falling back to another agent. Probe output contains fixed redacted fields rather than prompts, user settings, credentials, or external file content.
