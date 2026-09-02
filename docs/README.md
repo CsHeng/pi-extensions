@@ -7,6 +7,7 @@ This directory contains stable project truth, retained evaluation evidence, and 
 - `architecture/plan-mode.md` defines the reversible read-only loop profile and branch-local state contract.
 - `architecture/multi-skill-mentions.md` defines loaded-Skill mention completion and expansion.
 - `architecture/subagents.md` defines delegation ownership, routing, scheduling, isolation, convergence, result, and removal contracts.
+- `architecture/herdr-handoff.md` defines the explicit-user-only full-agent Herdr bridge, request/return protocol, isolated-worktree evidence, and removal contract.
 
 ## Evaluation Evidence
 

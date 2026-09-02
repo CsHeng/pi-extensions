@@ -1,0 +1,47 @@
+{
+	"herdrVersion": "0.8.2",
+	"protocol": 20,
+	"schemaVersion": 1,
+	"captured": "installed-cli-help+api-schema",
+	"minimumVersion": [0, 8, 2],
+	"commands": {
+		"version": ["--version"],
+		"agentGet": ["agent", "get"],
+		"agentStart": ["agent", "start"],
+		"agentPrompt": ["agent", "prompt"],
+		"agentWait": ["agent", "wait"],
+		"agentRead": ["agent", "read"],
+		"agentSendKeys": ["agent", "send-keys"],
+		"worktreeCreate": ["worktree", "create"]
+	},
+	"promptFlags": {
+		"wait": "--wait",
+		"until": "--until",
+		"timeout": "--timeout",
+		"transferUntil": "working",
+		"readSource": "recent-unwrapped",
+		"interruptKey": "ctrl+c"
+	},
+	"resultTypes": {
+		"agent_info": ["type", "agent"],
+		"agent_started": ["type", "agent", "argv"],
+		"agent_prompted": ["type", "agent"],
+		"worktree_created": ["type", "workspace", "tab", "root_pane", "worktree"],
+		"ok": ["type"]
+	},
+	"rawOutputs": {
+		"agentRead": {
+			"stream": "stdout",
+			"maxLines": 240,
+			"maxBytes": 32768
+		}
+	},
+	"agentInfoRequired": ["terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id", "focused", "revision"],
+	"worktreeInfoRequired": ["path", "is_bare", "is_detached", "is_prunable", "is_linked_worktree", "label"],
+	"errorShape": {
+		"required": ["id", "error"],
+		"errorRequired": ["code", "message"]
+	},
+	"agentStatuses": ["idle", "working", "blocked", "done", "unknown"],
+	"stableErrorCodes": ["agent_blocked", "agent_prompt_stalled", "timeout"]
+}

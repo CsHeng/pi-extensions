@@ -4,13 +4,14 @@
 
 This repository is the authored source for small local Pi extensions. Extensions may change the host loop's active tools, prompt context, editor completion behavior, or execute one bounded foreground delegation call, but must not replace the coding agent with a second lifecycle engine.
 
-The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, and `subagents` as a bounded in-memory delegation DAG executor. Keep each extension's behavior, state, tests, and removal semantics independent.
+The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, `subagents` as a bounded in-memory delegation DAG executor, and `herdr-handoff` as an explicit-user-only bridge to one persistent Herdr-managed full agent. Keep each extension's behavior, state, tests, and removal semantics independent.
 
 ## Layout
 
 - `extensions/plan-mode/`: reversible read-only tool profile
 - `extensions/multi-skill-mentions/`: TUI completion and input expansion for loaded skills
 - `extensions/subagents/`: fixed child roles, routing, scheduling, subprocess, path guard, writable snapshots, and convergence
+- `extensions/herdr-handoff/`: explicit-user-only Herdr CLI adapter, launch profiles, isolated-worktree evidence, and bounded continuations
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
 - `.agents/skills/evaluate-subagent-runs/`: maintainer-only read-only evaluator, excluded from the npm package
 - `tests/`: deterministic, fake-Pi, subprocess, filesystem, evaluator, and disposable-Git tests
@@ -27,6 +28,7 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - The host Pi loop remains authoritative for parent model turns, tool execution, persistence, user interaction, and final responses.
 - A profile may select tools and append compact loop guidance. It must not introduce task graphs, schedulers, approval protocols, review gates, settlement, or a generic permission framework.
 - The subagent extension may validate and execute one foreground, hard-bounded, in-memory task batch with optional hard predecessor edges submitted by the parent. Ordinary delegation stays flat; semantic hard-edge eligibility remains parent-owned. The extension owns physical child routing, readiness, concurrency, locks, cancellation, path capabilities, isolated worker snapshots, and mechanical convergence; it owns no semantic lifecycle, approval, verification judgment, review adjudication, repair decision, continuation, or durable run state.
+- The herdr-handoff extension may validate and execute one explicit-user-only foreground handoff to a persistent full coding agent through Herdr. Recipients are not capability-sandboxed; write authority is cooperative and detective via isolated linked worktrees and Git postflight. The extension owns the request/return bridge, launch-profile loading, CLI adaptation, identity checks, one blocking wait, bounded continuations, cancellation request, and redaction. It owns no semantic eligibility, plan approval, verification judgment, review adjudication, repair decision, automatic UI answers, automatic convergence, or completion claim. There is no fallback to `csheng_subagents`, another profile, or direct harness execution. Managed Herdr hooks and the official `herdr` Skill remain outside this package.
 - Pi's skill command registry remains authoritative for loaded Skill names and source paths. This package does not independently discover, execute, or enforce a Skill repository, and subagent children load no Skills.
 - Child roles are code-owned and fixed. The repository ships tested role-preferred peer routes and optional semantic profile mappings; a user-owned Pi-agent-directory overlay may change persistent defaults. Project repositories cannot provide routes, and the package never changes the parent model or provider settings.
 - A task may provide fixed provider-neutral execution and reasoning profiles. When the user explicitly selects a concrete model or Pi thinking level, the parent may also pass ephemeral task `model` and `thinking` overrides for any role. Those fields override default selection without mutating package or user route configuration. The parent owns semantic projection; the extension never reads a plan or Skill.
@@ -54,6 +56,8 @@ bash scripts/run-temporary-plan-mode-probe.sh
 bash scripts/run-installed-plan-mode-probe.sh
 bash scripts/run-temporary-subagents-probe.sh
 bash scripts/run-installed-subagents-probe.sh
+bash scripts/run-temporary-herdr-handoff-probe.sh
+bash scripts/run-installed-herdr-handoff-probe.sh
 ```
 
 The multi-skill mention probes use Pi print mode and cross model/provider preflight. `PI_OFFLINE=1` does not disable inference, so these probes require explicit provider-call authority and do not belong to the deterministic offline lane:

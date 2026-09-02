@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, and `subagents` while preserving Pi's authoritative host agent loop.
+This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `subagents`, and `herdr-handoff` while preserving Pi's authoritative host agent loop.
 
 ## Plan Mode
 
@@ -36,6 +36,18 @@ Workers operate in private snapshots of tracked and non-ignored repository files
 
 See [`docs/architecture/subagents.md`](docs/architecture/subagents.md) for the three-owner boundary, complete tool contract, routing, scheduling, isolation, telemetry, evaluation, failure behavior, and removal semantics.
 
+## Herdr Handoff
+
+`herdr_handoff` is an explicit-user-only bridge to one persistent vendor-native coding agent managed by Herdr. Pi remains the plan, verification, review-adjudication, repair, truth-sync, and closure owner. The extension waits without polling, parses an untrusted return envelope, and records Git postflight in a distinct linked worktree. It does not sandbox the full agent, auto-converge isolated output, or treat recipient settlement as completion.
+
+`delegate-return` is the default: Pi freezes the plan, waits for settlement, then resumes with evidence. `transfer` waits only until Herdr confirms prompt delivery and an observed `working` transition, then relinquishes outcome ownership. Targets are exact: message one already-running named agent, or `start-and-ask` with one user-owned launch profile from `herdr-handoff.json` under Pi's agent directory. There is no package profile, no project overlay, and no fallback to `csheng_subagents` or another harness.
+
+Recipient write authority is cooperative. First-release recipients must occupy a distinct linked worktree of the same Git repository. Postflight accepts only declared regular-file create or modify operations. Timeout, blocked UI, malformed return, and unconfirmed cancellation return typed handles rather than widening authority.
+
+`/herdr-handoff` reports redacted environment and handle status. `plan-mode` continues to expose only its original four tools, so the handoff tool is inactive while that profile is selected. The official `herdr` Skill remains optional manual guidance and is not a runtime dependency.
+
+See [`docs/architecture/herdr-handoff.md`](docs/architecture/herdr-handoff.md) for the request/return protocol, launch profiles, workspace evidence, cancellation, failure, redaction, and removal contracts.
+
 ## Package
 
 The private package exposes exactly:
@@ -44,6 +56,7 @@ The private package exposes exactly:
 extensions/plan-mode/index.ts
 extensions/multi-skill-mentions/index.ts
 extensions/subagents/index.ts
+extensions/herdr-handoff/index.ts
 ```
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.
@@ -59,9 +72,9 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. Plan-mode and subagent probes use RPC fixtures without model calls. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
+Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
-The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all three package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
+The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads the complete package, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
@@ -74,4 +87,4 @@ Maintainers can evaluate an explicitly selected persisted run with `.agents/skil
 
 ## Safety
 
-If a future Pi release does not expose one of the declared plan-mode read-only tools, plan mode activates only the available subset and reports the mismatch. Subagent graph, route, path, process, and convergence failures return typed bounded evidence and do not widen authority or trigger hidden retries. Probe output contains fixed redacted fields rather than prompts, user settings, credentials, or external file content.
+If a future Pi release does not expose one of the declared plan-mode read-only tools, plan mode activates only the available subset and reports the mismatch. Subagent graph, route, path, process, and convergence failures return typed bounded evidence and do not widen authority or trigger hidden retries. Herdr handoff failures return typed bridge, recipient, and workspace evidence without treating settlement as verification or falling back to another agent. Probe output contains fixed redacted fields rather than prompts, user settings, credentials, or external file content.

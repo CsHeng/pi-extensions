@@ -16,6 +16,13 @@ const FORBIDDEN = [
 	["src", "runtime", "harness"].join("/"),
 	["integrations", "pi"].join("/"),
 ] as const;
+const HERDR_RUNTIME_FORBIDDEN = [
+	"extensions/subagents",
+	["from", "./subagents"].join(" "),
+	["net", "connect"].join("."),
+	["integrations", "pi"].join("/"),
+	["agent", "skills"].join("-"),
+] as const;
 const SUBAGENT_RUNTIME_FORBIDDEN = [
 	["pi", "subagents"].join("-"),
 	["workflow", "harness"].join("-"),
@@ -58,5 +65,19 @@ test("subagent runtime has fixed roles and provider-neutral authored defaults", 
 	}
 	const manifest = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
 	assert.equal(manifest.dependencies?.[["pi", "subagents"].join("-")], undefined);
+	assert.deepEqual(violations, []);
+});
+
+test("herdr-handoff runtime stays independent of subagents, sockets, and Herdr internals", async () => {
+	const runtimeRoot = join(ROOT, "extensions", "herdr-handoff");
+	const violations: string[] = [];
+	for (const path of await maintainedTextFiles(runtimeRoot)) {
+		const text = await readFile(path, "utf8");
+		for (const token of HERDR_RUNTIME_FORBIDDEN) {
+			if (text.includes(token)) violations.push(`${relative(ROOT, path)}: ${token}`);
+		}
+	}
+	const manifest = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
+	assert.equal(manifest.dependencies?.herdr, undefined);
 	assert.deepEqual(violations, []);
 });
