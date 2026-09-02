@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
+	CHILD_ACTIVITY_PHASES,
 	HARD_LIMITS,
 	PROFILE_FALLBACKS,
 	ROLE_NAMES,
@@ -11,6 +12,7 @@ import {
 	SubagentToolSchema,
 	TELEMETRY_SCHEMA_VERSION,
 	THINKING_LEVELS,
+	isSafeDiagnosticRef,
 	truncateUtf8,
 } from "../extensions/subagents/contracts.ts";
 import type {
@@ -169,7 +171,36 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		"ambiguous_model",
 		"thinking_unavailable",
 		"worker_no_changes",
+		"diagnostic_session_unavailable",
+		"diagnostic_storage_unavailable",
+		"diagnostic_session_limit",
+		"child_exit_stalled",
 	]);
+});
+
+test("diagnostic and activity contracts are bounded and additive", () => {
+	assert.deepEqual(CHILD_ACTIVITY_PHASES, [
+		"starting",
+		"running",
+		"retrying",
+		"settling",
+		"settled-awaiting-exit",
+		"closed",
+	]);
+	assert.equal(HARD_LIMITS.heartbeatMs, 5_000);
+	assert.equal(HARD_LIMITS.settledExitGraceMs, 10_000);
+	assert.equal(HARD_LIMITS.diagnosticRetentionMs, 30 * 24 * 60 * 60 * 1_000);
+	assert.equal(HARD_LIMITS.diagnosticRootBytes, 512 * 1024 * 1024);
+	assert.equal(HARD_LIMITS.diagnosticChildBytes, 32 * 1024 * 1024);
+	assert.equal(HARD_LIMITS.diagnosticRunBytes, 256 * 1024 * 1024);
+	assert.equal(HARD_LIMITS.maxDiagnosticScopes, 20);
+	assert.equal(HARD_LIMITS.maxDiagnosticTimelineEntries, 200);
+	assert.equal(HARD_LIMITS.maxDiagnosticLineBytes, 1024 * 1024);
+	assert.equal(HARD_LIMITS.maxDiagnosticRenderBytes, 64 * 1024);
+	assert.equal(isSafeDiagnosticRef("subagent-sessions/parent/run/task.jsonl"), true);
+	for (const unsafe of ["", "/absolute/run/task.jsonl", "../run/task.jsonl", "subagent-sessions/../run/task.jsonl", "subagent-sessions\\parent\\run\\task.jsonl"]) {
+		assert.equal(isSafeDiagnosticRef(unsafe), false);
+	}
 });
 
 test("UTF-8 truncation preserves complete characters and reports omitted bytes", () => {

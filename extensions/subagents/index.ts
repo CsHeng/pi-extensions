@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	SUBAGENT_DEBUG_COMMAND,
 	SUBAGENT_STATUS_COMMAND,
 	SUBAGENT_TOOL_NAME,
 	SubagentToolSchema,
@@ -18,6 +19,7 @@ import {
 	type TaskResult,
 } from "./contracts.ts";
 import { loadConfig, type ConfigLoadResult, type EffectiveSubagentConfig } from "./config.ts";
+import { DiagnosticStore, renderDiagnosticInspection, type DiagnosticRun, type DiagnosticStoreLike } from "./diagnostics.ts";
 import { validateGraph, type NormalizedTask } from "./graph.ts";
 import { boundToolContent, formatProgress, formatRunResult } from "./render.ts";
 import { resolveRoute, type RouteContext, type RouteResolution } from "./routing.ts";
@@ -38,6 +40,7 @@ export interface SubagentDependencies {
 	createWorkerWorkspace(cwd: string, task: NormalizedTask): Promise<WorkerWorkspace>;
 	convergeWorkerWorkspace(workspace: WorkerWorkspace): Promise<ConvergenceResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
+	createDiagnosticStore(): DiagnosticStoreLike;
 	guardExtensionPath: string;
 }
 
@@ -46,6 +49,7 @@ const DEFAULT_DEPENDENCIES: SubagentDependencies = {
 	createWorkerWorkspace,
 	convergeWorkerWorkspace,
 	runChild,
+	createDiagnosticStore: () => new DiagnosticStore(getAgentDir()),
 	guardExtensionPath: GUARD_EXTENSION_PATH,
 };
 
@@ -188,6 +192,7 @@ function linkAbort(source: AbortSignal | undefined, target: AbortController): ()
 export function createSubagentsExtension(overrides: Partial<SubagentDependencies> = {}): (pi: ExtensionAPI) => void {
 	const dependencies = { ...DEFAULT_DEPENDENCIES, ...overrides };
 	return function subagentsExtension(pi: ExtensionAPI): void {
+		const diagnosticStore = dependencies.createDiagnosticStore();
 		let activeController: AbortController | undefined;
 		let activeRun: Promise<void> | undefined;
 		let activeChildren = 0;
@@ -232,6 +237,11 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 				const runSettlement = new Promise<void>((resolve) => { settleActiveRun = resolve; });
 				activeController = controller;
 				activeRun = runSettlement;
+				let diagnosticRun: DiagnosticRun | undefined;
+				let runLimitExceeded = false;
+				let runLimitCheckActive = false;
+				const limitedTaskIds = new Set<string>();
+				const taskDiagnosticChecks = new Map<string, { sessionPath: string; controller: AbortController; checking: boolean }>();
 				try {
 				const loaded = await dependencies.loadConfig();
 				if (!loaded.config) {
@@ -261,6 +271,14 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					const result = aggregateFailure(validation.tasks, "workspace_unavailable", error instanceof Error ? error.message : String(error), identity);
 					return finalToolResult(result);
 				}
+				try {
+					diagnosticRun = await diagnosticStore.allocateRun(ctx.sessionManager.getSessionId(), identity.runId);
+				} catch (error) {
+					const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "diagnostic_session_unavailable";
+					const result = aggregateFailure(validation.tasks, code, "Private diagnostic storage is unavailable.", identity);
+					return finalToolResult(result);
+				}
+				const activeDiagnosticRun = diagnosticRun as DiagnosticRun;
 
 					const scheduled = await runScheduledTasks(validation.tasks, {
 						runId: identity.runId,
@@ -272,6 +290,40 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							worker: config.routes.worker.maxConcurrency,
 						},
 						signal: controller.signal,
+						abortResult() {
+							return runLimitExceeded
+								? { status: "failed", code: "diagnostic_session_limit", message: "The diagnostic run exceeded its storage limit." }
+								: { status: "aborted", code: "aborted", message: "Task was not started before cancellation." };
+						},
+						onHeartbeat() {
+							if (!runLimitExceeded && !controller.signal.aborted && !runLimitCheckActive) {
+								runLimitCheckActive = true;
+								void activeDiagnosticRun.checkLimits().then((limit) => {
+									if (!limit.ok && !controller.signal.aborted) {
+										runLimitExceeded = true;
+										controller.abort();
+									}
+								}).catch(() => {
+									if (!controller.signal.aborted) {
+										runLimitExceeded = true;
+										controller.abort();
+									}
+								}).finally(() => { runLimitCheckActive = false; });
+							}
+							for (const [taskId, check] of taskDiagnosticChecks) {
+								if (check.checking || check.controller.signal.aborted) continue;
+								check.checking = true;
+								void activeDiagnosticRun.checkLimits(check.sessionPath).then((limit) => {
+									if (!limit.ok && limit.scope === "child") {
+										limitedTaskIds.add(taskId);
+										check.controller.abort();
+									}
+								}).catch(() => {
+									limitedTaskIds.add(taskId);
+									check.controller.abort();
+								}).finally(() => { check.checking = false; });
+							}
+						},
 						onChildConcurrency(count) {
 							activeChildren = count;
 						},
@@ -282,6 +334,11 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						async execute(task, predecessors, childSignal, lifecycle) {
 							const selected = routes.get(task.id) as Extract<RouteResolution, { ok: true }>;
 							let workspace: WorkerWorkspace | undefined;
+							let diagnosticSession: Awaited<ReturnType<DiagnosticRun["createTask"]>> | undefined;
+							const taskController = new AbortController();
+							const forwardAbort = () => taskController.abort();
+							if (childSignal.aborted) forwardAbort();
+							else childSignal.addEventListener("abort", forwardAbort, { once: true });
 							let workspaceMs = 0;
 							let workspaceStarted: number | undefined;
 							try {
@@ -291,6 +348,8 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
 								}
 								const root = workspace?.root ?? readOnlyRoot;
+								diagnosticSession = await activeDiagnosticRun.createTask(task.id);
+								taskDiagnosticChecks.set(task.id, { sessionPath: diagnosticSession.path, controller: taskController, checking: false });
 								const childStarted = Date.now();
 								const childResult = await dependencies.runChild({
 									task,
@@ -301,7 +360,17 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									capability: capability(root, task),
 									prompt: buildInputs(task, predecessors),
 									approveProject: true,
-									signal: childSignal,
+									diagnosticSession,
+									checkDiagnosticLimits: () => activeDiagnosticRun.checkLimits(diagnosticSession?.path),
+									onRunDiagnosticLimit: () => {
+										if (!controller.signal.aborted) {
+											runLimitExceeded = true;
+											controller.abort();
+										}
+									},
+									abortCause: () => runLimitExceeded || limitedTaskIds.has(task.id) ? "diagnostic_session_limit" : "aborted",
+									signal: taskController.signal,
+									onActivity: lifecycle.activity,
 									onChildStarted: lifecycle.childStarted,
 									onChildSettled: lifecycle.childSettled,
 								});
@@ -343,6 +412,8 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									telemetry: { ...emptyTaskTelemetry(), workspaceMs },
 								};
 							} finally {
+								taskDiagnosticChecks.delete(task.id);
+								childSignal.removeEventListener("abort", forwardAbort);
 								await workspace?.cleanup();
 							}
 						},
@@ -360,11 +431,15 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					};
 					return finalToolResult(result);
 				} finally {
-					activeChildren = 0;
-					unlink();
-					activeController = undefined;
-					if (activeRun === runSettlement) activeRun = undefined;
-					settleActiveRun?.();
+					try {
+						await diagnosticRun?.settle();
+					} finally {
+						activeChildren = 0;
+						unlink();
+						activeController = undefined;
+						if (activeRun === runSettlement) activeRun = undefined;
+						settleActiveRun?.();
+					}
 				}
 			},
 		});
@@ -390,6 +465,32 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						: `${role}=unavailable max=${loaded.config.routes[role].maxConcurrency}`);
 				}
 				ctx.ui.notify(lines.join("\n"), "info");
+			},
+		});
+
+		pi.registerCommand(SUBAGENT_DEBUG_COMMAND, {
+			description: "Inspect retained subagent diagnostic session metadata without resuming it",
+			handler: async (rawArgs, ctx) => {
+				const argument = rawArgs.trim();
+				try {
+					const relativeArgument = argument.replace(/^subagent-sessions\//, "");
+					const segments = relativeArgument ? relativeArgument.split("/") : [];
+					if (argument && argument !== "--all" && segments.length === 3) {
+						const taskReference = segments[2]?.endsWith(".jsonl") ? relativeArgument : `${relativeArgument}.jsonl`;
+						const inspection = await diagnosticStore.inspect(taskReference);
+						ctx.ui.notify(renderDiagnosticInspection(inspection), "info");
+						return;
+					}
+					if (argument && argument !== "--all" && segments.length !== 2) throw new Error("invalid diagnostic scope");
+					const scopes = await diagnosticStore.discover(argument === "--all" ? undefined : (segments[0] ?? ctx.sessionManager.getSessionId()));
+					const filtered = segments.length === 2
+						? scopes.filter((scope) => scope.ref === `subagent-sessions/${relativeArgument}`)
+						: scopes;
+					const lines = filtered.map((scope) => `${scope.ref} ${scope.active ? "active-or-stale" : "settled"} bytes=${scope.bytes}\n${scope.path}`);
+					ctx.ui.notify(lines.length > 0 ? lines.join("\n") : "No retained subagent diagnostic sessions found.", "info");
+				} catch {
+					ctx.ui.notify("Subagent diagnostic lookup failed safely.", "error");
+				}
 			},
 		});
 

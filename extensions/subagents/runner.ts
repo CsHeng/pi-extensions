@@ -10,10 +10,12 @@ import {
 	emptyTaskTelemetry,
 	emptyUsage,
 	truncateUtf8,
+	type ChildActivity,
 	type ChildCapabilityManifest,
 	type EffectiveRoute,
 	type TaskResult,
 } from "./contracts.ts";
+import type { DiagnosticLimitResult, DiagnosticTaskSession } from "./diagnostics.ts";
 import type { NormalizedTask } from "./graph.ts";
 import { JsonlProtocolParser } from "./protocol.ts";
 import type { RoleDefinition } from "./roles.ts";
@@ -22,6 +24,8 @@ export interface PiInvocation {
 	command: string;
 	args: string[];
 }
+
+type StopCause = "aborted" | "timeout" | "diagnostic_session_limit" | "child_exit_stalled";
 
 export interface ChildRunOptions {
 	task: NormalizedTask;
@@ -32,11 +36,18 @@ export interface ChildRunOptions {
 	capability: ChildCapabilityManifest;
 	prompt: string;
 	approveProject: boolean;
+	diagnosticSession: DiagnosticTaskSession;
+	checkDiagnosticLimits?(): Promise<DiagnosticLimitResult>;
+	onRunDiagnosticLimit?(): void;
+	abortCause?(): "aborted" | "diagnostic_session_limit";
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	killGraceMs?: number;
+	settledExitGraceMs?: number;
 	invocation?: PiInvocation;
 	env?: NodeJS.ProcessEnv;
+	now?: () => number;
+	onActivity?(activity: Readonly<ChildActivity>): void;
 	onChildStarted?(): void;
 	onChildSettled?(): void;
 }
@@ -70,24 +81,32 @@ function buildPrompt(task: NormalizedTask, prompt: string): string {
 }
 
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
-	const started = Date.now();
+	const now = options.now ?? Date.now;
+	const started = now();
 	const privateDir = await mkdtemp(join(tmpdir(), "csheng-subagent-"));
 	await chmod(privateDir, 0o700);
 	const systemPromptPath = join(privateDir, "role.md");
 	const taskPromptPath = join(privateDir, "task.md");
 	const capabilityPath = join(privateDir, "capability.json");
-	const parser = new JsonlProtocolParser();
 	let stderr = "";
-	let timedOut = false;
-	let aborted = options.signal?.aborted ?? false;
 	let spawnError: Error | undefined;
 	let childDidStart = false;
 	let childDurationMs = 0;
+	let finalActivity: Readonly<ChildActivity> | undefined;
+	let activitySink = (activity: Readonly<ChildActivity>) => {
+		finalActivity = activity;
+		options.onActivity?.(activity);
+	};
+	const parser = new JsonlProtocolParser({
+		now,
+		allowedTools: options.role.tools,
+		onActivity(activity) { activitySink(activity); },
+	});
 
 	try {
 		const completePrompt = buildPrompt(options.task, options.prompt);
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
-			return failure(options, started, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
+			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}
 		await Promise.all([
 			writeFile(systemPromptPath, options.role.systemPrompt, { encoding: "utf8", mode: 0o600 }),
@@ -96,7 +115,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		]);
 
 		const args = [
-			"--mode", "json", "-p", "--no-session",
+			"--mode", "json", "-p", "--session", options.diagnosticSession.path,
 			"--no-extensions", "-e", options.guardExtensionPath,
 			"--no-skills", "--no-prompt-templates",
 			"--tools", options.role.tools.join(","),
@@ -108,8 +127,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		];
 		const invocation = options.invocation ?? resolvePiInvocation(args);
 		const finalArgs = options.invocation ? [...options.invocation.args, ...args] : invocation.args;
+		let stopCause: StopCause | undefined = options.signal?.aborted ? "aborted" : undefined;
 
-		const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+		const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
 			const child = spawn(invocation.command, finalArgs, {
 				cwd: options.cwd,
 				shell: false,
@@ -117,57 +137,87 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				env: childEnvironment(options.env ?? process.env, capabilityPath),
 			});
 			let closed = false;
+			let stopping = false;
 			let childStartedAt: number | undefined;
 			let killTimer: NodeJS.Timeout | undefined;
-			const stop = () => {
+			let settledTimer: NodeJS.Timeout | undefined;
+			let checkingLimit = false;
+
+			const requestStop = (cause: StopCause) => {
 				if (closed) return;
+				stopCause ??= cause;
+				if (stopping) return;
+				stopping = true;
 				child.kill("SIGTERM");
 				killTimer = setTimeout(() => {
 					if (!closed) child.kill("SIGKILL");
 				}, options.killGraceMs ?? HARD_LIMITS.killGraceMs);
 				killTimer.unref();
 			};
-			const abort = () => {
-				aborted = true;
-				stop();
+			const checkLimits = () => {
+				if (!options.checkDiagnosticLimits || checkingLimit || closed) return;
+				checkingLimit = true;
+				void options.checkDiagnosticLimits()
+					.then((limit) => {
+						if (!limit.ok) {
+							if (limit.scope === "run") options.onRunDiagnosticLimit?.();
+							requestStop("diagnostic_session_limit");
+						}
+					})
+					.catch(() => requestStop("diagnostic_session_limit"))
+					.finally(() => { checkingLimit = false; });
 			};
+			const activity = (snapshot: Readonly<ChildActivity>) => {
+				finalActivity = snapshot;
+				options.onActivity?.(snapshot);
+				checkLimits();
+				if (snapshot.agentSettledObserved && !settledTimer && !closed) {
+					settledTimer = setTimeout(() => requestStop("child_exit_stalled"), options.settledExitGraceMs ?? HARD_LIMITS.settledExitGraceMs);
+					settledTimer.unref();
+				}
+			};
+			activitySink = activity;
+
+			const abort = () => requestStop(options.abortCause?.() ?? "aborted");
 			if (options.signal?.aborted) abort();
 			else options.signal?.addEventListener("abort", abort, { once: true });
-			const timeout = setTimeout(() => {
-				timedOut = true;
-				stop();
-			}, options.timeoutMs ?? HARD_LIMITS.taskTimeoutMs);
+			const timeout = setTimeout(() => requestStop("timeout"), options.timeoutMs ?? HARD_LIMITS.taskTimeoutMs);
 			timeout.unref();
 
 			child.once("spawn", () => {
 				childDidStart = true;
-				childStartedAt = Date.now();
+				childStartedAt = now();
 				options.onChildStarted?.();
+				activitySink(parser.snapshot(childStartedAt));
+				if (stopCause) requestStop(stopCause);
 			});
 			child.stdout.on("data", (chunk: Buffer | string) => parser.push(chunk.toString()));
 			child.stderr.on("data", (chunk: Buffer | string) => {
 				stderr = truncateUtf8(stderr + chunk.toString(), HARD_LIMITS.maxStderrBytes).text;
 			});
-			child.once("error", (error) => {
-				spawnError = error;
-			});
+			child.once("error", (error) => { spawnError = error; });
 			child.once("close", (code, signal) => {
 				closed = true;
 				if (childStartedAt !== undefined) {
-					childDurationMs = Math.max(0, Date.now() - childStartedAt);
+					childDurationMs = Math.max(0, now() - childStartedAt);
 					options.onChildSettled?.();
 				}
 				clearTimeout(timeout);
 				if (killTimer) clearTimeout(killTimer);
+				if (settledTimer) clearTimeout(settledTimer);
 				options.signal?.removeEventListener("abort", abort);
-				resolve({ code, signal });
+				resolveExit({ code, signal });
 			});
 		});
 
 		const parsed = parser.finish();
+		if (finalActivity) {
+			finalActivity = Object.freeze({ ...finalActivity, phase: "closed", elapsedMs: Math.max(finalActivity.elapsedMs, now() - started) });
+			options.onActivity?.(finalActivity);
+		}
 		const output = truncateUtf8(parsed.output, HARD_LIMITS.maxFinalOutputBytes);
 		const suffix = output.truncatedBytes > 0 ? `\n\n[Output truncated: ${output.truncatedBytes} bytes omitted.]` : "";
-		const durationMs = Date.now() - started;
+		const durationMs = now() - started;
 		const base: TaskResult = {
 			id: options.task.id,
 			role: options.task.role,
@@ -180,11 +230,15 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			telemetry: { ...emptyTaskTelemetry(), childStarted: childDidStart, childMs: childDurationMs },
 			convergence: "not-applicable",
 			route: options.route,
+			...(childDidStart ? { diagnosticSessionRef: options.diagnosticSession.ref } : {}),
+			...(finalActivity === undefined ? {} : { activity: { ...finalActivity, activeTools: [...finalActivity.activeTools] } }),
 			...(parsed.stopReason === undefined ? {} : { stopReason: parsed.stopReason }),
 		};
 		if (spawnError) return { ...base, status: "failed", error: { code: "spawn_failure", message: spawnError.message } };
-		if (aborted) return { ...base, status: "aborted", error: { code: "aborted", message: "Child was cancelled." } };
-		if (timedOut) return { ...base, status: "failed", error: { code: "timeout", message: "Child exceeded its task timeout." } };
+		if (stopCause === "aborted") return { ...base, status: "aborted", error: { code: "aborted", message: "Child was cancelled." } };
+		if (stopCause === "timeout") return { ...base, status: "failed", error: { code: "timeout", message: "Child exceeded its task timeout." } };
+		if (stopCause === "diagnostic_session_limit") return { ...base, status: "failed", error: { code: "diagnostic_session_limit", message: "Child diagnostic session exceeded its storage limit." } };
+		if (stopCause === "child_exit_stalled") return { ...base, status: "failed", error: { code: "child_exit_stalled", message: "Child settled but did not close within the exit grace period." } };
 		if (exit.code !== 0) return { ...base, status: "failed", error: { code: "child_exit", message: `Child exited unsuccessfully (${exit.code ?? exit.signal ?? "unknown"}).` } };
 		if (parsed.messageCount === 0 && parsed.malformedLines > 0) return { ...base, status: "failed", error: { code: "malformed_jsonl", message: "Child produced no valid assistant message." } };
 		if (parsed.stopReason === "error" || parsed.stopReason === "aborted" || parsed.errorMessage) {
@@ -192,11 +246,12 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		}
 		return base;
 	} finally {
+		if (!childDidStart) await options.diagnosticSession.removeUnused().catch(() => {});
 		await rm(privateDir, { recursive: true, force: true });
 	}
 }
 
-function failure(options: ChildRunOptions, started: number, code: string, message: string): TaskResult {
+function failure(options: ChildRunOptions, started: number, now: () => number, code: string, message: string): TaskResult {
 	return {
 		id: options.task.id,
 		role: options.task.role,
@@ -204,7 +259,7 @@ function failure(options: ChildRunOptions, started: number, code: string, messag
 		output: "",
 		stderr: "",
 		usage: emptyUsage(),
-		durationMs: Date.now() - started,
+		durationMs: now() - started,
 		changedPaths: [],
 		telemetry: emptyTaskTelemetry(),
 		convergence: "not-applicable",

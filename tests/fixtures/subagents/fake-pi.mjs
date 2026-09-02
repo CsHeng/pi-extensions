@@ -1,26 +1,34 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_PI_MODE ?? "normal";
+const args = process.argv.slice(2);
 const capture = process.env.FAKE_PI_CAPTURE;
+const sessionIndex = args.indexOf("--session");
+const sessionPath = sessionIndex >= 0 ? args[sessionIndex + 1] : undefined;
 if (capture) {
 	writeFileSync(capture, JSON.stringify({
-		args: process.argv.slice(2),
+		args,
 		child: process.env.CSHENG_SUBAGENT_CHILD,
 		capability: process.env.CSHENG_SUBAGENT_CAPABILITY,
 		removedParentMarker: process.env.CSHENG_SUBAGENT_TEST_MODE,
+		sessionPath,
 	}));
 }
 
-const event = JSON.stringify({
-	type: "message_end",
-	message: {
-		role: "assistant",
-		content: [{ type: "text", text: mode === "large" ? "x".repeat(60 * 1024) : "done" }],
-		usage: { input: 3, output: 2, cacheRead: 1, cacheWrite: 1, cost: { total: 0.25 } },
-		stopReason: "stop",
-	},
-});
+const message = {
+	role: "assistant",
+	content: [{ type: "text", text: mode === "large" ? "x".repeat(60 * 1024) : "done" }],
+	usage: { input: 3, output: 2, cacheRead: 1, cacheWrite: 1, cost: { total: 0.25 } },
+	stopReason: "stop",
+};
+const event = JSON.stringify({ type: "message_end", message });
+const emit = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+
+if (sessionPath) {
+	appendFileSync(sessionPath, `${JSON.stringify({ type: "session", version: 3, id: "fake-session", timestamp: new Date().toISOString(), cwd: process.cwd() })}\n`);
+	appendFileSync(sessionPath, `${JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: new Date().toISOString(), message })}\n`);
+}
 
 if (mode === "fragmented") {
 	process.stdout.write(event.slice(0, 17));
@@ -37,6 +45,30 @@ if (mode === "fragmented") {
 	process.on("SIGTERM", () => process.exit(0));
 	setInterval(() => {}, 1000);
 } else if (mode === "ignore-term") {
+	process.on("SIGTERM", () => {});
+	setInterval(() => {}, 1000);
+} else if (mode === "activity") {
+	emit({ type: "agent_start" });
+	emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: { path: "secret" } });
+	setTimeout(() => {
+		emit({ type: "tool_execution_end", toolCallId: "tool-1", toolName: "read", result: "secret", isError: false });
+		process.stdout.write(`${event}\n`);
+		emit({ type: "agent_end", messages: [] });
+		emit({ type: "agent_settled" });
+	}, 10);
+} else if (mode === "retry") {
+	emit({ type: "message_end", message: { ...message, content: [], stopReason: "error", errorMessage: "private error" } });
+	emit({ type: "agent_end", messages: [] });
+	emit({ type: "agent_start" });
+	process.stdout.write(`${event}\n`);
+	emit({ type: "agent_settled" });
+} else if (mode === "agent-end-only") {
+	emit({ type: "agent_end", messages: [] });
+	process.on("SIGTERM", () => process.exit(0));
+	setInterval(() => {}, 1000);
+} else if (mode === "settled-stall") {
+	process.stdout.write(`${event}\n`);
+	emit({ type: "agent_settled" });
 	process.on("SIGTERM", () => {});
 	setInterval(() => {}, 1000);
 } else {

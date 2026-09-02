@@ -3,6 +3,7 @@ import { Type } from "typebox";
 
 export const SUBAGENT_TOOL_NAME = "csheng_subagents";
 export const SUBAGENT_STATUS_COMMAND = "subagents";
+export const SUBAGENT_DEBUG_COMMAND = "subagents-debug";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
 export const TELEMETRY_SCHEMA_VERSION = 2 as const;
@@ -21,6 +22,16 @@ export const HARD_LIMITS = Object.freeze({
 	maxStderrBytes: 16 * 1024,
 	taskTimeoutMs: 15 * 60 * 1000,
 	killGraceMs: 5 * 1000,
+	heartbeatMs: 5 * 1000,
+	settledExitGraceMs: 10 * 1000,
+	diagnosticRetentionMs: 30 * 24 * 60 * 60 * 1000,
+	diagnosticRootBytes: 512 * 1024 * 1024,
+	diagnosticChildBytes: 32 * 1024 * 1024,
+	diagnosticRunBytes: 256 * 1024 * 1024,
+	maxDiagnosticScopes: 20,
+	maxDiagnosticTimelineEntries: 200,
+	maxDiagnosticLineBytes: 1024 * 1024,
+	maxDiagnosticRenderBytes: 64 * 1024,
 });
 
 export const ROLE_NAMES = ["explorer", "reviewer", "worker"] as const;
@@ -35,6 +46,10 @@ export const STABLE_TASK_ERROR_CODES = [
 	"ambiguous_model",
 	"thinking_unavailable",
 	"worker_no_changes",
+	"diagnostic_session_unavailable",
+	"diagnostic_storage_unavailable",
+	"diagnostic_session_limit",
+	"child_exit_stalled",
 ] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
@@ -43,6 +58,28 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type StableTaskErrorCode = (typeof STABLE_TASK_ERROR_CODES)[number];
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
 export type RunStatus = "succeeded" | "partial" | "failed" | "aborted";
+export const CHILD_ACTIVITY_PHASES = [
+	"starting",
+	"running",
+	"retrying",
+	"settling",
+	"settled-awaiting-exit",
+	"closed",
+] as const;
+export type ChildActivityPhase = (typeof CHILD_ACTIVITY_PHASES)[number];
+
+export interface ChildActivity {
+	phase: ChildActivityPhase;
+	assistantTurns: number;
+	activeTools: string[];
+	latestEventType?: string;
+	latestStopReason?: string;
+	errorObserved: boolean;
+	agentEndObserved: boolean;
+	agentSettledObserved: boolean;
+	elapsedMs: number;
+	inactiveForMs: number;
+}
 
 const RoleSchema = StringEnum(ROLE_NAMES);
 const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES);
@@ -190,6 +227,8 @@ export interface TaskResult {
 	telemetry?: TaskTelemetry;
 	route?: EffectiveRoute;
 	stopReason?: string;
+	diagnosticSessionRef?: string;
+	activity?: ChildActivity;
 	error?: TaskError;
 }
 
@@ -238,6 +277,12 @@ export interface ChildCapabilityManifest {
 	role: RoleName;
 	readRoots: string[];
 	writePaths: string[];
+}
+
+export function isSafeDiagnosticRef(value: string): boolean {
+	if (value.length === 0 || value.startsWith("/") || value.includes("\\")) return false;
+	const segments = value.split("/");
+	return segments.length >= 3 && segments.length <= 4 && segments.every((segment) => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..");
 }
 
 export function roleConcurrencyCeiling(role: RoleName): number {

@@ -74,6 +74,11 @@ export function formatProgress(results: readonly TaskResult[]): string {
 	const lines = [`Subagents: ${settled}/${results.length} settled, ${running} running`];
 	for (const result of results) {
 		if (result.status === "pending") continue;
+		if (result.status === "running" && result.activity) {
+			const tools = result.activity.activeTools.length > 0 ? ` tool=${singleLine(result.activity.activeTools.join(","))}` : "";
+			lines.push(`[${singleLine(result.id)}] ${result.role} ${result.activity.phase} elapsed=${formatDuration(result.activity.elapsedMs)} turns=${result.activity.assistantTurns}${tools} inactive=${formatDuration(result.activity.inactiveForMs)}`);
+			continue;
+		}
 		const elapsed = result.status === "running" && result.durationMs === 0
 			? ""
 			: ` elapsed=${formatDuration(result.durationMs)}`;

@@ -91,10 +91,27 @@ test("arbitrary final tool text is bounded even when its first line exceeds the 
 	assert.match(bounded, /Tool result truncated/);
 });
 
-test("progress includes known elapsed duration without a ticking timer", () => {
-	const results = [task(0, "done"), { ...task(1, ""), status: "running" as const, durationMs: 0 }];
+test("progress includes bounded activity without diagnostic paths or payloads", () => {
+	const results = [task(0, "done"), {
+		...task(1, ""),
+		status: "running" as const,
+		durationMs: 5_000,
+		diagnosticSessionRef: "subagent-sessions/private/run/task.jsonl",
+		activity: {
+			phase: "settled-awaiting-exit" as const,
+			assistantTurns: 3,
+			activeTools: ["read"],
+			latestEventType: "agent_settled",
+			errorObserved: false,
+			agentEndObserved: true,
+			agentSettledObserved: true,
+			elapsedMs: 5_000,
+			inactiveForMs: 2_000,
+		},
+	}];
 	const progress = formatProgress(results);
 	assert.match(progress, /1\/2 settled, 1 running/);
 	assert.match(progress, /task-0.*elapsed=1\.5s/);
-	assert.doesNotMatch(progress, /task-1.*elapsed=/);
+	assert.match(progress, /task-1.*settled-awaiting-exit elapsed=5\.0s turns=3 tool=read inactive=2\.0s/);
+	assert.doesNotMatch(progress, /subagent-sessions|private|jsonl/);
 });

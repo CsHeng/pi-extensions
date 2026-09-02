@@ -152,6 +152,41 @@ test("mixed ready tasks can reach ten while role ceilings remain four, four, and
 	assert.equal(result.telemetry.launchedChildren, 10);
 });
 
+test("activity emits before settlement and injected heartbeat advances quiet evidence", async () => {
+	const tasks = graph([{ id: "quiet", role: "explorer", objective: "quiet", scope: ["."] }]);
+	let now = 0;
+	let heartbeat: (() => void) | undefined;
+	let cleared = false;
+	let release: (() => void) | undefined;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const updates: TaskResult[][] = [];
+	const run = runScheduledTasks(tasks, {
+		now: () => now,
+		scheduleHeartbeat(callback, intervalMs) {
+			assert.equal(intervalMs, 5_000);
+			heartbeat = callback;
+			return () => { cleared = true; };
+		},
+		onUpdate(results) { updates.push(results.map((result) => ({ ...result }))); },
+		async execute(task, _predecessors, _signal, lifecycle) {
+			lifecycle.childStarted();
+			lifecycle.activity({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 0, inactiveForMs: 0 });
+			await gate;
+			lifecycle.childSettled();
+			return success(task);
+		},
+	});
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.ok(updates.some((snapshot) => snapshot[0]?.activity?.activeTools[0] === "read"));
+	now = 5_000;
+	heartbeat?.();
+	assert.equal(updates.at(-1)?.[0]?.durationMs, 5_000);
+	assert.equal(updates.at(-1)?.[0]?.activity?.inactiveForMs, 5_000);
+	release?.();
+	await run;
+	assert.equal(cleared, true);
+});
+
 test("abort stops pending work and forwards one signal to running tasks", async () => {
 	const tasks = graph([
 		{ id: "a", role: "explorer", objective: "a", scope: ["."] },

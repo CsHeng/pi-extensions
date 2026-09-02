@@ -79,6 +79,8 @@ test("legacy evidence remains readable and does not infer unavailable metrics", 
 			status: "succeeded",
 			tasks: [task("explorer", {
 				model: "SECRET_RAW_TASK_SELECTOR",
+				diagnosticSessionRef: "SECRET_DIAGNOSTIC_PATH",
+				activity: { phase: "running", latestEventType: "SECRET_ACTIVITY_PAYLOAD" },
 				route: { provider: "fixture", model: "luna", thinking: "medium", source: "parent" },
 			})],
 			usage,
@@ -115,6 +117,8 @@ test("legacy evidence remains readable and does not infer unavailable metrics", 
 		"SECRET_RAW_TASK_SELECTOR",
 		"SECRET_CANDIDATE_LIST",
 		"SECRET_REPOSITORY_PATH",
+		"SECRET_DIAGNOSTIC_PATH",
+		"SECRET_ACTIVITY_PAYLOAD",
 	]) {
 		assert.equal(serialized.includes(secret), false);
 	}
