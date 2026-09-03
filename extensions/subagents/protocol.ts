@@ -57,6 +57,7 @@ export class JsonlProtocolParser {
 	private phase: ChildActivity["phase"] = "starting";
 	private latestEventType: string | undefined;
 	private errorObserved = false;
+	private errorCount = 0;
 	private agentEndObserved = false;
 	private agentSettledObserved = false;
 	private readonly activeToolCalls = new Map<string, string>();
@@ -98,6 +99,7 @@ export class JsonlProtocolParser {
 			...(this.latestEventType === undefined ? {} : { latestEventType: this.latestEventType }),
 			...(this.stopReason === undefined ? {} : { latestStopReason: this.stopReason }),
 			errorObserved: this.errorObserved,
+			errorCount: this.errorCount,
 			agentEndObserved: this.agentEndObserved,
 			agentSettledObserved: this.agentSettledObserved,
 			elapsedMs: Math.max(0, at - this.startedAt),
@@ -125,7 +127,7 @@ export class JsonlProtocolParser {
 
 	private projectEvent(eventType: string, event: Record<string, unknown>): void {
 		if (eventType === "agent_start") {
-			this.phase = this.errorObserved ? "retrying" : "running";
+			this.phase = "running";
 		} else if (eventType === "agent_end") {
 			this.agentEndObserved = true;
 			this.phase = "settling";
@@ -136,14 +138,15 @@ export class JsonlProtocolParser {
 			const id = stringField(event, "toolCallId");
 			const tool = stringField(event, "toolName");
 			if (id && tool && (!this.allowedTools || this.allowedTools.has(tool))) this.activeToolCalls.set(id, tool);
-			if (!this.agentSettledObserved) this.phase = this.errorObserved ? "retrying" : "running";
+			if (!this.agentSettledObserved) this.phase = "running";
 		} else if (eventType === "tool_execution_end") {
 			const id = stringField(event, "toolCallId");
 			if (id) this.activeToolCalls.delete(id);
 			if (event.isError === true) {
 				this.errorObserved = true;
-				if (!this.agentSettledObserved) this.phase = "retrying";
+				this.errorCount += 1;
 			}
+			if (!this.agentSettledObserved) this.phase = "running";
 		}
 
 		if (eventType !== "message_end" || !isRecord(event.message)) return;
@@ -160,8 +163,11 @@ export class JsonlProtocolParser {
 		if (text !== undefined) this.finalOutput = text;
 		this.stopReason = typeof message.stopReason === "string" && KNOWN_STOP_REASONS.has(message.stopReason) ? message.stopReason : undefined;
 		this.errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
-		if (message.stopReason === "error" || typeof message.errorMessage === "string") this.errorObserved = true;
-		if (!this.agentSettledObserved) this.phase = this.errorObserved ? "retrying" : "running";
+		if (message.stopReason === "error" || typeof message.errorMessage === "string") {
+			this.errorObserved = true;
+			this.errorCount += 1;
+		}
+		if (!this.agentSettledObserved) this.phase = "running";
 	}
 }
 

@@ -4,7 +4,6 @@ import {
 	TELEMETRY_SCHEMA_VERSION,
 	emptyTaskTelemetry,
 	emptyUsage,
-	roleConcurrencyCeiling,
 	truncateUtf8,
 	type ChildActivity,
 	type RoleName,
@@ -121,7 +120,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 		peakConcurrency: 0,
 		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
 	};
-	const maxConcurrency = Math.max(1, Math.min(options.maxConcurrency ?? HARD_LIMITS.maxConcurrency, HARD_LIMITS.maxConcurrency));
+	const maxConcurrency = options.maxConcurrency ?? Math.max(1, tasks.length);
 	const results = new Map(tasks.map((task) => [task.id, pendingResult(task)] as const));
 	const active = new Map<string, Promise<void>>();
 	const activeLocks = new Set<string>();
@@ -172,8 +171,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 	options.signal?.addEventListener("abort", abort, { once: true });
 
 	function roleLimit(role: RoleName): number {
-		const hard = roleConcurrencyCeiling(role);
-		return Math.max(1, Math.min(options.roleLimits?.[role] ?? hard, hard));
+		return options.roleLimits?.[role] ?? maxConcurrency;
 	}
 
 	function release(task: NormalizedTask): void {

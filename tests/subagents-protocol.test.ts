@@ -49,7 +49,8 @@ test("activity projects lifecycle and overlapping allowed tools only", () => {
 	parser.push(line({ type: "tool_execution_end", toolCallId: "b", toolName: "read", result: "secret", isError: false }));
 	assert.deepEqual(snapshots.at(-1)?.activeTools, []);
 	parser.push(line({ type: "tool_execution_end", toolCallId: "c", toolName: "bash", result: "secret", isError: true }));
-	assert.equal(snapshots.at(-1)?.phase, "retrying");
+	assert.equal(snapshots.at(-1)?.phase, "running");
+	assert.equal(snapshots.at(-1)?.errorCount, 1);
 	now = 150;
 	assert.equal(parser.snapshot().elapsedMs, 50);
 	assert.equal(parser.snapshot().inactiveForMs, 40);
@@ -65,7 +66,8 @@ test("agent_end is nonfinal while agent_settled is semantic settlement", () => {
 	assert.equal(parser.snapshot().phase, "settling");
 	assert.equal(parser.snapshot().agentSettledObserved, false);
 	parser.push(line({ type: "agent_start" }));
-	assert.equal(parser.snapshot().phase, "retrying");
+	assert.equal(parser.snapshot().phase, "running");
+	assert.equal(parser.snapshot().errorCount, 1);
 	parser.push(line({ type: "agent_settled" }));
 	assert.equal(parser.snapshot().phase, "settled-awaiting-exit");
 	assert.equal(parser.snapshot().agentEndObserved, true);

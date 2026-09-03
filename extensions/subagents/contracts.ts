@@ -10,10 +10,6 @@ export const TELEMETRY_SCHEMA_VERSION = 2 as const;
 
 export const HARD_LIMITS = Object.freeze({
 	maxTasks: 10,
-	maxConcurrency: 10,
-	maxExplorers: 4,
-	maxReviewers: 4,
-	maxWorkers: 2,
 	maxExternalReadRoots: 8,
 	maxPathBytes: 4096,
 	maxObjectiveBytes: 16 * 1024,
@@ -72,7 +68,6 @@ export type RunStatus = "succeeded" | "partial" | "failed" | "aborted";
 export const CHILD_ACTIVITY_PHASES = [
 	"starting",
 	"running",
-	"retrying",
 	"settling",
 	"settled-awaiting-exit",
 	"closed",
@@ -86,6 +81,7 @@ export interface ChildActivity {
 	latestEventType?: string;
 	latestStopReason?: string;
 	errorObserved: boolean;
+	errorCount: number;
 	agentEndObserved: boolean;
 	agentSettledObserved: boolean;
 	elapsedMs: number;
@@ -317,12 +313,6 @@ export function isSafeDiagnosticRef(value: string): boolean {
 	if (value.length === 0 || value.startsWith("/") || value.includes("\\")) return false;
 	const segments = value.split("/");
 	return segments.length >= 3 && segments.length <= 4 && segments.every((segment) => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..");
-}
-
-export function roleConcurrencyCeiling(role: RoleName): number {
-	if (role === "worker") return HARD_LIMITS.maxWorkers;
-	if (role === "reviewer") return HARD_LIMITS.maxReviewers;
-	return HARD_LIMITS.maxExplorers;
 }
 
 export function emptyUsage(): UsageTotals {

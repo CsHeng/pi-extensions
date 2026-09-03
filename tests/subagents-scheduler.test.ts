@@ -139,7 +139,7 @@ test("failure blocks dependents while independent work succeeds", async () => {
 	]);
 });
 
-test("mixed ready tasks can reach ten while role ceilings remain four, four, and two", async () => {
+test("configured package defaults allow four explorers, four reviewers, and two workers", async () => {
 	const tasks = graph([
 		...Array.from({ length: 4 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", scope: ["."] })),
 		...Array.from({ length: 4 }, (_, index) => ({ id: `r${index}`, role: "reviewer", objective: "r", scope: ["."] })),
@@ -151,6 +151,8 @@ test("mixed ready tasks can reach ten while role ceilings remain four, four, and
 	let allStarted: (() => void) | undefined;
 	const startedGate = new Promise<void>((resolve) => { allStarted = resolve; });
 	const run = runScheduledTasks(tasks, {
+		maxConcurrency: 10,
+		roleLimits: { explorer: 4, reviewer: 4, worker: 2 },
 		async execute(task, _predecessors, _signal, lifecycle) {
 			started += 1;
 			lifecycle.childStarted();
@@ -165,6 +167,38 @@ test("mixed ready tasks can reach ten while role ceilings remain four, four, and
 	const result = await run;
 	assert.equal(result.telemetry.peakConcurrency, 10);
 	assert.deepEqual(result.telemetry.peakConcurrencyByRole, { explorer: 4, reviewer: 4, worker: 2 });
+	assert.equal(result.telemetry.launchedChildren, 10);
+});
+
+test("configured role concurrency above package defaults is bounded by global concurrency", async () => {
+	const tasks = graph([
+		...Array.from({ length: 4 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", scope: ["src"], writePaths: [`src/w${index}.ts`] })),
+		...Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", scope: ["."] })),
+		{ id: "r0", role: "reviewer", objective: "r", scope: ["."] },
+	]);
+	let release: (() => void) | undefined;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let started = 0;
+	let globalLimitReached: (() => void) | undefined;
+	const globalLimitGate = new Promise<void>((resolve) => { globalLimitReached = resolve; });
+	const run = runScheduledTasks(tasks, {
+		maxConcurrency: 6,
+		roleLimits: { explorer: 5, reviewer: 3, worker: 4 },
+		async execute(task, _predecessors, _signal, lifecycle) {
+			started += 1;
+			lifecycle.childStarted();
+			if (started === 6) globalLimitReached?.();
+			await gate;
+			lifecycle.childSettled();
+			return success(task);
+		},
+	});
+	await globalLimitGate;
+	assert.equal(started, 6);
+	release?.();
+	const result = await run;
+	assert.equal(result.telemetry.peakConcurrency, 6);
+	assert.equal(result.telemetry.peakConcurrencyByRole.worker, 4);
 	assert.equal(result.telemetry.launchedChildren, 10);
 });
 
@@ -186,7 +220,7 @@ test("activity emits before settlement and injected heartbeat advances quiet evi
 		onUpdate(results) { updates.push(results.map((result) => ({ ...result }))); },
 		async execute(task, _predecessors, _signal, lifecycle) {
 			lifecycle.childStarted();
-			lifecycle.activity({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 0, inactiveForMs: 0 });
+			lifecycle.activity({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 0, inactiveForMs: 0 });
 			await gate;
 			lifecycle.childSettled();
 			return success(task);

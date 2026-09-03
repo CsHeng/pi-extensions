@@ -423,16 +423,22 @@ test("explicit routing takes one getAll and getAvailable snapshot and never muta
 	assert.equal(JSON.stringify(config), before);
 });
 
-test("user overlay can lower caps without replacing unmentioned packaged routes", async (t) => {
+test("user overlay owns concurrency without replacing unmentioned packaged routes", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-user-overlay-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
 	await writeFile(join(root, "csheng-subagents.json"), JSON.stringify({
-		maxConcurrency: 3,
-		routes: { explorer: { maxConcurrency: 2 } },
+		maxConcurrency: 12,
+		routes: {
+			explorer: { maxConcurrency: 5 },
+			reviewer: { maxConcurrency: 3 },
+			worker: { maxConcurrency: 4 },
+		},
 	}));
 	const loaded = await loadConfig(root);
-	assert.equal(loaded.config?.maxConcurrency, 3);
-	assert.equal(loaded.config?.routes.explorer.maxConcurrency, 2);
+	assert.equal(loaded.config?.maxConcurrency, 12);
+	assert.equal(loaded.config?.routes.explorer.maxConcurrency, 5);
+	assert.equal(loaded.config?.routes.reviewer.maxConcurrency, 3);
+	assert.equal(loaded.config?.routes.worker.maxConcurrency, 4);
 	assert.equal(loaded.config?.routes.explorer.source, "package-default");
 	assert.equal(loaded.config?.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
 });
@@ -451,10 +457,22 @@ test("omitted overrides retain stable default scope and thinking failure", () =>
 	});
 });
 
-test("configuration cannot raise hard limits or add unknown fields", () => {
-	assert.throws(() => parseConfig({ maxConcurrency: 11 }), /1 through 10/);
-	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 5 } } }), /1 through 4/);
-	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: 3 } } }), /1 through 2/);
+test("configuration accepts user concurrency and rejects invalid values or unknown fields", () => {
+	const config = parseConfig({
+		maxConcurrency: 12,
+		routes: {
+			explorer: { maxConcurrency: 5 },
+			reviewer: { maxConcurrency: 3 },
+			worker: { maxConcurrency: 4 },
+		},
+	});
+	assert.equal(config.maxConcurrency, 12);
+	assert.equal(config.routes.explorer.maxConcurrency, 5);
+	assert.equal(config.routes.reviewer.maxConcurrency, 3);
+	assert.equal(config.routes.worker.maxConcurrency, 4);
+	assert.throws(() => parseConfig({ maxConcurrency: 0 }), /positive safe integer/);
+	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 1.5 } } }), /positive safe integer/);
+	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: Number.MAX_SAFE_INTEGER + 1 } } }), /positive safe integer/);
 	assert.throws(() => parseConfig({ model: "synthetic/fast" }), /unsupported fields/);
 	assert.throws(() => parseConfig({ reasoningProfiles: { extreme: "max" } }), /unsupported fields/);
 });

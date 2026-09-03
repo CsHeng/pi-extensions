@@ -273,7 +273,6 @@ test("diagnostic and activity contracts are bounded and additive", () => {
 	assert.deepEqual(CHILD_ACTIVITY_PHASES, [
 		"starting",
 		"running",
-		"retrying",
 		"settling",
 		"settled-awaiting-exit",
 		"closed",

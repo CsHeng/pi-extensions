@@ -4,11 +4,9 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	EXECUTION_PROFILES,
-	HARD_LIMITS,
 	REASONING_PROFILES,
 	ROLE_NAMES,
 	THINKING_LEVELS,
-	roleConcurrencyCeiling,
 	type ExecutionProfile,
 	type ReasoningProfile,
 	type RoleName,
@@ -22,6 +20,12 @@ export type ConfiguredThinking = "$parent" | ThinkingLevel;
 export type DelegationGuidance = "off" | "balanced" | "aggressive";
 
 const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/csheng-subagents.json", import.meta.url));
+const DEFAULT_GLOBAL_CONCURRENCY = 10;
+const DEFAULT_ROLE_CONCURRENCY: Record<RoleName, number> = {
+	explorer: 4,
+	reviewer: 4,
+	worker: 2,
+};
 
 export interface RouteCandidateConfig {
 	model: string;
@@ -61,7 +65,7 @@ interface ParseOptions {
 function neutralRoute(role: RoleName): RoleRouteConfig {
 	return {
 		candidates: [{ model: "$parent", thinking: "$parent" }],
-		maxConcurrency: roleConcurrencyCeiling(role),
+		maxConcurrency: DEFAULT_ROLE_CONCURRENCY[role],
 		source: "parent",
 		executionProfiles: {},
 	};
@@ -70,7 +74,7 @@ function neutralRoute(role: RoleName): RoleRouteConfig {
 export function defaultConfig(): EffectiveSubagentConfig {
 	return {
 		guidance: "aggressive",
-		maxConcurrency: HARD_LIMITS.maxConcurrency,
+		maxConcurrency: DEFAULT_GLOBAL_CONCURRENCY,
 		routes: {
 			explorer: neutralRoute("explorer"),
 			reviewer: neutralRoute("reviewer"),
@@ -107,9 +111,9 @@ function assertKnownKeys(record: Record<string, unknown>, known: readonly string
 	if (extras.length > 0) throw new Error(`${owner} contains unsupported fields: ${extras.join(", ")}`);
 }
 
-function parsePositiveLimit(value: unknown, ceiling: number, owner: string): number {
-	if (!Number.isInteger(value) || typeof value !== "number" || value < 1 || value > ceiling) {
-		throw new Error(`${owner} must be an integer from 1 through ${ceiling}`);
+function parsePositiveLimit(value: unknown, owner: string): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+		throw new Error(`${owner} must be a positive safe integer`);
 	}
 	return value;
 }
@@ -171,7 +175,7 @@ function parseRoute(value: unknown, role: RoleName, source: RouteSource, base: R
 			: parseCandidates(value.candidates, `routes.${role}.candidates`),
 		maxConcurrency: value.maxConcurrency === undefined
 			? base.maxConcurrency
-			: parsePositiveLimit(value.maxConcurrency, roleConcurrencyCeiling(role), `routes.${role}.maxConcurrency`),
+			: parsePositiveLimit(value.maxConcurrency, `routes.${role}.maxConcurrency`),
 		source: value.candidates === undefined ? base.source : source,
 		executionProfiles: value.executionProfiles === undefined
 			? { ...base.executionProfiles }
@@ -191,7 +195,7 @@ export function parseConfig(value: unknown, options: ParseOptions = {}): Effecti
 		base.guidance = value.guidance;
 	}
 	if (value.maxConcurrency !== undefined) {
-		base.maxConcurrency = parsePositiveLimit(value.maxConcurrency, HARD_LIMITS.maxConcurrency, "maxConcurrency");
+		base.maxConcurrency = parsePositiveLimit(value.maxConcurrency, "maxConcurrency");
 	}
 	if (value.reasoningProfiles !== undefined) {
 		if (!isRecord(value.reasoningProfiles)) throw new Error("reasoningProfiles must be an object");

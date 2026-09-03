@@ -145,7 +145,7 @@ test("runner caps output and stderr by UTF-8 bytes", async () => {
 	assert.equal(Buffer.byteLength(noisy.stderr, "utf8"), HARD_LIMITS.maxStderrBytes);
 });
 
-test("activity arrives before close and retry evidence does not override final success", async () => {
+test("activity arrives before close and intermediate error evidence does not override final success", async () => {
 	const phases: string[] = [];
 	let closed = false;
 	const result = await runChild(options("activity", {
@@ -166,6 +166,7 @@ test("activity arrives before close and retry evidence does not override final s
 	const retry = await runChild(options("retry"));
 	assert.equal(retry.status, "succeeded");
 	assert.equal(retry.activity?.errorObserved, true);
+	assert.equal(retry.activity?.errorCount, 1);
 	assert.equal(retry.stopReason, "stop");
 });
 

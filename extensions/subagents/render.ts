@@ -38,9 +38,14 @@ function profileSummary(task: TaskResult): string {
 	return profiles.length === 0 ? "" : ` profiles=${singleLine(profiles.join(";"))}`;
 }
 
+function routeSummary(task: TaskResult): string {
+	if (!task.route) return "";
+	return ` route=${singleLine(`${task.route.provider}/${task.route.model}`)}:${singleLine(task.route.thinking)}`;
+}
+
 function taskSummary(task: TaskResult): string {
 	const route = task.route
-		? ` route=${singleLine(`${task.route.provider}/${task.route.model}:${task.route.thinking}`)} source=${task.route.source} selection=${task.route.selectionSource ?? "unavailable"}`
+		? `${routeSummary(task)} source=${task.route.source} selection=${task.route.selectionSource ?? "unavailable"}`
 		: "";
 	const error = task.error ? ` error=${singleLine(task.error.code)}` : "";
 	return `[${singleLine(task.id)}] ${task.role} ${task.status} elapsed=${formatDuration(task.durationMs)}${route}${profileSummary(task)} convergence=${task.convergence} changed=${task.changedPaths.length}${error}`;
@@ -76,13 +81,14 @@ export function formatProgress(results: readonly TaskResult[]): string {
 		if (result.status === "pending") continue;
 		if (result.status === "running" && result.activity) {
 			const tools = result.activity.activeTools.length > 0 ? ` tool=${singleLine(result.activity.activeTools.join(","))}` : "";
-			lines.push(`[${singleLine(result.id)}] ${result.role} ${result.activity.phase} elapsed=${formatDuration(result.activity.elapsedMs)} turns=${result.activity.assistantTurns}${tools} inactive=${formatDuration(result.activity.inactiveForMs)}`);
+			const errors = result.activity.errorCount > 0 ? ` errs=${result.activity.errorCount}` : "";
+			lines.push(`[${singleLine(result.id)}] ${result.role} ${result.activity.phase}${routeSummary(result)} elapsed=${formatDuration(result.activity.elapsedMs)} turns=${result.activity.assistantTurns}${tools}${errors} inactive=${formatDuration(result.activity.inactiveForMs)}`);
 			continue;
 		}
 		const elapsed = result.status === "running" && result.durationMs === 0
 			? ""
 			: ` elapsed=${formatDuration(result.durationMs)}`;
-		lines.push(`[${singleLine(result.id)}] ${result.role} ${result.status}${elapsed}`);
+		lines.push(`[${singleLine(result.id)}] ${result.role} ${result.status}${routeSummary(result)}${elapsed}`);
 	}
 	return lines.join("\n");
 }

@@ -202,7 +202,7 @@ test("child activity reaches host progress before final settlement without leaki
 	createSubagentsExtension(dependencies({
 		runChild: async (options) => {
 			options.onChildStarted?.();
-			options.onActivity?.({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 5, inactiveForMs: 0 });
+			options.onActivity?.({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 5, inactiveForMs: 0 });
 			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route, diagnosticSessionRef: "subagent-sessions/private/run/task.jsonl" };
 		},

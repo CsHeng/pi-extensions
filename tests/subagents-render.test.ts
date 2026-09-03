@@ -102,7 +102,8 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 			assistantTurns: 3,
 			activeTools: ["read"],
 			latestEventType: "agent_settled",
-			errorObserved: false,
+			errorObserved: true,
+			errorCount: 2,
 			agentEndObserved: true,
 			agentSettledObserved: true,
 			elapsedMs: 5_000,
@@ -111,7 +112,7 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 	}];
 	const progress = formatProgress(results);
 	assert.match(progress, /1\/2 settled, 1 running/);
-	assert.match(progress, /task-0.*elapsed=1\.5s/);
-	assert.match(progress, /task-1.*settled-awaiting-exit elapsed=5\.0s turns=3 tool=read inactive=2\.0s/);
+	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
+	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);
 	assert.doesNotMatch(progress, /subagent-sessions|private|jsonl/);
 });
