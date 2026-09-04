@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	extractCurrentEpochMetrics,
 	extractSessionMetrics,
 	resolveSessionPath,
 } from "../.agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts";
@@ -87,7 +88,9 @@ test("legacy evidence remains readable and does not infer unavailable metrics", 
 		}),
 	].join("\n");
 	const metrics = extractSessionMetrics(text, "/redacted/2026_session-legacy123.jsonl");
-	assert.equal(metrics.schemaVersion, 2);
+	assert.equal(metrics.schemaVersion, 3);
+	assert.equal(metrics.source.selectionMode, "exact-session");
+	assert.equal(metrics.source.planEligibility, "unavailable");
 	assert.equal(metrics.source.telemetryMode, "legacy");
 	assert.equal(metrics.totals.toolCalls, 2);
 	assert.equal(metrics.totals.requestedTasks, 1);
@@ -285,6 +288,47 @@ test("singleton runs for every role remain derivable from per-run role summaries
 function roleWithTask(roles: Record<"explorer" | "reviewer" | "worker", { tasks: number }>): string {
 	return Object.entries(roles).find(([, metric]) => metric.tasks === 1)?.[0] ?? "none";
 }
+
+test("current-epoch mode selects only matching schema-three runs", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "subagent-epoch-"));
+	t.after(async () => rm(root, { recursive: true, force: true }));
+	const sessions = join(root, "sessions");
+	await mkdir(sessions);
+	const manifest = join(root, "current.json");
+	await writeFile(manifest, JSON.stringify({
+		version: 1,
+		extensionFingerprint: "a",
+		extensionEpoch: "ext-now",
+		extensionActivatedAtMs: 100,
+		configurationFingerprint: "b",
+		configurationEpoch: "cfg-now",
+		configurationActivatedAtMs: 100,
+	}));
+	const selected = toolResult({
+		status: "succeeded",
+		telemetry: {
+			...telemetry(2, {
+				schemaVersion: 3,
+				startedAtMs: 200,
+				provenance: { available: true, extensionEpoch: "ext-now", configurationEpoch: "cfg-now" },
+			}),
+		},
+		tasks: [task("explorer")],
+	});
+	const old = toolResult({
+		status: "failed",
+		telemetry: telemetry(2),
+		tasks: [task("worker", { status: "failed", error: { code: "invalid_scope" } })],
+	});
+	await writeFile(join(sessions, "a_session.jsonl"), `${old}\n${selected}\n`);
+	const metrics = await extractCurrentEpochMetrics(sessions, manifest);
+	assert.equal(metrics.source.selectionMode, "current-epoch");
+	assert.equal(metrics.source.selectedRuns, 1);
+	assert.equal(metrics.source.unavailableProvenanceRuns, 1);
+	assert.equal(metrics.totals.succeededRuns, 1);
+	assert.equal(metrics.totals.failedRuns, 0);
+	assert.equal(metrics.source.planEligibility, "unavailable");
+});
 
 test("session ID resolution refuses ambiguous matches", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-evaluator-"));

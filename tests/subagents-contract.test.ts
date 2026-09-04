@@ -12,7 +12,9 @@ import {
 	STABLE_TASK_ERROR_CODES,
 	SubagentTaskSchema,
 	SubagentToolSchema,
+	TASK_EXECUTION_PHASES,
 	TELEMETRY_SCHEMA_VERSION,
+	TELEMETRY_SCHEMA_VERSION_V2,
 	THINKING_LEVELS,
 	isSafeDiagnosticRef,
 	isSafePathGrammar,
@@ -24,6 +26,7 @@ import type {
 	EffectiveRouteV2,
 	NormalizedChildCapability,
 	RunTelemetryV2,
+	RunTelemetryV3,
 } from "../extensions/subagents/contracts.ts";
 import { ROLES } from "../extensions/subagents/roles.ts";
 
@@ -165,7 +168,7 @@ test("model-facing capability fields retain descriptions without freezing prose"
 
 test("telemetry schema v2 freezes run counters, route attribution, and stable errors", () => {
 	const telemetry: RunTelemetryV2 = {
-		schemaVersion: TELEMETRY_SCHEMA_VERSION,
+		schemaVersion: TELEMETRY_SCHEMA_VERSION_V2,
 		runId: "run-1",
 		runDurationMs: 10,
 		requestedTasks: 2,
@@ -193,7 +196,9 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		reasoningProfileApplied: false,
 		profileFallbacks: [],
 	};
-	assert.equal(TELEMETRY_SCHEMA_VERSION, 2);
+	assert.equal(TELEMETRY_SCHEMA_VERSION_V2, 2);
+	assert.equal(TELEMETRY_SCHEMA_VERSION, 3);
+	assert.equal(telemetry.schemaVersion, 2);
 	assert.deepEqual(ROUTE_SELECTION_SOURCES, ["role-default", "explicit-task"]);
 	assert.deepEqual(PROFILE_FALLBACKS, ["execution-role-default", "reasoning-role-default"]);
 	assert.equal(telemetry.requestedDependencyEdges, 1);
@@ -222,6 +227,42 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 	assert.equal("pathCount" in telemetry, false);
 	assert.equal("externalReadRootCount" in telemetry, false);
 	assert.equal("repositoryCount" in telemetry, false);
+});
+
+test("telemetry schema v3 adds start time, provenance, and optional effective caps", () => {
+	const unavailable: RunTelemetryV3 = {
+		schemaVersion: TELEMETRY_SCHEMA_VERSION,
+		runId: "run-1",
+		runDurationMs: 10,
+		requestedTasks: 1,
+		admittedTasks: 1,
+		requestedDependencyEdges: 0,
+		admittedDependencyEdges: 0,
+		explicitModelTasks: 0,
+		explicitThinkingTasks: 0,
+		launchedChildren: 1,
+		peakConcurrency: 1,
+		peakConcurrencyByRole: { explorer: 1, reviewer: 0, worker: 0 },
+		startedAtMs: 1,
+		provenance: { available: false },
+	};
+	const available: RunTelemetryV3 = {
+		...unavailable,
+		provenance: { available: true, extensionEpoch: "ext-1", configurationEpoch: "cfg-1" },
+		effectiveMaxConcurrency: 10,
+		effectiveRoleConcurrency: { explorer: 4, reviewer: 4, worker: 2 },
+	};
+	assert.equal(unavailable.schemaVersion, 3);
+	assert.equal(unavailable.provenance.available, false);
+	assert.equal(available.provenance.available, true);
+	assert.equal("pathCount" in available, false);
+	assert.deepEqual(TASK_EXECUTION_PHASES, [
+		"queued",
+		"workspace-preparation",
+		"child-execution",
+		"convergence-critical",
+		"settled",
+	]);
 });
 
 test("path grammar and private capability manifests are exact and additive", () => {

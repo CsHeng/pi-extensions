@@ -9,11 +9,11 @@ Evaluate one explicitly named Pi session without changing Pi state, runtime rout
 
 ## Boundary
 
-- Accept one exact session JSONL path or session ID.
+- Accept one exact session JSONL path or session ID, or an explicit current-epoch scan that names both a sessions root and the provenance manifest.
 - Read only Pi JSONL. Never read Pi SQLite, settings, credentials, logs, or unrelated sessions.
-- Emit only metric schema version two as defined in `references/metric-schema.md`.
+- Emit only metric schema version three as defined in `references/metric-schema.md`.
 - Never copy prompts, objectives, raw model selectors, task IDs, child output, stderr, environment values, route-file content, or external file content.
-- Treat runtime telemetry schema two as authoritative for all declared fields. Treat schema one as authoritative only for its available launch, admission, duration, and concurrency fields. Label legacy launch, width, and timing derivation as inference.
+- Treat runtime telemetry schema two and three as authoritative for the fields they declare. Treat schema one as authoritative only for its available launch, admission, duration, and concurrency fields. Label legacy launch, width, and timing derivation as inference.
 - Never reconstruct topology, explicit model or thinking requests, or other new metrics from assistant tool arguments, prompts, or legacy prose. Report unavailable evidence as `null` per run and through `unavailableRuns` totals.
 - Report mechanical dispatch-correction candidates separately. Semantic repair remains unavailable unless parent-owned structured evidence is added in a future approved contract.
 - Do not invoke subagents, change routing, retry provider calls, or mutate a report unless an explicit new output path is provided.
@@ -26,6 +26,14 @@ From the `pi-extensions` repository:
 node --experimental-strip-types \
   .agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts \
   --session <path-or-id>
+```
+
+For current installed/configured health, require explicit inputs:
+
+```bash
+node --experimental-strip-types \
+  .agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts \
+  --epoch current --sessions-root <dir> --manifest <file>
 ```
 
 Use `--sessions-root <dir>` only for a bounded fixture or explicitly selected alternate session root. Use `--output <new-file>` to create a report; the extractor refuses to overwrite an existing path.

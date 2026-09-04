@@ -55,6 +55,12 @@ export interface EffectiveSubagentConfig {
 export interface ConfigLoadResult {
 	config?: EffectiveSubagentConfig;
 	diagnostic?: { code: "invalid_route_config"; message: string };
+	source?: ConfigSourceSnapshot;
+}
+
+export interface ConfigSourceSnapshot {
+	packageBytes: Buffer;
+	userBytes?: Buffer;
 }
 
 interface ParseOptions {
@@ -216,29 +222,54 @@ export function parseConfig(value: unknown, options: ParseOptions = {}): Effecti
 	return base;
 }
 
-async function loadRegularJson(path: string, owner: string): Promise<unknown> {
+async function readRegularFile(path: string, owner: string): Promise<Buffer> {
 	const info = await lstat(path);
 	if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${owner} must be a regular non-symlink file`);
+	return readFile(path);
+}
+
+function parseJsonBytes(bytes: Buffer, owner: string): unknown {
 	try {
-		return JSON.parse(await readFile(path, "utf8")) as unknown;
+		return JSON.parse(bytes.toString("utf8")) as unknown;
 	} catch (error) {
 		if (error instanceof SyntaxError) throw new Error(`${owner} is not valid JSON`);
 		throw error;
 	}
 }
 
-export async function loadConfig(agentDir = getAgentDir()): Promise<ConfigLoadResult> {
+export async function readConfigSources(agentDir = getAgentDir()): Promise<ConfigSourceSnapshot> {
+	const packageBytes = await readRegularFile(PACKAGE_CONFIG_PATH, "packaged route configuration");
 	const configPath = join(agentDir, ROUTE_CONFIG_FILE);
 	try {
-		const packageValue = await loadRegularJson(PACKAGE_CONFIG_PATH, "packaged route configuration");
-		const packaged = parseConfig(packageValue, { source: "package-default" });
-		try {
-			const userValue = await loadRegularJson(configPath, "route configuration");
-			return { config: parseConfig(userValue, { base: packaged, source: "user-config" }) };
-		} catch (error) {
-			if (isNodeError(error) && error.code === "ENOENT") return { config: packaged };
-			throw error;
-		}
+		return { packageBytes, userBytes: await readRegularFile(configPath, "route configuration") };
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { packageBytes };
+		throw error;
+	}
+}
+
+export function parseConfigSources(snapshot: ConfigSourceSnapshot): ConfigLoadResult {
+	try {
+		const packaged = parseConfig(parseJsonBytes(snapshot.packageBytes, "packaged route configuration"), { source: "package-default" });
+		if (!snapshot.userBytes) return { config: packaged, source: snapshot };
+		return {
+			config: parseConfig(parseJsonBytes(snapshot.userBytes, "route configuration"), { base: packaged, source: "user-config" }),
+			source: snapshot,
+		};
+	} catch (error) {
+		return {
+			source: snapshot,
+			diagnostic: {
+				code: "invalid_route_config",
+				message: error instanceof Error ? error.message : String(error),
+			},
+		};
+	}
+}
+
+export async function loadConfig(agentDir = getAgentDir()): Promise<ConfigLoadResult> {
+	try {
+		return parseConfigSources(await readConfigSources(agentDir));
 	} catch (error) {
 		return {
 			diagnostic: {

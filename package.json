@@ -14,7 +14,10 @@
     "multi-skill-mentions",
     "fast-gpt",
     "subagents",
-    "herdr-handoff"
+    "herdr-handoff",
+    "session-id-footer",
+    "work-timing",
+    "subagents-ui"
   ],
   "scripts": {
     "check": "npm run typecheck && npm test && bash -n scripts/*.sh",
@@ -42,7 +45,10 @@
       "./extensions/multi-skill-mentions/index.ts",
       "./extensions/fast-gpt/index.ts",
       "./extensions/subagents/index.ts",
-      "./extensions/herdr-handoff/index.ts"
+      "./extensions/herdr-handoff/index.ts",
+      "./extensions/session-id-footer/index.ts",
+      "./extensions/work-timing/index.ts",
+      "./extensions/subagents-ui/index.ts"
     ]
   }
 }

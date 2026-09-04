@@ -8,15 +8,31 @@ import {
 	type ChildActivity,
 	type RoleName,
 	type SubagentRunResult,
+	type TaskExecutionPhase,
 	type TaskResult,
 	type UsageTotals,
 } from "./contracts.ts";
+import type { CancelReceiptOutcome } from "./events.ts";
 import type { NormalizedTask } from "./graph.ts";
 
 export interface ChildLifecycle {
 	childStarted(): void;
 	activity(activity: Readonly<ChildActivity>): void;
 	childSettled(): void;
+}
+
+export interface SchedulerControl {
+	cancelTask(taskId: string): CancelReceiptOutcome;
+	cancelRun(): Extract<CancelReceiptOutcome, "accepted" | "not-active">;
+	enterConvergence(taskId: string): boolean;
+	setExecutionPhase(taskId: string, phase: Exclude<TaskExecutionPhase, "convergence-critical" | "settled">): void;
+}
+
+interface TaskControlState {
+	phase: TaskExecutionPhase;
+	cancelLatched: boolean;
+	controller: AbortController;
+	unlinkAbort: () => void;
 }
 
 export interface SchedulerOptions {
@@ -29,6 +45,7 @@ export interface SchedulerOptions {
 	heartbeatMs?: number;
 	scheduleHeartbeat?(callback: () => void, intervalMs: number): () => void;
 	onHeartbeat?(): void;
+	onControl?(control: SchedulerControl): void;
 	abortResult?(): { status: "aborted" | "failed"; code: string; message: string };
 	execute(
 		task: NormalizedTask,
@@ -131,8 +148,79 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 	const activeChildRoles = new Map<RoleName, number>();
 	const taskStartedAt = new Map<string, number>();
 	const taskActivityBase = new Map<string, { observedAt: number; inactiveForMs: number }>();
+	const taskControls = new Map<string, TaskControlState>();
+	let runCancelLatched = false;
+	let wake: (() => void) | undefined;
+	const waitForChange = () => new Promise<void>((resolve) => { wake = resolve; });
+	const notify = () => {
+		wake?.();
+		wake = undefined;
+	};
+
+	const abortPending = (taskId: string, abortResult: { status: "aborted" | "failed"; code: string; message: string }) => {
+		const result = results.get(taskId);
+		if (result?.status !== "pending") return;
+		results.set(taskId, { ...result, status: abortResult.status, error: { code: abortResult.code, message: abortResult.message } });
+	};
+
+	const control: SchedulerControl = {
+		cancelTask(taskId) {
+			const current = results.get(taskId);
+			if (!current) return "unknown-task";
+			if (current.status !== "pending" && current.status !== "running") return "already-settled";
+			const state = taskControls.get(taskId);
+			if (state?.phase === "convergence-critical") return "too-late";
+			if (current.status === "pending") {
+				abortPending(taskId, { status: "aborted", code: "aborted", message: "Task was cancelled before launch." });
+				emit();
+				notify();
+				return "accepted";
+			}
+			if (!state) return "already-settled";
+			state.cancelLatched = true;
+			state.controller.abort();
+			notify();
+			return "accepted";
+		},
+		cancelRun() {
+			if (tasks.every((task) => {
+				const status = results.get(task.id)?.status;
+				return status !== "pending" && status !== "running";
+			})) return "not-active";
+			runCancelLatched = true;
+			const abortResult = { status: "aborted" as const, code: "aborted", message: "Run was cancelled." };
+			for (const task of tasks) {
+				const current = results.get(task.id);
+				const state = taskControls.get(task.id);
+				if (current?.status === "pending") abortPending(task.id, abortResult);
+				else if (current?.status === "running" && state && state.phase !== "convergence-critical") {
+					state.cancelLatched = true;
+					state.controller.abort();
+				}
+			}
+			emit();
+			notify();
+			return "accepted";
+		},
+		enterConvergence(taskId) {
+			const state = taskControls.get(taskId);
+			const current = results.get(taskId);
+			if (!state || !current || current.status !== "running") return false;
+			if (state.phase === "convergence-critical") return true;
+			if (state.cancelLatched || state.controller.signal.aborted || runCancelLatched) return false;
+			state.phase = "convergence-critical";
+			state.unlinkAbort();
+			return true;
+		},
+		setExecutionPhase(taskId, phase) {
+			const state = taskControls.get(taskId);
+			if (!state || state.phase === "convergence-critical" || state.phase === "settled") return;
+			state.phase = phase;
+		},
+	};
 
 	const emit = () => options.onUpdate?.(tasks.map((task) => results.get(task.id) as TaskResult));
+	options.onControl?.(control);
 	const heartbeat = () => {
 		if (active.size === 0) return;
 		const observedAt = now();
@@ -193,6 +281,25 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 		const predecessors = task.dependsOn.map((id) => boundedPredecessor(results.get(id) as TaskResult));
 		const taskStarted = now();
 		taskStartedAt.set(task.id, taskStarted);
+		const taskController = new AbortController();
+		const forwardAbort = () => {
+			const state = taskControls.get(task.id);
+			if (state?.phase === "convergence-critical") return;
+			if (state) state.cancelLatched = true;
+			taskController.abort();
+		};
+		if (controller.signal.aborted) forwardAbort();
+		else controller.signal.addEventListener("abort", forwardAbort, { once: true });
+		const unlinkAbort = () => controller.signal.removeEventListener("abort", forwardAbort);
+		taskControls.set(task.id, {
+			phase: "queued",
+			cancelLatched: runCancelLatched,
+			controller: taskController,
+			unlinkAbort,
+		});
+		if (taskController.signal.aborted) {
+			unlinkAbort();
+		}
 		let childActive = false;
 		const lifecycle: ChildLifecycle = {
 			childStarted() {
@@ -227,7 +334,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				options.onChildConcurrency?.(activeChildren);
 			},
 		};
-		const promise = options.execute(task, predecessors, controller.signal, lifecycle)
+		const promise = options.execute(task, predecessors, taskController.signal, lifecycle)
 			.then((result) => {
 				const allowedStatus = result.status === "succeeded" || result.status === "failed" || result.status === "aborted";
 				const telemetry = {
@@ -258,9 +365,15 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 			})
 			.finally(() => {
 				lifecycle.childSettled();
+				const state = taskControls.get(task.id);
+				if (state) {
+					state.phase = "settled";
+					state.unlinkAbort();
+				}
 				release(task);
 				active.delete(task.id);
 				emit();
+				notify();
 			});
 		active.set(task.id, promise);
 	}
@@ -294,7 +407,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 			if (changed) emit();
 
 			for (const task of tasks) {
-				if (active.size >= maxConcurrency) break;
+				if (runCancelLatched || active.size >= maxConcurrency) break;
 				const result = results.get(task.id) as TaskResult;
 				if (result.status !== "pending") continue;
 				if (!task.dependsOn.every((id) => results.get(id)?.status === "succeeded")) continue;
@@ -316,7 +429,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				emit();
 				return aggregate(tasks.map((task) => results.get(task.id) as TaskResult), false, metrics);
 			}
-			await Promise.race(active.values());
+			await Promise.race([...active.values(), waitForChange()]);
 		}
 	} finally {
 		clearHeartbeat();

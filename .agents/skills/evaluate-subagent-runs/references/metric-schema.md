@@ -1,6 +1,6 @@
 # Subagent Session Metric Schema
 
-`schemaVersion = 2` is a redacted evaluation document, not runtime state and not a workflow ledger. The evaluator reads runtime telemetry schema versions one and two and qualified legacy task results; it always emits this metric schema version.
+`schemaVersion = 3` is a redacted evaluation document, not runtime state and not a workflow ledger. The evaluator reads runtime telemetry schema versions one, two, and three and qualified legacy task results; it always emits this metric schema version. Current-epoch mode selects only matching schema-three runs and never infers provenance from mtime or prose.
 
 ## Top level
 

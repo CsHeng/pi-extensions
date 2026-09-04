@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const OUTPUT_SCHEMA_VERSION = 2;
+const OUTPUT_SCHEMA_VERSION = 3;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
 const TOOL_NAME = "csheng_subagents";
 const MAX_RUN_RECORDS = 1_000;
@@ -50,7 +50,7 @@ interface RunMetrics {
 	ordinal: number;
 	status: RunStatus;
 	telemetryAuthority: "authoritative" | "legacy-inferred";
-	telemetrySchemaVersion: 1 | 2 | null;
+	telemetrySchemaVersion: 1 | 2 | 3 | null;
 	requestedTasks: number | null;
 	admittedTasks: number | null;
 	launchedChildren: number;
@@ -69,6 +69,13 @@ export interface SessionMetrics {
 	source: {
 		sessionId: string;
 		telemetryMode: "authoritative" | "legacy" | "mixed";
+		selectionMode: "exact-session" | "current-epoch";
+		scannedSessions: number;
+		matchedSessions: number;
+		selectedRuns: number;
+		excludedRuns: number;
+		unavailableProvenanceRuns: number;
+		planEligibility: "unavailable";
 	};
 	totals: {
 		toolCalls: number;
@@ -289,9 +296,9 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		const details = record(message.details) ?? {};
 		const telemetry = record(details.telemetry);
 		const tasks = Array.isArray(details.tasks) ? details.tasks.map(record).filter((task): task is Record<string, unknown> => task !== undefined) : [];
-		const telemetryVersion = telemetry?.schemaVersion === 2 ? 2 : telemetry?.schemaVersion === 1 ? 1 : null;
+		const telemetryVersion = telemetry?.schemaVersion === 3 ? 3 : telemetry?.schemaVersion === 2 ? 2 : telemetry?.schemaVersion === 1 ? 1 : null;
 		const isAuthoritative = telemetryVersion !== null;
-		const isSchemaTwo = telemetryVersion === 2;
+		const isSchemaTwo = telemetryVersion === 2 || telemetryVersion === 3;
 		if (isAuthoritative) authoritative += 1;
 		else legacy += 1;
 		const status = runStatus(details.status);
@@ -423,6 +430,13 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		source: {
 			sessionId: sessionIdFromPath(sourcePath),
 			telemetryMode: authoritative > 0 && legacy > 0 ? "mixed" : authoritative > 0 ? "authoritative" : "legacy",
+			selectionMode: "exact-session",
+			scannedSessions: 1,
+			matchedSessions: messages.length > 0 ? 1 : 0,
+			selectedRuns: messages.length,
+			excludedRuns: 0,
+			unavailableProvenanceRuns: messages.length,
+			planEligibility: "unavailable",
 		},
 		totals,
 		roles,
@@ -435,14 +449,25 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 }
 
 function usageText(): string {
-	return "Usage: extract-session-metrics.ts --session <path-or-id> [--sessions-root <dir>] [--output <new-file>]";
+	return "Usage: extract-session-metrics.ts --session <path-or-id> [--sessions-root <dir>] [--output <new-file>]\n       extract-session-metrics.ts --epoch current --sessions-root <dir> --manifest <file> [--output <new-file>]";
 }
 
 interface CliOptions {
-	session: string;
+	session?: string;
+	epoch?: "current";
 	sessionsRoot?: string;
+	manifest?: string;
 	output?: string;
 }
+
+const MAX_WALK_DEPTH = 8;
+const MAX_WALK_ENTRIES = 20_000;
+const MAX_SESSION_FILES = 4_096;
+const MAX_SESSION_BYTES = 64 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
+const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_PARSED_RUNS = 100_000;
+const MAX_REPORT_BYTES = 4 * 1024 * 1024;
 
 function parseArgs(args: string[]): CliOptions | "help" {
 	if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) return "help";
@@ -450,18 +475,153 @@ function parseArgs(args: string[]): CliOptions | "help" {
 	for (let index = 0; index < args.length; index += 2) {
 		const key = args[index];
 		const value = args[index + 1];
-		if (!key || !value || !["--session", "--sessions-root", "--output"].includes(key)) throw new Error("invalid_arguments");
+		if (!key || !value || !["--session", "--sessions-root", "--output", "--epoch", "--manifest"].includes(key)) throw new Error("invalid_arguments");
 		if (values.has(key)) throw new Error("duplicate_argument");
 		values.set(key, value);
 	}
 	const session = values.get("--session");
-	if (!session) throw new Error("session_required");
-	const options: CliOptions = { session };
+	const epoch = values.get("--epoch");
+	if (session && epoch) throw new Error("ambiguous_input_mode");
+	if (epoch && epoch !== "current") throw new Error("invalid_epoch_mode");
+	if (!session && epoch !== "current") throw new Error("session_required");
+	if (epoch === "current" && (!values.get("--sessions-root") || !values.get("--manifest"))) throw new Error("epoch_inputs_required");
+	const options: CliOptions = {};
+	if (session !== undefined) options.session = session;
+	if (epoch === "current") options.epoch = "current";
 	const sessionsRoot = values.get("--sessions-root");
+	const manifest = values.get("--manifest");
 	const output = values.get("--output");
 	if (sessionsRoot !== undefined) options.sessionsRoot = sessionsRoot;
+	if (manifest !== undefined) options.manifest = manifest;
 	if (output !== undefined) options.output = output;
 	return options;
+}
+
+interface EpochManifest {
+	extensionEpoch: string;
+	configurationEpoch: string;
+	extensionActivatedAtMs: number;
+	configurationActivatedAtMs: number;
+}
+
+async function readEpochManifest(path: string): Promise<EpochManifest> {
+	await assertRegularFile(path);
+	const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+	if (
+		parsed.version !== 1
+		|| typeof parsed.extensionEpoch !== "string"
+		|| typeof parsed.configurationEpoch !== "string"
+		|| typeof parsed.extensionActivatedAtMs !== "number"
+		|| typeof parsed.configurationActivatedAtMs !== "number"
+	) throw new Error("invalid_manifest");
+	return {
+	extensionEpoch: parsed.extensionEpoch,
+	configurationEpoch: parsed.configurationEpoch,
+	extensionActivatedAtMs: parsed.extensionActivatedAtMs,
+	configurationActivatedAtMs: parsed.configurationActivatedAtMs,
+	};
+}
+
+function nonNegativeInt(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function runMatchesEpoch(details: Record<string, unknown>, manifest: EpochManifest): "select" | "exclude" | "unavailable" {
+	const telemetry = record(details.telemetry);
+	if (!telemetry || telemetry.schemaVersion !== 3) return "unavailable";
+	const provenance = record(telemetry.provenance);
+	if (!provenance || typeof provenance.available !== "boolean") return "unavailable";
+	if (!nonNegativeInt(telemetry.requestedTasks) || !nonNegativeInt(telemetry.admittedTasks) || !nonNegativeInt(telemetry.launchedChildren) || !nonNegativeInt(telemetry.runDurationMs)) {
+		return "unavailable";
+	}
+	if (telemetry.admittedTasks > telemetry.requestedTasks || telemetry.launchedChildren > telemetry.admittedTasks) return "unavailable";
+	if (typeof telemetry.startedAtMs !== "number" || !Number.isFinite(telemetry.startedAtMs) || telemetry.startedAtMs < 0) return "unavailable";
+	if (provenance.available !== true) return "unavailable";
+	if (typeof provenance.extensionEpoch !== "string" || typeof provenance.configurationEpoch !== "string") return "unavailable";
+	if (provenance.extensionEpoch !== manifest.extensionEpoch || provenance.configurationEpoch !== manifest.configurationEpoch) {
+		return "exclude";
+	}
+	const cutoff = Math.max(manifest.extensionActivatedAtMs, manifest.configurationActivatedAtMs);
+	if (telemetry.startedAtMs < cutoff) return "exclude";
+	return "select";
+}
+
+export function filterEpochSessionText(text: string, manifest: EpochManifest): { text: string; selected: number; excluded: number; unavailable: number } {
+	const kept: string[] = [];
+	let selected = 0;
+	let excluded = 0;
+	let unavailable = 0;
+	let parsedRuns = 0;
+	for (const line of text.split("\n")) {
+		if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) throw new Error("line_too_large");
+		if (!line.trim()) continue;
+		const event = JSON.parse(line) as unknown;
+		const item = record(event);
+		const message = record(item?.message);
+		if (item?.type !== "message" || message?.role !== "toolResult" || message.toolName !== TOOL_NAME) continue;
+		parsedRuns += 1;
+		if (parsedRuns > MAX_PARSED_RUNS) throw new Error("too_many_runs");
+		const details = record(message.details) ?? {};
+		const decision = runMatchesEpoch(details, manifest);
+		if (decision === "select") {
+			kept.push(line);
+			selected += 1;
+		} else if (decision === "exclude") excluded += 1;
+		else unavailable += 1;
+	}
+	return { text: kept.join("\n"), selected, excluded, unavailable };
+}
+
+async function walkSessionFiles(root: string, files: string[], depth: number, stats: { entries: number }): Promise<void> {
+	if (depth > MAX_WALK_DEPTH) throw new Error("walk_too_deep");
+	const directory = await opendir(root);
+	for await (const entry of directory) {
+		stats.entries += 1;
+		if (stats.entries > MAX_WALK_ENTRIES) throw new Error("too_many_entries");
+		const path = join(root, entry.name);
+		const info = await lstat(path);
+		if (info.isSymbolicLink()) throw new Error("symlink_rejected");
+		if (info.isDirectory()) await walkSessionFiles(path, files, depth + 1, stats);
+		else if (info.isFile() && entry.name.endsWith(".jsonl")) {
+			if (info.size > MAX_SESSION_BYTES) throw new Error("session_too_large");
+			files.push(path);
+			if (files.length > MAX_SESSION_FILES) throw new Error("too_many_sessions");
+		}
+	}
+}
+
+export async function extractCurrentEpochMetrics(sessionsRoot: string, manifestPath: string): Promise<SessionMetrics> {
+	const manifest = await readEpochManifest(manifestPath);
+	const files: string[] = [];
+	await walkSessionFiles(resolve(sessionsRoot), files, 0, { entries: 0 });
+	let totalBytes = 0;
+	let selected = 0;
+	let excluded = 0;
+	let unavailable = 0;
+	let matchedSessions = 0;
+	const chunks: string[] = [];
+	for (const path of files) {
+		const info = await lstat(path);
+		totalBytes += info.size;
+		if (totalBytes > MAX_TOTAL_BYTES) throw new Error("input_too_large");
+		const filtered = filterEpochSessionText(await readFile(path, "utf8"), manifest);
+		selected += filtered.selected;
+		excluded += filtered.excluded;
+		unavailable += filtered.unavailable;
+		if (filtered.selected > 0) {
+			matchedSessions += 1;
+			chunks.push(filtered.text);
+		}
+	}
+	const metrics = extractSessionMetrics(chunks.join("\n"), "current-epoch.jsonl");
+	metrics.source.sessionId = "current-epoch";
+	metrics.source.selectionMode = "current-epoch";
+	metrics.source.scannedSessions = files.length;
+	metrics.source.matchedSessions = matchedSessions;
+	metrics.source.selectedRuns = selected;
+	metrics.source.excludedRuns = excluded;
+	metrics.source.unavailableProvenanceRuns = unavailable;
+	return metrics;
 }
 
 async function main(): Promise<void> {
@@ -470,9 +630,14 @@ async function main(): Promise<void> {
 		process.stdout.write(`${usageText()}\n`);
 		return;
 	}
-	const path = await resolveSessionPath(options.session, options.sessionsRoot);
-	const metrics = extractSessionMetrics(await readFile(path, "utf8"), path);
+	const metrics = options.epoch === "current"
+		? await extractCurrentEpochMetrics(options.sessionsRoot as string, options.manifest as string)
+		: await (async () => {
+			const path = await resolveSessionPath(options.session as string, options.sessionsRoot);
+			return extractSessionMetrics(await readFile(path, "utf8"), path);
+		})();
 	const output = `${JSON.stringify(metrics, null, 2)}\n`;
+	if (Buffer.byteLength(output, "utf8") > MAX_REPORT_BYTES) throw new Error("report_too_large");
 	if (options.output) {
 		await writeFile(resolve(options.output), output, { encoding: "utf8", flag: "wx", mode: 0o600 });
 		process.stdout.write(`${JSON.stringify({ result: "pass", output: basename(options.output) })}\n`);

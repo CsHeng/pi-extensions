@@ -30,6 +30,7 @@ function harness(): Harness {
 			registerCommand(name: string, command: any) { commands.set(name, command); },
 			on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 			getActiveTools() { return [SUBAGENT_TOOL_NAME]; },
+			events: { on() {}, emit() {} },
 		},
 	};
 	return value;
@@ -74,6 +75,10 @@ function successful(task: NormalizedTask): TaskResult {
 function dependencies(overrides: Partial<SubagentDependencies> = {}): Partial<SubagentDependencies> {
 	return {
 		loadConfig: async () => ({ config: defaultConfig() }),
+		createProvenance: () => ({
+			observeExtension: async () => ({ available: false as const }),
+			observeConfiguration: async () => ({ available: false as const }),
+		}),
 		createDiagnosticStore: () => ({
 			async allocateRun(parentSessionId, runId) {
 				return {
@@ -693,7 +698,7 @@ test("explorer and reviewer external roots reach only task and capability fields
 		],
 	}, undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
 	assert.equal(result.details.status, "succeeded");
-	assert.equal(result.details.telemetry.schemaVersion, 2);
+	assert.equal(result.details.telemetry.schemaVersion, 3);
 	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
 	assert.equal(seen[0]?.cwd, await realpath(current));

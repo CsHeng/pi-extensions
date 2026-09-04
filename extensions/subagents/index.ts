@@ -12,13 +12,24 @@ import {
 	emptyTaskTelemetry,
 	emptyUsage,
 	type NormalizedChildCapability,
+	type ProvenanceTelemetry,
 	type RunTelemetry,
 	type RoleName,
 	type SubagentRunResult,
 	type SubagentToolInput,
+	type TaskExecutionPhase,
 	type TaskResult,
 } from "./contracts.ts";
 import { loadConfig, type ConfigLoadResult, type EffectiveSubagentConfig } from "./config.ts";
+import { buildSnapshot } from "./activity.ts";
+import {
+	CANCEL_RECEIPT_EVENT,
+	CANCEL_REQUEST_EVENT,
+	SNAPSHOT_EVENT,
+	parseCancelRequest,
+	type CancelReceiptOutcome,
+} from "./events.ts";
+import { createProvenance, type ProvenanceCore } from "./provenance.ts";
 import { DiagnosticStore, renderDiagnosticInspection, type DiagnosticRun, type DiagnosticStoreLike } from "./diagnostics.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
 import { admitRepositoryTasks, defaultRepositoryHost, type RepositoryHost } from "./repository-policy.ts";
@@ -42,6 +53,7 @@ export interface SubagentDependencies {
 	convergeWorkerWorkspace(workspace: WorkerWorkspace): Promise<ConvergenceResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
 	createDiagnosticStore(): DiagnosticStoreLike;
+	createProvenance?(): ProvenanceCore;
 	guardExtensionPath: string;
 	repositoryHost: RepositoryHost;
 }
@@ -91,6 +103,8 @@ function failedTelemetry(
 	admittedTasks: number,
 	admittedDependencyEdges: number,
 	code: string,
+	provenance: ProvenanceTelemetry = { available: false },
+	effectiveMaxConcurrency?: number,
 ): RunTelemetry {
 	return {
 		schemaVersion: TELEMETRY_SCHEMA_VERSION,
@@ -105,7 +119,10 @@ function failedTelemetry(
 		launchedChildren: 0,
 		peakConcurrency: 0,
 		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
+		startedAtMs: identity.started,
+		provenance,
 		runErrorCode: code,
+		...(effectiveMaxConcurrency === undefined ? {} : { effectiveMaxConcurrency }),
 	};
 }
 
@@ -115,12 +132,13 @@ function aggregateFailure(
 	message: string,
 	identity: RunIdentity,
 	admittedTasks = tasks.length,
+	provenance: ProvenanceTelemetry = { available: false },
 ): SubagentRunResult {
 	return {
 		status: "failed",
 		tasks: tasks.map((task) => failureResult(task, code, message)),
 		usage: emptyUsage(),
-		telemetry: failedTelemetry(identity, admittedTasks, dependencyEdges(tasks), code),
+		telemetry: failedTelemetry(identity, admittedTasks, dependencyEdges(tasks), code, provenance),
 	};
 }
 
@@ -207,9 +225,40 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 	const dependencies = { ...DEFAULT_DEPENDENCIES, ...overrides };
 	return function subagentsExtension(pi: ExtensionAPI): void {
 		const diagnosticStore = dependencies.createDiagnosticStore();
+		const provenance = dependencies.createProvenance?.() ?? createProvenance();
 		let activeController: AbortController | undefined;
 		let activeRun: Promise<void> | undefined;
 		let activeChildren = 0;
+		let activeRunId: string | undefined;
+		let activeCancellation = false;
+		let activeControl: { cancelTask(taskId: string): CancelReceiptOutcome; cancelRun(): CancelReceiptOutcome; enterConvergence(taskId: string): boolean; setExecutionPhase(taskId: string, phase: Exclude<TaskExecutionPhase, "convergence-critical" | "settled">): void } | undefined;
+		const activePhases = new Map<string, TaskExecutionPhase>();
+		let extensionProvenance: ProvenanceTelemetry = { available: false };
+
+
+		const emitReceipt = (requestId: string, runId: string, target: "run" | "task", outcome: CancelReceiptOutcome, taskId?: string) => {
+			pi.events.emit(CANCEL_RECEIPT_EVENT, {
+				version: 1,
+				requestId,
+				runId,
+				target,
+				outcome,
+				...(taskId === undefined ? {} : { taskId }),
+			});
+		};
+
+		pi.events.on(CANCEL_REQUEST_EVENT, (data) => {
+			const parsed = parseCancelRequest(data);
+			if (!parsed.ok) return;
+			const request = parsed.value;
+			if (!activeRunId || request.runId !== activeRunId || !activeControl) {
+				emitReceipt(request.requestId, request.runId, request.target, activeRunId ? "already-settled" : "not-active", request.taskId);
+				return;
+			}
+			const outcome = request.target === "run" ? activeControl.cancelRun() : activeControl.cancelTask(request.taskId ?? "");
+			if (outcome === "accepted" && request.target === "run") activeCancellation = true;
+			emitReceipt(request.requestId, request.runId, request.target, outcome, request.taskId);
+		});
 
 		pi.registerTool({
 			name: SUBAGENT_TOOL_NAME,
@@ -227,22 +276,30 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					explicitModelTasks: requestedTasks.filter((task) => task.model !== undefined).length,
 					explicitThinkingTasks: requestedTasks.filter((task) => task.thinking !== undefined).length,
 				};
+				let runProvenance: ProvenanceTelemetry = { available: false };
+				try {
+					runProvenance = await provenance.observeExtension();
+					extensionProvenance = runProvenance;
+				} catch {
+					runProvenance = { available: false };
+					extensionProvenance = runProvenance;
+				}
 				const validation = validateGraphStructure(params);
 				if (!validation.ok) {
 					const result: SubagentRunResult = {
 						status: "failed",
 						tasks: [],
 						usage: emptyUsage(),
-						telemetry: failedTelemetry(identity, 0, 0, validation.error.code),
+						telemetry: failedTelemetry(identity, 0, 0, validation.error.code, runProvenance),
 					};
 					return finalToolResult(result, `Subagent graph rejected (${validation.error.code}): ${validation.error.message}`);
 				}
 				if (!ctx.isProjectTrusted()) {
-					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.", identity);
+					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.", identity, validation.tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
 				if (activeController) {
-					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.", identity);
+					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.", identity, validation.tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
 				const controller = new AbortController();
@@ -251,6 +308,9 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 				const runSettlement = new Promise<void>((resolve) => { settleActiveRun = resolve; });
 				activeController = controller;
 				activeRun = runSettlement;
+				activeRunId = identity.runId;
+				activeCancellation = false;
+				activePhases.clear();
 				let diagnosticRun: DiagnosticRun | undefined;
 				let runLimitExceeded = false;
 				let runLimitCheckActive = false;
@@ -289,8 +349,18 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					return finalToolResult(result, `Subagent graph rejected (prompt_too_large): Task ${oversizedPrompt.id} complete projected prompt exceeds the byte limit.`);
 				}
 				const loaded = await dependencies.loadConfig();
+				if (loaded.source) {
+					try {
+						runProvenance = await provenance.observeConfiguration(loaded.source);
+					} catch {
+						runProvenance = { available: false };
+					}
+				} else {
+					runProvenance = { available: false };
+				}
+				extensionProvenance = runProvenance;
 				if (!loaded.config) {
-					const result = aggregateFailure(tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity);
+					const result = aggregateFailure(tasks, loaded.diagnostic?.code ?? "invalid_route_config", loaded.diagnostic?.message ?? "Route configuration is unavailable.", identity, tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
 				const config = loaded.config;
@@ -303,7 +373,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						...(task.thinking === undefined ? {} : { thinking: task.thinking }),
 					});
 					if (!selected.ok) {
-						const result = aggregateFailure(tasks, selected.error.code, selected.error.message, identity);
+						const result = aggregateFailure(tasks, selected.error.code, selected.error.message, identity, tasks.length, runProvenance);
 						return finalToolResult(result);
 					}
 					routes.set(task.id, selected);
@@ -314,11 +384,24 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					diagnosticRun = await diagnosticStore.allocateRun(ctx.sessionManager.getSessionId(), identity.runId);
 				} catch (error) {
 					const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "diagnostic_session_unavailable";
-					const result = aggregateFailure(tasks, code, "Private diagnostic storage is unavailable.", identity);
+					const result = aggregateFailure(tasks, code, "Private diagnostic storage is unavailable.", identity, tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
 				const activeDiagnosticRun = diagnosticRun as DiagnosticRun;
 
+					let snapshotPeak = 0;
+					const emitSnapshot = (results: readonly TaskResult[], peakConcurrency = snapshotPeak) => {
+						const snapshot = buildSnapshot({
+							runId: identity.runId,
+							requestedTasks: identity.requestedTasks,
+							results,
+							elapsedMs: Math.max(0, Date.now() - identity.started),
+							peakConcurrency,
+							cancellationRequested: activeCancellation,
+							phases: activePhases,
+						});
+						if (snapshot) pi.events.emit(SNAPSHOT_EVENT, snapshot);
+					};
 					const scheduled = await runScheduledTasks(tasks, {
 						runId: identity.runId,
 						requestedTasks: identity.requestedTasks,
@@ -365,9 +448,14 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						},
 						onChildConcurrency(count) {
 							activeChildren = count;
+							snapshotPeak = Math.max(snapshotPeak, count);
+						},
+						onControl(control) {
+							activeControl = control;
 						},
 						onUpdate(results) {
 							const routedResults = attachResolvedRoutes(results, routes);
+							emitSnapshot(routedResults);
 							onUpdate?.({ content: [{ type: "text", text: formatProgress(routedResults) }], details: { status: "running", tasks: routedResults, usage: emptyUsage() } });
 						},
 						async execute(task, predecessors, childSignal, lifecycle) {
@@ -382,10 +470,21 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							let workspaceStarted: number | undefined;
 							try {
 								if (task.role === "worker") {
+									activeControl?.setExecutionPhase(task.id, "workspace-preparation");
+									activePhases.set(task.id, "workspace-preparation");
 									workspaceStarted = Date.now();
 									workspace = await dependencies.createWorkerWorkspace(ctx.cwd, task);
 									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
+									if (childSignal.aborted) {
+										return {
+											...failureResult(task, "aborted", "Task was cancelled before child launch.", selected.route),
+											status: "aborted",
+											telemetry: { ...emptyTaskTelemetry(), workspaceMs },
+										};
+									}
 								}
+								activeControl?.setExecutionPhase(task.id, "child-execution");
+								activePhases.set(task.id, "child-execution");
 								const root = workspace?.root ?? readOnlyRoot;
 								diagnosticSession = await activeDiagnosticRun.createTask(task.id);
 								taskDiagnosticChecks.set(task.id, { sessionPath: diagnosticSession.path, controller: taskController, checking: false });
@@ -427,6 +526,16 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 										...(workspace ? { convergence: "not-applied" as const } : {}),
 									};
 								}
+								if (!activeControl?.enterConvergence(task.id)) {
+									return {
+										...childResult,
+										status: "aborted" as const,
+										telemetry,
+										convergence: "not-applied" as const,
+										error: { code: "aborted", message: "Task was cancelled before convergence." },
+									};
+								}
+								activePhases.set(task.id, "convergence-critical");
 								const convergenceStarted = Date.now();
 								const converged = await dependencies.convergeWorkerWorkspace(workspace);
 								telemetry.convergenceMs = Math.max(0, Date.now() - convergenceStarted);
@@ -466,8 +575,17 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							admittedDependencyEdges: dependencyEdges(tasks),
 							explicitModelTasks: identity.explicitModelTasks,
 							explicitThinkingTasks: identity.explicitThinkingTasks,
+							startedAtMs: identity.started,
+							provenance: runProvenance,
+							effectiveMaxConcurrency: config.maxConcurrency,
+							effectiveRoleConcurrency: {
+								explorer: config.routes.explorer.maxConcurrency,
+								reviewer: config.routes.reviewer.maxConcurrency,
+								worker: config.routes.worker.maxConcurrency,
+							},
 						},
 					};
+					emitSnapshot(result.tasks, result.telemetry.peakConcurrency);
 					return finalToolResult(result);
 				} finally {
 					try {
@@ -476,6 +594,10 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						activeChildren = 0;
 						unlink();
 						activeController = undefined;
+						activeRunId = undefined;
+						activeControl = undefined;
+						activeCancellation = false;
+						activePhases.clear();
 						if (activeRun === runSettlement) activeRun = undefined;
 						settleActiveRun?.();
 					}
@@ -496,7 +618,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					ctx.ui.notify(`Subagents unavailable: ${loaded.diagnostic?.message ?? "invalid configuration"}`, "error");
 					return;
 				}
-				const lines = [`guidance=${loaded.config.guidance}`, `maxConcurrency=${loaded.config.maxConcurrency}`, `activeChildren=${activeChildren}`];
+				const lines = [`guidance=${loaded.config.guidance}`, `maxConcurrency=${loaded.config.maxConcurrency}`, `activeChildren=${activeChildren}`, `provenance=${extensionProvenance.available ? "available" : "unavailable"}`];
 				for (const role of ["explorer", "reviewer", "worker"] as const satisfies readonly RoleName[]) {
 					const selected = resolveRoute(role, loaded.config, routeContext(ctx));
 					lines.push(selected.ok

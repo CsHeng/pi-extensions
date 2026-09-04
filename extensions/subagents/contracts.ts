@@ -6,7 +6,8 @@ export const SUBAGENT_STATUS_COMMAND = "subagents";
 export const SUBAGENT_DEBUG_COMMAND = "subagents-debug";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
-export const TELEMETRY_SCHEMA_VERSION = 2 as const;
+export const TELEMETRY_SCHEMA_VERSION_V2 = 2 as const;
+export const TELEMETRY_SCHEMA_VERSION = 3 as const;
 
 export const HARD_LIMITS = Object.freeze({
 	maxTasks: 10,
@@ -65,6 +66,14 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type StableTaskErrorCode = (typeof STABLE_TASK_ERROR_CODES)[number];
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
 export type RunStatus = "succeeded" | "partial" | "failed" | "aborted";
+export const TASK_EXECUTION_PHASES = [
+	"queued",
+	"workspace-preparation",
+	"child-execution",
+	"convergence-critical",
+	"settled",
+] as const;
+export type TaskExecutionPhase = (typeof TASK_EXECUTION_PHASES)[number];
 export const CHILD_ACTIVITY_PHASES = [
 	"starting",
 	"running",
@@ -245,7 +254,7 @@ export interface TaskResult {
 }
 
 export interface RunTelemetryV2 {
-	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION;
+	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION_V2;
 	runId: string;
 	runDurationMs: number;
 	requestedTasks: number;
@@ -260,20 +269,41 @@ export interface RunTelemetryV2 {
 	runErrorCode?: string;
 }
 
+export type ProvenanceTelemetry =
+	| { available: false }
+	| { available: true; extensionEpoch: string; configurationEpoch: string };
+
+export interface RunTelemetryV3 extends Omit<RunTelemetryV2, "schemaVersion"> {
+	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION;
+	startedAtMs: number;
+	provenance: ProvenanceTelemetry;
+	effectiveMaxConcurrency?: number;
+	effectiveRoleConcurrency?: Record<RoleName, number>;
+}
+
 /**
- * Runtime-facing additive compatibility shape. New schema-v2 counters are
- * populated by run integration; the strict persisted shape is RunTelemetryV2.
+ * Runtime-facing additive compatibility shape. Schema-three producer fields are
+ * required on RunTelemetryV3; older in-memory builders may omit them until the
+ * integration slice fills them.
  */
-export interface RunTelemetry extends Omit<RunTelemetryV2,
+export interface RunTelemetry extends Omit<RunTelemetryV3,
 	| "requestedDependencyEdges"
 	| "admittedDependencyEdges"
 	| "explicitModelTasks"
 	| "explicitThinkingTasks"
+	| "startedAtMs"
+	| "provenance"
+	| "effectiveMaxConcurrency"
+	| "effectiveRoleConcurrency"
 > {
 	requestedDependencyEdges?: number;
 	admittedDependencyEdges?: number;
 	explicitModelTasks?: number;
 	explicitThinkingTasks?: number;
+	startedAtMs?: number;
+	provenance?: ProvenanceTelemetry;
+	effectiveMaxConcurrency?: number;
+	effectiveRoleConcurrency?: Partial<Record<RoleName, number>>;
 }
 
 export interface SubagentRunResult {

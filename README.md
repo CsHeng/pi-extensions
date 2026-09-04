@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, and `herdr-handoff` while preserving Pi's authoritative host agent loop.
+This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, `subagents-ui`, `herdr-handoff`, `session-id-footer`, and `work-timing` while preserving Pi's authoritative host agent loop.
 
 ## Plan Mode
 
@@ -30,7 +30,9 @@ Fixed roles are:
 - `reviewer`: read-only candidate findings with the same tools
 - `worker`: exact-file create or modify with `read`, `grep`, `find`, `ls`, `edit`, and `write`; no shell, deletion, or recursive delegation
 
-Loading the extension registers the tool, `/subagents` status command, `/subagents-debug` diagnostic command, and delegation guidance. It starts no child and changes no workspace until the parent calls the tool. Dispatch requires a trusted project whose cwd is a Git worktree. After that trust check, task `scope` is canonicalized against the Git toplevel so physically contained absolute or parent-traversing spellings become repository-relative paths; unsafe, inaccessible, or escaping targets fail before launch. A missing internal target remains admissible when its nearest existing ancestor is physically contained, preserving absence checks and exact create-file workers. Explorer and reviewer tasks may also declare at most eight exact absolute `externalReadRoots` that already exist inside another Git worktree. Those roots are private prompt and session evidence only: the extension does not load the target's project resources, change child cwd, or grant writes. `plan-mode` continues to expose only its original four tools, so subagent dispatch is unavailable while that profile is active.
+`subagents-ui` is an independently removable TUI consumer. It listens for bounded lifecycle snapshots, shows keyed status and a below-editor panel, opens a live inspector with `Ctrl+Alt+F` or `/subagents-ui`, and can request confirmed run or task cancellation. It never writes the working row or footer. Removing it does not change `csheng_subagents` execution.
+
+Loading the core extension registers the tool, `/subagents` status command, `/subagents-debug` diagnostic command, and delegation guidance. It starts no child and changes no workspace until the parent calls the tool. Dispatch requires a trusted project whose cwd is a Git worktree. After that trust check, task `scope` is canonicalized against the Git toplevel so physically contained absolute or parent-traversing spellings become repository-relative paths; unsafe, inaccessible, or escaping targets fail before launch. A missing internal target remains admissible when its nearest existing ancestor is physically contained, preserving absence checks and exact create-file workers. Explorer and reviewer tasks may also declare at most eight exact absolute `externalReadRoots` that already exist inside another Git worktree. Those roots are private prompt and session evidence only: the extension does not load the target's project resources, change child cwd, or grant writes. `plan-mode` continues to expose only its original four tools, so subagent dispatch is unavailable while that profile is active.
 
 Every launched child writes a private standard Pi session JSONL beneath `<agent-dir>/subagent-sessions/<parent-session>/<run>/<task>.jsonl`, normally `~/.pi/agent/subagent-sessions/...`. This sibling root stays outside Pi's ordinary `sessions/` discovery tree, so `/resume` remains focused on user sessions. `/subagents-debug` shows a bounded read-only metadata timeline and local path without exposing prompts, assistant text, tool arguments, or tool-result content to the parent model. Explicitly opening that path with `pi --session` creates an ordinary continuable Pi session, not a resumed subagent mission; worker snapshots, locks, scheduling, and convergence state are not retained.
 
@@ -58,6 +60,14 @@ Recipient write authority is cooperative. First-release recipients must occupy a
 
 See [`docs/architecture/herdr-handoff.md`](docs/architecture/herdr-handoff.md) for the request/return protocol, launch profiles, workspace evidence, cancellation, failure, redaction, and removal contracts.
 
+## Session ID Footer
+
+`session-id-footer` keeps Pi's built-in TUI footer and appends the current session UUID to its first line. Long working-directory text is truncated before the session label so the identifier remains visible when terminal width permits. The extension is inactive in RPC, JSON, and print modes and stores no state.
+
+## Work Timing
+
+`work-timing` replaces the active TUI working label with client-observed timing for the current model turn's reasoning, reasoning accumulated across the active user interaction, and total elapsed time through final settlement. Durations use carried `h`, `m`, and `s` units, such as `1h 1m 1s`. On `agent_settled`, the loading row disappears and a TUI-only `Worked for 18s • reasoning 7s (39%)` entry is persisted in the session without entering model context; expanded rendering also shows last-turn reasoning. RPC, JSON, and print modes do not run or persist this display timer.
+
 ## Package
 
 The private package exposes exactly:
@@ -68,6 +78,9 @@ extensions/multi-skill-mentions/index.ts
 extensions/fast-gpt/index.ts
 extensions/subagents/index.ts
 extensions/herdr-handoff/index.ts
+extensions/session-id-footer/index.ts
+extensions/work-timing/index.ts
+extensions/subagents-ui/index.ts
 ```
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.
@@ -83,7 +96,7 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt payload boundary is owned by deterministic unit tests and adds no probe command. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
+Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt, session-footer, and work-timing boundaries are owned by deterministic unit tests and add no probe commands. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
 The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 
@@ -94,7 +107,7 @@ CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
 
 The first command temporary-loads the complete package with ordinary global extensions disabled. The second verifies the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `npm test`.
 
-Maintainers can evaluate an explicitly selected persisted run with `.agents/skills/evaluate-subagent-runs/`. Metric schema version two adds requested/admitted tasks, singleton calls, hard dependency edges, explicit-route attribution, and zero-change workers while reading older telemetry with explicit unavailable evidence. The extractor remains redacted and does not retain raw model selectors, prompts, task IDs, child output, paths, credentials, or external content.
+Maintainers can evaluate an explicitly selected persisted run or an explicit current-epoch scan with `.agents/skills/evaluate-subagent-runs/`. Metric schema version three adds selection mode, current-epoch filtering, and schema-three start/provenance fields while reading older telemetry with explicit unavailable evidence. The extractor remains redacted and does not retain raw model selectors, prompts, task IDs, child output, paths, credentials, epoch identifiers, or external content.
 
 ## Safety
 

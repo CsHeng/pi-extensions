@@ -265,3 +265,100 @@ test("abort stops pending work and forwards one signal to running tasks", async 
 	assert.equal(observed, 1);
 	assert.deepEqual(result.tasks.map((item) => item.status), ["aborted", "aborted", "aborted"]);
 });
+
+test("task cancellation aborts pending work, blocks dependents, and leaves unrelated tasks running", async () => {
+	const tasks = graph([
+		{ id: "hold", role: "explorer", objective: "hold", scope: ["."] },
+		{ id: "pending", role: "explorer", objective: "pending", scope: ["."] },
+		{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["pending"] },
+	]);
+	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let release: (() => void) | undefined;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const run = runScheduledTasks(tasks, {
+		maxConcurrency: 1,
+		onControl(value) { control = value; },
+		async execute(task, _predecessors, signal) {
+			if (task.id === "hold") {
+				await gate;
+				return success(task);
+			}
+			await new Promise<void>((resolve) => {
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			return { ...success(task), status: "aborted", error: { code: "aborted", message: "aborted" } };
+		},
+	});
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(control?.cancelTask("pending"), "accepted");
+	assert.equal(control?.cancelTask("missing"), "unknown-task");
+	release?.();
+	const result = await run;
+	assert.deepEqual(result.tasks.map((item) => [item.id, item.status]), [
+		["hold", "succeeded"],
+		["pending", "aborted"],
+		["blocked", "blocked"],
+	]);
+	assert.equal(result.status, "aborted");
+});
+
+test("enterConvergence linearizes task and run cancellation", async () => {
+	const tasks = graph([
+		{ id: "worker", role: "worker", objective: "w", scope: ["src"], writePaths: ["src/a.ts"] },
+		{ id: "other", role: "explorer", objective: "o", scope: ["."] },
+	]);
+	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let otherSignal: AbortSignal | undefined;
+	let releaseOther: (() => void) | undefined;
+	const otherGate = new Promise<void>((resolve) => { releaseOther = resolve; });
+	let afterEnter: (() => void) | undefined;
+	const entered = new Promise<void>((resolve) => { afterEnter = resolve; });
+	const run = runScheduledTasks(tasks, {
+		onControl(value) { control = value; },
+		async execute(task, _predecessors, signal) {
+			if (task.id === "other") {
+				otherSignal = signal;
+				await otherGate;
+				return signal.aborted
+					? { ...success(task), status: "aborted", error: { code: "aborted", message: "aborted" } }
+					: success(task);
+			}
+			assert.equal(control?.enterConvergence("worker"), true);
+			assert.equal(control?.cancelTask("worker"), "too-late");
+			afterEnter?.();
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			return success(task);
+		},
+	});
+	await entered;
+	assert.equal(control?.cancelRun(), "accepted");
+	assert.equal(otherSignal?.aborted, true);
+	releaseOther?.();
+	const result = await run;
+	assert.equal(result.tasks.find((task) => task.id === "worker")?.status, "succeeded");
+	assert.equal(result.tasks.find((task) => task.id === "other")?.status, "aborted");
+	assert.equal(result.status, "aborted");
+});
+
+test("task cancellation before enterConvergence wins and prevents the critical section", async () => {
+	const tasks = graph([{ id: "worker", role: "worker", objective: "w", scope: ["src"], writePaths: ["src/a.ts"] }]);
+	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let ready: (() => void) | undefined;
+	const started = new Promise<void>((resolve) => { ready = resolve; });
+	const run = runScheduledTasks(tasks, {
+		onControl(value) { control = value; },
+		async execute(task, _predecessors, signal) {
+			ready?.();
+			await new Promise<void>((resolve) => {
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			assert.equal(control?.enterConvergence("worker"), false);
+			return { ...success(task), status: "aborted", error: { code: "aborted", message: "aborted" } };
+		},
+	});
+	await started;
+	assert.equal(control?.cancelTask("worker"), "accepted");
+	const result = await run;
+	assert.equal(result.status, "aborted");
+	assert.equal(result.tasks[0]?.status, "aborted");
+});
