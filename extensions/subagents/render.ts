@@ -25,6 +25,16 @@ export function formatDuration(durationMs: number): string {
 	return `${minutes}m ${seconds.toFixed(1)}s`;
 }
 
+export function formatClock(durationMs: number): string {
+	const totalSeconds = Math.floor(Math.max(0, durationMs) / 1_000);
+	const hours = Math.floor(totalSeconds / 3_600);
+	const minutes = Math.floor((totalSeconds % 3_600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
 function profileSummary(task: TaskResult): string {
 	if (!task.route) return "";
 	const profiles: string[] = [];
@@ -75,8 +85,10 @@ export function boundToolContent(content: string): string {
 
 export function formatProgress(results: readonly TaskResult[]): string {
 	const running = results.filter((result) => result.status === "running").length;
-	const settled = results.filter((result) => result.status !== "pending" && result.status !== "running").length;
-	const lines = [`Subagents: ${settled}/${results.length} settled, ${running} running`];
+	const finished = results.filter((result) => result.status !== "pending" && result.status !== "running").length;
+	const turns = results.reduce((total, result) => total + (result.activity?.assistantTurns ?? result.usage.turns), 0);
+	const elapsedMs = results.reduce((longest, result) => Math.max(longest, result.activity?.elapsedMs ?? result.durationMs), 0);
+	const lines = [`Subagents ${running}/${results.length} running, ${finished} finished · ${turns} turns · ${formatClock(elapsedMs)}`];
 	for (const result of results) {
 		if (result.status === "pending") continue;
 		if (result.status === "running" && result.activity) {

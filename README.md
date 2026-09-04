@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, `subagents-ui`, `herdr-handoff`, `session-id-footer`, and `work-timing` while preserving Pi's authoritative host agent loop.
+This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, `herdr-handoff`, `session-id-footer`, and `work-timing` while preserving Pi's authoritative host agent loop. `subagents-ui` remains available in source but is not loaded by default.
 
 ## Plan Mode
 
@@ -30,7 +30,7 @@ Fixed roles are:
 - `reviewer`: read-only candidate findings with the same tools
 - `worker`: exact-file create or modify with `read`, `grep`, `find`, `ls`, `edit`, and `write`; no shell, deletion, or recursive delegation
 
-`subagents-ui` is an independently removable TUI consumer. It listens for bounded lifecycle snapshots, shows keyed status and a below-editor panel, opens a live inspector with `Ctrl+Alt+F` or `/subagents-ui`, and can request confirmed run or task cancellation. It never writes the working row or footer. Removing it does not change `csheng_subagents` execution.
+Live tool progress uses `Subagents {running}/{total} running, {finished} finished · {turns} turns · {clock}`. `subagents-ui` is an optional TUI consumer for keyed status, a below-editor panel, and `/subagents-ui` inspection; it is not in the default package load list.
 
 Loading the core extension registers the tool, `/subagents` status command, `/subagents-debug` diagnostic command, and delegation guidance. It starts no child and changes no workspace until the parent calls the tool. Dispatch requires a trusted project whose cwd is a Git worktree. After that trust check, task `scope` is canonicalized against the Git toplevel so physically contained absolute or parent-traversing spellings become repository-relative paths; unsafe, inaccessible, or escaping targets fail before launch. A missing internal target remains admissible when its nearest existing ancestor is physically contained, preserving absence checks and exact create-file workers. Explorer and reviewer tasks may also declare at most eight exact absolute `externalReadRoots` that already exist inside another Git worktree. Those roots are private prompt and session evidence only: the extension does not load the target's project resources, change child cwd, or grant writes. `plan-mode` continues to expose only its original four tools, so subagent dispatch is unavailable while that profile is active.
 
@@ -80,7 +80,6 @@ extensions/subagents/index.ts
 extensions/herdr-handoff/index.ts
 extensions/session-id-footer/index.ts
 extensions/work-timing/index.ts
-extensions/subagents-ui/index.ts
 ```
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.

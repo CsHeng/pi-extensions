@@ -4,7 +4,7 @@
 
 This repository is the authored source for small local Pi extensions. Extensions may change the host loop's active tools, prompt context, editor completion behavior, provider request payload, or execute one bounded foreground delegation call, but must not replace the coding agent with a second lifecycle engine.
 
-The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, `fast-gpt` as a branch-local request profile, `subagents` as a bounded foreground delegation DAG executor with retained diagnostic session evidence, `subagents-ui` as a TUI-only snapshot and cancellation consumer, `herdr-handoff` as an explicit-user-only bridge to one persistent Herdr-managed full agent, `session-id-footer` as a TUI-only decoration of Pi's built-in footer, and `work-timing` as TUI-only timing feedback. Keep each extension's behavior, state, tests, and removal semantics independent.
+The package exposes `plan-mode` as a reversible loop profile, `multi-skill-mentions` as an explicit prompt expansion mechanism, `fast-gpt` as a branch-local request profile, `subagents` as a bounded foreground delegation DAG executor with retained diagnostic session evidence, `herdr-handoff` as an explicit-user-only bridge to one persistent Herdr-managed full agent, `session-id-footer` as a TUI-only decoration of Pi's built-in footer, and `work-timing` as TUI-only timing feedback. Keep each extension's behavior, state, tests, and removal semantics independent. `subagents-ui` remains in source as an optional TUI consumer and is not in the default package load list.
 
 ## Layout
 
@@ -12,7 +12,7 @@ The package exposes `plan-mode` as a reversible loop profile, `multi-skill-menti
 - `extensions/multi-skill-mentions/`: TUI completion and input expansion for loaded skills
 - `extensions/fast-gpt/`: branch-local OpenAI Responses service-tier request profile
 - `extensions/subagents/`: fixed child roles, routing, scheduling, subprocess, path guard, writable snapshots, and convergence
-- `extensions/subagents-ui/`: TUI-only lifecycle status, inspector, and confirmed cancellation requests
+- `extensions/subagents-ui/`: optional TUI-only lifecycle status, inspector, and confirmed cancellation requests; not loaded by default
 - `extensions/herdr-handoff/`: explicit-user-only Herdr CLI adapter, launch profiles, isolated-worktree evidence, and bounded continuations
 - `extensions/session-id-footer/`: TUI footer decoration that keeps the current session UUID visible
 - `extensions/work-timing/`: live request and reasoning timing with durable TUI-only completion entries

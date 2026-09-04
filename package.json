@@ -47,8 +47,7 @@
       "./extensions/subagents/index.ts",
       "./extensions/herdr-handoff/index.ts",
       "./extensions/session-id-footer/index.ts",
-      "./extensions/work-timing/index.ts",
-      "./extensions/subagents-ui/index.ts"
+      "./extensions/work-timing/index.ts"
     ]
   }
 }

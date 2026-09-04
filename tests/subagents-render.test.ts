@@ -7,7 +7,7 @@ import {
 	type SubagentRunResult,
 	type TaskResult,
 } from "../extensions/subagents/contracts.ts";
-import { boundToolContent, formatDuration, formatProgress, formatRunResult } from "../extensions/subagents/render.ts";
+import { boundToolContent, formatClock, formatDuration, formatProgress, formatRunResult } from "../extensions/subagents/render.ts";
 
 function task(index: number, output: string): TaskResult {
 	return {
@@ -66,6 +66,10 @@ test("duration rendering is deterministic and compact", () => {
 	assert.equal(formatDuration(999), "999ms");
 	assert.equal(formatDuration(1_000), "1.0s");
 	assert.equal(formatDuration(61_500), "1m 1.5s");
+	assert.equal(formatClock(0), "0s");
+	assert.equal(formatClock(5_000), "5s");
+	assert.equal(formatClock(61_500), "1m 1s");
+	assert.equal(formatClock(3_661_000), "1h 1m 1s");
 });
 
 test("aggregate rendering obeys Pi byte and line limits while retaining every task summary", () => {
@@ -111,7 +115,7 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 		},
 	}];
 	const progress = formatProgress(results);
-	assert.match(progress, /1\/2 settled, 1 running/);
+	assert.match(progress, /Subagents 1\/2 running, 1 finished · 3 turns · 5s/);
 	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
 	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);
 	assert.doesNotMatch(progress, /subagent-sessions|private|jsonl/);

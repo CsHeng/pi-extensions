@@ -1,6 +1,6 @@
 # Subagents UI
 
-`extensions/subagents-ui/index.ts` is a TUI-only consumer of bounded `csheng_subagents` lifecycle snapshots. It does not execute children, own cancellation settlement, or write the working row or footer.
+`extensions/subagents-ui/index.ts` is a TUI-only consumer of bounded `csheng_subagents` lifecycle snapshots. It does not execute children, own cancellation settlement, or write the working row or footer. The default package load list omits this entry; live progress belongs on the `csheng_subagents` tool row.
 
 ## Surfaces
 
