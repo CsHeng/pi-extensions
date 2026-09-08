@@ -1,4 +1,4 @@
-import { emptyUsage, type ChildActivity, type UsageTotals } from "./contracts.ts";
+import { HARD_LIMITS, emptyUsage, type ChildActivity, type UsageTotals } from "./contracts.ts";
 
 const KNOWN_EVENT_TYPES = new Set([
 	"session", "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end",
@@ -10,6 +10,8 @@ const KNOWN_STOP_REASONS = new Set(["stop", "length", "toolUse", "error", "abort
 interface AssistantPart {
 	type?: string;
 	text?: string;
+	id?: string;
+	name?: string;
 }
 
 interface AssistantMessage {
@@ -33,6 +35,7 @@ export interface ParsedChildStream {
 	errorMessage?: string;
 	messageCount: number;
 	malformedLines: number;
+	reportComplete: boolean;
 }
 
 export interface ProtocolParserOptions {
@@ -43,6 +46,10 @@ export interface ProtocolParserOptions {
 
 export class JsonlProtocolParser {
 	private buffer = "";
+	private discardingLine = false;
+	private assistantOpen = false;
+	private compactionOpen = false;
+	private protocolInvalid = false;
 	private finalOutput = "";
 	private readonly totals = emptyUsage();
 	private stopReason: string | undefined;
@@ -63,7 +70,7 @@ export class JsonlProtocolParser {
 	private readonly activeToolCalls = new Map<string, string>();
 
 	constructor(options: ProtocolParserOptions = {}) {
-		this.now = options.now ?? Date.now;
+		this.now = options.now ?? (() => performance.now());
 		this.startedAt = this.now();
 		this.lastActivityAt = this.startedAt;
 		this.allowedTools = options.allowedTools ? new Set(options.allowedTools) : undefined;
@@ -74,11 +81,19 @@ export class JsonlProtocolParser {
 		this.buffer += chunk;
 		const lines = this.buffer.split("\n");
 		this.buffer = lines.pop() ?? "";
-		for (const line of lines) this.processLine(line);
+		for (const line of lines) {
+			if (this.discardingLine) this.discardingLine = false;
+			else this.processLine(line);
+		}
+		if (Buffer.byteLength(this.buffer) > HARD_LIMITS.maxProtocolLineBytes) {
+			this.buffer = "";
+			this.discardingLine = true;
+			this.protocolInvalid = true;
+		}
 	}
 
 	finish(): ParsedChildStream {
-		if (this.buffer.trim()) this.processLine(this.buffer);
+		if (this.buffer.trim() || this.discardingLine) this.protocolInvalid = true;
 		this.buffer = "";
 		return {
 			output: this.finalOutput,
@@ -87,11 +102,14 @@ export class JsonlProtocolParser {
 			...(this.errorMessage === undefined ? {} : { errorMessage: this.errorMessage }),
 			messageCount: this.messageCount,
 			malformedLines: this.malformedLines,
+			reportComplete: !this.protocolInvalid && this.malformedLines === 0 && !this.assistantOpen && !this.compactionOpen &&
+				this.agentSettledObserved && this.stopReason === "stop" && !this.errorMessage &&
+				this.activeToolCalls.size === 0 && this.finalOutput.trim().length > 0,
 		};
 	}
 
 	snapshot(at = this.now()): Readonly<ChildActivity> {
-		const activeTools = [...new Set(this.activeToolCalls.values())].sort();
+		const activeTools = [...new Set([...this.activeToolCalls.values()].filter((tool) => !this.allowedTools || this.allowedTools.has(tool)))].sort();
 		return Object.freeze({
 			phase: this.phase,
 			assistantTurns: this.messageCount,
@@ -109,6 +127,10 @@ export class JsonlProtocolParser {
 
 	private processLine(line: string): void {
 		if (!line.trim()) return;
+		if (Buffer.byteLength(line) > HARD_LIMITS.maxProtocolLineBytes) {
+			this.protocolInvalid = true;
+			return;
+		}
 		let event: unknown;
 		try {
 			event = JSON.parse(line) as unknown;
@@ -116,7 +138,7 @@ export class JsonlProtocolParser {
 			this.malformedLines += 1;
 			return;
 		}
-		if (!isRecord(event)) return;
+		if (!isRecord(event)) { this.protocolInvalid = true; return; }
 		const observedAt = this.now();
 		this.lastActivityAt = observedAt;
 		const eventType = typeof event.type === "string" && KNOWN_EVENT_TYPES.has(event.type) ? event.type : "unknown";
@@ -126,8 +148,46 @@ export class JsonlProtocolParser {
 	}
 
 	private projectEvent(eventType: string, event: Record<string, unknown>): void {
-		if (eventType === "agent_start") {
+		if (eventType === "message_update") {
+			// Native print JSON carries a delta, not a full message envelope.
+			if (!isRecord(event.assistantMessageEvent) || typeof event.assistantMessageEvent.type !== "string" || !event.assistantMessageEvent.type) this.protocolInvalid = true;
+			this.assistantOpen = true;
+			this.finalOutput = "";
+			this.agentSettledObserved = false;
 			this.phase = "running";
+			return;
+		}
+		if ((eventType === "message_start" || eventType === "message_end") &&
+			(!isRecord(event.message) || typeof event.message.role !== "string" || !event.message.role)) {
+			this.protocolInvalid = true;
+			this.finalOutput = "";
+			this.agentSettledObserved = false;
+			return;
+		}
+		if (eventType === "compaction_start") {
+			if (this.compactionOpen || typeof event.reason !== "string" || !["manual", "threshold", "overflow"].includes(event.reason)) this.protocolInvalid = true;
+			this.compactionOpen = true;
+			this.agentSettledObserved = false;
+			this.phase = "running";
+		} else if (eventType === "compaction_end") {
+			const failed = event.aborted === true || typeof event.errorMessage === "string" && event.errorMessage.length > 0;
+			const resultValid = isRecord(event.result) && typeof event.result.summary === "string" && event.result.summary.trim().length > 0 &&
+				typeof event.result.firstKeptEntryId === "string" && event.result.firstKeptEntryId.length > 0 && typeof event.result.tokensBefore === "number" && Number.isFinite(event.result.tokensBefore) && event.result.tokensBefore >= 0;
+			if ((event.errorMessage !== undefined && typeof event.errorMessage !== "string") || (!this.compactionOpen && !failed) || typeof event.reason !== "string" || !["manual", "threshold", "overflow"].includes(event.reason) || typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean" || (!failed && !resultValid)) this.protocolInvalid = true;
+			this.compactionOpen = false;
+			this.agentSettledObserved = false;
+			// Quiet native history maintenance does not replace a completed answer.
+			// Failed maintenance or a promised retry cannot reuse that answer.
+			if (failed || event.willRetry) { this.finalOutput = ""; this.stopReason = undefined; }
+		} else if (eventType === "agent_start") {
+			this.agentSettledObserved = false;
+			this.finalOutput = "";
+			this.stopReason = undefined;
+			this.phase = "running";
+		} else if (eventType === "message_start" && isRecord(event.message) && event.message.role === "assistant") {
+			this.assistantOpen = true;
+			this.agentSettledObserved = false;
+			this.finalOutput = "";
 		} else if (eventType === "agent_end") {
 			this.agentEndObserved = true;
 			this.phase = "settling";
@@ -137,11 +197,17 @@ export class JsonlProtocolParser {
 		} else if (eventType === "tool_execution_start") {
 			const id = stringField(event, "toolCallId");
 			const tool = stringField(event, "toolName");
-			if (id && tool && (!this.allowedTools || this.allowedTools.has(tool))) this.activeToolCalls.set(id, tool);
+			if (id && tool) this.trackTool(id, tool);
+			else this.protocolInvalid = true;
+			this.agentSettledObserved = false;
+			this.finalOutput = "";
 			if (!this.agentSettledObserved) this.phase = "running";
 		} else if (eventType === "tool_execution_end") {
+			this.agentSettledObserved = false;
+			this.finalOutput = "";
 			const id = stringField(event, "toolCallId");
 			if (id) this.activeToolCalls.delete(id);
+			else this.protocolInvalid = true;
 			if (event.isError === true) {
 				this.errorObserved = true;
 				this.errorCount += 1;
@@ -151,7 +217,24 @@ export class JsonlProtocolParser {
 
 		if (eventType !== "message_end" || !isRecord(event.message)) return;
 		const message = event.message as AssistantMessage;
-		if (message.role !== "assistant") return;
+		if (message.role !== "assistant") {
+			this.finalOutput = "";
+			this.agentSettledObserved = false;
+			return;
+		}
+		if (!Array.isArray(message.content) || message.content.some((part) => !isRecord(part))) {
+			this.protocolInvalid = true;
+			this.finalOutput = "";
+			return;
+		}
+		this.assistantOpen = false;
+		this.agentSettledObserved = false;
+		for (const part of message.content ?? []) {
+			if (part.type === "toolCall") {
+				if (typeof part.id === "string" && typeof part.name === "string") this.trackTool(part.id, part.name);
+				else this.protocolInvalid = true;
+			}
+		}
 		this.messageCount += 1;
 		this.totals.turns += 1;
 		this.totals.input += finiteNumber(message.usage?.input);
@@ -159,8 +242,7 @@ export class JsonlProtocolParser {
 		this.totals.cacheRead += finiteNumber(message.usage?.cacheRead);
 		this.totals.cacheWrite += finiteNumber(message.usage?.cacheWrite);
 		this.totals.cost += finiteNumber(message.usage?.cost?.total);
-		const text = message.content?.find((part) => part.type === "text" && typeof part.text === "string")?.text;
-		if (text !== undefined) this.finalOutput = text;
+		this.finalOutput = message.content?.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n\n") ?? "";
 		this.stopReason = typeof message.stopReason === "string" && KNOWN_STOP_REASONS.has(message.stopReason) ? message.stopReason : undefined;
 		this.errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
 		if (message.stopReason === "error" || typeof message.errorMessage === "string") {
@@ -168,6 +250,13 @@ export class JsonlProtocolParser {
 			this.errorCount += 1;
 		}
 		if (!this.agentSettledObserved) this.phase = "running";
+	}
+	private trackTool(id: string, tool: string): void {
+		if (this.activeToolCalls.size >= HARD_LIMITS.maxPendingToolCalls && !this.activeToolCalls.has(id)) {
+			this.protocolInvalid = true;
+			return;
+		}
+		this.activeToolCalls.set(id, tool);
 	}
 }
 

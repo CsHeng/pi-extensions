@@ -7,7 +7,17 @@ import {
 	type SubagentRunResult,
 	type TaskResult,
 } from "../extensions/subagents/contracts.ts";
-import { boundToolContent, formatClock, formatDuration, formatProgress, formatRunResult } from "../extensions/subagents/render.ts";
+import {
+	boundToolContent,
+	formatClock,
+	formatDuration,
+	formatManagedContent,
+	formatManagedResult,
+	formatProgress,
+	formatRunResult,
+} from "../extensions/subagents/render.ts";
+import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
+import type { NativeObservation } from "../extensions/subagents/observability.ts";
 
 function task(index: number, output: string): TaskResult {
 	return {
@@ -114,9 +124,164 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 			inactiveForMs: 2_000,
 		},
 	}];
-	const progress = formatProgress(results);
-	assert.match(progress, /Subagents 1\/2 running, 1 finished · 3 turns · 5s/);
+	const progress = formatProgress(results, 12_000);
+	assert.match(progress, /Subagents 1\/2 running, 1 finished · 3 turns · 12s/);
+	assert.match(formatProgress(results), /3 turns · unknown/);
 	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
 	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);
 	assert.doesNotMatch(progress, /subagent-sessions|private|jsonl/);
+});
+
+function emptyObservation(overrides: Partial<NativeObservation> = {}): NativeObservation {
+	return {
+		available: true,
+		ownerSessionId: "sess1",
+		entries: [{
+			ownerSessionId: "sess1",
+			entryId: "entry1",
+			kind: "assistant",
+			modelKey: null,
+			usage: { input: 0, output: 1, cacheRead: null, cacheWrite: 0, totalTokens: null, cost: 0 },
+		}],
+		commands: [{
+			ownerSessionId: "sess1",
+			entryId: "cmd1",
+			startMs: 1,
+			endMs: 2,
+			exitCode: 0,
+			status: "succeeded",
+			sourceBeforeKey: null,
+			sourceAfterKey: null,
+		}],
+		usage: { input: 0, output: 1, cacheRead: null, cacheWrite: 0, totalTokens: null, cost: 0 },
+		contextWindow: null,
+		toolNames: null,
+		capabilityKey: null,
+		commandCoverage: "complete",
+		...overrides,
+	};
+}
+
+function sessionView(index: number, overrides: Partial<SessionView> = {}): SessionView {
+	return {
+		handle: `handle-${index}`,
+		role: index % 3 === 0 ? "worker" : index % 2 === 0 ? "reviewer" : "explorer",
+		episode: index,
+		state: "idle",
+		reportComplete: index !== 1,
+		result: {
+			...task(index, `report-${index}`),
+			observation: emptyObservation(),
+		},
+		candidate: {
+			id: `cand-${index}`,
+			episode: index,
+			status: "applied",
+			changedPaths: ["a.ts"],
+			appliedPaths: ["a.ts"],
+		},
+		...overrides,
+	};
+}
+
+function managed(sessions: SessionView[], extra: Partial<SessionActionResult> = {}): SessionActionResult {
+	return { schemaVersion: 1, action: "inspect", status: "succeeded", sessions, ...extra };
+}
+
+test("managed model content is parseable JSON with headers for ten huge reports", () => {
+	const huge = `${"界".repeat(20_000)}\"\n\u0001 quote`;
+	const sessions = Array.from({ length: 10 }, (_, index) => sessionView(index, {
+		result: { ...task(index, huge), observation: emptyObservation(), stopReason: "stop", error: { code: "incomplete_report", message: "x" } },
+	}));
+	const content = formatManagedContent(managed(sessions, { error: { code: "partial_failure" } }));
+	assert.ok(Buffer.byteLength(content, "utf8") <= DEFAULT_MAX_BYTES);
+	const parsed = JSON.parse(content) as SessionActionResult & {
+		parentAcceptance: string;
+		sessions: Array<{
+			handle: string;
+			result?: { report?: string; reportTruncated?: boolean; id: string; status: string; stopReason?: string; error?: { code: string } };
+			candidate?: { id: string; status: string; changedCount: number; appliedCount: number };
+			nativeUsage: { recorded: boolean; input: number | null };
+		}>;
+	};
+	assert.equal(parsed.schemaVersion, 1);
+	assert.equal(parsed.action, "inspect");
+	assert.equal(parsed.status, "succeeded");
+	assert.equal(parsed.error?.code, "partial_failure");
+	assert.equal(parsed.parentAcceptance, "unavailable");
+	assert.equal(parsed.sessions.length, 10);
+	for (let index = 0; index < 10; index += 1) {
+		const row = parsed.sessions[index]!;
+		assert.equal(row.handle, `handle-${index}`);
+		assert.equal(row.result?.id, `task-${index}`);
+		assert.equal(row.result?.status, index === 8 ? "failed" : "succeeded");
+		assert.equal(row.result?.stopReason, "stop");
+		assert.equal(row.result?.error?.code, "incomplete_report");
+		assert.equal(row.candidate?.id, `cand-${index}`);
+		assert.equal(row.candidate?.status, "applied");
+		assert.equal(row.candidate?.changedCount, 1);
+		assert.equal(row.result?.reportTruncated, true);
+		assert.equal(row.nativeUsage.recorded, true);
+		assert.equal(row.nativeUsage.input, 0);
+	}
+	assert.doesNotMatch(content, /"entries"|"commands"|"timing"/);
+	const expanded = formatManagedResult(managed(sessions), true);
+	assert.ok(Buffer.byteLength(expanded) <= DEFAULT_MAX_BYTES);
+	assert.ok(expanded.split("\n").length <= DEFAULT_MAX_LINES);
+	for (const session of sessions) { assert.ok(expanded.includes(session.handle)); assert.ok(expanded.includes(session.candidate!.id)); }
+});
+
+test("managed content preserves zero native metrics and does not infer protocol usage", () => {
+	const view = sessionView(0, {
+		result: {
+			...task(0, "ok"),
+			usage: { input: 99, output: 99, cacheRead: 99, cacheWrite: 99, cost: 9, turns: 9 },
+			observation: emptyObservation({ available: false, usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null } }),
+		},
+	});
+	const parsed = JSON.parse(formatManagedContent(managed([view]))) as { sessions: Array<{ nativeUsage: Record<string, unknown> }> };
+	assert.equal(parsed.sessions[0]!.nativeUsage.recorded, false);
+	assert.equal(parsed.sessions[0]!.nativeUsage.input, null);
+	const zero = sessionView(1, {
+		result: { ...task(1, "ok"), observation: emptyObservation({ usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 } }) },
+	});
+	const zeroParsed = JSON.parse(formatManagedContent(managed([zero]))) as { sessions: Array<{ nativeUsage: { recorded: boolean; input: number } }> };
+	assert.equal(zeroParsed.sessions[0]!.nativeUsage.recorded, true);
+	assert.equal(zeroParsed.sessions[0]!.nativeUsage.input, 0);
+});
+
+test("managed TUI separates request, stored state, episode outcome, and never infers acceptance", () => {
+	const stale = sessionView(0, {
+		state: "idle",
+		requestError: { code: "stale_request" },
+		result: { ...task(0, "committed-output"), status: "succeeded" },
+		candidate: { id: "cand-0", episode: 0, status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+	});
+	const text = formatManagedResult(managed([stale], { status: "failed", error: { code: "stale_request" } }), false);
+	assert.match(text, /Managed session inspect: failed/);
+	assert.match(text, /request error=stale_request/);
+	assert.match(text, /idle \(no running process\)/);
+	assert.match(text, /episode-outcome=succeeded/);
+	assert.match(text, /requestError=stale_request/);
+	assert.match(text, /candidate=cand-0 apply=applied/);
+	assert.match(text, /parent acceptance unavailable/);
+	assert.doesNotMatch(text, /committed-output|background agent|bash |sourceBefore|environment/);
+	assert.doesNotMatch(formatManagedResult(managed([stale]), false), /--- \[handle-0\] report ---/);
+	const expanded = formatManagedResult(managed([stale]), true);
+	assert.match(expanded, /committed-output/);
+});
+
+test("managed TUI does not leak command rows and keeps candidate ids under bounds", () => {
+	const view = sessionView(2, {
+		handle: `h-${"x".repeat(400)}`,
+		candidate: { id: `c-${"y".repeat(400)}`, episode: 2, status: "not-applied", changedPaths: [], appliedPaths: [] },
+		result: { ...task(2, "ok"), observation: emptyObservation() },
+	});
+	const text = formatManagedResult(managed([view]));
+	assert.match(text, /candidate=c-y+/);
+	assert.doesNotMatch(text, /cmd1|sourceBeforeKey|environmentAfterKey|assistant turns/);
+	const content = formatManagedContent(managed([view]));
+	const parsed = JSON.parse(content) as { sessions: Array<{ handle: string; candidate: { id: string } }> };
+	assert.ok(parsed.sessions[0]!.handle.startsWith("h-x"));
+	assert.ok(parsed.sessions[0]!.candidate.id.startsWith("c-y"));
 });

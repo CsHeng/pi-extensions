@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
@@ -45,6 +45,23 @@ test("path policy rejects lexical and symlink escape", async (t) => {
 	await symlink(join(root, "src", "allowed.ts"), join(root, "src", "write-link"));
 	const linkedManifest = { ...manifest, writePaths: [...manifest.writePaths, join(root, "src", "write-link")] };
 	assert.match((await authorizePath(linkedManifest, "write", "src/write-link")).reason ?? "", /symlinks/);
+});
+
+test("replacing a canonical root ancestor is fatal even when the replacement root is a directory", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-root-identity-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const parent = join(base, "parent");
+	const root = join(parent, "repo");
+	await mkdir(root, { recursive: true });
+	const manifest: ChildCapabilityManifest = { version: 1, root, role: "worker", readRoots: [root], writePaths: [join(root, "file")] };
+	await mkdir(join(base, "outside", "repo"), { recursive: true });
+	await rename(parent, join(base, "preserved"));
+	await symlink(join(base, "outside"), parent);
+	for (const tool of ["read", "write"]) {
+		const result = await authorizePath(manifest, tool, "file");
+		assert.equal(result.allowed, false);
+		assert.equal(result.fatal, true);
+	}
 });
 
 test("read-only role cannot gain write capability", async (t) => {
@@ -234,20 +251,46 @@ test("recursive grep and find reject descendant symlink escape from internal and
 	assert.equal((await authorizePath(explorer, "ls", externalDir)).allowed, true);
 });
 
+test("a safe rejection permits correction but lost root terminates subsequent calls", async (t) => {
+	const { root, manifest } = await fixture(t);
+	const file = join(root, "capability.json");
+	await writeFile(file, JSON.stringify(manifest), { mode: 0o600 });
+	const originalMarker = process.env[CHILD_MARKER_ENV];
+	const originalCapability = process.env[CHILD_CAPABILITY_ENV];
+	try {
+		process.env[CHILD_MARKER_ENV] = "1";
+		process.env[CHILD_CAPABILITY_ENV] = file;
+		let handler: (event: any) => Promise<any> = async () => undefined;
+		await childGuard({ on(_name: string, value: typeof handler) { handler = value; } } as never);
+		const rejected = await handler({ toolName: "write", input: { path: "src/other.ts" } });
+		assert.equal(rejected.block, true);
+		assert.equal(rejected.terminate, false);
+		assert.equal(await handler({ toolName: "write", input: { path: "src/allowed.ts" } }), undefined);
+		await rm(root, { recursive: true });
+		assert.equal((await handler({ toolName: "read", input: { path: "src/allowed.ts" } })).terminate, true);
+	} finally {
+		if (originalMarker === undefined) delete process.env[CHILD_MARKER_ENV];
+		else process.env[CHILD_MARKER_ENV] = originalMarker;
+		if (originalCapability === undefined) delete process.env[CHILD_CAPABILITY_ENV];
+		else process.env[CHILD_CAPABILITY_ENV] = originalCapability;
+	}
+});
+
 test("guard is inert outside a marked child and blocks invalid marked children", async () => {
 	const originalMarker = process.env[CHILD_MARKER_ENV];
 	const originalCapability = process.env[CHILD_CAPABILITY_ENV];
 	try {
 		delete process.env[CHILD_MARKER_ENV];
-		const handlers: Array<(event: any) => unknown> = [];
-		await childGuard({ on(_name: string, handler: (event: any) => unknown) { handlers.push(handler); } } as never);
-		assert.equal(handlers.length, 0);
+		const handlers = new Map<string, (event: any) => unknown>();
+		const pi = { on(name: string, handler: (event: any) => unknown) { handlers.set(name, handler); } };
+		await childGuard(pi as never);
+		assert.equal(handlers.size, 0);
 
 		process.env[CHILD_MARKER_ENV] = "1";
 		delete process.env[CHILD_CAPABILITY_ENV];
-		await childGuard({ on(_name: string, handler: (event: any) => unknown) { handlers.push(handler); } } as never);
-		assert.equal(handlers.length, 1);
-		assert.deepEqual(await handlers[0]?.({ toolName: "read", input: { path: "." } }), {
+		await childGuard(pi as never);
+		assert.ok(handlers.has("tool_call"));
+		assert.deepEqual(await handlers.get("tool_call")?.({ toolName: "read", input: { path: "." } }), {
 			block: true,
 			terminate: true,
 			reason: "child capability manifest is missing",

@@ -27,3 +27,12 @@ export const ROLES: Readonly<Record<RoleName, RoleDefinition>> = Object.freeze({
 export function getRole(name: RoleName): RoleDefinition {
 	return ROLES[name];
 }
+
+const MANAGED_WORKER: RoleDefinition = Object.freeze({
+	tools: Object.freeze([...ROLES.worker.tools, "bash"]),
+	systemPrompt: `${COMMON_BOUNDARY}\nYou are a trusted-host development worker with local file, search and bash tools sharing one private source directory. Implement, test, diagnose and repair the supplied task locally. Create or modify only the exact declared write files; do not delete or rename them. Keep temporary output in task scratch. No Skills or recursive delegation. Return concise changes, command/exit evidence, and remaining uncertainty; the parent owns review adjudication, explicit candidate apply and final acceptance. Directory separation is not an OS sandbox; keep shell operations within the task cooperatively.`,
+});
+
+export function getManagedRole(name: RoleName): RoleDefinition {
+	return name === "worker" ? MANAGED_WORKER : ROLES[name];
+}

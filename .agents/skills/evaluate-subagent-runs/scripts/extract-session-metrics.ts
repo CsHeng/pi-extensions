@@ -2,8 +2,10 @@ import { lstat, opendir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractObservationMetrics, type ObservationMetrics } from "./observation-metrics.ts";
+import { workerIntervalTotals } from "../../../../extensions/subagents/telemetry.ts";
 
-const OUTPUT_SCHEMA_VERSION = 3;
+const OUTPUT_SCHEMA_VERSION = 4;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
 const TOOL_NAME = "csheng_subagents";
 const MAX_RUN_RECORDS = 1_000;
@@ -50,7 +52,7 @@ interface RunMetrics {
 	ordinal: number;
 	status: RunStatus;
 	telemetryAuthority: "authoritative" | "legacy-inferred";
-	telemetrySchemaVersion: 1 | 2 | 3 | null;
+	telemetrySchemaVersion: 1 | 2 | 3 | 4 | null;
 	requestedTasks: number | null;
 	admittedTasks: number | null;
 	launchedChildren: number;
@@ -58,7 +60,8 @@ interface RunMetrics {
 	admittedDependencyEdges: number | null;
 	explicitModelTasks: number | null;
 	explicitThinkingTasks: number | null;
-	runDurationMs: number;
+	runDurationMs: number | null;
+	timing: TimingMetrics | null;
 	peakConcurrency: number | null;
 	roles: Record<Role, RoleMetrics>;
 	errorCodes: string[];
@@ -66,7 +69,10 @@ interface RunMetrics {
 
 export interface SessionMetrics {
 	schemaVersion: typeof OUTPUT_SCHEMA_VERSION;
+	/** Legacy counters above observations cover csheng_subagents only. */
+	observations: ObservationMetrics;
 	source: {
+		legacyCountersScope: "csheng_subagents-only";
 		sessionId: string;
 		telemetryMode: "authoritative" | "legacy" | "mixed";
 		selectionMode: "exact-session" | "current-epoch";
@@ -141,6 +147,58 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function number(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+interface TimingMetrics {
+	boundary: "tool-entry" | "scheduler";
+	complete: boolean;
+	schedulerMs: number | null;
+	workerEffortMs: number | null;
+	workerOccupiedMs: number | null;
+	waitMsByReason: Record<string, number> | null;
+}
+
+function duration(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function timingMetrics(value: unknown, wall: number | null): TimingMetrics | null {
+	const timing = record(value);
+	if (!timing || (timing.boundary !== "tool-entry" && timing.boundary !== "scheduler") || typeof timing.complete !== "boolean") return null;
+	const result: TimingMetrics = { boundary: timing.boundary, complete: false, schedulerMs: null, workerEffortMs: null, workerOccupiedMs: null, waitMsByReason: null };
+	const span = (value: unknown): { start: number; end: number } | undefined => {
+		const item = record(value);
+		const start = duration(item?.startMs);
+		const end = duration(item?.endMs);
+		return start !== null && end !== null && end >= start && wall !== null && end <= wall ? { start, end } : undefined;
+	};
+	const scheduler = span(timing.scheduler);
+	if (scheduler) result.schedulerMs = scheduler.end - scheduler.start;
+	if (!timing.complete || wall === null || !Array.isArray(timing.children) || timing.children.length > 10 || !Array.isArray(timing.waits) || timing.waits.length > 2048) return result;
+	if (timing.scheduler !== null && !scheduler) return result;
+	const workers: Array<{ start: number; end: number }> = [];
+	for (const child of timing.children) {
+		const item = record(child);
+		const interval = span(child);
+		if (!item || !ROLES.includes(item.role as Role) || !interval) return result;
+		if (item.role === "worker") workers.push(interval);
+	}
+	const waitMs: Record<string, number> = { dependency: 0, capacity: 0, "role-capacity": 0, "resource-lock": 0, ready: 0 };
+	for (const wait of timing.waits) {
+		const interval = span(wait);
+		const reasons = record(wait)?.reasons;
+		if (!interval || !Array.isArray(reasons) || reasons.length < 1 || reasons.length > 5 || new Set(reasons).size !== reasons.length) return result;
+		for (const reason of reasons) {
+			if (typeof reason !== "string" || !Object.hasOwn(waitMs, reason)) return result;
+			waitMs[reason] = (waitMs[reason] ?? 0) + interval.end - interval.start;
+		}
+	}
+	const totals = workerIntervalTotals({
+		boundary: timing.boundary, complete: true, scheduler: null, waits: [],
+		children: workers.map(({ start, end }) => ({ taskId: "redacted", role: "worker", startMs: start, endMs: end })),
+	});
+	if (![totals.effortMs, totals.occupiedMs, ...Object.values(waitMs)].every((value) => value !== null && Number.isFinite(value))) return result;
+	return { ...result, complete: true, workerEffortMs: totals.effortMs, workerOccupiedMs: totals.occupiedMs, waitMsByReason: waitMs };
 }
 
 function nonNegativeInteger(value: unknown): number {
@@ -241,7 +299,7 @@ export async function resolveSessionPath(input: string, sessionsRoot = join(home
 	return matches[0] as string;
 }
 
-export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"): SessionMetrics {
+export function extractSessionMetrics(text: string, sourcePath = "session.jsonl", disposition?: unknown): SessionMetrics {
 	const messages: Record<string, unknown>[] = [];
 	let lineNumber = 0;
 	for (const line of text.split("\n")) {
@@ -260,6 +318,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		}
 	}
 
+	const observations = extractObservationMetrics(text, disposition);
 	const totals = {
 		toolCalls: messages.length,
 		succeededRuns: 0,
@@ -296,9 +355,9 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		const details = record(message.details) ?? {};
 		const telemetry = record(details.telemetry);
 		const tasks = Array.isArray(details.tasks) ? details.tasks.map(record).filter((task): task is Record<string, unknown> => task !== undefined) : [];
-		const telemetryVersion = telemetry?.schemaVersion === 3 ? 3 : telemetry?.schemaVersion === 2 ? 2 : telemetry?.schemaVersion === 1 ? 1 : null;
+		const telemetryVersion = telemetry?.schemaVersion === 4 ? 4 : telemetry?.schemaVersion === 3 ? 3 : telemetry?.schemaVersion === 2 ? 2 : telemetry?.schemaVersion === 1 ? 1 : null;
 		const isAuthoritative = telemetryVersion !== null;
-		const isSchemaTwo = telemetryVersion === 2 || telemetryVersion === 3;
+		const isSchemaTwo = telemetryVersion === 2 || telemetryVersion === 3 || telemetryVersion === 4;
 		if (isAuthoritative) authoritative += 1;
 		else legacy += 1;
 		const status = runStatus(details.status);
@@ -313,7 +372,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 		const requestedTasks = isAuthoritative ? nonNegativeInteger(telemetry?.requestedTasks) : tasks.length > 0 ? tasks.length : null;
 		const admittedTasks = isAuthoritative ? nonNegativeInteger(telemetry?.admittedTasks) : tasks.length > 0 ? tasks.length : null;
 		let launchedChildren = isAuthoritative ? nonNegativeInteger(telemetry?.launchedChildren) : 0;
-		let runDurationMs = isAuthoritative ? number(telemetry?.runDurationMs) : 0;
+		let runDurationMs = telemetryVersion === 4 ? duration(telemetry?.runDurationMs) : isAuthoritative ? number(telemetry?.runDurationMs) : 0;
 		const peakConcurrency = isAuthoritative ? nonNegativeInteger(telemetry?.peakConcurrency) : null;
 		const requestedDependencyEdges = isSchemaTwo ? nonNegativeInteger(telemetry?.requestedDependencyEdges) : null;
 		const admittedDependencyEdges = isSchemaTwo ? nonNegativeInteger(telemetry?.admittedDependencyEdges) : null;
@@ -351,7 +410,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 				: taskUsage.turns > 0;
 			if (!isAuthoritative && launched) launchedChildren += 1;
 			const durationMs = number(task.durationMs);
-			if (!isAuthoritative) runDurationMs = Math.max(runDurationMs, durationMs);
+			if (!isAuthoritative) runDurationMs = Math.max(runDurationMs ?? 0, durationMs);
 			const changedPathsValue = task.changedPaths;
 			const hasChangedPaths = Array.isArray(changedPathsValue);
 			const changedPaths = hasChangedPaths ? changedPathsValue.length : 0;
@@ -418,6 +477,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 				explicitModelTasks,
 				explicitThinkingTasks,
 				runDurationMs,
+				timing: telemetryVersion === 4 ? timingMetrics(telemetry?.timing, runDurationMs) : null,
 				peakConcurrency,
 				roles: runRoles,
 				errorCodes: [...errorCodes].sort(),
@@ -427,12 +487,14 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 
 	return {
 		schemaVersion: OUTPUT_SCHEMA_VERSION,
+		observations,
 		source: {
+			legacyCountersScope: "csheng_subagents-only",
 			sessionId: sessionIdFromPath(sourcePath),
-			telemetryMode: authoritative > 0 && legacy > 0 ? "mixed" : authoritative > 0 ? "authoritative" : "legacy",
+			telemetryMode: (authoritative > 0 || observations.available) && legacy > 0 ? "mixed" : authoritative > 0 || observations.available ? "authoritative" : "legacy",
 			selectionMode: "exact-session",
 			scannedSessions: 1,
-			matchedSessions: messages.length > 0 ? 1 : 0,
+			matchedSessions: messages.length > 0 || observations.available ? 1 : 0,
 			selectedRuns: messages.length,
 			excludedRuns: 0,
 			unavailableProvenanceRuns: messages.length,
@@ -449,10 +511,11 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 }
 
 function usageText(): string {
-	return "Usage: extract-session-metrics.ts --session <path-or-id> [--sessions-root <dir>] [--output <new-file>]\n       extract-session-metrics.ts --epoch current --sessions-root <dir> --manifest <file> [--output <new-file>]";
+	return "Usage: extract-session-metrics.ts --session <path-or-id> [--sessions-root <dir>] [--output <new-file>] [--disposition <explicit-parent-json>]\n       extract-session-metrics.ts --epoch current --sessions-root <dir> --manifest <file> [--output <new-file>]";
 }
 
 interface CliOptions {
+	disposition?: string;
 	session?: string;
 	epoch?: "current";
 	sessionsRoot?: string;
@@ -475,7 +538,7 @@ function parseArgs(args: string[]): CliOptions | "help" {
 	for (let index = 0; index < args.length; index += 2) {
 		const key = args[index];
 		const value = args[index + 1];
-		if (!key || !value || !["--session", "--sessions-root", "--output", "--epoch", "--manifest"].includes(key)) throw new Error("invalid_arguments");
+		if (!key || !value || !["--session", "--sessions-root", "--output", "--epoch", "--manifest", "--disposition"].includes(key)) throw new Error("invalid_arguments");
 		if (values.has(key)) throw new Error("duplicate_argument");
 		values.set(key, value);
 	}
@@ -486,6 +549,8 @@ function parseArgs(args: string[]): CliOptions | "help" {
 	if (!session && epoch !== "current") throw new Error("session_required");
 	if (epoch === "current" && (!values.get("--sessions-root") || !values.get("--manifest"))) throw new Error("epoch_inputs_required");
 	const options: CliOptions = {};
+	const disposition = values.get("--disposition");
+	if (disposition !== undefined) { if (epoch) throw new Error("disposition_requires_exact_session"); options.disposition = disposition; }
 	if (session !== undefined) options.session = session;
 	if (epoch === "current") options.epoch = "current";
 	const sessionsRoot = values.get("--sessions-root");
@@ -528,10 +593,10 @@ function nonNegativeInt(value: unknown): value is number {
 
 function runMatchesEpoch(details: Record<string, unknown>, manifest: EpochManifest): "select" | "exclude" | "unavailable" {
 	const telemetry = record(details.telemetry);
-	if (!telemetry || telemetry.schemaVersion !== 3) return "unavailable";
+	if (!telemetry || (telemetry.schemaVersion !== 3 && telemetry.schemaVersion !== 4)) return "unavailable";
 	const provenance = record(telemetry.provenance);
 	if (!provenance || typeof provenance.available !== "boolean") return "unavailable";
-	if (!nonNegativeInt(telemetry.requestedTasks) || !nonNegativeInt(telemetry.admittedTasks) || !nonNegativeInt(telemetry.launchedChildren) || !nonNegativeInt(telemetry.runDurationMs)) {
+	if (!nonNegativeInt(telemetry.requestedTasks) || !nonNegativeInt(telemetry.admittedTasks) || !nonNegativeInt(telemetry.launchedChildren) || (telemetry.schemaVersion === 3 ? !nonNegativeInt(telemetry.runDurationMs) : telemetry.runDurationMs !== null && duration(telemetry.runDurationMs) === null)) {
 		return "unavailable";
 	}
 	if (telemetry.admittedTasks > telemetry.requestedTasks || telemetry.launchedChildren > telemetry.admittedTasks) return "unavailable";
@@ -558,7 +623,14 @@ export function filterEpochSessionText(text: string, manifest: EpochManifest): {
 		const event = JSON.parse(line) as unknown;
 		const item = record(event);
 		const message = record(item?.message);
-		if (item?.type !== "message" || message?.role !== "toolResult" || message.toolName !== TOOL_NAME) continue;
+		if (item?.type !== "message" || message?.role !== "toolResult") continue;
+		if (message.toolName === "csheng_subagent_sessions") {
+			// The managed envelope has no effective revision pair. Never infer it from file time or the parent process.
+			const action = record(message.details)?.action;
+			if (action === "create" || action === "continue") { unavailable++; if (++parsedRuns > MAX_PARSED_RUNS) throw new Error("too_many_runs"); }
+			continue;
+		}
+		if (message.toolName !== TOOL_NAME) continue;
 		parsedRuns += 1;
 		if (parsedRuns > MAX_PARSED_RUNS) throw new Error("too_many_runs");
 		const details = record(message.details) ?? {};
@@ -634,7 +706,17 @@ async function main(): Promise<void> {
 		? await extractCurrentEpochMetrics(options.sessionsRoot as string, options.manifest as string)
 		: await (async () => {
 			const path = await resolveSessionPath(options.session as string, options.sessionsRoot);
-			return extractSessionMetrics(await readFile(path, "utf8"), path);
+			let disposition: unknown;
+			if (options.disposition) {
+				try {
+					await assertRegularFile(options.disposition);
+					if ((await lstat(options.disposition)).size > 4096) throw new Error("too_large");
+					const text = await readFile(options.disposition, "utf8");
+					if (Buffer.byteLength(text) > 4096) throw new Error("too_large");
+					disposition = JSON.parse(text);
+				} catch { throw new Error("invalid_parent_disposition_file"); }
+			}
+			return extractSessionMetrics(await readFile(path, "utf8"), path, disposition);
 		})();
 	const output = `${JSON.stringify(metrics, null, 2)}\n`;
 	if (Buffer.byteLength(output, "utf8") > MAX_REPORT_BYTES) throw new Error("report_too_large");
@@ -649,7 +731,7 @@ async function main(): Promise<void> {
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
 if (invokedPath === fileURLToPath(import.meta.url)) {
 	main().catch((error: unknown) => {
-		const code = error instanceof Error ? error.message : "evaluation_failed";
+		const code = error instanceof Error ? safeErrorCode(error.message) ?? "evaluation_failed" : "evaluation_failed";
 		process.stderr.write(`${JSON.stringify({ result: "fail", code })}\n`);
 		process.exitCode = 1;
 	});

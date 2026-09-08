@@ -13,6 +13,7 @@ import { getRole } from "./roles.ts";
 
 export interface PathDecision {
 	allowed: boolean;
+	fatal?: boolean;
 	reason?: string;
 	resolvedPath?: string;
 }
@@ -244,6 +245,12 @@ export async function authorizePath(
 	requestedPath: string,
 ): Promise<PathDecision> {
 	const capability = normalizedCapability(manifest);
+	try {
+		if (!(await lstat(capability.root)).isDirectory() || await realpath(capability.root) !== capability.root) throw new Error("invalid root");
+		await assertCanonicalExternalRoots(capability);
+	} catch {
+		return { allowed: false, fatal: true, reason: "Child capability root is unavailable or no longer canonical." };
+	}
 	const role = getRole(capability.role);
 	if (!role.tools.includes(toolName)) return { allowed: false, reason: `Tool ${toolName} is not allowed for role ${capability.role}.` };
 	if (requestedPath.includes("\0")) return { allowed: false, reason: "Path contains a null byte." };
@@ -264,7 +271,7 @@ export async function authorizePath(
 			}
 			return { allowed: true, resolvedPath: target };
 		} catch (error) {
-			return { allowed: false, reason: error instanceof Error ? error.message : String(error) };
+			return pathCheckFailure(error);
 		}
 	}
 
@@ -288,6 +295,14 @@ export async function authorizePath(
 		if (externalRoots.length === 0) return { allowed: false, reason: "Path is outside the declared read scope." };
 		return await authorizeRead(capability, toolName, target, externalRoots, false);
 	} catch (error) {
-		return { allowed: false, reason: error instanceof Error ? error.message : String(error) };
+		return pathCheckFailure(error);
 	}
+}
+
+function pathCheckFailure(error: unknown): PathDecision {
+	return {
+		allowed: false,
+		fatal: !isNodeError(error) || !["ENOENT", "ENOTDIR"].includes(error.code ?? ""),
+		reason: "Path could not be checked safely.",
+	};
 }

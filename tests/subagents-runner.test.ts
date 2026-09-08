@@ -84,6 +84,18 @@ test("child prompt renders canonical external roots without changing write or ev
 	assert.match(withRoots, /\n\nInputs:\nbounded input$/);
 });
 
+test("zero exit without a complete final report never succeeds", async () => {
+	for (const mode of ["empty", "stale", "tool-only", "unpaired", "length", "pending", "toolUse", "missing-settled"]) {
+		const result = await runChild(options(mode));
+		assert.equal(result.status, "failed", mode);
+		assert.equal(result.error?.code, "incomplete_report", mode);
+		assert.equal(result.convergence, "not-applicable", mode);
+	}
+	const complete = await runChild(options("multi-text"));
+	assert.equal(complete.status, "succeeded");
+	assert.equal(complete.output, "first\n\nsecond");
+});
+
 test("runner parses fragmented JSONL and aggregates usage", async () => {
 	const result = await runChild(options("fragmented"));
 	assert.equal(result.status, "succeeded");

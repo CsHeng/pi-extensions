@@ -32,12 +32,34 @@ if (sessionPath) {
 
 if (mode === "fragmented") {
 	process.stdout.write(event.slice(0, 17));
-	setTimeout(() => process.stdout.write(`${event.slice(17)}\n`), 5);
+	setTimeout(() => { process.stdout.write(`${event.slice(17)}\n`); emit({ type: "agent_settled" }); }, 5);
+} else if (mode === "empty") {
+	// Deliberately successful OS exit with no protocol.
+} else if (mode === "stale") {
+	emit({ type: "message_end", message });
+	emit({ type: "message_end", message: { ...message, content: [], stopReason: "toolUse" } });
+	emit({ type: "agent_settled" });
+} else if (mode === "tool-only") {
+	emit({ type: "message_end", message: { role: "toolResult", toolCallId: "orphan", content: [] } });
+	emit({ type: "agent_settled" });
+} else if (mode === "unpaired") {
+	emit({ type: "tool_execution_start", toolCallId: "pending", toolName: "read" });
+	emit({ type: "message_end", message });
+	emit({ type: "agent_settled" });
+} else if (["length", "pending", "toolUse"].includes(mode)) {
+	emit({ type: "message_end", message: { ...message, stopReason: mode } });
+	emit({ type: "agent_settled" });
+} else if (mode === "missing-settled") {
+	emit({ type: "message_end", message });
+} else if (mode === "multi-text") {
+	emit({ type: "message_end", message: { ...message, content: [{ type: "text", text: "first" }, { type: "text", text: "second" }] } });
+	emit({ type: "agent_settled" });
 } else if (mode === "malformed") {
 	process.stdout.write("{not-json}\n");
 } else if (mode === "stderr") {
 	process.stderr.write("e".repeat(20 * 1024));
 	process.stdout.write(`${event}\n`);
+	emit({ type: "agent_settled" });
 } else if (mode === "nonzero") {
 	process.stdout.write(`${event}\n`);
 	process.exitCode = 7;
@@ -72,5 +94,6 @@ if (mode === "fragmented") {
 	process.on("SIGTERM", () => {});
 	setInterval(() => {}, 1000);
 } else {
-	process.stdout.write(event);
+	process.stdout.write(`${event}\n`);
+	emit({ type: "agent_settled" });
 }

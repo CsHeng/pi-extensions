@@ -31,6 +31,7 @@ test("fragmented and coalesced events preserve final output and usage", () => {
 		stopReason: "stop",
 		messageCount: 1,
 		malformedLines: 0,
+		reportComplete: false,
 	});
 });
 
@@ -74,6 +75,49 @@ test("agent_end is nonfinal while agent_settled is semantic settlement", () => {
 	assert.equal(parser.snapshot().agentSettledObserved, true);
 	assert.equal(parser.snapshot().errorObserved, true);
 	assert.doesNotMatch(JSON.stringify(phases), /sensitive/);
+});
+
+test("report completeness rejects stale, truncated, oversized and structurally invalid episodes", () => {
+	for (const tail of [
+		line(assistant("toolUse", "")),
+		line({ type: "message_start", message: { role: "assistant" } }),
+		line({ type: "message_end", message: { role: "assistant", content: "invalid" } }),
+		line({ type: "message_end", message: null }),
+		line({ type: "message_start", message: null }),
+		line({ type: "message_update", message: {} }),
+		line({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "later" } }),
+		line({ type: "tool_execution_start", toolCallId: "pending", toolName: "read" }),
+		"{broken}\n",
+		"x".repeat(1024 * 1024 + 1) + "\n",
+	]) {
+		const parser = new JsonlProtocolParser();
+		parser.push(line(assistant()) + tail + line({ type: "agent_settled" }));
+		assert.equal(parser.finish().reportComplete, false);
+	}
+	const truncated = new JsonlProtocolParser();
+	truncated.push(line(assistant()) + JSON.stringify({ type: "agent_settled" }));
+	assert.equal(truncated.finish().reportComplete, false);
+	const complete = new JsonlProtocolParser();
+	complete.push(line(assistant()) + line({ type: "agent_settled" }));
+	assert.equal(complete.finish().reportComplete, true);
+});
+
+test("quiet native compaction preserves the current answer but open, failed, malformed and retrying maintenance cannot reuse it", () => {
+	const start = { type: "compaction_start", reason: "threshold" };
+	const end = { type: "compaction_end", reason: "threshold", aborted: false, willRetry: false, result: { summary: "summary", firstKeptEntryId: "tail", tokensBefore: 100 } };
+	const settle = { type: "agent_settled" };
+	for (const reason of ["manual", "threshold"]) {
+		const parser = new JsonlProtocolParser();
+		parser.push([assistant(), { ...start, reason }, { ...end, reason }, settle].map(line).join(""));
+		assert.equal(parser.finish().reportComplete, true);
+	}
+	for (const events of [[start, settle], [start, { ...end, willRetry: true }, settle], [start, { ...end, aborted: true }, settle], [start, { ...end, errorMessage: "failed" }, settle], [start, { ...end, result: {} }, settle], [start, { ...end, errorMessage: {} }, settle], [start, { ...end, errorMessage: null }, settle], [{ ...start, reason: { toString: null } }, end, settle]]) {
+		const parser = new JsonlProtocolParser(); parser.push([assistant(), ...events].map(line).join(""));
+		assert.equal(parser.finish().reportComplete, false);
+	}
+	const retried = new JsonlProtocolParser();
+	retried.push([assistant("error", "", "overflow"), start, { ...end, willRetry: true }, { type: "agent_start" }, assistant("stop", "current"), settle].map(line).join(""));
+	assert.equal(retried.finish().reportComplete, true);
 });
 
 test("malformed lines are bounded diagnostics and valid unknown objects refresh liveness", () => {

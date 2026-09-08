@@ -4,7 +4,9 @@ import {
 	truncateHead,
 	truncateLine,
 } from "@earendil-works/pi-coding-agent";
-import type { SubagentRunResult, TaskResult } from "./contracts.ts";
+import { truncateUtf8, utf8Bytes, type SubagentRunResult, type TaskResult } from "./contracts.ts";
+import { isNativeObservation, type ObservedUsage } from "./observability.ts";
+import type { SessionActionResult, SessionView } from "./session-contracts.ts";
 
 const SUMMARY_SCALAR_CHARS = 300;
 
@@ -16,7 +18,8 @@ function lineCount(value: string): number {
 	return value.length === 0 ? 0 : value.split("\n").length;
 }
 
-export function formatDuration(durationMs: number): string {
+export function formatDuration(durationMs: number | null): string {
+	if (durationMs === null || !Number.isFinite(durationMs)) return "unknown";
 	const milliseconds = Math.max(0, Math.floor(durationMs));
 	if (milliseconds < 1_000) return `${milliseconds}ms`;
 	if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)}s`;
@@ -83,12 +86,11 @@ export function boundToolContent(content: string): string {
 	return body.content ? `${body.content}\n${marker}` : marker;
 }
 
-export function formatProgress(results: readonly TaskResult[]): string {
+export function formatProgress(results: readonly TaskResult[], elapsedMs: number | null = null): string {
 	const running = results.filter((result) => result.status === "running").length;
 	const finished = results.filter((result) => result.status !== "pending" && result.status !== "running").length;
 	const turns = results.reduce((total, result) => total + (result.activity?.assistantTurns ?? result.usage.turns), 0);
-	const elapsedMs = results.reduce((longest, result) => Math.max(longest, result.activity?.elapsedMs ?? result.durationMs), 0);
-	const lines = [`Subagents ${running}/${results.length} running, ${finished} finished · ${turns} turns · ${formatClock(elapsedMs)}`];
+	const lines = [`Subagents ${running}/${results.length} running, ${finished} finished · ${turns} turns · ${elapsedMs === null ? "unknown" : formatClock(elapsedMs)}`];
 	for (const result of results) {
 		if (result.status === "pending") continue;
 		if (result.status === "running" && result.activity) {
@@ -148,4 +150,159 @@ export function formatRunResult(result: SubagentRunResult): string {
 
 	const fallback = `${summary}\n[Task details omitted to enforce Pi tool-output limits.]`;
 	return boundToolContent(fallback);
+}
+
+interface NativeUsageSummary extends ObservedUsage {
+	recorded: boolean;
+}
+
+function boundScalar(value: string): string {
+	return truncateLine(value.replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, " "), SUMMARY_SCALAR_CHARS).text;
+}
+
+function nativeUsageSummary(result: TaskResult | undefined): NativeUsageSummary {
+	const observation = result?.observation;
+	if (!isNativeObservation(observation) || !observation.available) {
+		return { recorded: false, input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null };
+	}
+	const usage = observation.usage;
+	return {
+		recorded: true,
+		input: usage.input,
+		output: usage.output,
+		cacheRead: usage.cacheRead,
+		cacheWrite: usage.cacheWrite,
+		totalTokens: usage.totalTokens,
+		cost: usage.cost,
+	};
+}
+
+function truncateReport(text: string, maxBytes: number): { report: string; truncated: boolean } {
+	const result = truncateUtf8(text, maxBytes);
+	return { report: result.text, truncated: result.truncatedBytes > 0 };
+}
+
+function sessionPayload(session: SessionView, reportBudget: number | null): Record<string, unknown> {
+	const payload: Record<string, unknown> = {
+		handle: boundScalar(session.handle),
+		role: session.role,
+		episode: session.episode,
+		state: session.state,
+		reportComplete: session.reportComplete,
+		parentAcceptance: "unavailable",
+	};
+	if (session.requestError) payload.requestError = { code: boundScalar(session.requestError.code) };
+	if (session.result) {
+		const result: Record<string, unknown> = {
+			id: boundScalar(session.result.id),
+			status: session.result.status,
+		};
+		if (session.result.stopReason !== undefined) result.stopReason = boundScalar(session.result.stopReason);
+		if (session.result.error) result.error = { code: boundScalar(session.result.error.code) };
+		const output = session.result.output ?? "";
+		if (reportBudget === null) {
+			result.reportTruncated = true;
+		} else {
+			const clipped = truncateReport(output, reportBudget);
+			result.report = clipped.report;
+			result.reportTruncated = clipped.truncated;
+		}
+		payload.result = result;
+	}
+	if (session.candidate) {
+		payload.candidate = {
+			id: boundScalar(session.candidate.id),
+			status: session.candidate.status,
+			changedCount: session.candidate.changedPaths.length,
+			appliedCount: session.candidate.appliedPaths.length,
+		};
+	}
+	payload.nativeUsage = nativeUsageSummary(session.result);
+	return payload;
+}
+
+function managedEnvelope(details: SessionActionResult, reportBudget: number | null): Record<string, unknown> {
+	const payload: Record<string, unknown> = {
+		schemaVersion: details.schemaVersion,
+		action: details.action,
+		status: details.status,
+		parentAcceptance: "unavailable",
+		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
+	};
+	if (details.error) payload.error = { code: boundScalar(details.error.code) };
+	return payload;
+}
+
+function stringifyManaged(details: SessionActionResult, reportBudget: number | null): string {
+	return JSON.stringify(managedEnvelope(details, reportBudget));
+}
+
+export function formatManagedContent(details: SessionActionResult): string {
+	const skeleton = stringifyManaged(details, null);
+	if (utf8Bytes(skeleton) > DEFAULT_MAX_BYTES) return skeleton;
+	const reportCount = Math.max(1, details.sessions.filter((session) => session.result).length);
+	let high = Math.max(0, Math.floor((DEFAULT_MAX_BYTES - utf8Bytes(skeleton)) / reportCount));
+	let low = 0;
+	let best = skeleton;
+	while (low <= high) {
+		const middle = Math.floor((low + high) / 2);
+		const candidate = stringifyManaged(details, middle);
+		if (utf8Bytes(candidate) <= DEFAULT_MAX_BYTES) {
+			best = candidate;
+			low = middle + 1;
+		} else {
+			high = middle - 1;
+		}
+	}
+	return best;
+}
+
+function stateMeaning(state: SessionView["state"]): string {
+	switch (state) {
+		case "idle": return "idle (no running process)";
+		case "running": return "running";
+		case "interrupted": return "interrupted";
+		case "closed": return "closed";
+	}
+}
+
+export function formatManagedResult(details: SessionActionResult, expanded = false): string {
+	const lines = [
+		`Managed session ${details.action}: ${details.status}`,
+		"parent acceptance unavailable",
+	];
+	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}`);
+	for (const session of details.sessions) {
+		const parts = [
+			`[${boundScalar(session.handle)}] ${session.role} episode=${session.episode} ${stateMeaning(session.state)}`,
+			`reportComplete=${session.reportComplete}`,
+		];
+		if (session.requestError) parts.push(`requestError=${boundScalar(session.requestError.code)}`);
+		if (session.result) {
+			parts.push(`episode-outcome=${session.result.status} id=${boundScalar(session.result.id)} elapsed=${formatDuration(session.result.durationMs)}`);
+			if (session.result.stopReason !== undefined) parts.push(`stopReason=${boundScalar(session.result.stopReason)}`);
+			if (session.result.error) parts.push(`result-error=${boundScalar(session.result.error.code)}`);
+		}
+		if (session.candidate) {
+			parts.push(`candidate=${boundScalar(session.candidate.id)} apply=${session.candidate.status} changed=${session.candidate.changedPaths.length} applied=${session.candidate.appliedPaths.length}`);
+		}
+		const native = nativeUsageSummary(session.result);
+		parts.push(native.recorded
+			? `native-usage recorded input=${native.input} output=${native.output}`
+			: "native-usage unrecorded");
+		parts.push("parent acceptance unavailable");
+		lines.push(parts.join(" "));
+	}
+	// Reserve every session/candidate header before any expanded report can consume its budget.
+	if (expanded) {
+		const reports = details.sessions.filter((session) => session.result?.output);
+		const budget = Math.max(0, Math.floor((DEFAULT_MAX_BYTES - utf8Bytes(lines.join("\n")) - reports.length * 512) / Math.max(1, reports.length)));
+		const lineBudget = Math.max(0, Math.floor((DEFAULT_MAX_LINES - lines.length - reports.length * 4) / Math.max(1, reports.length)));
+		for (const session of reports) {
+			const clipped = truncateHead(session.result!.output, { maxBytes: budget, maxLines: lineBudget });
+			lines.push(`--- [${boundScalar(session.handle)}] report ---`, clipped.content);
+			if (clipped.truncated) lines.push("[Report display truncated; protocol completeness is independent.]");
+		}
+	}
+	return boundToolContent(lines.join("\n"));
 }

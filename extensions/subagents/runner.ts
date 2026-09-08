@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
 	CHILD_CAPABILITY_ENV,
 	CHILD_MARKER_ENV,
@@ -19,6 +20,18 @@ import type { DiagnosticLimitResult, DiagnosticTaskSession } from "./diagnostics
 import type { NormalizedTask } from "./graph.ts";
 import { JsonlProtocolParser } from "./protocol.ts";
 import type { RoleDefinition } from "./roles.ts";
+import { workerGitEnvironment, type WorkerInputState } from "./worker-inputs.ts";
+import { boundNativeObservation, collectNativeObservation, nativeLeaf, unavailableObservation } from "./observability.ts";
+import { MANAGED_LIMITS } from "./session-contracts.ts";
+
+async function readObservationNative(file: string): Promise<string | undefined> {
+	try {
+		const info = await lstat(file);
+		if (!info.isFile() || info.size > MANAGED_LIMITS.maxNativeBytes || await realpath(file) !== resolve(file)) return undefined;
+		const text = await readFile(file, "utf8");
+		return Buffer.byteLength(text) <= MANAGED_LIMITS.maxNativeBytes ? text : undefined;
+	} catch { return undefined; }
+}
 
 export interface PiInvocation {
 	command: string;
@@ -28,6 +41,9 @@ export interface PiInvocation {
 type StopCause = "aborted" | "timeout" | "diagnostic_session_limit" | "child_exit_stalled";
 
 export interface ChildRunOptions {
+	managedWorkerScratch?: string;
+	managedWorkerInputs?: WorkerInputState;
+	managedProcessGroup?: boolean;
 	task: NormalizedTask;
 	role: RoleDefinition;
 	route: EffectiveRoute;
@@ -52,7 +68,7 @@ export interface ChildRunOptions {
 	onChildSettled?(): void;
 }
 
-const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE"]);
+const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE", "CSHENG_SUBAGENT_WORKER_SCRATCH", "CSHENG_SUBAGENT_WORKER_INPUTS"]);
 
 export function resolvePiInvocation(extraArgs: string[]): PiInvocation {
 	const currentScript = process.argv[1];
@@ -65,14 +81,20 @@ export function resolvePiInvocation(extraArgs: string[]): PiInvocation {
 	return { command: "pi", args: extraArgs };
 }
 
-function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string): NodeJS.ProcessEnv {
+function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, managedWorkerScratch?: string, managedWorkerInputs?: WorkerInputState): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(source)) {
 		if (!ENV_DENYLIST.has(key) && value !== undefined) env[key] = value;
 	}
 	env[CHILD_MARKER_ENV] = "1";
 	env[CHILD_CAPABILITY_ENV] = capabilityPath;
-	return env;
+	if (managedWorkerScratch) {
+		env.CSHENG_SUBAGENT_WORKER_SCRATCH = managedWorkerScratch;
+		env.TMPDIR = managedWorkerScratch;
+		if (managedWorkerInputs) env.CSHENG_SUBAGENT_WORKER_INPUTS = JSON.stringify(managedWorkerInputs);
+		env.PI_OFFLINE = "1";
+	}
+	return managedWorkerScratch ? workerGitEnvironment(env) : env;
 }
 
 export function buildChildPrompt(task: NormalizedTask, prompt: string): string {
@@ -83,7 +105,7 @@ export function buildChildPrompt(task: NormalizedTask, prompt: string): string {
 }
 
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
-	const now = options.now ?? Date.now;
+	const now = options.now ?? (() => performance.now());
 	const started = now();
 	const privateDir = await mkdtemp(join(tmpdir(), "csheng-subagent-"));
 	await chmod(privateDir, 0o700);
@@ -106,6 +128,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	});
 
 	try {
+		const observationBefore = await readObservationNative(options.diagnosticSession.path);
+		const observationStart = observationBefore === undefined ? undefined : nativeLeaf(observationBefore);
+		const nativeStartBytes = options.managedWorkerScratch ? (await lstat(options.diagnosticSession.path)).size : 0;
 		const completePrompt = buildChildPrompt(options.task, options.prompt);
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
@@ -132,11 +157,13 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		let stopCause: StopCause | undefined = options.signal?.aborted ? "aborted" : undefined;
 
 		const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
+			const managedGroup = (options.managedProcessGroup || options.managedWorkerScratch !== undefined) && process.platform !== "win32";
 			const child = spawn(invocation.command, finalArgs, {
+				detached: managedGroup,
 				cwd: options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: childEnvironment(options.env ?? process.env, capabilityPath),
+				env: childEnvironment(options.env ?? process.env, capabilityPath, options.managedWorkerScratch, options.managedWorkerInputs),
 			});
 			let closed = false;
 			let stopping = false;
@@ -145,14 +172,21 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			let settledTimer: NodeJS.Timeout | undefined;
 			let checkingLimit = false;
 
+			const signalChild = (signal: NodeJS.Signals) => {
+				try {
+					if (managedGroup && child.pid) process.kill(-child.pid, signal);
+					else child.kill(signal);
+				} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") spawnError ??= new Error("child_process_group_stop_failed"); }
+			};
+			child.once("exit", () => { if (managedGroup) signalChild("SIGKILL"); });
 			const requestStop = (cause: StopCause) => {
 				if (closed) return;
 				stopCause ??= cause;
 				if (stopping) return;
 				stopping = true;
-				child.kill("SIGTERM");
+				signalChild("SIGTERM");
 				killTimer = setTimeout(() => {
-					if (!closed) child.kill("SIGKILL");
+					if (!closed) signalChild("SIGKILL");
 				}, options.killGraceMs ?? HARD_LIMITS.killGraceMs);
 				killTimer.unref();
 			};
@@ -193,7 +227,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				activitySink(parser.snapshot(childStartedAt));
 				if (stopCause) requestStop(stopCause);
 			});
-			child.stdout.on("data", (chunk: Buffer | string) => parser.push(chunk.toString()));
+			const decoder = new StringDecoder("utf8");
+			child.stdout.on("data", (chunk: Buffer | string) => parser.push(typeof chunk === "string" ? chunk : decoder.write(chunk)));
+			child.stdout.on("end", () => parser.push(decoder.end()));
 			child.stderr.on("data", (chunk: Buffer | string) => {
 				stderr = truncateUtf8(stderr + chunk.toString(), HARD_LIMITS.maxStderrBytes).text;
 			});
@@ -213,6 +249,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		});
 
 		const parsed = parser.finish();
+		const managedToolState = options.managedWorkerScratch ? await workerToolsSettled(options.diagnosticSession.path, nativeStartBytes) : undefined;
 		if (finalActivity) {
 			finalActivity = Object.freeze({ ...finalActivity, phase: "closed", elapsedMs: Math.max(finalActivity.elapsedMs, now() - started) });
 			options.onActivity?.(finalActivity);
@@ -220,13 +257,24 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const output = truncateUtf8(parsed.output, HARD_LIMITS.maxFinalOutputBytes);
 		const suffix = output.truncatedBytes > 0 ? `\n\n[Output truncated: ${output.truncatedBytes} bytes omitted.]` : "";
 		const durationMs = now() - started;
+		const observationAfter = await readObservationNative(options.diagnosticSession.path);
+		const observationEnd = observationAfter === undefined ? undefined : nativeLeaf(observationAfter);
+		let observation = observationStart === undefined || observationEnd === undefined || observationAfter === undefined
+			? unavailableObservation()
+			: boundNativeObservation(collectNativeObservation(observationAfter, { startLeaf: observationStart, endLeaf: observationEnd, launched: childDidStart }));
+		// A launched v1 producer must leave its completion observation. Missing
+		// optional evidence is unavailable, never a known-zero retained prefix.
+		if (childDidStart && !observation.timing) observation = unavailableObservation();
 		const base: TaskResult = {
+			observation, observationVersion: 1,
 			id: options.task.id,
 			role: options.task.role,
 			status: "succeeded",
 			output: `${output.text}${suffix}`,
 			stderr,
 			usage: parsed.usage,
+			reportComplete: parsed.reportComplete,
+			...(managedToolState === undefined ? {} : { workerToolsSettled: managedToolState }),
 			durationMs,
 			changedPaths: [],
 			telemetry: { ...emptyTaskTelemetry(), childStarted: childDidStart, childMs: childDurationMs },
@@ -246,11 +294,34 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		if (parsed.stopReason === "error" || parsed.stopReason === "aborted" || parsed.errorMessage) {
 			return { ...base, status: parsed.stopReason === "aborted" ? "aborted" : "failed", error: { code: "child_model_error", message: parsed.errorMessage ?? `Child stopped with ${parsed.stopReason}.` } };
 		}
+		if (!parsed.reportComplete) return { ...base, status: "failed", error: { code: "incomplete_report", message: "Child did not settle with a complete final report and closed tool calls." } };
+		if (options.managedWorkerScratch && managedToolState !== true) return { ...base, status: "failed", error: { code: "worker_tools_unsettled", message: "Managed worker tools did not record successful initialization and settlement for this episode." } };
 		return base;
 	} finally {
 		if (!childDidStart) await options.diagnosticSession.removeUnused().catch(() => {});
 		await rm(privateDir, { recursive: true, force: true });
 	}
+}
+
+async function workerToolsSettled(path: string, start: number): Promise<boolean> {
+	try {
+		const info = await lstat(path);
+		if (!info.isFile() || info.size > HARD_LIMITS.diagnosticChildBytes || info.size < start) return false;
+		const data = await readFile(path);
+		if (data.length !== info.size || data.at(-1) !== 10) return false;
+		let ready = false;
+		let stopped = false;
+		for (const line of data.subarray(start).toString("utf8").trimEnd().split("\n")) {
+			if (Buffer.byteLength(line) > HARD_LIMITS.maxProtocolLineBytes) return false;
+			const entry = JSON.parse(line);
+			if (entry.type !== "custom" || entry.customType !== "csheng-worker-lifecycle") continue;
+			if (entry.data?.ok !== true) return false;
+			if (entry.data.phase === "ready") ready = true;
+			else if (entry.data.phase === "stopped" && ready) stopped = true;
+			else return false;
+		}
+		return ready && stopped;
+	} catch { return false; }
 }
 
 function failure(options: ChildRunOptions, started: number, now: () => number, code: string, message: string): TaskResult {

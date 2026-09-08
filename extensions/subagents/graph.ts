@@ -96,7 +96,7 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		if (task.scope.length < 1 || task.scope.some((entry) => !isSafePathGrammar(entry))) {
 			return fail("invalid_scope", `Task ${task.id} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`);
 		}
-		if (task.role === "worker" && task.externalReadRoots !== undefined) {
+		if (task.role === "worker" && (task.externalReadRoots?.length ?? 0) > 0) {
 			return fail("external_read_roots_forbidden", `Worker task ${task.id} cannot declare externalReadRoots.`);
 		}
 		const externalReadRoots = [...(task.externalReadRoots ?? [])];
@@ -114,7 +114,7 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		if (task.role === "worker" && safeWrites.length < 1) {
 			return fail("worker_write_paths_required", `Worker task ${task.id} must declare its exact repository-relative files in writePaths; write paths are not inferred.`);
 		}
-		if (task.role !== "worker" && task.writePaths !== undefined) {
+		if (task.role !== "worker" && safeWrites.length > 0) {
 			return fail("read_only_write_paths", `Read-only task ${task.id} cannot declare write paths.`);
 		}
 		if (new Set(safeWrites).size !== safeWrites.length) {

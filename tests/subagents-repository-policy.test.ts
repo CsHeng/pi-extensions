@@ -68,7 +68,7 @@ test("structure validation keeps absolute scope and rejects worker external root
 			objective: "edit",
 			scope: ["."],
 			writePaths: ["src/a.ts"],
-			externalReadRoots: [],
+			externalReadRoots: ["/outside"],
 		}],
 	});
 	assert.equal(worker.ok, false);
@@ -82,6 +82,19 @@ test("structure validation keeps absolute scope and rejects worker external root
 	assert.equal(relativeExternal.ok, false);
 	if (relativeExternal.ok) return;
 	assert.equal(relativeExternal.error.code, "invalid_external_read_root");
+});
+
+test("permission-neutral arrays normalize without granting writes or external reads", () => {
+	for (const role of ["explorer", "reviewer", "worker"] as const) {
+		const result = validateGraphStructure({ tasks: [{ id: role, role, objective: "bounded", scope: ["."],
+			writePaths: role === "worker" ? ["src/a.ts"] : [], externalReadRoots: [] }] });
+		assert.equal(result.ok, true);
+		if (result.ok) {
+			assert.deepEqual(result.tasks[0]?.externalReadRoots, []);
+			assert.deepEqual(result.tasks[0]?.writePaths, role === "worker" ? ["src/a.ts"] : []);
+		}
+	}
+	assert.equal(validateGraphStructure({ tasks: [{ id: "review", role: "reviewer", objective: "bounded", scope: ["."], writePaths: ["a"] }] }).ok, false);
 });
 
 test("canonical Git discovery supports ordinary roots and linked worktrees", async (t) => {

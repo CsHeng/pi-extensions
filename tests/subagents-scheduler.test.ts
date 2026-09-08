@@ -3,6 +3,7 @@ import test from "node:test";
 import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
 import { validateGraph, type NormalizedTask } from "../extensions/subagents/graph.ts";
 import { runScheduledTasks } from "../extensions/subagents/scheduler.ts";
+import { createRunClock, workerIntervalTotals } from "../extensions/subagents/telemetry.ts";
 
 function success(task: NormalizedTask, output = task.id): TaskResult {
 	return {
@@ -23,6 +24,69 @@ function graph(tasks: Array<Record<string, unknown>>): NormalizedTask[] {
 	assert.equal(result.ok, true, result.ok ? undefined : result.error.message);
 	return result.ok ? result.tasks : [];
 }
+
+test("v4 records serial child intervals and dependency waits on the parent clock", async () => {
+	let now = 100;
+	const clock = createRunClock(() => now);
+	now = 120; // admission/preparation before scheduler entry
+	const tasks = graph([
+		{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"] },
+		{ id: "b", role: "worker", objective: "b", scope: ["."], writePaths: ["b"], dependsOn: ["a"] },
+	]);
+	const result = await runScheduledTasks(tasks, {
+		clock,
+		execute: async (task, _predecessors, _signal, lifecycle) => {
+			lifecycle.childStarted();
+			now += 10;
+			lifecycle.childSettled();
+			return success(task);
+		},
+	});
+	assert.equal(result.telemetry.runDurationMs, 40);
+	assert.deepEqual(result.telemetry.timing?.scheduler, { startMs: 20, endMs: 40 });
+	assert.deepEqual(result.telemetry.timing?.children.map(({ startMs, endMs }) => ({ startMs, endMs })), [
+		{ startMs: 20, endMs: 30 }, { startMs: 30, endMs: 40 },
+	]);
+	assert.ok(result.telemetry.timing?.waits.some((span) => span.taskId === "b" && span.reasons.includes("dependency")));
+	assert.deepEqual(workerIntervalTotals(result.telemetry.timing!), { effortMs: 20, occupiedMs: 20 });
+});
+
+test("v4 records overlapping slot and lock waits without interpreting provider queues", async () => {
+	let now = 0;
+	const tasks = graph([
+		{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"], resourceLocks: ["fixture"] },
+		{ id: "b", role: "worker", objective: "b", scope: ["."], writePaths: ["b"] },
+		{ id: "c", role: "reviewer", objective: "c", scope: ["."], resourceLocks: ["fixture"] },
+	]);
+	const result = await runScheduledTasks(tasks, { maxConcurrency: 1, now: () => now,
+		execute: async (task, _p, _s, lifecycle) => {
+			lifecycle.childStarted();
+			await Promise.resolve();
+			now += 10;
+			lifecycle.childSettled();
+			return success(task);
+		},
+	});
+	assert.ok(result.telemetry.timing?.waits.some((span) => span.taskId === "b" && span.reasons.includes("capacity") && span.reasons.includes("role-capacity") && span.endMs! > span.startMs!));
+	assert.ok(result.telemetry.timing?.waits.some((span) => span.taskId === "c" && span.reasons.includes("resource-lock") && span.endMs! > span.startMs!));
+	assert.deepEqual(workerIntervalTotals({ boundary: "scheduler", scheduler: null, complete: true, waits: [], children:
+		[0, 1, 2].map((id) => ({ taskId: String(id), role: "worker", startMs: 0, endMs: 600000 })) }), { effortMs: 1800000, occupiedMs: 600000 });
+	assert.deepEqual(workerIntervalTotals({ boundary: "scheduler", scheduler: null, complete: true, waits: [], children:
+		[[0, 100], [50, 150], [200, 250]].map(([startMs, endMs], id) => ({ taskId: String(id), role: "worker", startMs: startMs!, endMs: endMs! })) }), { effortMs: 250, occupiedMs: 200 });
+});
+
+test("v4 marks unclosed child endpoints and backward clocks unavailable", async () => {
+	const tasks = graph([{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"] }]);
+	const unclosed = await runScheduledTasks(tasks, { execute: async (task, _p, _s, lifecycle) => { lifecycle.childStarted(); return success(task); } });
+	assert.equal(unclosed.telemetry.timing?.children[0]?.endMs, null);
+	assert.equal(unclosed.telemetry.timing?.complete, false);
+	for (const invalidValue of [0, NaN, Infinity]) {
+		let now = 10;
+		const invalid = await runScheduledTasks(tasks, { now: () => now, execute: async (task) => { now = invalidValue; return success(task); } });
+		assert.equal(invalid.telemetry.runDurationMs, null);
+		assert.equal(invalid.telemetry.timing?.complete, false);
+	}
+});
 
 test("canonical repository-relative writes stay contained and still conflict when overlapping", () => {
 	assert.equal(validateGraph({ tasks: [
@@ -49,7 +113,7 @@ test("graph admission rejects cycles, unknown dependencies, role writes, and con
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["missing"] },
 	] }), { ok: false, error: { code: "unknown_dependency", message: "Task a depends on unknown task missing." } });
 	assert.equal(validateGraph({ tasks: [
-		{ id: "a", role: "reviewer", objective: "a", scope: ["."], writePaths: [] },
+		{ id: "a", role: "reviewer", objective: "a", scope: ["."], writePaths: ["file.ts"] },
 	] }).ok, false);
 	assert.equal(validateGraph({ tasks: [
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },

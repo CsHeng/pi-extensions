@@ -11,9 +11,12 @@ import {
 	type TaskExecutionPhase,
 	type TaskResult,
 	type UsageTotals,
+	type RunTiming,
+	type WaitReason,
 } from "./contracts.ts";
 import type { CancelReceiptOutcome } from "./events.ts";
 import type { NormalizedTask } from "./graph.ts";
+import { createRunClock, spanDuration, type RunClock } from "./telemetry.ts";
 
 export interface ChildLifecycle {
 	childStarted(): void;
@@ -42,6 +45,7 @@ export interface SchedulerOptions {
 	runId?: string;
 	requestedTasks?: number;
 	now?: () => number;
+	clock?: RunClock;
 	heartbeatMs?: number;
 	scheduleHeartbeat?(callback: () => void, intervalMs: number): () => void;
 	onHeartbeat?(): void;
@@ -86,13 +90,18 @@ function aggregate(
 	aborted: boolean,
 	metrics: {
 		runId: string;
-		started: number;
-		now: () => number;
+		clock: RunClock;
+		timing: RunTiming;
 		requestedTasks: number;
 		peakConcurrency: number;
 		peakConcurrencyByRole: Record<RoleName, number>;
 	},
 ): SubagentRunResult {
+	metrics.timing.scheduler!.endMs = metrics.clock.offset();
+	const runDurationMs = metrics.clock.elapsed();
+	metrics.timing.complete &&= metrics.clock.valid && spanDuration(metrics.timing.scheduler!) !== null &&
+		[...metrics.timing.children, ...metrics.timing.waits].every((span) => spanDuration(span) !== null) &&
+		results.every((result) => !result.telemetry?.childStarted || metrics.timing.children.some((span) => span.taskId === result.id));
 	const usage = emptyUsage();
 	for (const result of results) addUsage(usage, result.usage);
 	let status: SubagentRunResult["status"];
@@ -111,7 +120,8 @@ function aggregate(
 		telemetry: {
 			schemaVersion: TELEMETRY_SCHEMA_VERSION,
 			runId: metrics.runId,
-			runDurationMs: Math.max(0, metrics.now() - metrics.started),
+			runDurationMs,
+			timing: metrics.timing,
 			requestedTasks: metrics.requestedTasks,
 			admittedTasks: results.length,
 			launchedChildren,
@@ -127,12 +137,14 @@ function boundedPredecessor(result: TaskResult): TaskResult {
 }
 
 export async function runScheduledTasks(tasks: readonly NormalizedTask[], options: SchedulerOptions): Promise<SubagentRunResult> {
-	const now = options.now ?? Date.now;
+	const clock = options.clock ?? createRunClock(options.now);
+	const now = clock.now;
 	const started = now();
+	const timing: RunTiming = { boundary: options.clock ? "tool-entry" : "scheduler", scheduler: { startMs: clock.offset(), endMs: null }, children: [], waits: [], complete: true };
 	const metrics = {
 		runId: options.runId ?? randomUUID(),
-		started,
-		now,
+		clock,
+		timing,
 		requestedTasks: options.requestedTasks ?? tasks.length,
 		peakConcurrency: 0,
 		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
@@ -219,7 +231,32 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 		},
 	};
 
-	const emit = () => options.onUpdate?.(tasks.map((task) => results.get(task.id) as TaskResult));
+	const waiting = new Map<string, { startMs: number | null; reasons: WaitReason[] }>();
+	function refreshWaits(): void {
+		const at = clock.offset();
+		for (const task of tasks) {
+			const reasons: WaitReason[] = [];
+			if (results.get(task.id)?.status === "pending") {
+				if (!task.dependsOn.every((id) => results.get(id)?.status === "succeeded")) reasons.push("dependency");
+				if ([...activeRoles.values()].reduce((sum, value) => sum + value, 0) >= maxConcurrency) reasons.push("capacity");
+				if ((activeRoles.get(task.role) ?? 0) >= roleLimit(task.role)) reasons.push("role-capacity");
+				if (task.resourceLocks.some((lock) => activeLocks.has(lock))) reasons.push("resource-lock");
+				if (reasons.length === 0) reasons.push("ready");
+			}
+			const prior = waiting.get(task.id);
+			if (prior?.reasons.join(",") === reasons.join(",")) continue;
+			if (prior) {
+				if (timing.waits.length < HARD_LIMITS.maxWaitSpans) timing.waits.push({ taskId: task.id, ...prior, endMs: at });
+				else timing.complete = false;
+			}
+			if (reasons.length > 0) waiting.set(task.id, { startMs: at, reasons });
+			else waiting.delete(task.id);
+		}
+	}
+	const emit = () => {
+		refreshWaits();
+		options.onUpdate?.(tasks.map((task) => results.get(task.id) as TaskResult));
+	};
 	options.onControl?.(control);
 	const heartbeat = () => {
 		if (active.size === 0) return;
@@ -301,10 +338,20 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 			unlinkAbort();
 		}
 		let childActive = false;
+		let childInterval: RunTiming["children"][number] | undefined;
+		const releaseChild = () => {
+			if (!childActive) return;
+			childActive = false;
+			activeChildren = Math.max(0, activeChildren - 1);
+			activeChildRoles.set(task.role, Math.max(0, (activeChildRoles.get(task.role) ?? 1) - 1));
+			options.onChildConcurrency?.(activeChildren);
+		};
 		const lifecycle: ChildLifecycle = {
 			childStarted() {
-				if (childActive) return;
+				if (childInterval) return;
 				childActive = true;
+				childInterval = { taskId: task.id, role: task.role, startMs: clock.offset(), endMs: null };
+				timing.children.push(childInterval);
 				activeChildren += 1;
 				metrics.peakConcurrency = Math.max(metrics.peakConcurrency, activeChildren);
 				const roleChildren = (activeChildRoles.get(task.role) ?? 0) + 1;
@@ -328,10 +375,8 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 			},
 			childSettled() {
 				if (!childActive) return;
-				childActive = false;
-				activeChildren = Math.max(0, activeChildren - 1);
-				activeChildRoles.set(task.role, Math.max(0, (activeChildRoles.get(task.role) ?? 1) - 1));
-				options.onChildConcurrency?.(activeChildren);
+				if (childInterval) childInterval.endMs = clock.offset();
+				releaseChild();
 			},
 		};
 		const promise = options.execute(task, predecessors, taskController.signal, lifecycle)
@@ -364,7 +409,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				});
 			})
 			.finally(() => {
-				lifecycle.childSettled();
+				releaseChild();
 				const state = taskControls.get(task.id);
 				if (state) {
 					state.phase = "settled";
@@ -376,6 +421,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				notify();
 			});
 		active.set(task.id, promise);
+		refreshWaits();
 	}
 
 	try {

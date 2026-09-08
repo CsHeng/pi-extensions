@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -54,6 +54,14 @@ test("snapshot preserves dirty, staged, and eligible untracked state while exclu
 	await assert.rejects(lstat(join(workspace.root, "src", "deleted.ts")), /ENOENT/);
 });
 
+test("managed bounded source admission preserves ordinary unstaged deletions", async (t) => {
+	const root = await repository(t);
+	const workspace = await createWorkerWorkspace(root, worker(["src/tracked.ts"]), { maxBytes: 1024 * 1024, maxEntries: 100 });
+	t.after(() => workspace.cleanup());
+	await assert.rejects(lstat(join(workspace.root, "src/deleted.ts")), { code: "ENOENT" });
+	assert.equal(await readFile(join(workspace.root, "src/tracked.ts"), "utf8"), "working\n");
+});
+
 test("snapshot permits repository components beginning with two dots", async (t) => {
 	const root = await repository(t);
 	await mkdir(join(root, "..state"));
@@ -75,6 +83,44 @@ test("convergence atomically applies exact create and modify operations with mod
 	assert.equal(await readFile(join(root, "src", "tracked.ts"), "utf8"), "changed\n");
 	assert.equal((await lstat(join(root, "src", "tracked.ts"))).mode & 0o777, 0o640);
 	assert.equal(await readFile(join(root, "src", "new.ts"), "utf8"), "new\n");
+});
+
+test("declared new files create missing internal directories only when applied", async (t) => {
+	const root = await repository(t);
+	const workspace = await createWorkerWorkspace(root, worker(["new/nested/file.ts"]));
+	t.after(() => workspace.cleanup());
+	await assert.rejects(lstat(join(root, "new")), { code: "ENOENT" });
+	await writeFile(join(workspace.root, "new/nested/file.ts"), "candidate");
+	assert.equal((await convergeWorkerWorkspace(workspace)).ok, true);
+	assert.equal(await readFile(join(root, "new/nested/file.ts"), "utf8"), "candidate");
+});
+
+test("new-file directory replacement cannot escape during apply", async (t) => {
+	const root = await repository(t);
+	const outside = await mkdtemp(join(tmpdir(), "subagent-new-outside-"));
+	t.after(() => rm(outside, { recursive: true, force: true }));
+	const workspace = await createWorkerWorkspace(root, worker(["new/file.ts"]));
+	t.after(() => workspace.cleanup());
+	await writeFile(join(workspace.root, "new/file.ts"), "candidate");
+	await symlink(outside, join(root, "new"));
+	await assert.rejects(convergeWorkerWorkspace(workspace), (error: unknown) => error instanceof WorkspaceError && error.code === "write_symlink");
+	await assert.rejects(lstat(join(outside, "file.ts")), { code: "ENOENT" });
+});
+
+test("convergence rejects ancestor replacement rather than applying into another repository", async (t) => {
+	const base = await repository(t);
+	const parent = join(base, "parent");
+	const root = join(parent, "repo");
+	await mkdir(root, { recursive: true });
+	await exec("git", ["init", "-q", root]);
+	const workspace = await createWorkerWorkspace(root, worker(["new/file.ts"]));
+	t.after(() => workspace.cleanup());
+	await writeFile(join(workspace.root, "new/file.ts"), "candidate");
+	await mkdir(join(base, "outside", "repo"), { recursive: true });
+	await rename(parent, join(base, "preserved"));
+	await symlink(join(base, "outside"), parent);
+	await assert.rejects(convergeWorkerWorkspace(workspace), (error: unknown) => error instanceof WorkspaceError && error.code === "write_symlink");
+	await assert.rejects(lstat(join(base, "outside", "repo", "new")), { code: "ENOENT" });
 });
 
 test("empty complete worker diff fails without mutating the parent", async (t) => {

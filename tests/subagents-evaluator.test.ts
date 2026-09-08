@@ -1,13 +1,40 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
 	extractCurrentEpochMetrics,
 	extractSessionMetrics,
+	filterEpochSessionText,
 	resolveSessionPath,
 } from "../.agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts";
+
+import { observationFixture } from "./fixtures/subagents-observation-v1.ts";
+
+test("exact-session CLI consumes explicit null disposition without leaking paths or overwriting reports", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "observation-cli-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const session = join(root, "PRIVATE_SESSION.jsonl"); const disposition = join(root, "PRIVATE_DISPOSITION.json"); const output = join(root, "PRIVATE_OUTPUT.json");
+	await writeFile(session, observationFixture().text());
+	await writeFile(disposition, JSON.stringify({ version: 1, parentSessionId: "parent", startEntryId: "user", endEntryId: "after", outcome: "accepted", startedAtMs: 0, acceptedAtMs: null }));
+	const script = new URL("../.agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts", import.meta.url).pathname;
+	const args = ["--experimental-strip-types", script, "--session", session, "--disposition", disposition, "--output", output];
+	await promisify(execFile)(process.execPath, args);
+	const report = JSON.parse(await readFile(output, "utf8"));
+	assert.equal(report.observations.usage.total.input, 5); assert.equal(report.observations.outcomes.parentAccepted, true);
+	assert.equal(report.observations.outcomes.acceptedDeliveryWallMs, null);
+	const before = await readFile(output);
+	await assert.rejects(promisify(execFile)(process.execPath, args), (error: any) => {
+		assert.doesNotMatch(error.stderr, /PRIVATE|observation-cli/); assert.match(error.stderr, /evaluation_failed/); return true;
+	});
+	assert.deepEqual(await readFile(output), before);
+	await writeFile(disposition, "PRIVATE_INVALID_JSON");
+	await assert.rejects(promisify(execFile)(process.execPath, args.slice(0, -2)), (error: any) => {
+		assert.doesNotMatch(error.stderr, /PRIVATE|observation-cli/); assert.match(error.stderr, /invalid_parent_disposition_file/); return true;
+	});
+});
 
 function toolResult(details: Record<string, unknown>, text = "Subagent run complete"): string {
 	return JSON.stringify({
@@ -88,7 +115,7 @@ test("legacy evidence remains readable and does not infer unavailable metrics", 
 		}),
 	].join("\n");
 	const metrics = extractSessionMetrics(text, "/redacted/2026_session-legacy123.jsonl");
-	assert.equal(metrics.schemaVersion, 3);
+	assert.equal(metrics.schemaVersion, 4);
 	assert.equal(metrics.source.selectionMode, "exact-session");
 	assert.equal(metrics.source.planEligibility, "unavailable");
 	assert.equal(metrics.source.telemetryMode, "legacy");
@@ -125,6 +152,27 @@ test("legacy evidence remains readable and does not infer unavailable metrics", 
 	]) {
 		assert.equal(serialized.includes(secret), false);
 	}
+});
+
+test("v4 separates effort, occupied wall and scheduler time without exposing raw intervals", () => {
+	const timing = {
+		boundary: "tool-entry", complete: true, scheduler: { startMs: 10, endMs: 70 },
+		children: [0, 1, 2].map((id) => ({ taskId: `SECRET_${id}`, role: "worker", startMs: 20, endMs: 60 })),
+		waits: [{ taskId: "SECRET_0", reasons: ["capacity", "role-capacity"], startMs: 10, endMs: 20 }],
+	};
+	const run = (schemaVersion: number, extra = {}) => toolResult({ status: "succeeded", tasks: [], telemetry: telemetry(2, { schemaVersion, timing, ...extra }) });
+	const metrics = extractSessionMetrics([run(4), run(3), run(4, { runDurationMs: null }),
+		run(4, { timing: { ...timing, children: [{ role: "worker", startMs: 20, endMs: null }] } })].join("\n"), "session_fixture123.jsonl");
+	assert.equal(metrics.runs[0]?.telemetrySchemaVersion, 4);
+	assert.equal(metrics.runs[0]?.timing?.schedulerMs, 60);
+	assert.equal(metrics.runs[0]?.timing?.workerEffortMs, 120);
+	assert.equal(metrics.runs[0]?.timing?.workerOccupiedMs, 40);
+	assert.equal(metrics.runs[0]?.timing?.waitMsByReason?.capacity, 10);
+	assert.equal(metrics.runs[1]?.timing, null);
+	assert.equal(metrics.runs[2]?.runDurationMs, null);
+	assert.equal(metrics.runs[2]?.timing?.workerEffortMs, null);
+	assert.equal(metrics.runs[3]?.timing?.workerEffortMs, null);
+	assert.doesNotMatch(JSON.stringify(metrics), /SECRET_/);
 });
 
 test("runtime schema one is authoritative only for its available fields", () => {
@@ -288,6 +336,17 @@ test("singleton runs for every role remain derivable from per-run role summaries
 function roleWithTask(roles: Record<"explorer" | "reviewer" | "worker", { tasks: number }>): string {
 	return Object.entries(roles).find(([, metric]) => metric.tasks === 1)?.[0] ?? "none";
 }
+
+test("current-epoch filtering keeps v4 fractional or unavailable durations without inventing timing", () => {
+	const manifest = { extensionEpoch: "ext", configurationEpoch: "cfg", extensionActivatedAtMs: 100, configurationActivatedAtMs: 100 };
+	const text = [0.25, null].map((runDurationMs) => toolResult({ status: "succeeded", tasks: [], telemetry: telemetry(2, {
+		schemaVersion: 4, runDurationMs, startedAtMs: 200,
+		provenance: { available: true, extensionEpoch: "ext", configurationEpoch: "cfg" },
+	}) })).join("\n");
+	const selected = filterEpochSessionText(text, manifest);
+	assert.equal(selected.selected, 2);
+	assert.equal(extractSessionMetrics(selected.text, "session_fixture123.jsonl").runs[1]?.runDurationMs, null);
+});
 
 test("current-epoch mode selects only matching schema-three runs", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-epoch-"));

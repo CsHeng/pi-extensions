@@ -7,7 +7,8 @@ export const SUBAGENT_DEBUG_COMMAND = "subagents-debug";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
 export const TELEMETRY_SCHEMA_VERSION_V2 = 2 as const;
-export const TELEMETRY_SCHEMA_VERSION = 3 as const;
+export const TELEMETRY_SCHEMA_VERSION_V3 = 3 as const;
+export const TELEMETRY_SCHEMA_VERSION = 4 as const;
 
 export const HARD_LIMITS = Object.freeze({
 	maxTasks: 10,
@@ -18,6 +19,9 @@ export const HARD_LIMITS = Object.freeze({
 	maxPredecessorOutputBytes: 16 * 1024,
 	maxPromptBytes: 128 * 1024,
 	maxFinalOutputBytes: 50 * 1024,
+	maxProtocolLineBytes: 1024 * 1024,
+	maxPendingToolCalls: 1024,
+	maxWaitSpans: 2048,
 	maxStderrBytes: 16 * 1024,
 	taskTimeoutMs: 15 * 60 * 1000,
 	killGraceMs: 5 * 1000,
@@ -45,6 +49,7 @@ export const STABLE_TASK_ERROR_CODES = [
 	"ambiguous_model",
 	"thinking_unavailable",
 	"worker_no_changes",
+	"incomplete_report",
 	"diagnostic_session_unavailable",
 	"diagnostic_storage_unavailable",
 	"diagnostic_session_limit",
@@ -236,6 +241,9 @@ export interface TaskTelemetry {
 }
 
 export interface TaskResult {
+	/** Bounded Pi-native episode observations; missing is unavailable, not zero. */
+	observation?: import("./observability.ts").NativeObservation;
+	observationVersion?: 1;
 	id: string;
 	role: RoleName;
 	status: TaskStatus;
@@ -248,6 +256,10 @@ export interface TaskResult {
 	telemetry?: TaskTelemetry;
 	route?: EffectiveRoute;
 	stopReason?: string;
+	/** Mechanical report completeness; absent in historical results. */
+	reportComplete?: boolean;
+	/** Managed worker tools recorded ready and drained for this native episode. */
+	workerToolsSettled?: boolean;
 	diagnosticSessionRef?: string;
 	activity?: ChildActivity;
 	error?: TaskError;
@@ -274,19 +286,34 @@ export type ProvenanceTelemetry =
 	| { available: true; extensionEpoch: string; configurationEpoch: string };
 
 export interface RunTelemetryV3 extends Omit<RunTelemetryV2, "schemaVersion"> {
-	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION;
+	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION_V3;
 	startedAtMs: number;
 	provenance: ProvenanceTelemetry;
 	effectiveMaxConcurrency?: number;
 	effectiveRoleConcurrency?: Record<RoleName, number>;
 }
 
-/**
- * Runtime-facing additive compatibility shape. Schema-three producer fields are
- * required on RunTelemetryV3; older in-memory builders may omit them until the
- * integration slice fills them.
- */
-export interface RunTelemetry extends Omit<RunTelemetryV3,
+export interface TimeSpan {
+	startMs: number | null;
+	endMs: number | null;
+}
+export type WaitReason = "dependency" | "capacity" | "role-capacity" | "resource-lock" | "ready";
+export interface RunTiming {
+	boundary: "tool-entry" | "scheduler";
+	scheduler: TimeSpan | null;
+	children: Array<TimeSpan & { taskId: string; role: RoleName }>;
+	waits: Array<TimeSpan & { taskId: string; reasons: WaitReason[] }>;
+	complete: boolean;
+}
+export interface RunTelemetryV4 extends Omit<RunTelemetryV3, "schemaVersion" | "runDurationMs"> {
+	schemaVersion: typeof TELEMETRY_SCHEMA_VERSION;
+	runDurationMs: number | null;
+	timing: RunTiming;
+}
+
+/** Historical/in-memory builders may omit new evidence; never infer it. */
+export interface RunTelemetry extends Omit<RunTelemetryV4,
+	| "timing"
 	| "requestedDependencyEdges"
 	| "admittedDependencyEdges"
 	| "explicitModelTasks"
@@ -296,6 +323,7 @@ export interface RunTelemetry extends Omit<RunTelemetryV3,
 	| "effectiveMaxConcurrency"
 	| "effectiveRoleConcurrency"
 > {
+	timing?: RunTiming;
 	requestedDependencyEdges?: number;
 	admittedDependencyEdges?: number;
 	explicitModelTasks?: number;

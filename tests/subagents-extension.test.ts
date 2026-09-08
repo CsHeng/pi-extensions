@@ -14,6 +14,7 @@ const exec = promisify(execFile);
 
 interface Harness {
 	tool?: any;
+	tools: Map<string, any>;
 	commands: Map<string, any>;
 	handlers: Map<string, Array<(...args: any[]) => any>>;
 	pi: any;
@@ -23,10 +24,11 @@ function harness(): Harness {
 	const commands = new Map<string, any>();
 	const handlers = new Map<string, Array<(...args: any[]) => any>>();
 	const value: Harness = {
+		tools: new Map(),
 		commands,
 		handlers,
 		pi: {
-			registerTool(tool: any) { value.tool = tool; },
+			registerTool(tool: any) { value.tools.set(tool.name, tool); if (tool.name === SUBAGENT_TOOL_NAME) value.tool = tool; },
 			registerCommand(name: string, command: any) { commands.set(name, command); },
 			on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 			getActiveTools() { return [SUBAGENT_TOOL_NAME]; },
@@ -100,10 +102,36 @@ function dependencies(overrides: Partial<SubagentDependencies> = {}): Partial<Su
 	};
 }
 
-test("extension registers one bounded tool and redacted status command", async () => {
+test("tool-entry timing includes admission and diagnostic settlement rather than scheduler alone", async () => {
+	let now = 0;
+	const state = harness();
+	const store = dependencies().createDiagnosticStore!();
+	createSubagentsExtension(dependencies({
+		now: () => now,
+		loadConfig: async () => { now += 10; return { config: defaultConfig() }; },
+		createDiagnosticStore: () => ({ ...store, async allocateRun(parent, run) {
+			const allocated = await store.allocateRun(parent, run);
+			return { ...allocated, async settle() { now += 20; await allocated.settle(); } };
+		} }),
+		runChild: async (options) => {
+			options.onChildStarted?.();
+			now += 30;
+			options.onChildSettled?.();
+			return successful(options.task);
+		},
+	}))(state.pi);
+	const result = await state.tool.execute("clock", { tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }] }, undefined, undefined, context());
+	assert.equal(result.details.telemetry.runDurationMs, 60);
+	assert.deepEqual(result.details.telemetry.timing.scheduler, { startMs: 10, endMs: 40 });
+	assert.equal(result.details.telemetry.timing.boundary, "tool-entry");
+	assert.equal(result.details.telemetry.timing.complete, true);
+});
+
+test("extension registers bounded one-shot and managed tools with redacted status commands", async () => {
 	const state = harness();
 	createSubagentsExtension(dependencies())(state.pi);
 	assert.equal(state.tool.name, SUBAGENT_TOOL_NAME);
+	assert.deepEqual([...state.tools.keys()], [SUBAGENT_TOOL_NAME, "csheng_subagent_sessions"]);
 	assert.deepEqual([...state.commands.keys()], ["subagents", "subagents-debug"]);
 	const ctx = context();
 	await state.commands.get("subagents").handler("", ctx);
@@ -698,7 +726,7 @@ test("explorer and reviewer external roots reach only task and capability fields
 		],
 	}, undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
 	assert.equal(result.details.status, "succeeded");
-	assert.equal(result.details.telemetry.schemaVersion, 3);
+	assert.equal(result.details.telemetry.schemaVersion, 4);
 	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
 	assert.equal(seen[0]?.cwd, await realpath(current));

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type AgentToolResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -38,6 +38,9 @@ import { resolveRoute, type RouteContext, type RouteResolution } from "./routing
 import { getRole } from "./roles.ts";
 import { buildChildPrompt, runChild, type ChildRunOptions } from "./runner.ts";
 import { runScheduledTasks } from "./scheduler.ts";
+import { createRunClock, type RunClock } from "./telemetry.ts";
+import { registerObservationHooks } from "./observation-hooks.ts";
+import { registerContinuationTool } from "./continuation.ts";
 import {
 	convergeWorkerWorkspace,
 	createWorkerWorkspace,
@@ -48,6 +51,7 @@ import {
 const GUARD_EXTENSION_PATH = fileURLToPath(new URL("./child-capability-guard.ts", import.meta.url));
 
 export interface SubagentDependencies {
+	now(): number;
 	loadConfig(): Promise<ConfigLoadResult>;
 	createWorkerWorkspace(cwd: string, task: NormalizedTask): Promise<WorkerWorkspace>;
 	convergeWorkerWorkspace(workspace: WorkerWorkspace): Promise<ConvergenceResult>;
@@ -59,6 +63,7 @@ export interface SubagentDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: SubagentDependencies = {
+	now: () => performance.now(),
 	loadConfig,
 	createWorkerWorkspace,
 	convergeWorkerWorkspace,
@@ -87,7 +92,8 @@ function failureResult(task: NormalizedTask, code: string, message: string, rout
 
 interface RunIdentity {
 	runId: string;
-	started: number;
+	clock: RunClock;
+	startedAtMs: number;
 	requestedTasks: number;
 	requestedDependencyEdges: number;
 	explicitModelTasks: number;
@@ -109,7 +115,8 @@ function failedTelemetry(
 	return {
 		schemaVersion: TELEMETRY_SCHEMA_VERSION,
 		runId: identity.runId,
-		runDurationMs: Math.max(0, Date.now() - identity.started),
+		runDurationMs: identity.clock.elapsed(),
+		timing: { boundary: "tool-entry", scheduler: null, children: [], waits: [], complete: identity.clock.valid },
 		requestedTasks: identity.requestedTasks,
 		admittedTasks,
 		requestedDependencyEdges: identity.requestedDependencyEdges,
@@ -119,7 +126,7 @@ function failedTelemetry(
 		launchedChildren: 0,
 		peakConcurrency: 0,
 		peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
-		startedAtMs: identity.started,
+		startedAtMs: identity.startedAtMs,
 		provenance,
 		runErrorCode: code,
 		...(effectiveMaxConcurrency === undefined ? {} : { effectiveMaxConcurrency }),
@@ -266,11 +273,16 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 			description: "Run one bounded foreground batch of fixed explorer, reviewer, or isolated worker children. Keep ordinary work flat; use hard predecessor edges only for approved implementation order with no intervening parent decision.",
 			parameters: SubagentToolSchema,
 			async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
+				const clock = createRunClock(dependencies.now);
+				const executeBatch = async () => {
+				// Defer rendering and final timing until diagnostic cleanup has settled.
+				const finalToolResult = (result: SubagentRunResult, text?: string) => ({ result, text });
 				const params = rawParams as SubagentToolInput;
 				const requestedTasks = Array.isArray(params.tasks) ? params.tasks : [];
 				const identity: RunIdentity = {
 					runId: randomUUID(),
-					started: Date.now(),
+					clock,
+					startedAtMs: Date.now(),
 					requestedTasks: requestedTasks.length,
 					requestedDependencyEdges: dependencyEdges(requestedTasks),
 					explicitModelTasks: requestedTasks.filter((task) => task.model !== undefined).length,
@@ -298,7 +310,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 					const result = aggregateFailure(validation.tasks, "project_trust_required", "Subagent dispatch requires a trusted parent project.", identity, validation.tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
-				if (activeController) {
+				if (activeController || managed.busy) {
 					const result = aggregateFailure(validation.tasks, "subagent_run_active", "Another subagent graph is already active in this session.", identity, validation.tasks.length, runProvenance);
 					return finalToolResult(result);
 				}
@@ -391,11 +403,13 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 
 					let snapshotPeak = 0;
 					const emitSnapshot = (results: readonly TaskResult[], peakConcurrency = snapshotPeak) => {
+						const elapsedMs = clock.elapsed();
+						if (elapsedMs === null) return;
 						const snapshot = buildSnapshot({
 							runId: identity.runId,
 							requestedTasks: identity.requestedTasks,
 							results,
-							elapsedMs: Math.max(0, Date.now() - identity.started),
+							elapsedMs,
 							peakConcurrency,
 							cancellationRequested: activeCancellation,
 							phases: activePhases,
@@ -403,6 +417,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						if (snapshot) pi.events.emit(SNAPSHOT_EVENT, snapshot);
 					};
 					const scheduled = await runScheduledTasks(tasks, {
+						clock,
 						runId: identity.runId,
 						requestedTasks: identity.requestedTasks,
 						maxConcurrency: config.maxConcurrency,
@@ -456,7 +471,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						onUpdate(results) {
 							const routedResults = attachResolvedRoutes(results, routes);
 							emitSnapshot(routedResults);
-							onUpdate?.({ content: [{ type: "text", text: formatProgress(routedResults) }], details: { status: "running", tasks: routedResults, usage: emptyUsage() } });
+							onUpdate?.({ content: [{ type: "text", text: formatProgress(routedResults, clock.elapsed()) }], details: { status: "running", tasks: routedResults, usage: emptyUsage() } });
 						},
 						async execute(task, predecessors, childSignal, lifecycle) {
 							const selected = routes.get(task.id) as Extract<RouteResolution, { ok: true }>;
@@ -472,9 +487,9 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 								if (task.role === "worker") {
 									activeControl?.setExecutionPhase(task.id, "workspace-preparation");
 									activePhases.set(task.id, "workspace-preparation");
-									workspaceStarted = Date.now();
+									workspaceStarted = clock.now();
 									workspace = await dependencies.createWorkerWorkspace(ctx.cwd, task);
-									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
+									workspaceMs = Math.max(0, clock.now() - workspaceStarted);
 									if (childSignal.aborted) {
 										return {
 											...failureResult(task, "aborted", "Task was cancelled before child launch.", selected.route),
@@ -488,8 +503,9 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 								const root = workspace?.root ?? readOnlyRoot;
 								diagnosticSession = await activeDiagnosticRun.createTask(task.id);
 								taskDiagnosticChecks.set(task.id, { sessionPath: diagnosticSession.path, controller: taskController, checking: false });
-								const childStarted = Date.now();
+								const childStarted = clock.now();
 								const childResult = await dependencies.runChild({
+									now: clock.now,
 									task,
 									role: getRole(task.role),
 									route: selected.route,
@@ -517,7 +533,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									...childResult.telemetry,
 									childStarted: childResult.telemetry?.childStarted ?? true,
 									workspaceMs,
-									childMs: childResult.telemetry?.childMs ?? Math.max(0, Date.now() - childStarted),
+									childMs: childResult.telemetry?.childMs ?? Math.max(0, clock.now() - childStarted),
 								};
 								if (!workspace || childResult.status !== "succeeded") {
 									return {
@@ -536,9 +552,9 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 									};
 								}
 								activePhases.set(task.id, "convergence-critical");
-								const convergenceStarted = Date.now();
+								const convergenceStarted = clock.now();
 								const converged = await dependencies.convergeWorkerWorkspace(workspace);
-								telemetry.convergenceMs = Math.max(0, Date.now() - convergenceStarted);
+								telemetry.convergenceMs = Math.max(0, clock.now() - convergenceStarted);
 								if (!converged.ok) {
 									return {
 										...childResult,
@@ -552,7 +568,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 								return { ...childResult, changedPaths: converged.changedPaths, convergence: "applied" as const, telemetry };
 							} catch (error) {
 								if (workspaceStarted !== undefined && workspaceMs === 0) {
-									workspaceMs = Math.max(0, Date.now() - workspaceStarted);
+									workspaceMs = Math.max(0, clock.now() - workspaceStarted);
 								}
 								const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "worker_execution_failed";
 								return {
@@ -575,7 +591,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 							admittedDependencyEdges: dependencyEdges(tasks),
 							explicitModelTasks: identity.explicitModelTasks,
 							explicitThinkingTasks: identity.explicitThinkingTasks,
-							startedAtMs: identity.started,
+							startedAtMs: identity.startedAtMs,
 							provenance: runProvenance,
 							effectiveMaxConcurrency: config.maxConcurrency,
 							effectiveRoleConcurrency: {
@@ -602,6 +618,18 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 						settleActiveRun?.();
 					}
 				}
+				};
+				const prepared = await executeBatch();
+				prepared.result.telemetry.runDurationMs = clock.elapsed();
+				if (prepared.result.telemetry.timing) prepared.result.telemetry.timing.complete &&= clock.valid;
+				try {
+					const telemetry = structuredClone(prepared.result.telemetry);
+					for (const span of [...(telemetry.timing?.children ?? []), ...(telemetry.timing?.waits ?? [])]) {
+						span.taskId = prepared.result.tasks.find((task) => task.id === span.taskId)?.observation?.ownerSessionId ?? createHash("sha256").update(JSON.stringify([telemetry.runId, span.taskId])).digest("hex");
+					}
+					observations.recordRun({ telemetry, clockKey: clock.clockKey, originMs: clock.valid ? clock.started : null });
+				} catch { /* Optional native observation. */ }
+				return finalToolResult(prepared.result, prepared.text);
 			},
 		});
 
@@ -667,6 +695,14 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 			const settlingRun = activeRun;
 			activeController?.abort();
 			await settlingRun;
+		});
+		const observations = registerObservationHooks(pi, { now: dependencies.now });
+		const managed = registerContinuationTool(pi, {
+			now: dependencies.now, onRun: observations.recordRun,
+			loadConfig: dependencies.loadConfig,
+			runChild: dependencies.runChild,
+			repositoryHost: dependencies.repositoryHost,
+			legacyBusy: () => activeController !== undefined,
 		});
 	};
 }

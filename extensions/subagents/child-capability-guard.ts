@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { registerObservationHooks } from "./observation-hooks.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
@@ -16,18 +18,23 @@ function requestedPath(toolName: string, input: unknown): string | undefined {
 export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
+	let fatalReason = loaded.error;
+	registerObservationHooks(pi, { child: true, capabilityKey: loaded.manifest ? createHash("sha256").update(JSON.stringify(loaded.manifest)).digest("hex") : null });
 
 	pi.on("tool_call", async (event) => {
-		if (!loaded.manifest) {
-			return { block: true, terminate: true, reason: loaded.error ?? "Child capability is unavailable." };
+		if (!loaded.manifest || fatalReason) {
+			return { block: true, terminate: true, reason: fatalReason ?? "Child capability is unavailable." };
 		}
 		if (!PATH_TOOLS.has(event.toolName)) {
-			return { block: true, terminate: true, reason: `Tool ${event.toolName} is outside the child capability.` };
+			return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the child capability.` };
 		}
 		const path = requestedPath(event.toolName, event.input);
-		if (path === undefined) return { block: true, terminate: true, reason: `Tool ${event.toolName} did not provide a path.` };
+		if (path === undefined) return { block: true, terminate: false, reason: `Tool ${event.toolName} did not provide a path.` };
 		const decision = await authorizePath(loaded.manifest, event.toolName, path);
-		if (!decision.allowed) return { block: true, terminate: true, reason: decision.reason ?? "Path denied." };
+		if (!decision.allowed) {
+			if (decision.fatal) fatalReason = decision.reason ?? "Child capability is unavailable.";
+			return { block: true, terminate: decision.fatal === true, reason: decision.reason ?? "Path denied." };
+		}
 		return undefined;
 	});
 }

@@ -15,6 +15,7 @@ import {
 	TASK_EXECUTION_PHASES,
 	TELEMETRY_SCHEMA_VERSION,
 	TELEMETRY_SCHEMA_VERSION_V2,
+	TELEMETRY_SCHEMA_VERSION_V3,
 	THINKING_LEVELS,
 	isSafeDiagnosticRef,
 	isSafePathGrammar,
@@ -197,7 +198,7 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		profileFallbacks: [],
 	};
 	assert.equal(TELEMETRY_SCHEMA_VERSION_V2, 2);
-	assert.equal(TELEMETRY_SCHEMA_VERSION, 3);
+	assert.equal(TELEMETRY_SCHEMA_VERSION, 4);
 	assert.equal(telemetry.schemaVersion, 2);
 	assert.deepEqual(ROUTE_SELECTION_SOURCES, ["role-default", "explicit-task"]);
 	assert.deepEqual(PROFILE_FALLBACKS, ["execution-role-default", "reasoning-role-default"]);
@@ -212,6 +213,7 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		"ambiguous_model",
 		"thinking_unavailable",
 		"worker_no_changes",
+		"incomplete_report",
 		"diagnostic_session_unavailable",
 		"diagnostic_storage_unavailable",
 		"diagnostic_session_limit",
@@ -231,7 +233,7 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 
 test("telemetry schema v3 adds start time, provenance, and optional effective caps", () => {
 	const unavailable: RunTelemetryV3 = {
-		schemaVersion: TELEMETRY_SCHEMA_VERSION,
+		schemaVersion: TELEMETRY_SCHEMA_VERSION_V3,
 		runId: "run-1",
 		runDurationMs: 10,
 		requestedTasks: 1,
