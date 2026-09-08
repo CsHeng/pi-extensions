@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,9 +20,9 @@ done
 if [[ $instance == 1 ]]; then
 	printf '%s\\n' \\
 		'{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"subagents"}]}}' \\
-		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":true}}]}}'
+		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":true,"managed":true}}]}}'
 else
-	printf '%s\\n' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":false}}]}}'
+	printf '%s\\n' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":false,"managed":false}}]}}'
 fi
 `);
 	await chmod(shim, 0o700);
@@ -35,7 +35,12 @@ fi
 		result: "pass",
 		source: "installed",
 		tool: 1,
+		managed_tool: 1,
 		command: 1,
 		extension_off_tool: 0,
+		extension_off_managed_tool: 0,
 	});
+	await writeFile(shim, (await readFile(shim, "utf8")).replace('"managed":true', '"managed":false'));
+	const stale = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { PATH: `${shimRoot}:${process.env.PATH ?? ""}` } });
+	assert.notEqual(stale.status, 0, "legacy-only installed discovery must not claim managed support");
 });
