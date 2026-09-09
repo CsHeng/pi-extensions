@@ -3,13 +3,14 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_TOOL_NAME, type RunTelemetry } from "../extensions/subagents/contracts.ts";
 import { registerObservationHooks } from "../extensions/subagents/observation-hooks.ts";
+import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
 import { isLocalTiming } from "../extensions/subagents/telemetry.ts";
 
 function harness(child = false, now: () => number = () => performance.now()) {
 	const handlers = new Map<string, Array<(...args: any[]) => unknown>>();
 	const customs: Array<{ customType: string; data: any }> = [];
 	const entries: any[] = [{ id: "root", type: "message", parentId: null, message: { role: "user" } }];
-	let tools = [SUBAGENT_TOOL_NAME];
+	let tools = [SUBAGENT_SESSION_TOOL_NAME];
 	const pi = {
 		on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		getActiveTools: () => tools,
@@ -26,7 +27,7 @@ function harness(child = false, now: () => number = () => performance.now()) {
 }
 const assistant = { message: { role: "assistant", content: [] } };
 const thinking = (type: string, contentIndex: number) => ({ assistantMessageEvent: { type, contentIndex } });
-const tool = (toolName = SUBAGENT_TOOL_NAME, toolCallId = "call") => ({ toolName, toolCallId });
+const tool = (toolName = SUBAGENT_SESSION_TOOL_NAME, toolCallId = "call") => ({ toolName, toolCallId });
 const run: RunTelemetry = { schemaVersion: 4, runId: "run", runDurationMs: 1, requestedTasks: 1, admittedTasks: 1, launchedChildren: 1, peakConcurrency: 1, peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 1 } };
 
 test("public child hooks capture model, overlapping thinking, tool and compaction endpoints", () => {
@@ -88,6 +89,13 @@ test("missing thinking start and a lost compaction usage marker cannot look comp
 	failed.pi.appendEntry = (type, data) => { if (type === "csheng-compaction-unavailable") throw new Error("optional"); append(type, data); };
 	failed.emit("before_agent_start"); failed.emit("session_before_compact"); failed.emit("session_compact_failed", { reason: "overflow", aborted: true }); failed.emit("agent_settled");
 	assert.equal(failed.customs.some((entry) => entry.customType === "csheng-episode-timing"), false);
+});
+
+test("retired one-shot tool name does not create live parent delegation observations", () => {
+	const f = harness();
+	f.pi.setTools([SUBAGENT_TOOL_NAME]);
+	f.emit("before_agent_start"); f.emit("tool_execution_start", tool(SUBAGENT_TOOL_NAME)); f.emit("tool_execution_end", tool(SUBAGENT_TOOL_NAME)); f.emit("agent_settled");
+	assert.equal(f.customs.length, 0);
 });
 
 test("ordinary parent requests, idle shutdown and disabled tools write nothing", () => {

@@ -6,11 +6,39 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/subagents/config.ts";
-import { emptyUsage, HARD_LIMITS, SUBAGENT_TOOL_NAME, type TaskResult } from "../extensions/subagents/contracts.ts";
+import { emptyUsage, HARD_LIMITS, SUBAGENT_DEBUG_COMMAND, SUBAGENT_TOOL_NAME, type TaskResult } from "../extensions/subagents/contracts.ts";
 import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
-import type { NormalizedTask } from "../extensions/subagents/graph.ts";
+import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 const exec = promisify(execFile);
+
+/*
+ * Old one-shot entry tests → managed-only owners
+ *
+ * PORT via this file (managed tool + ContinuationService/store fixtures):
+ *   registration/status/guidance, trust-before-probe, parent/explicit/profile routes,
+ *   user route-file immutability, cycle/prompt bounds before config, busy-batch,
+ *   shutdown abort, canonical scope, path-admission redaction, external reads,
+ *   worker external-root ban, progress without diagnostic leak, predecessor reports,
+ *   repo-wide worker scope refusal, request duration spanning admission+child.
+ *
+ * RETIRED one-shot product (do not reintroduce):
+ *   csheng_subagents, /subagents-debug, diagnostic store admission/limit abort,
+ *   auto-convergence/worker_no_changes apply, writable-snapshot partial success,
+ *   complete-prompt-after-alias-realpath, one-shot scheduler telemetry counters,
+ *   blocked-task prelaunch route decoration, "Predecessor"-labeled prompts,
+ *   subagent_run_active, missing-path create-file worker scope.
+ *
+ * COVERED by existing managed tests (not deleted invariants):
+ *   continue trust/native-leaf/abort/replay/blocked dependents → tests/subagents-continuation.test.ts
+ *   worker_no_changes snapshot failure → tests/subagents-workspace.test.ts
+ *   no parent write before apply / no candidate on empty worker diff → tests/subagents-continuation.test.ts, tests/subagents-candidates.test.ts
+ *   writable_isolation_unavailable → tests/subagents-workspace.test.ts
+ *   diagnostic_session_limit → tests/subagents-runner.test.ts
+ *   managed storage/history bounds → tests/subagents-managed-sessions.test.ts
+ *   historical one-shot JSONL → tests/subagents-evaluator.test.ts
+ */
 
 interface Harness {
 	tool?: any;
@@ -28,10 +56,11 @@ function harness(): Harness {
 		commands,
 		handlers,
 		pi: {
-			registerTool(tool: any) { value.tools.set(tool.name, tool); if (tool.name === SUBAGENT_TOOL_NAME) value.tool = tool; },
+			registerTool(tool: any) { value.tools.set(tool.name, tool); if (tool.name === SUBAGENT_SESSION_TOOL_NAME) value.tool = tool; },
 			registerCommand(name: string, command: any) { commands.set(name, command); },
 			on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
-			getActiveTools() { return [SUBAGENT_TOOL_NAME]; },
+			getActiveTools() { return [SUBAGENT_SESSION_TOOL_NAME]; },
+			appendEntry() {},
 			events: { on() {}, emit() {} },
 		},
 	};
@@ -52,7 +81,11 @@ function context(trusted = true, models = [parentModel], cwd = process.cwd()) {
 			getAvailable() { return models; },
 		},
 		isProjectTrusted() { return trusted; },
-		sessionManager: { getSessionId() { return "parent-session"; } },
+		sessionManager: {
+			getSessionId() { return "parent-session"; },
+			getLeafId() { return "anchor"; },
+			getBranch() { return [{ id: "anchor" }]; },
+		},
 		ui: {
 			notify(message: string, level: string) { notifications.push({ message, level }); },
 		},
@@ -60,7 +93,7 @@ function context(trusted = true, models = [parentModel], cwd = process.cwd()) {
 	};
 }
 
-function successful(task: NormalizedTask): TaskResult {
+function successful(task: { id: string; role: TaskResult["role"] }): TaskResult {
 	return {
 		id: task.id,
 		role: task.role,
@@ -71,234 +104,182 @@ function successful(task: NormalizedTask): TaskResult {
 		durationMs: 1,
 		changedPaths: [],
 		convergence: "not-applicable",
+		reportComplete: true,
 	};
 }
 
-function dependencies(overrides: Partial<SubagentDependencies> = {}): Partial<SubagentDependencies> {
-	return {
+function detailsOf(result: { details: SessionActionResult }): SessionActionResult {
+	return result.details;
+}
+
+async function registered(t: test.TestContext, overrides: Partial<SubagentDependencies> = {}) {
+	const base = await mkdtemp(join(tmpdir(), "subagent-extension-"));
+	t.after(async () => rm(base, { recursive: true, force: true }));
+	const store = new ManagedSessionStore(base);
+	const state = harness();
+	createSubagentsExtension({
+		store,
 		loadConfig: async () => ({ config: defaultConfig() }),
 		createProvenance: () => ({
 			observeExtension: async () => ({ available: false as const }),
 			observeConfiguration: async () => ({ available: false as const }),
 		}),
-		createDiagnosticStore: () => ({
-			async allocateRun(parentSessionId, runId) {
-				return {
-					path: `/private/${parentSessionId}/${runId}`,
-					ref: `subagent-sessions/${parentSessionId}/${runId}`,
-					parentSegment: parentSessionId,
-					runSegment: runId,
-					async createTask(taskId) { return { path: `/private/${taskId}.jsonl`, ref: `subagent-sessions/${parentSessionId}/${runId}/${taskId}.jsonl`, async removeUnused() {} }; },
-					async checkLimits() { return { ok: true }; },
-					async settle() {},
-				};
-			},
-			async discover() { return []; },
-			async inspect() { throw new Error("not configured"); },
-		}),
-		runChild: async (options) => ({ ...successful(options.task), route: options.route, diagnosticSessionRef: options.diagnosticSession.ref }),
-		guardExtensionPath: "/tmp/guard.ts",
-		...overrides,
-	};
-}
-
-test("tool-entry timing includes admission and diagnostic settlement rather than scheduler alone", async () => {
-	let now = 0;
-	const state = harness();
-	const store = dependencies().createDiagnosticStore!();
-	createSubagentsExtension(dependencies({
-		now: () => now,
-		loadConfig: async () => { now += 10; return { config: defaultConfig() }; },
-		createDiagnosticStore: () => ({ ...store, async allocateRun(parent, run) {
-			const allocated = await store.allocateRun(parent, run);
-			return { ...allocated, async settle() { now += 20; await allocated.settle(); } };
-		} }),
 		runChild: async (options) => {
 			options.onChildStarted?.();
-			now += 30;
 			options.onChildSettled?.();
 			return successful(options.task);
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("clock", { tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }] }, undefined, undefined, context());
-	assert.equal(result.details.telemetry.runDurationMs, 60);
-	assert.deepEqual(result.details.telemetry.timing.scheduler, { startMs: 10, endMs: 40 });
-	assert.equal(result.details.telemetry.timing.boundary, "tool-entry");
-	assert.equal(result.details.telemetry.timing.complete, true);
-});
+		...overrides,
+	})(state.pi);
+	return { base, store, state };
+}
 
-test("extension registers bounded one-shot and managed tools with redacted status commands", async () => {
+function createInput(requestId: string, tasks: object[]) {
+	return { action: "create", requestId, tasks };
+}
+
+async function emitBeforeAgentStart(state: Harness, event = { systemPrompt: "base" }, ctx = context()) {
+	let result: unknown;
+	for (const handler of state.handlers.get("before_agent_start") ?? []) {
+		result = await handler(event, ctx) ?? result;
+	}
+	return result as { systemPrompt?: string } | undefined;
+}
+
+test("extension registers only the managed tool and a redacted status command", async () => {
 	const state = harness();
-	createSubagentsExtension(dependencies())(state.pi);
-	assert.equal(state.tool.name, SUBAGENT_TOOL_NAME);
-	assert.deepEqual([...state.tools.keys()], [SUBAGENT_TOOL_NAME, "csheng_subagent_sessions"]);
-	assert.deepEqual([...state.commands.keys()], ["subagents", "subagents-debug"]);
+	createSubagentsExtension({
+		loadConfig: async () => ({ config: defaultConfig() }),
+	})(state.pi);
+	assert.equal(state.tool.name, SUBAGENT_SESSION_TOOL_NAME);
+	assert.deepEqual([...state.tools.keys()], [SUBAGENT_SESSION_TOOL_NAME]);
+	assert.equal(state.tools.has(SUBAGENT_TOOL_NAME), false);
+	assert.deepEqual([...state.commands.keys()], ["subagents"]);
+	assert.equal(state.commands.has(SUBAGENT_DEBUG_COMMAND), false);
 	const ctx = context();
 	await state.commands.get("subagents").handler("", ctx);
+	assert.match(ctx.notifications[0]?.message ?? "", /tool=csheng_subagent_sessions/);
 	assert.match(ctx.notifications[0]?.message ?? "", /guidance=aggressive/);
 	assert.doesNotMatch(ctx.notifications[0]?.message ?? "", /\/tmp\/agent/);
 });
 
-test("debug command renders user-only bounded metadata and not raw session content", async () => {
+test("invalid route configuration is reported by status without launching work", async () => {
 	const state = harness();
-	createSubagentsExtension(dependencies({
-		createDiagnosticStore: () => ({
-			async allocateRun() { throw new Error("unused"); },
-			async discover() { return [{ ref: "subagent-sessions/parent/run", path: "/private/run", active: false, staleActive: false, mtimeMs: 1, bytes: 2 }]; },
-			async inspect(reference) {
-				return { path: "/private/run/task.jsonl", ref: reference, entries: [{ entryType: "message", role: "assistant", stopReason: "stop" }], truncated: false, transcriptComplete: true };
-			},
-		}),
-	}))(state.pi);
+	createSubagentsExtension({
+		loadConfig: async () => ({ diagnostic: { code: "invalid_route_config", message: "invalid overlay" } }),
+	})(state.pi);
 	const ctx = context();
-	await state.commands.get("subagents-debug").handler("parent/run/task.jsonl", ctx);
-	assert.match(ctx.notifications.at(-1)?.message ?? "", /\/private\/run\/task\.jsonl/);
-	assert.match(ctx.notifications.at(-1)?.message ?? "", /ordinary continuable Pi session/);
-	assert.doesNotMatch(ctx.notifications.at(-1)?.message ?? "", /prompt|result content/);
+	await state.commands.get("subagents").handler("", ctx);
+	assert.equal(ctx.notifications[0]?.level, "error");
+	assert.match(ctx.notifications[0]?.message ?? "", /invalid overlay/);
 });
 
-test("untrusted projects fail before a child starts", async () => {
+test("untrusted projects fail before a child or repository probe starts", async (t) => {
 	let calls = 0;
 	let probes = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		runChild: async (options) => { calls += 1; return successful(options.task); },
 		repositoryHost: {
 			async findGitToplevel() { probes += 1; throw new Error("probed"); },
 			async realpath() { probes += 1; throw new Error("probed"); },
 			async lstat() { probes += 1; throw new Error("probed"); },
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
-	}, undefined, undefined, context(false));
+	});
+	const result = await state.tool.execute("call", createInput("trust", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context(false));
+	const details = detailsOf(result);
 	assert.equal("isError" in result, false);
 	assert.match(result.content[0].text, /project_trust_required/);
-	assert.equal(result.details.telemetry.runErrorCode, "project_trust_required");
-	assert.equal(result.details.telemetry.launchedChildren, 0);
-	assert.equal(result.details.telemetry.requestedDependencyEdges, 0);
-	assert.equal(result.details.telemetry.admittedDependencyEdges, 0);
-	assert.equal(result.details.telemetry.explicitModelTasks, 0);
-	assert.equal(result.details.telemetry.explicitThinkingTasks, 0);
+	assert.equal(details.error?.code, "project_trust_required");
+	assert.equal(details.requestTelemetry?.launchedChildren, 0);
+	assert.equal(details.sessions.length, 0);
 	assert.equal(calls, 0);
 	assert.equal(probes, 0);
 });
 
-test("diagnostic admission failure blocks every child without fallback", async () => {
-	let calls = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		createDiagnosticStore: () => ({
-			async allocateRun() { throw Object.assign(new Error("sensitive path"), { code: "diagnostic_storage_unavailable" }); },
-			async discover() { return []; },
-			async inspect() { throw new Error("unused"); },
-		}),
-		runChild: async (options) => { calls += 1; return successful(options.task); },
-	}))(state.pi);
-	const result = await state.tool.execute("call", { tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }] }, undefined, undefined, context());
-	assert.equal(result.details.telemetry.runErrorCode, "diagnostic_storage_unavailable");
-	assert.equal(result.details.telemetry.launchedChildren, 0);
-	assert.equal(calls, 0);
-	assert.doesNotMatch(result.content[0].text, /sensitive path/);
-});
-
-test("trusted graph inherits parent route and passes explicit child approval", async () => {
+test("trusted graph inherits the parent route, approves the child, and passes predecessor reports", async (t) => {
 	const seen: any[] = [];
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		runChild: async (options) => {
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			seen.push(options);
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
+	});
 	const updates: string[] = [];
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "a", role: "explorer", objective: "a", scope: ["."] },
-			{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
-		],
-	}, undefined, (update: any) => updates.push(update.content[0].text), context());
-	assert.equal("isError" in result, false);
-	assert.equal(result.details.status, "succeeded");
+	const result = await state.tool.execute("call", createInput("graph", [
+		{ id: "a", role: "explorer", objective: "a", scope: ["."] },
+		{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
+	]), undefined, (update: any) => updates.push(update.content[0].text), context());
+	const details = detailsOf(result);
+	assert.equal(details.status, "succeeded");
 	assert.equal(seen.length, 2);
 	assert.equal(seen[0].approveProject, true);
 	assert.equal(seen[0].route.model, "parent");
 	assert.equal(seen[0].route.selectionSource, "role-default");
-	assert.match(seen[1].prompt, /Predecessor a/);
-	assert.equal(result.details.telemetry.requestedDependencyEdges, 1);
-	assert.equal(result.details.telemetry.admittedDependencyEdges, 1);
+	assert.match(seen[1].prompt, /result:a/);
+	assert.equal(details.requestTelemetry?.launchedChildren, 2);
 	assert.ok(updates.some((message) => /running/.test(message)));
 });
 
-test("child activity reaches host progress before final settlement without leaking diagnostics", async () => {
-	const state = harness();
-	createSubagentsExtension(dependencies({
+test("child activity reaches host progress before settlement without leaking diagnostics", async (t) => {
+	const { state } = await registered(t, {
 		runChild: async (options) => {
 			options.onChildStarted?.();
 			options.onActivity?.({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 5, inactiveForMs: 0 });
 			options.onChildSettled?.();
-			return { ...successful(options.task), route: options.route, diagnosticSessionRef: "subagent-sessions/private/run/task.jsonl" };
+			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
+	});
 	const updates: string[] = [];
-	const result = await state.tool.execute("call", { tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }] }, undefined, (update: any) => updates.push(update.content[0].text), context());
-	assert.equal(result.details.status, "succeeded");
+	const result = await state.tool.execute("call", createInput("progress", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, (update: any) => updates.push(update.content[0].text), context());
+	assert.equal(detailsOf(result).status, "succeeded");
 	assert.ok(updates.some((message) => /turns=1 tool=read/.test(message)));
 	assert.ok(updates.every((message) => !/subagent-sessions|private|jsonl/.test(message)));
 	assert.doesNotMatch(result.content[0].text, /subagent-sessions|private|jsonl/);
 });
 
-test("event-boundary run limit aborts remaining children with typed storage failure", async () => {
-	let started = 0;
-	let releaseFirst: (() => void) | undefined;
-	const bothStarted = new Promise<void>((resolve) => { releaseFirst = resolve; });
-	const state = harness();
-	createSubagentsExtension(dependencies({
+test("request duration spans configuration admission and child work", async (t) => {
+	let now = 0;
+	const { state } = await registered(t, {
+		now: () => now,
+		loadConfig: async () => { now += 10; return { config: defaultConfig() }; },
 		runChild: async (options) => {
-			started += 1;
 			options.onChildStarted?.();
-			if (started === 2) releaseFirst?.();
-			await bothStarted;
-			if (options.task.id === "first") {
-				options.onRunDiagnosticLimit?.();
-				options.onChildSettled?.();
-				return { ...successful(options.task), status: "failed", error: { code: "diagnostic_session_limit", message: "limit" } };
-			}
-			if (!options.signal?.aborted) await new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve(), { once: true }));
+			now += 30;
 			options.onChildSettled?.();
-			return { ...successful(options.task), status: "failed", error: { code: options.abortCause?.() ?? "aborted", message: "stopped" } };
+			return successful(options.task);
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", { tasks: [
+	});
+	const details = detailsOf(await state.tool.execute("clock", createInput("clock", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	assert.equal(details.status, "succeeded");
+	assert.ok((details.requestTelemetry?.durationMs ?? 0) >= 40);
+	assert.equal(details.requestTelemetry?.launchedChildren, 1);
+});
+
+test("a failed predecessor does not launch its dependent", async (t) => {
+	const launched: string[] = [];
+	const { state } = await registered(t, {
+		runChild: async (options) => {
+			launched.push(options.task.id);
+			options.onChildStarted?.();
+			options.onChildSettled?.();
+			return options.task.id === "first"
+				? { ...successful(options.task), status: "failed", error: { code: "synthetic_failure", message: "failed" } }
+				: successful(options.task);
+		},
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("blocked", [
 		{ id: "first", role: "explorer", objective: "first", scope: ["."] },
-		{ id: "second", role: "reviewer", objective: "second", scope: ["."] },
-	] }, undefined, undefined, context());
-	assert.equal(result.details.status, "failed");
-	assert.deepEqual(result.details.tasks.map((task: TaskResult) => task.error?.code), ["diagnostic_session_limit", "diagnostic_session_limit"]);
+		{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["first"] },
+	]), undefined, undefined, context()));
+	assert.equal(details.status, "failed");
+	assert.deepEqual(launched, ["first"]);
+	assert.equal(details.sessions[1]?.requestError?.code, "dependency_failed");
+	assert.equal(details.requestTelemetry?.launchedChildren, 1);
 });
 
-test("resolved route evidence survives dependency blocking before child launch", async () => {
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		runChild: async (options) => options.task.id === "first"
-			? { ...successful(options.task), status: "failed", error: { code: "synthetic_failure", message: "failed" } }
-			: successful(options.task),
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "first", role: "explorer", objective: "first", scope: ["."] },
-			{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["first"] },
-		],
-	}, undefined, undefined, context());
-	const blocked = result.details.tasks.find((task: TaskResult) => task.id === "blocked");
-	assert.equal(blocked?.status, "blocked");
-	assert.equal(blocked?.route?.model, "parent");
-	assert.equal(blocked?.route?.source, "parent");
-	assert.equal(blocked?.route?.selectionSource, "role-default");
-	assert.equal(blocked?.telemetry?.childStarted, false);
-});
-
-test("task semantic profiles are projected into route resolution without plan coupling", async () => {
+test("task semantic profiles are projected into route resolution without plan coupling", async (t) => {
 	const deepModel = { provider: "synthetic", id: "deep", reasoning: true };
 	const config = parseConfig({
 		reasoningProfiles: { deep: "high" },
@@ -311,58 +292,53 @@ test("task semantic profiles are projected into route resolution without plan co
 		},
 	});
 	let route: TaskResult["route"];
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		loadConfig: async () => ({ config }),
 		runChild: async (options) => {
 			route = options.route;
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
-	const ctx = context(true, [parentModel, deepModel]);
-	const result = await state.tool.execute("call", {
-		tasks: [{
-			id: "scan",
-			role: "explorer",
-			objective: "scan",
-			scope: ["."],
-			executionProfile: "deep",
-			reasoningProfile: "deep",
-		}],
-	}, undefined, undefined, ctx);
-	assert.equal("isError" in result, false);
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("profiles", [{
+		id: "scan",
+		role: "explorer",
+		objective: "scan",
+		scope: ["."],
+		executionProfile: "deep",
+		reasoningProfile: "deep",
+	}]), undefined, undefined, context(true, [parentModel, deepModel])));
+	assert.equal(details.status, "succeeded");
 	assert.equal(route?.model, "deep");
 	assert.equal(route?.thinking, "high");
 	assert.equal(route?.executionProfileApplied, true);
 	assert.equal(route?.reasoningProfileApplied, true);
-	assert.equal(result.details.telemetry.launchedChildren, 1);
+	assert.equal(details.requestTelemetry?.launchedChildren, 1);
 });
 
-test("mixed explicit and default routes emit exact ephemeral telemetry", async () => {
+test("mixed explicit and default routes keep selection sources on the managed result", async (t) => {
 	const explicitModel = { provider: "synthetic", id: "explicit-4.6", name: "Explicit 4.6", reasoning: true };
-	const seen: TaskResult["route"][] = [];
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const seen = new Map<string, TaskResult["route"]>();
+	const { state } = await registered(t, {
 		runChild: async (options) => {
-			seen.push(options.route);
+			seen.set(options.task.id, options.route);
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "explicit", role: "explorer", objective: "scan", scope: ["."], model: "Explicit 4.6", thinking: "high" },
-			{ id: "default", role: "reviewer", objective: "review", scope: ["."] },
-		],
-	}, undefined, undefined, context(true, [parentModel, explicitModel]));
-	assert.equal(result.details.status, "succeeded");
-	assert.deepEqual(seen.map((route) => [route?.model, route?.thinking, route?.selectionSource]), [
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("routes", [
+		{ id: "explicit", role: "explorer", objective: "scan", scope: ["."], model: "Explicit 4.6", thinking: "high" },
+		{ id: "default", role: "reviewer", objective: "review", scope: ["."] },
+	]), undefined, undefined, context(true, [parentModel, explicitModel])));
+	assert.equal(details.status, "succeeded");
+	assert.equal(seen.size, 2);
+	assert.deepEqual([seen.get("explicit"), seen.get("default")].map((route) => [route?.model, route?.thinking, route?.selectionSource]), [
 		["explicit-4.6", "high", "explicit-task"],
 		["parent", "high", "role-default"],
 	]);
-	assert.equal(result.details.telemetry.explicitModelTasks, 1);
-	assert.equal(result.details.telemetry.explicitThinkingTasks, 1);
-	assert.equal(result.details.telemetry.requestedDependencyEdges, 0);
-	assert.equal(result.details.telemetry.admittedDependencyEdges, 0);
+	assert.equal(details.requestTelemetry?.launchedChildren, 2);
 });
 
 test("explicit route success and failure leave the user route file byte-identical", async (t) => {
@@ -373,180 +349,130 @@ test("explicit route success and failure leave the user route file byte-identica
 	await writeFile(configPath, configBytes, { mode: 0o600 });
 	const explicitModel = { provider: "synthetic", id: "explicit-4.6", name: "Explicit 4.6", reasoning: true };
 	let calls = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		loadConfig: () => loadConfig(agentDir),
-		createWorkerWorkspace: async (_cwd, task) => ({
-			sourceRoot: process.cwd(),
-			root: process.cwd(),
-			task,
-			parentBaselines: new Map(),
-			workspaceBaseline: new Map(),
-			cleanup: async () => {},
-		}),
-		convergeWorkerWorkspace: async () => ({ ok: true, changedPaths: ["result.txt"] }),
 		runChild: async (options) => {
 			calls += 1;
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
+	});
 	const ctx = context(true, [parentModel, explicitModel]);
-	const success = await state.tool.execute("success", {
-		tasks: [{ id: "explicit", role: "worker", objective: "write", scope: ["."], writePaths: ["result.txt"], model: "Explicit 4.6", thinking: "high" }],
-	}, undefined, undefined, ctx);
-	assert.equal(success.details.tasks[0]?.route?.selectionSource, "explicit-task");
-	const failure = await state.tool.execute("failure", {
-		tasks: [{ id: "missing", role: "explorer", objective: "scan", scope: ["."], model: "missing-model", thinking: "high" }],
-	}, undefined, undefined, ctx);
-	assert.equal(failure.details.telemetry.runErrorCode, "model_not_found");
-	assert.equal(failure.details.telemetry.launchedChildren, 0);
+	const success = detailsOf(await state.tool.execute("success", createInput("explicit", [{ id: "explicit", role: "explorer", objective: "scan", scope: ["."], model: "Explicit 4.6", thinking: "high" }]), undefined, undefined, ctx));
+	assert.equal(success.sessions[0]?.result?.route?.selectionSource, "explicit-task");
+	const failure = detailsOf(await state.tool.execute("failure", createInput("missing", [{ id: "missing", role: "explorer", objective: "scan", scope: ["."], model: "missing-model", thinking: "high" }]), undefined, undefined, ctx));
+	assert.equal(failure.error?.code, "model_not_found");
+	assert.equal(failure.requestTelemetry?.launchedChildren, 0);
 	assert.equal(calls, 1);
 	assert.equal(await readFile(configPath, "utf8"), configBytes);
 });
 
-test("rejected graphs retain requested but not admitted dependency evidence", async () => {
-	const state = harness();
-	createSubagentsExtension(dependencies())(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
-			{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
-		],
-	}, undefined, undefined, context());
-	assert.equal(result.details.telemetry.runErrorCode, "dependency_cycle");
-	assert.equal(result.details.telemetry.requestedDependencyEdges, 2);
-	assert.equal(result.details.telemetry.admittedDependencyEdges, 0);
+test("rejected graphs fail before configuration or child launch", async (t) => {
+	let configCalls = 0;
+	let childCalls = 0;
+	const { state } = await registered(t, {
+		loadConfig: async () => {
+			configCalls += 1;
+			return { config: defaultConfig() };
+		},
+		runChild: async (options) => {
+			childCalls += 1;
+			return successful(options.task);
+		},
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("cycle", [
+		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
+		{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
+	]), undefined, undefined, context()));
+	assert.equal(details.error?.code, "dependency_cycle");
+	assert.equal(details.requestTelemetry?.launchedChildren, 0);
+	assert.equal(details.sessions.length, 0);
+	assert.equal(configCalls, 0);
+	assert.equal(childCalls, 0);
 });
 
-test("a concurrent graph is rejected before it can exceed session caps", async () => {
+test("a concurrent create is rejected before it can exceed session caps", async (t) => {
 	let releaseChild: (() => void) | undefined;
 	let markStarted: (() => void) | undefined;
 	const childStarted = new Promise<void>((resolve) => { markStarted = resolve; });
 	const childReleased = new Promise<void>((resolve) => { releaseChild = resolve; });
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		runChild: async (options) => {
+			options.onChildStarted?.();
 			markStarted?.();
 			await childReleased;
+			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
-	const input = { tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }] };
+	});
+	const input = createInput("busy", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]);
 	const first = state.tool.execute("first", input, undefined, undefined, context());
 	await childStarted;
-	const second = await state.tool.execute("second", input, undefined, undefined, context());
-	assert.equal("isError" in second, false);
-	assert.match(second.content[0].text, /subagent_run_active/);
+	const second = detailsOf(await state.tool.execute("second", input, undefined, undefined, context()));
+	assert.match(second.error?.code ?? "", /managed_batch_active/);
 	releaseChild?.();
-	assert.equal((await first).details.status, "succeeded");
+	assert.equal(detailsOf(await first).status, "succeeded");
 });
 
-test("a true zero-diff worker fails aggregate convergence as not applied", async () => {
+test("managed guidance appears only while the tool is active and guidance is on", async () => {
 	const state = harness();
-	createSubagentsExtension(dependencies({
-		createWorkerWorkspace: async (_cwd, task) => ({
-			sourceRoot: process.cwd(),
-			root: process.cwd(),
-			task,
-			parentBaselines: new Map(),
-			workspaceBaseline: new Map(),
-			cleanup: async () => {},
-		}),
-		convergeWorkerWorkspace: async () => ({
-			ok: false,
-			changedPaths: [],
-			error: { code: "worker_no_changes", message: "no changes" },
-		}),
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [{ id: "write", role: "worker", objective: "write", scope: ["."], writePaths: ["result.txt"] }],
-	}, undefined, undefined, context());
-	assert.equal(result.details.status, "failed");
-	assert.equal(result.details.tasks[0]?.error?.code, "worker_no_changes");
-	assert.equal(result.details.tasks[0]?.convergence, "not-applied");
-	assert.deepEqual(result.details.tasks[0]?.changedPaths, []);
-});
-
-test("a non-Git worker fails without suppressing an independent read-only task", async () => {
-	const isolationError = Object.assign(new Error("Git repository required"), { code: "writable_isolation_unavailable" });
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		createWorkerWorkspace: async () => { throw isolationError; },
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "write", role: "worker", objective: "write", scope: ["src"], writePaths: ["src/a.ts"] },
-			{ id: "read", role: "explorer", objective: "read", scope: ["."] },
-		],
-	}, undefined, undefined, context());
-	assert.equal(result.details.status, "partial");
-	assert.deepEqual(result.details.tasks.map((item: TaskResult) => [item.id, item.status]), [
-		["write", "failed"],
-		["read", "succeeded"],
-	]);
-});
-
-test("aggressive guidance appears only while the tool is active", async () => {
-	const state = harness();
-	createSubagentsExtension(dependencies())(state.pi);
-	const handler = state.handlers.get("before_agent_start")?.[0];
-	const modified = await handler?.({ systemPrompt: "base" });
-	assert.match(modified.systemPrompt, /flat csheng_subagents batch/);
+	createSubagentsExtension({
+		loadConfig: async () => ({ config: defaultConfig() }),
+	})(state.pi);
+	const modified = await emitBeforeAgentStart(state);
+	assert.match(modified?.systemPrompt ?? "", /flat csheng_subagent_sessions create batch/);
+	assert.match(modified?.systemPrompt ?? "", /explicit parent apply/);
+	assert.doesNotMatch(modified?.systemPrompt ?? "", /csheng_subagents/);
 	state.pi.getActiveTools = () => [];
-	assert.equal(await handler?.({ systemPrompt: "base" }), undefined);
+	assert.equal(await emitBeforeAgentStart(state), undefined);
+	const off = harness();
+	createSubagentsExtension({
+		loadConfig: async () => ({ config: { ...defaultConfig(), guidance: "off" } }),
+	})(off.pi);
+	assert.equal(await emitBeforeAgentStart(off), undefined);
 });
 
-test("session shutdown waits for the aborted run and workspace cleanup", async () => {
+test("session shutdown waits for the aborted run before a later create", async (t) => {
 	let markStarted: (() => void) | undefined;
 	let markAborted: (() => void) | undefined;
-	let releaseCleanup: (() => void) | undefined;
 	let childRuns = 0;
 	const started = new Promise<void>((resolve) => { markStarted = resolve; });
 	const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
-	const cleanupReleased = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		createWorkerWorkspace: async (_cwd, task) => ({
-			sourceRoot: process.cwd(),
-			root: process.cwd(),
-			task,
-			parentBaselines: new Map(),
-			workspaceBaseline: new Map(),
-			cleanup: async () => cleanupReleased,
-		}),
+	const { state } = await registered(t, {
 		runChild: async (options) => {
 			childRuns += 1;
-			if (childRuns > 1) return successful(options.task);
+			options.onChildStarted?.();
+			if (childRuns > 1) {
+				options.onChildSettled?.();
+				return successful(options.task);
+			}
 			return new Promise<TaskResult>((resolve) => {
 				markStarted?.();
 				options.signal?.addEventListener("abort", () => {
 					markAborted?.();
+					options.onChildSettled?.();
 					resolve({ ...successful(options.task), status: "aborted", error: { code: "aborted", message: "aborted" } });
 				}, { once: true });
 			});
 		},
-	}))(state.pi);
-	const execution = state.tool.execute("call", {
-		tasks: [{ id: "write", role: "worker", objective: "write", scope: ["."], writePaths: ["result.txt"] }],
-	}, undefined, undefined, context());
+	});
+	const execution = state.tool.execute("call", createInput("abort", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context());
 	await started;
 
 	let shutdownSettled = false;
-	const shutdown = state.handlers.get("session_shutdown")?.[0]?.({}).then(() => { shutdownSettled = true; });
+	const shutdown = Promise.all((state.handlers.get("session_shutdown") ?? []).map((handler) => handler({}))).then(() => { shutdownSettled = true; });
 	await aborted;
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	assert.equal(shutdownSettled, false);
 
-	releaseCleanup?.();
 	await shutdown;
-	const result = await execution;
+	const result = detailsOf(await execution);
 	assert.equal(shutdownSettled, true);
-	assert.equal(result.details.status, "aborted");
+	assert.equal(result.status, "aborted");
 
-	const next = await state.tool.execute("next", {
-		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
-	}, undefined, undefined, context());
-	assert.equal(next.details.status, "succeeded");
+	const next = detailsOf(await state.tool.execute("next", createInput("next", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	assert.equal(next.status, "succeeded");
 	assert.equal(childRuns, 2);
 });
 
@@ -569,138 +495,104 @@ test("current-repository absolute and returning-parent scope reach children in c
 	const { current } = await gitPair(t);
 	const gitRoot = await realpath(current);
 	const seen: any[] = [];
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		runChild: async (options) => {
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			seen.push(options);
 			return { ...successful(options.task), route: options.route };
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [{
-			id: "scan",
-			role: "explorer",
-			objective: "scan",
-			scope: [gitRoot, join(gitRoot, "src"), `../${basename(current)}/src/tracked.ts`],
-		}],
-	}, undefined, undefined, context(true, [parentModel], current));
-	assert.equal(result.details.status, "succeeded");
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("canon", [{
+		id: "scan",
+		role: "explorer",
+		objective: "scan",
+		scope: [gitRoot, join(gitRoot, "src"), `../${basename(current)}/src/tracked.ts`],
+	}]), undefined, undefined, context(true, [parentModel], current)));
+	assert.equal(details.status, "succeeded");
 	assert.deepEqual(seen[0]?.task.scope, [".", "src", "src/tracked.ts"]);
 	assert.equal(seen[0]?.cwd, gitRoot);
 	assert.equal(seen[0]?.capability.version, 2);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, []);
 });
 
-test("missing internal new-file worker scope remains admissible", async (t) => {
+test("narrow worker scope is refused as repo-wide managed worker authority", async (t) => {
 	const { current } = await gitPair(t);
-	let workspaceCreated = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		createWorkerWorkspace: async (_cwd, task) => {
-			workspaceCreated += 1;
-			return {
-				sourceRoot: current,
-				root: current,
-				task,
-				parentBaselines: new Map(),
-				workspaceBaseline: new Map(),
-				cleanup: async () => {},
-			};
-		},
-		convergeWorkerWorkspace: async () => ({ ok: true, changedPaths: ["src/new.ts"] }),
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [{ id: "write", role: "worker", objective: "write", scope: ["src/new.ts"], writePaths: ["src/new.ts"] }],
-	}, undefined, undefined, context(true, [parentModel], current));
-	assert.equal(result.details.status, "succeeded");
-	assert.equal(workspaceCreated, 1);
-});
-
-test("sibling, non-Git, unsafe, and invalid external roots fail before config and child work", async (t) => {
-	const { current, sibling } = await gitPair(t);
-	const plain = await mkdtemp(join(tmpdir(), "subagent-ext-plain-"));
-	t.after(async () => rm(plain, { recursive: true, force: true }));
-	for (const [cwd, tasks, code] of [
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: [sibling] }], "scope_outside_repository"],
-		[plain, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }], "repository_root_unavailable"],
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["bad\0path"] }], "invalid_scope"],
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [join(current, "src")] }], "external_read_root_not_external"],
-	] as const) {
-		let configCalls = 0;
-		let diagnosticCalls = 0;
-		let childCalls = 0;
-		const state = harness();
-		createSubagentsExtension(dependencies({
-			loadConfig: async () => {
-				configCalls += 1;
-				return { config: defaultConfig() };
-			},
-			createDiagnosticStore: () => ({
-				async allocateRun() {
-					diagnosticCalls += 1;
-					throw new Error("unused");
-				},
-				async discover() { return []; },
-				async inspect() { throw new Error("unused"); },
-			}),
-			runChild: async (options) => {
-				childCalls += 1;
-				return successful(options.task);
-			},
-		}))(state.pi);
-		const result = await state.tool.execute("call", { tasks: [...tasks] }, undefined, undefined, context(true, [parentModel], cwd));
-		assert.equal(result.details.telemetry.runErrorCode, code, code);
-		assert.equal(result.details.telemetry.admittedTasks, 0);
-		assert.equal(result.details.telemetry.launchedChildren, 0);
-		assert.equal(result.details.tasks.length, 0);
-		assert.doesNotMatch(result.content[0].text, /\/tmp\/|secret\.ts/);
-		assert.equal(configCalls, 0);
-		assert.equal(diagnosticCalls, 0);
-		assert.equal(childCalls, 0);
-	}
-});
-
-test("canonical complete prompt bounds reject the whole batch before config or launch", async () => {
-	const longRelative = "a".repeat(HARD_LIMITS.maxPathBytes);
-	let configCalls = 0;
-	let diagnosticAllocations = 0;
 	let childCalls = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		loadConfig: async () => {
-			configCalls += 1;
-			return { config: defaultConfig() };
-		},
-		createDiagnosticStore: () => ({
-			async allocateRun() {
-				diagnosticAllocations += 1;
-				throw new Error("unused");
-			},
-			async discover() { return []; },
-			async inspect() { throw new Error("unused"); },
-		}),
+	const { state } = await registered(t, {
 		runChild: async (options) => {
 			childCalls += 1;
 			return successful(options.task);
 		},
-		repositoryHost: {
-			async findGitToplevel() { return "/repo"; },
-			async realpath(path) { return path === "/repo/alias" ? `/repo/${longRelative}` : path; },
-			async lstat() { return {} as never; },
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("narrow", [{
+		id: "write",
+		role: "worker",
+		objective: "write",
+		scope: ["src/new.ts"],
+		writePaths: ["src/new.ts"],
+	}]), undefined, undefined, context(true, [parentModel], current)));
+	assert.equal(details.error?.code, "full_worker_scope_required");
+	assert.equal(details.requestTelemetry?.launchedChildren, 0);
+	assert.equal(childCalls, 0);
+});
+
+test("sibling, non-Git, unsafe, and invalid external roots fail without child work", async (t) => {
+	const { current, sibling } = await gitPair(t);
+	const plain = await mkdtemp(join(tmpdir(), "subagent-ext-plain-"));
+	t.after(async () => rm(plain, { recursive: true, force: true }));
+	for (const [cwd, tasks, code, configBeforeAdmit] of [
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: [sibling] }], "scope_outside_repository", true],
+		[plain, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }], "repository_root_unavailable", false],
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["bad\0path"] }], "invalid_scope", false],
+		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [join(current, "src")] }], "external_read_root_not_external", true],
+	] as const) {
+		let configCalls = 0;
+		let childCalls = 0;
+		const { state } = await registered(t, {
+			loadConfig: async () => {
+				configCalls += 1;
+				return { config: defaultConfig() };
+			},
+			runChild: async (options) => {
+				childCalls += 1;
+				return successful(options.task);
+			},
+		});
+		const result = await state.tool.execute("call", createInput(`admit-${code}`, [...tasks]), undefined, undefined, context(true, [parentModel], cwd));
+		const details = detailsOf(result);
+		assert.equal(details.error?.code, code, code);
+		assert.equal(details.requestTelemetry?.launchedChildren, 0);
+		assert.equal(details.sessions.length, 0);
+		assert.doesNotMatch(result.content[0].text, /\/tmp\/|secret\.ts/);
+		assert.equal(configCalls > 0, configBeforeAdmit, code);
+		assert.equal(childCalls, 0);
+	}
+});
+
+test("projected prompt bounds reject the whole batch before config or launch", async (t) => {
+	let configCalls = 0;
+	let childCalls = 0;
+	const { state } = await registered(t, {
+		loadConfig: async () => {
+			configCalls += 1;
+			return { config: defaultConfig() };
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "small", role: "explorer", objective: "small", scope: ["."] },
-			{ id: "oversized", role: "reviewer", objective: "review", scope: Array.from({ length: 32 }, () => "alias") },
-		],
-	}, undefined, undefined, context(true, [parentModel], "/repo"));
-	assert.equal(result.details.telemetry.runErrorCode, "prompt_too_large");
-	assert.equal(result.details.telemetry.admittedTasks, 0);
-	assert.equal(result.details.telemetry.launchedChildren, 0);
-	assert.deepEqual(result.details.tasks, []);
+		runChild: async (options) => {
+			childCalls += 1;
+			return successful(options.task);
+		},
+	});
+	const predecessors = Array.from({ length: 8 }, (_, index) => ({ id: `p${index}`, role: "explorer" as const, objective: "p", scope: ["."] }));
+	const details = detailsOf(await state.tool.execute("call", createInput("prompt", [
+		...predecessors,
+		{ id: "oversized", role: "reviewer", objective: "review", scope: ["."], dependsOn: predecessors.map((task) => task.id) },
+	]), undefined, undefined, context()));
+	assert.equal(details.error?.code, "prompt_too_large");
+	assert.ok(8 * HARD_LIMITS.maxPredecessorOutputBytes + "review".length > HARD_LIMITS.maxPromptBytes);
+	assert.equal(details.requestTelemetry?.launchedChildren, 0);
+	assert.equal(details.sessions.length, 0);
 	assert.equal(configCalls, 0);
-	assert.equal(diagnosticAllocations, 0);
 	assert.equal(childCalls, 0);
 });
 
@@ -708,9 +600,10 @@ test("explorer and reviewer external roots reach only task and capability fields
 	const { current, siblingFile } = await gitPair(t);
 	const seen: any[] = [];
 	const updates: string[] = [];
-	const state = harness();
-	createSubagentsExtension(dependencies({
+	const { state } = await registered(t, {
 		runChild: async (options) => {
+			options.onChildStarted?.();
+			options.onChildSettled?.();
 			seen.push(options);
 			return {
 				...successful(options.task),
@@ -718,53 +611,80 @@ test("explorer and reviewer external roots reach only task and capability fields
 				route: options.route,
 			};
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [
-			{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [siblingFile] },
-			{ id: "review", role: "reviewer", objective: "review", scope: ["src"], externalReadRoots: [siblingFile] },
-		],
-	}, undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
-	assert.equal(result.details.status, "succeeded");
-	assert.equal(result.details.telemetry.schemaVersion, 4);
+	});
+	const result = await state.tool.execute("call", createInput("external", [
+		{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [siblingFile] },
+		{ id: "review", role: "reviewer", objective: "review", scope: ["src"], externalReadRoots: [siblingFile] },
+	]), undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
+	const details = detailsOf(result);
+	assert.equal(details.status, "succeeded", JSON.stringify(details.sessions.map(view => ({ error: view.requestError, resultError: view.result?.error }))));
 	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
 	assert.equal(seen[0]?.cwd, await realpath(current));
 	assert.deepEqual(seen[0]?.capability.writePaths, []);
 	assert.deepEqual(seen[1]?.task.externalReadRoots, [siblingFile]);
 	assert.ok(updates.every((message) => !message.includes(siblingFile)));
-	assert.equal(JSON.stringify(result.details.telemetry).includes(siblingFile), false);
-	assert.equal(result.details.tasks[0]?.output, `echo:${siblingFile}`);
+	assert.equal(JSON.stringify(details.requestTelemetry).includes(siblingFile), false);
+	assert.equal(details.sessions[0]?.result?.output, `echo:${siblingFile}`);
 });
 
-test("worker external roots are rejected before workspace creation", async (t) => {
+test("managed TUI progress publishes route and actual launches; replay publishes no new run", async (t) => {
+	const snapshots: import("../extensions/subagents/observer-events.ts").ObserverSnapshot[] = [];
+	const { state } = await registered(t, { onObserver: value => snapshots.push(value), runChild: async options => {
+		options.onChildStarted?.(); options.onChildSettled?.();
+		return { ...successful(options.task), route: options.route };
+	} });
+	const ctx = { ...context(), mode: "tui" };
+	const input = createInput("observer", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]);
+	const first = await state.tool.execute("call", input, undefined, undefined, ctx);
+	assert.equal(first.details.status, "succeeded");
+	assert.ok(snapshots.some(value => value.activeChildren === 1));
+	assert.equal(snapshots.at(-1)?.phase, "settled");
+	assert.equal(snapshots.at(-1)?.launchedChildren, 1);
+	assert.equal(snapshots.at(-1)?.tasks[0]?.route?.model, parentModel.id);
+	assert.equal(snapshots.at(-1)?.tasks[0]?.assistantTurns, 1);
+	const length = snapshots.length;
+	const replay = await state.tool.execute("replay", input, undefined, undefined, ctx);
+	assert.equal(replay.details.requestTelemetry.launchedChildren, 0);
+	assert.equal(snapshots.length, length);
+	const second = await state.tool.execute("second", createInput("second", [{ id: "other", role: "reviewer", objective: "other", scope: ["."] }]), undefined, undefined, ctx);
+	assert.equal(second.details.status, "succeeded");
+	assert.ok(snapshots[length]!.revision > snapshots[length - 1]!.revision, "revisions must increase across runs in one generation");
+	assert.equal(snapshots[length]!.generation, snapshots[0]!.generation);
+	const handle = first.details.sessions[0]!.handle;
+	const episode = { handle, requestId: "episode-two", expectedEpisode: 1, message: "second scan" };
+	const two = await state.tool.execute("two", { action: "continue", episodes: [episode] }, undefined, undefined, ctx);
+	assert.equal(two.details.status, "succeeded");
+	const three = await state.tool.execute("three", { action: "continue", episodes: [{ handle, requestId: "episode-three", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
+	assert.equal(three.details.status, "succeeded");
+	const mixedStart = snapshots.length;
+	const mixed = await state.tool.execute("mixed", { action: "continue", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "other-two", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
+	assert.equal(mixed.details.status, "succeeded");
+	assert.equal(mixed.details.requestTelemetry.launchedChildren, 1);
+	for (const snapshot of snapshots.slice(mixedStart)) {
+		assert.equal(snapshot.tasks[0]!.episode, 2, "cached evidence retains its historical episode, not current ep3");
+		assert.equal(snapshot.tasks[0]!.replayed, true);
+	}
+});
+
+test("worker external roots are rejected before a child starts", async (t) => {
 	const { current, siblingFile } = await gitPair(t);
-	let workspaceCalls = 0;
-	const state = harness();
-	createSubagentsExtension(dependencies({
-		createWorkerWorkspace: async (_cwd, task) => {
-			workspaceCalls += 1;
-			return {
-				sourceRoot: current,
-				root: current,
-				task,
-				parentBaselines: new Map(),
-				workspaceBaseline: new Map(),
-				cleanup: async () => {},
-			};
+	let childCalls = 0;
+	const { state } = await registered(t, {
+		runChild: async (options) => {
+			childCalls += 1;
+			return successful(options.task);
 		},
-	}))(state.pi);
-	const result = await state.tool.execute("call", {
-		tasks: [{
-			id: "write",
-			role: "worker",
-			objective: "write",
-			scope: ["."],
-			writePaths: ["src/tracked.ts"],
-			externalReadRoots: [siblingFile],
-		}],
-	}, undefined, undefined, context(true, [parentModel], current));
-	assert.equal(result.details.telemetry.runErrorCode, "external_read_roots_forbidden");
-	assert.equal(result.details.telemetry.launchedChildren, 0);
-	assert.equal(workspaceCalls, 0);
+	});
+	const details = detailsOf(await state.tool.execute("call", createInput("worker-external", [{
+		id: "write",
+		role: "worker",
+		objective: "write",
+		scope: ["."],
+		writePaths: ["src/tracked.ts"],
+		externalReadRoots: [siblingFile],
+	}]), undefined, undefined, context(true, [parentModel], current)));
+	assert.equal(details.error?.code, "external_read_roots_forbidden");
+	assert.equal(details.requestTelemetry?.launchedChildren, 0);
+	assert.equal(childCalls, 0);
 });

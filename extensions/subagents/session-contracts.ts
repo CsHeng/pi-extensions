@@ -8,7 +8,8 @@ export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
 export const MANAGED_SESSION_VERSION = 2;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
-	maxStoreBytes: 512 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
+	maxStoreBytes: 8 * 1024 * 1024 * 1024, maxStoreEntries: 1_000_000, maxNativeBytes: 32 * 1024 * 1024,
+	// Native JSONL parsing remains bounded independently of filesystem entries.
 	maxEntries: 100_000, maxNativeLineBytes: 1024 * 1024, maxCandidateBytes: 64 * 1024 * 1024,
 });
 const opaque = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });

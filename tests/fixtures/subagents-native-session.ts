@@ -1,6 +1,10 @@
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+function explorerReadPath(input: string): string {
+	return /External read roots:\\n- (?!none(?:\\n|"|$))([^\\"]+)/.exec(input)?.[1] ?? "external.txt";
+}
+
 function workerCommand(input: string, count: number): string {
 	if (input.includes("host-inputs-fixture")) return `node -e 'require("node:fs").writeFileSync("candidate.txt", require("pkg"))' && git add -- candidate.txt && git diff --cached --name-only -- candidate.txt`;
 	if (input.includes("after-child-compaction-fixture")) return `node -e 'const fs=require("node:fs"); if(fs.readFileSync("candidate.txt","utf8")!=="candidate-1" || fs.readFileSync("node_modules/fixture-state","utf8")!=="retained-local")process.exit(3); fs.appendFileSync("candidate.txt","|continued")'`;
@@ -64,10 +68,11 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					message.stopReason = "error"; message.errorMessage = "fixture_requires_retained_summary";
 					stream.push({ type: "error", reason: "error", error: message }); stream.end(); return;
 				}
-				if (text !== "SYNTHETIC_SUMMARY" && (input.includes("host-worker-fixture") || input.includes("host-reviewer-fixture"))) {
+				if (text !== "SYNTHETIC_SUMMARY" && (input.includes("host-worker-fixture") || input.includes("host-reviewer-fixture") || input.includes("host-explorer-fixture"))) {
 					const count = context.messages.filter((item) => item.role === "user").length;
 					message.content = [input.includes("host-reviewer-fixture")
 						? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: "candidate.txt" } }
+						: input.includes("host-explorer-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: explorerReadPath(input) } }
 						: input.includes("host-search-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "find", arguments: { pattern: "*.txt", path: "." } }
 						: { type: "toolCall", id: `fixture-${count}|provider:command`, name: "bash", arguments: { command: workerCommand(input, count) } }];
 					message.stopReason = "toolUse";

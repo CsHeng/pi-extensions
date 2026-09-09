@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SNAPSHOT_EVENT, type SnapshotV1 } from "../extensions/subagents/events.ts";
-import { createSubagentsUiExtension, SUBAGENTS_UI_STATUS_KEY } from "../extensions/subagents-ui/index.ts";
+import type { TUI } from "@earendil-works/pi-tui";
+import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
+import { createSubagentsUiExtension, SUBAGENTS_UI_COMMAND } from "../extensions/subagents-ui/index.ts";
+import { SubagentsOverlay } from "../extensions/subagents-ui/component.ts";
 
 class FakeEvents {
 	readonly listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -14,37 +16,62 @@ class FakeEvents {
 	}
 }
 
-test("UI consumer renders core snapshots from a shared event bus without owning working or footer surfaces", async () => {
+test("UI consumer projects v2 observer snapshots through the registered overlay without default chrome", async () => {
 	const events = new FakeEvents();
-	const statuses: Array<string | undefined> = [];
+	const statuses: unknown[] = [];
+	const widgets: unknown[] = [];
 	const working: unknown[] = [];
 	const footers: unknown[] = [];
+	const entries: unknown[] = [];
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> }>();
+	const shortcuts = new Map<string, { handler: (ctx: ExtensionContext) => Promise<unknown> }>();
+	let overlay: SubagentsOverlay | undefined;
+	let overlayFlag = false;
 	const pi = {
 		events,
 		registerTool() {},
-		registerCommand() {},
-		registerShortcut() {},
+		registerCommand(name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> }) {
+			commands.set(name, options);
+		},
+		registerShortcut(name: string, options: { handler: (ctx: ExtensionContext) => Promise<unknown> }) {
+			shortcuts.set(name, options);
+		},
 		registerEntryRenderer() {},
-		appendEntry() {},
+		appendEntry(customType: string, data: unknown) { entries.push({ customType, data }); },
 		on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) { handlers.set(name, handler); },
 		getActiveTools() { return []; },
 	};
 	createSubagentsUiExtension()(pi as unknown as ExtensionAPI);
+	const tui = { requestRender() {} } as TUI;
 	const ctx = {
 		mode: "tui",
+		sessionManager: {
+			getSessionId: () => "parent_session-1",
+			getLeafId: () => "leaf_entry-1",
+			getBranch: () => [{ id: "leaf_entry-1" }],
+		},
 		ui: {
-			setStatus(key: string, text: string | undefined) { if (key === SUBAGENTS_UI_STATUS_KEY) statuses.push(text); },
-			setWidget() {},
+			setStatus(_key: string, value: unknown) { statuses.push(value); },
+			setWidget(_key: string, value: unknown) { widgets.push(value); },
 			setWorkingMessage(value: unknown) { working.push(value); },
 			setFooter(value: unknown) { footers.push(value); },
 			notify() {},
+			custom: async (factory: (tui: TUI, theme: unknown, kb: unknown, done: (value: null) => void) => unknown, options: { overlay?: boolean }) => {
+				overlayFlag = options.overlay === true;
+				overlay = factory(tui, {}, {}, () => {}) as SubagentsOverlay;
+				return null;
+			},
 		},
 	} as unknown as ExtensionContext;
 	await handlers.get("session_start")?.({}, ctx);
-	const snapshot: SnapshotV1 = {
-		version: 1,
+	const snapshot: ObserverSnapshot = {
+		version: OBSERVER_VERSION,
+		parentSessionId: "parent_session-1",
+		anchor: "leaf_entry-1",
+		generation: "gen-1",
 		runId: "run-1",
+		revision: 0,
 		phase: "running",
 		requestedTasks: 1,
 		admittedTasks: 1,
@@ -53,26 +80,32 @@ test("UI consumer renders core snapshots from a shared event bus without owning 
 		settledTasks: 0,
 		aggregateAssistantTurns: 1,
 		elapsedMs: 1000,
-		peakConcurrency: 1,
-		cancellationRequested: false,
 		tasks: [{
 			id: "scan",
 			ordinal: 1,
 			role: "explorer",
+			episode: 0,
 			status: "running",
 			executionPhase: "child-execution",
+			route: { provider: "openai", model: "gpt-4.1", thinking: "medium" },
 			assistantTurns: 1,
 			elapsedMs: 1000,
-			inactiveForMs: 0,
-			activeTools: ["read"],
-			errorCount: 0,
-			cancellationRequested: false,
+			replayed: false,
 		}],
 	};
-	events.emit(SNAPSHOT_EVENT, snapshot);
-	assert.equal(statuses.at(-1)?.includes("SA 1/1 active"), true);
-	events.emit(SNAPSHOT_EVENT, { ...snapshot, phase: "settled", activeChildren: 0, settledTasks: 1 });
-	assert.equal(statuses.at(-1), undefined);
+	events.emit(OBSERVER_EVENT, snapshot);
+	assert.deepEqual(statuses, []);
+	assert.deepEqual(widgets, []);
+	const command = commands.get(SUBAGENTS_UI_COMMAND);
+	assert.ok(command);
+	await command.handler("", ctx);
+	assert.equal(overlayFlag, true);
+	const text = overlay?.render(80).join("\n") ?? "";
+	assert.match(text, /thinking:medium/);
+	assert.match(text, /launched 1 running 1 finished 0/);
+	events.emit(OBSERVER_EVENT, { ...snapshot, revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1 });
 	assert.deepEqual(working, []);
 	assert.deepEqual(footers, []);
+	assert.deepEqual(entries, []);
+	assert.ok(shortcuts.has("ctrl+alt+f"));
 });

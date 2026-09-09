@@ -20,24 +20,30 @@ import { formatManagedContent, formatManagedResult, formatProgress } from "./ren
 import { createRunClock, monotonicNow, type RunClock } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
 import { registerManagedContext } from "./context.ts";
+import { ManagedObserver } from "./managed-observer.ts";
+import { OBSERVER_EVENT, type ObserverSnapshot } from "./observer-events.ts";
 
 export interface ContinuationDependencies {
 	store: ManagedSessionStore;
 	loadConfig(): Promise<ConfigLoadResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
 	repositoryHost: RepositoryHost;
-	legacyBusy(): boolean;
 	now(): number;
 	onRun?: (run: ObservedRun) => void;
 	provenance?: ProvenanceCore;
+	onObserver?: (snapshot: ObserverSnapshot) => void;
 }
 
 export class ContinuationService {
 	private readonly dependencies: ContinuationDependencies;
 	private active: AbortController | undefined;
 	private completion: Promise<unknown> | undefined;
+	private observer: ManagedObserver | undefined;
+	private generation = randomUUID();
+	private observerRevision = 0;
+	resetObserver(): void { this.generation = randomUUID(); this.observerRevision = 0; }
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
-		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, legacyBusy: () => false, now: monotonicNow, ...dependencies };
+		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
 	}
 	get busy(): boolean { return this.active !== undefined; }
 	async contextIndex(ctx: ExtensionContext): Promise<SessionView[]> {
@@ -54,7 +60,19 @@ export class ContinuationService {
 			const provenance = await this.dependencies.provenance?.observeExtension();
 			if (provenance?.available) telemetry.extensionEpoch = provenance.extensionEpoch;
 		} catch { /* Optional provenance cannot fail execution. */ }
-		const result = await this.executeRequest(raw, ctx, clock, telemetry, signal, onProgress);
+		let result: SessionActionResult;
+		let failed = true;
+		let aborted = signal?.aborted === true;
+		try {
+			result = await this.executeRequest(raw, ctx, clock, telemetry, signal, onProgress);
+			failed = result.status !== "succeeded";
+			aborted ||= result.status === "aborted";
+		} finally {
+			if (this.observer?.runId === telemetry.invocationId) {
+				this.observer.finish(failed, aborted);
+				this.observer = undefined;
+			}
+		}
 		const elapsed = clock.elapsed();
 		telemetry.durationMs = clock.valid ? elapsed : null;
 		return { ...result, schemaVersion: 2, requestTelemetry: telemetry };
@@ -72,7 +90,7 @@ export class ContinuationService {
 			try { return await this.action(request, await this.owner(ctx), ctx, signal, clock, telemetry); }
 			catch (error) { return this.failed(request.action, error); }
 		}
-		if (this.busy || this.dependencies.legacyBusy()) return this.failed(request.action, new ManagedError("managed_batch_active"));
+		if (this.busy) return this.failed(request.action, new ManagedError("managed_batch_active"));
 		const controller = new AbortController();
 		this.active = controller;
 		const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
@@ -174,16 +192,32 @@ export class ContinuationService {
 		const views = new Map<string, SessionView>();
 		const requestErrors = new Map<string, string>();
 		const routes = new Map(records.flatMap((record, index) => record.requests.some((entry) => entry.id === request.episodes?.[index]?.requestId && entry.state === "complete") ? [] : [[record.handle, this.route(record.task, loaded.config!, ctx)] as const]));
+		if (ctx.mode === "tui" && this.dependencies.onObserver) {
+			this.observer = new ManagedObserver(telemetry.invocationId, owner, this.generation,
+				records.map((record, index) => {
+					const prior = record.requests.find(entry => entry.id === request.episodes?.[index]?.requestId && entry.state === "complete");
+					const route = routes.get(record.handle) ?? prior?.result?.route;
+					return { id: record.handle, role: record.task.role, episode: prior?.episode ?? record.episode + 1,
+						replayed: !!prior, ...(route ? { route } : {}) };
+				}),
+				() => clock.valid ? clock.elapsed() : null, this.dependencies.onObserver, () => ++this.observerRevision);
+			this.observer.begin();
+		}
 		const scheduled = await runScheduledTasks(tasks, {
 			clock, now: this.dependencies.now,
-			onUpdate: (tasks) => { try { onProgress?.(tasks, clock.elapsed()); } catch { /* Display-only observer. */ } },
+			onUpdate: (results) => {
+				const decorated = results.map((result, index) => ({ ...result, ...(routes.get(records[index]!.handle) ? { route: routes.get(records[index]!.handle)! } : {}) }));
+				this.observer?.update(decorated);
+				try { onProgress?.(decorated, clock.elapsed()); } catch { /* Display-only observer. */ }
+			},
 			...(signal ? { signal } : {}), maxConcurrency: loaded.config.maxConcurrency,
 			roleLimits: Object.fromEntries(Object.entries(loaded.config.routes).map(([role, config]) => [role, config.maxConcurrency])),
 			execute: async (task, predecessors, episodeSignal, lifecycle) => {
 				const index = tasks.findIndex((item) => item.id === task.id);
 				const record = records[index]!;
 				const continuation = request.episodes?.[index];
-				const message = continuation?.message ?? [...record.task.inputs, ...predecessors.map((result) => result.output)].join("\n\n");
+				const message = continuation?.message ?? [...record.task.inputs, ...predecessors.map((result) => `Predecessor ${result.id} (${result.status}):\n${result.output || "(no output)"}`)].join("\n\n");
+				if (Buffer.byteLength(message, "utf8") + Buffer.byteLength(record.task.objective, "utf8") > HARD_LIMITS.maxPromptBytes) throw new ManagedError("prompt_too_large");
 				const requestId = continuation?.requestId ?? fingerprint([request.requestId, record.task.id]);
 				const expected = continuation?.expectedEpisode ?? 0;
 				try {
@@ -278,8 +312,8 @@ export class ContinuationService {
 					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map((file) => resolve(cwd, file)), writePaths: record.task.writePaths.map((file) => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [] },
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
 					checkDiagnosticLimits: async () => ({ ok: (await lstat(native)).size <= HARD_LIMITS.diagnosticChildBytes, code: "diagnostic_session_limit", scope: "child" }),
-					onChildStarted: () => { telemetry.launchedChildren++; lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
-				});
+					onChildStarted: () => { telemetry.launchedChildren++; this.observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
+				}).finally(() => this.observer?.childStopped(handle));
 				record.result = result; record.nativeLeaf = (await store.nativeRevision(handle)).leaf;
 				record.state = worker && result.workerToolsSettled !== true ? "interrupted" : "idle";
 				if (worker && result.status === "succeeded" && result.reportComplete) await freezeCandidate(store, record);
@@ -298,12 +332,16 @@ export class ContinuationService {
 }
 
 export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial<ContinuationDependencies> = {}): ContinuationService {
-	const service = new ContinuationService(dependencies);
+	const service = new ContinuationService({ ...dependencies, onObserver: dependencies.onObserver ?? ((snapshot) => pi.events.emit(OBSERVER_EVENT, snapshot)) });
+	pi.on("session_start", () => service.resetObserver());
+	pi.on("session_tree", () => service.resetObserver());
 	pi.registerTool({
 		name: SUBAGENT_SESSION_TOOL_NAME, label: "Subagent sessions",
 		description: "Create or continue a bounded foreground task with retained native history and working state. Trusted host workers can run local tools; return candidates for parent-selected apply. Inspect or close without running a model. Not an OS sandbox or an automatic review/repair workflow.",
-		promptSnippet: "Create/continue/inspect/apply/close same-task worker or reviewer sessions; parent owns acceptance.",
+		promptSnippet: "Create/continue/inspect/apply/close explorer, reviewer or worker sessions; parent owns acceptance.",
 		promptGuidelines: [
+			"A single create episode can finish a task. Workers require scope [\".\"] and trusted host bash; candidate guards do not sandbox filesystem, credentials or network. Apply is explicit. Dependency edges pass reports, not candidate files: apply file changes before dispatching file-dependent successors.",
+			"Close explicitly when same-task work is no longer needed: at most ten unclosed records per parent/repository. Retain/discard is a parent choice. Close releases slots, not all history; discard preserves native/registry evidence. Mandatory history can exhaust storage without a general reclamation action. Never automatically resume, apply or discard interrupted records.",
 			'csheng_subagent_sessions create requires requestId and tasks, e.g. {"action":"create","requestId":"r1","tasks":[{"id":"review","role":"reviewer","objective":"Review the change","scope":["."]}]}.',
 			'csheng_subagent_sessions continue requires episodes, e.g. {"action":"continue","episodes":[{"handle":"returned-handle","requestId":"r2","expectedEpisode":1,"message":"Check the repair"}]}. Use returned identities/versions, not these example values.',
 			'csheng_subagent_sessions apply requires handle, expectedEpisode and candidateId; close requires handle and expectedEpisode, with optional disposition. Example shapes: {"action":"apply","handle":"returned-handle","expectedEpisode":1,"candidateId":"returned-candidate"}; {"action":"close","handle":"returned-handle","expectedEpisode":1,"disposition":"retain"}.',

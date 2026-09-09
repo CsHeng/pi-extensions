@@ -98,6 +98,10 @@ async function readJson<T>(file: string): Promise<T> {
 	} finally { await handle.close(); }
 }
 
+export function exceedsManagedStorageBudget(bytes: number, entries: number): boolean {
+	return bytes > MANAGED_LIMITS.maxStoreBytes || entries > MANAGED_LIMITS.maxStoreEntries;
+}
+
 export class ManagedSessionStore {
 	readonly root: string;
 	constructor(agentDirectory: string) { this.root = join(agentDirectory, "subagent-managed-sessions"); }
@@ -172,14 +176,14 @@ export class ManagedSessionStore {
 				bytes += info.size; entries++;
 				if (match && Number(match[1]) <= MANAGED_LIMITS.maxEpisodes && info.isFile()) disposable.push(file);
 				else { requiredBytes += info.size; requiredEntries++; }
-				if (requiredBytes > MANAGED_LIMITS.maxStoreBytes || requiredEntries > MANAGED_LIMITS.maxEntries
-					|| (extraBytes > 0 && (bytes > MANAGED_LIMITS.maxStoreBytes || entries > MANAGED_LIMITS.maxEntries))
-					|| disposable.length > MANAGED_LIMITS.maxEntries + MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_storage_limit");
+				if (exceedsManagedStorageBudget(requiredBytes, requiredEntries)
+					|| (extraBytes > 0 && exceedsManagedStorageBudget(bytes, entries))
+					|| disposable.length > MANAGED_LIMITS.maxStoreEntries + MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_storage_limit");
 				if (info.isDirectory()) await visit(file, directory === this.root && /^session_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(entry.name));
 			}
 		};
 		await visit(this.root);
-		if (bytes > MANAGED_LIMITS.maxStoreBytes || entries > MANAGED_LIMITS.maxEntries) {
+		if (exceedsManagedStorageBudget(bytes, entries)) {
 			// Only disposable derived observations, including an in-flight optional
 			// write, may be reclaimed. Never touch native history/core/candidates.
 			for (const file of disposable) await rm(file, { force: true });

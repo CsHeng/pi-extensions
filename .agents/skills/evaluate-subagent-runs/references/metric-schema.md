@@ -4,7 +4,7 @@
 
 ## Top level
 
-- `source.legacyCountersScope`: `csheng_subagents-only`; existing `totals`, `roles`, `routes`, `errors`, `concurrency`, and `runs` do not include managed calls or parent-native usage.
+- `source.legacyCountersScope`: `csheng_subagents-only`. That name is the historical one-shot tool, not the registered managed runtime. Existing `totals`, `roles`, `routes`, `errors`, `concurrency`, and `runs` keep that historical one-shot meaning and do not include managed calls or parent-native usage.
 - `observations`: separately owned native/managed evidence described below; never add its usage to the legacy aggregate a second time.
 - `managedDispatch`: additive metric-v4 transport evidence, independent of settled observation windows and one-shot totals. Older reports lacking this section have unavailable managed dispatch evidence, not known zero.
 - `source.sessionId`: identifier derived from the selected JSONL filename.
@@ -109,7 +109,7 @@ This section counts transport evidence, not missions, acceptance, fresh work on 
 - `actions`: bounded selected-request groups containing only action, status, and count. Null action is `invalid-request`, never inspect. `errors` contains bounded selected stable request-code counts.
 - `launchedChildren` and `replayedEpisodes`: `{ known, unavailableRequests }`. Known sums cover selected valid requests; unavailable requests count legacy records, invalid records, and conflicting identities. Excluded and unassigned valid requests are reported through their selection buckets rather than silently merged into the known sums.
 
-All fields preserve the one-shot-only meaning of the pre-existing aggregate sections. No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output. Static parent-acceptance ownership remains documentation; missing disposition remains an offline nullable metric, not a routine runtime warning.
+All fields preserve the historical `csheng_subagents-only` meaning of the pre-existing aggregate sections. No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output. Static parent-acceptance ownership remains documentation; missing disposition remains an offline nullable metric, not a routine runtime warning.
 
 ## Explicit parent disposition
 

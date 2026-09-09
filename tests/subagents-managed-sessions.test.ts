@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
+import { exceedsManagedStorageBudget, fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { collectNativeObservation } from "../extensions/subagents/observability.ts";
@@ -29,6 +29,32 @@ async function retainedBytes(directory: string): Promise<number> {
 	}
 	return bytes;
 }
+
+test("managed root budget grows independently of native parsing and per-record bounds", () => {
+	assert.equal(MANAGED_LIMITS.maxStoreBytes, 8 * 1024 ** 3);
+	assert.equal(MANAGED_LIMITS.maxStoreEntries, 1_000_000);
+	assert.equal(exceedsManagedStorageBudget(900 * 1024 ** 2, 110_000), false);
+	assert.equal(exceedsManagedStorageBudget(MANAGED_LIMITS.maxStoreBytes, MANAGED_LIMITS.maxStoreEntries), false);
+	assert.equal(exceedsManagedStorageBudget(MANAGED_LIMITS.maxStoreBytes + 1, 0), true);
+	assert.equal(exceedsManagedStorageBudget(0, MANAGED_LIMITS.maxStoreEntries + 1), true);
+	assert.equal(MANAGED_LIMITS.maxEntries, 100_000);
+	assert.equal(MANAGED_LIMITS.maxSessions, 10);
+	assert.equal(MANAGED_LIMITS.maxNativeBytes, 32 * 1024 ** 2);
+	assert.equal(MANAGED_LIMITS.maxRegistryBytes, 2 * 1024 ** 2);
+	assert.equal(MANAGED_LIMITS.maxCandidateBytes, 64 * 1024 ** 2);
+});
+
+test("required source above the previous root byte cap is admitted without deletion", async (t) => {
+	const { store, owner, tasks } = await setup(t);
+	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
+	const registry = await readFile(join(store.path(record.handle), "registry.json"));
+	const padding = join(store.path(record.handle), "required-source");
+	await writeFile(padding, "");
+	await truncate(padding, 600 * 1024 ** 2); // Sparse metadata fixture, not a 600 MiB allocation.
+	await store.checkCapacity();
+	assert.equal((await lstat(padding)).size, 600 * 1024 ** 2);
+	assert.deepEqual(await readFile(join(store.path(record.handle), "registry.json")), registry);
+});
 
 test("required admission reclaims only disposable observations instead of failing another episode", async (t) => {
 	const { store, owner, tasks } = await setup(t);

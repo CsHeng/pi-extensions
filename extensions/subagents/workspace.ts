@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
 	chmod,
 	copyFile,
@@ -10,11 +10,8 @@ import {
 	readdir,
 	readlink,
 	realpath,
-	rmdir,
-	rename,
 	rm,
 	symlink,
-	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -35,12 +32,6 @@ export interface WorkerWorkspace {
 	parentBaselines: ReadonlyMap<string, FileState>;
 	workspaceBaseline: ReadonlyMap<string, FileState>;
 	cleanup(): Promise<void>;
-}
-
-export interface ConvergenceResult {
-	ok: boolean;
-	changedPaths: string[];
-	error?: { code: string; message: string };
 }
 
 export class WorkspaceError extends Error {
@@ -231,83 +222,6 @@ export async function createWorkerWorkspace(cwd: string, task: NormalizedTask, l
 export function changedEntries(before: ReadonlyMap<string, FileState>, after: ReadonlyMap<string, FileState>): string[] {
 	const keys = new Set([...before.keys(), ...after.keys()]);
 	return [...keys].filter((key) => !sameState(before.get(key) ?? { kind: "absent" }, after.get(key) ?? { kind: "absent" })).sort();
-}
-
-export async function convergeWorkerWorkspace(workspace: WorkerWorkspace): Promise<ConvergenceResult> {
-	const currentWorkspace = await scan(workspace.root);
-	const changed = changedEntries(workspace.workspaceBaseline, currentWorkspace);
-	const allowed = new Set(workspace.task.writePaths);
-	const unexpected = changed.find((entry) => !allowed.has(entry));
-	if (unexpected) return { ok: false, changedPaths: changed, error: { code: "unexpected_worker_change", message: `Worker changed undeclared path ${unexpected}.` } };
-
-	for (const relativePath of changed) {
-		const before = workspace.workspaceBaseline.get(relativePath) ?? { kind: "absent" };
-		const after = currentWorkspace.get(relativePath) ?? { kind: "absent" };
-		if (after.kind !== "file" || (before.kind === "file" && before.mode !== after.mode)) {
-			return { ok: false, changedPaths: changed, error: { code: "unexpected_worker_change", message: `Worker used an unsupported operation for ${relativePath}.` } };
-		}
-	}
-
-	for (const relativePath of workspace.task.writePaths) {
-		const parentPath = resolve(workspace.sourceRoot, relativePath);
-		await assertNoSymlinkComponent(workspace.sourceRoot, parentPath);
-		const baseline = workspace.parentBaselines.get(relativePath) as FileState;
-		if (!sameState(baseline, await state(parentPath))) {
-			return { ok: false, changedPaths: changed, error: { code: "convergence_conflict", message: `Parent path ${relativePath} changed after worker launch.` } };
-		}
-	}
-
-	if (changed.length === 0) {
-		return {
-			ok: false,
-			changedPaths: [],
-			error: { code: "worker_no_changes", message: "Worker completed without changing any repository file." },
-		};
-	}
-
-	const staged: Array<{ temporary: string; target: string }> = [];
-	const createdDirectories: string[] = [];
-	try {
-		for (const relativePath of changed) {
-			const source = resolve(workspace.root, relativePath);
-			const target = resolve(workspace.sourceRoot, relativePath);
-			await createSafeParentDirectories(workspace.sourceRoot, target, createdDirectories);
-			const after = currentWorkspace.get(relativePath) as FileState;
-			const baseline = workspace.parentBaselines.get(relativePath) as FileState;
-			const temporary = join(dirname(target), `.csheng-subagent-${randomUUID()}.tmp`);
-			await writeFile(temporary, await readFile(source), { mode: baseline.kind === "file" ? baseline.mode : after.mode ?? 0o644 });
-			staged.push({ temporary, target });
-			await chmod(temporary, baseline.kind === "file" ? baseline.mode ?? 0o644 : after.mode ?? 0o644);
-		}
-		for (const relativePath of changed) {
-			const target = resolve(workspace.sourceRoot, relativePath);
-			await assertNoSymlinkComponent(workspace.sourceRoot, target);
-			const baseline = workspace.parentBaselines.get(relativePath) as FileState;
-			if (!sameState(baseline, await state(target))) {
-				return { ok: false, changedPaths: changed, error: { code: "convergence_conflict", message: `Parent path ${relativePath} changed during convergence.` } };
-			}
-		}
-		for (const item of staged) {
-			await assertNoSymlinkComponent(workspace.sourceRoot, item.target);
-			await rename(item.temporary, item.target);
-		}
-		staged.length = 0;
-		return { ok: true, changedPaths: changed };
-	} finally {
-		for (const item of staged) {
-			await assertNoSymlinkComponent(workspace.sourceRoot, item.temporary);
-			await rm(item.temporary, { force: true });
-		}
-		for (const directory of createdDirectories.reverse()) {
-			try {
-				await assertNoSymlinkComponent(workspace.sourceRoot, directory);
-				await rmdir(directory);
-			}
-			catch (error) {
-				if (!isNodeError(error) || !["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code ?? "")) throw error;
-			}
-		}
-	}
 }
 
 export async function createSafeParentDirectories(root: string, target: string, created: string[]): Promise<void> {

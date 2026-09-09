@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+repo_root=$(realpath "${script_dir}/..")
+agent_root=$(mktemp -d)
 work_root=$(mktemp -d)
-cleanup() { rm -rf -- "${work_root}"; }
+cleanup() { rm -rf -- "${agent_root}" "${work_root}"; }
 trap cleanup EXIT
 
 git -C "${work_root}" init -q
+jq -n --arg path "${repo_root}" '{packages:[$path]}' >"${agent_root}/settings.json"
 
 rpc_output=$(
 	cd -- "${work_root}"
@@ -15,7 +19,7 @@ rpc_output=$(
 		'{"type":"get_entries"}' \
 		'{"type":"prompt","message":"/default"}' \
 		'{"type":"get_entries"}' |
-		PI_OFFLINE=1 pi \
+		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 pi \
 			--mode rpc \
 			--no-session \
 			--no-skills \
@@ -34,7 +38,7 @@ default_entry_count=$(jq -s '[.[] | select(.type == "response" and .command == "
 off_output=$(
 	cd -- "${work_root}"
 	printf '%s\n' '{"type":"get_commands"}' |
-		PI_OFFLINE=1 pi \
+		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 pi \
 			--mode rpc \
 			--no-session \
 			--no-skills \

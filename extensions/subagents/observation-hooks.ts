@@ -1,11 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { HARD_LIMITS, SUBAGENT_TOOL_NAME, type RunTelemetry } from "./contracts.ts";
+import { HARD_LIMITS, type RunTelemetry } from "./contracts.ts";
 import { boundNativeObservation, collectNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
 import { MANAGED_LIMITS, SUBAGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
 import { LocalTimingRecorder, monotonicNow, type LocalTiming } from "./telemetry.ts";
 
 const MAX_CUSTOM_BYTES = 64 * 1024;
-const DELEGATION_TOOLS = new Set([SUBAGENT_TOOL_NAME, SUBAGENT_SESSION_TOOL_NAME]);
+const DELEGATION_TOOLS = new Set([SUBAGENT_SESSION_TOOL_NAME]);
 export interface ObservedRun { telemetry: RunTelemetry; clockKey: string; originMs: number | null }
 export interface ParentObservation {
 	version: 1;

@@ -7,9 +7,9 @@ This directory contains stable project truth, retained evaluation evidence, and 
 - `architecture/plan-mode.md` defines the reversible read-only loop profile and branch-local state contract.
 - `architecture/multi-skill-mentions.md` defines loaded-Skill mention completion and expansion.
 - `architecture/fast-gpt.md` defines the branch-local OpenAI Responses service-tier request profile.
-- `architecture/subagents.md` defines shared delegation ownership/routing and the compatible one-shot contract.
+- `architecture/subagents.md` defines managed-only delegation ownership/routing and the historical one-shot boundary.
 - `architecture/subagent-execution.md` defines trusted host workers, explicit managed episodes/candidates, native continuity, observation ownership, and recovery/removal.
-- `architecture/subagents-ui.md` defines the optional one-shot snapshot consumer, separate from native managed tool rendering.
+- `architecture/subagents-ui.md` defines the default-loaded read-only floating observer and default-off widget, separate from managed tool-card rendering.
 - `architecture/herdr-handoff.md` defines the explicit-user-only full-agent Herdr bridge, request/return protocol, isolated-worktree evidence, and removal contract.
 
 ## Evaluation Evidence

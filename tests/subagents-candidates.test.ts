@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
+import { WorkspaceError } from "../extensions/subagents/workspace.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "../extensions/subagents/candidates.ts";
 
 async function setup(t: test.TestContext, files = ["file"]) {
@@ -43,6 +44,44 @@ test("unapplied continuation stays against B0; full apply advances baseline and 
 	const third = await freezeCandidate(store, record); assert.ok(third);
 	assert.equal((await applyCandidate(store, record, third.id)).status, "applied");
 	assert.equal(await readFile(join(repo, "file"), "utf8"), "C3");
+});
+
+test("explicit apply creates nested files only on request and preserves mode on later modification", async (t) => {
+	const { source, repo, store, record } = await setup(t, ["new/nested/file"]);
+	await writeFile(join(source, "new/nested/file"), "first", { mode: 0o640 });
+	const first = await freezeCandidate(store, record); assert.ok(first);
+	await assert.rejects(lstat(join(repo, "new")), { code: "ENOENT" });
+	assert.equal((await applyCandidate(store, record, first.id)).status, "applied");
+	assert.equal((await lstat(join(repo, "new/nested/file"))).mode & 0o777, 0o640);
+	record.episode++;
+	await writeFile(join(source, "new/nested/file"), "second");
+	const next = await freezeCandidate(store, record); assert.ok(next);
+	assert.equal((await applyCandidate(store, record, next.id)).status, "applied");
+	assert.equal(await readFile(join(repo, "new/nested/file"), "utf8"), "second");
+	assert.equal((await lstat(join(repo, "new/nested/file"))).mode & 0o777, 0o640);
+	await chmod(join(source, "new/nested/file"), 0o600);
+	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
+});
+
+for (const ancestor of [false, true]) test(`explicit candidate apply refuses ${ancestor ? "repository ancestor" : "new directory"} symlink replacement`, async (t) => {
+	const { source, repo, store, record } = await setup(t, ["new/file"]);
+	await writeFile(join(source, "new/file"), "candidate");
+	const candidate = await freezeCandidate(store, record); assert.ok(candidate);
+	const outside = await mkdtemp(join(tmpdir(), "managed-apply-outside-"));
+	t.after(() => rm(outside, { recursive: true, force: true }));
+	if (ancestor) { await rename(repo, `${repo}-preserved`); await symlink(outside, repo); }
+	else await symlink(outside, join(repo, "new"));
+	await assert.rejects(applyCandidate(store, record, candidate.id), (error: unknown) => error instanceof WorkspaceError && error.code === "write_symlink");
+	await assert.rejects(lstat(join(outside, "file")), { code: "ENOENT" });
+	await assert.rejects(lstat(join(outside, "new")), { code: "ENOENT" });
+});
+
+test("an unchanged managed source has no candidate; undeclared changes still fail", async (t) => {
+	const { source, repo, store, record } = await setup(t);
+	assert.equal(await freezeCandidate(store, record), undefined);
+	await assert.rejects(lstat(join(repo, "file")), { code: "ENOENT" });
+	await writeFile(join(source, "undeclared"), "bad");
+	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
 });
 
 test("unknown source changes, stale frozen bytes and parent drift cannot apply", async (t) => {

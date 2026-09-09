@@ -9,6 +9,7 @@ const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const TIMEOUT_MS = 20 * 60 * 1000;
 const KILL_GRACE_MS = 5_000;
+const SESSION_TOOL = "csheng_subagent_sessions";
 const REQUIRED_COMMANDS = ["default", "plan", "skill-mentions", "subagents"] as const;
 const EXPECTED_ROLE_ROUTES = {
 	explorer: "openai-codex/gpt-5.6-luna:medium",
@@ -16,11 +17,25 @@ const EXPECTED_ROLE_ROUTES = {
 	worker: "openai-codex/gpt-5.6-terra:high",
 } as const;
 
-interface ToolTaskResult {
+interface RequestTelemetry {
+	invocationId?: unknown;
+	requestedTasks?: unknown;
+	admittedTasks?: unknown;
+	launchedChildren?: unknown;
+	replayedEpisodes?: unknown;
+}
+
+interface SessionCandidate {
 	id?: unknown;
-	role?: unknown;
+	episode?: unknown;
 	status?: unknown;
-	output?: unknown;
+}
+
+interface SessionView {
+	handle?: unknown;
+	role?: unknown;
+	episode?: unknown;
+	state?: unknown;
 	route?: {
 		provider?: unknown;
 		model?: unknown;
@@ -29,18 +44,23 @@ interface ToolTaskResult {
 		executionProfileRequested?: unknown;
 		reasoningProfileRequested?: unknown;
 	};
+	result?: { status?: unknown; output?: unknown; usage?: unknown };
+	candidate?: SessionCandidate;
 }
 
-interface ToolRunDetails {
+interface SessionActionResult {
+	schemaVersion?: unknown;
+	action?: unknown;
 	status?: unknown;
-	tasks?: unknown;
+	requestTelemetry?: RequestTelemetry;
+	sessions?: SessionView[];
 }
 
 interface JsonEvent {
 	type?: unknown;
 	toolName?: unknown;
-	result?: { details?: ToolRunDetails };
-	message?: { role?: unknown; toolName?: unknown; details?: ToolRunDetails };
+	result?: { details?: SessionActionResult };
+	message?: { role?: unknown; toolName?: unknown; details?: SessionActionResult };
 }
 
 export interface LiveE2eSummary {
@@ -53,6 +73,7 @@ export interface LiveE2eSummary {
 	roleRoutes: typeof EXPECTED_ROLE_ROUTES;
 	profileMode: "role-default";
 	workerConvergence: "applied";
+	launchedChildren: 3;
 }
 
 function fail(code: string): never {
@@ -72,23 +93,68 @@ function parseEvents(stdout: string): JsonEvent[] {
 	return events;
 }
 
-function findRunDetails(events: readonly JsonEvent[]): ToolRunDetails {
-	const starts = events.filter((event) => event.type === "tool_execution_start" && event.toolName === "csheng_subagents");
-	if (starts.length !== 1) fail("unexpected_subagent_tool_call_count");
-	for (const event of events) {
-		if (event.type === "tool_execution_end" && event.toolName === "csheng_subagents" && event.result?.details) {
-			return event.result.details;
-		}
-		if (
-			event.type === "message_end" &&
-			event.message?.role === "toolResult" &&
-			event.message.toolName === "csheng_subagents" &&
-			event.message.details
-		) {
-			return event.message.details;
-		}
+function eventToolName(event: JsonEvent): unknown {
+	return event.toolName ?? event.message?.toolName;
+}
+
+function eventDetails(event: JsonEvent): SessionActionResult | undefined {
+	if (event.type === "tool_execution_end" && event.toolName === SESSION_TOOL) return event.result?.details;
+	if (event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === SESSION_TOOL) {
+		return event.message.details;
 	}
-	return fail("subagent_result_missing");
+	return undefined;
+}
+
+function collectResults(events: readonly JsonEvent[]): SessionActionResult[] {
+	if (events.some((event) => eventToolName(event) === "csheng_subagents")) fail("retired_subagent_tool");
+	const starts = events.filter((event) => event.type === "tool_execution_start" && event.toolName === SESSION_TOOL);
+	if (starts.length < 1) fail("unexpected_subagent_tool_call_count");
+	const seen = new Set<string>();
+	const results: SessionActionResult[] = [];
+	for (const event of events) {
+		const details = eventDetails(event);
+		if (!details) continue;
+		const invocationId = details.requestTelemetry?.invocationId;
+		if (typeof invocationId !== "string" || !invocationId) fail("request_telemetry_missing");
+		if (seen.has(invocationId)) continue;
+		seen.add(invocationId);
+		results.push(details);
+	}
+	if (results.length === 0) fail("subagent_result_missing");
+	return results;
+}
+
+function asSessions(value: SessionActionResult): SessionView[] {
+	if (!Array.isArray(value.sessions)) fail("subagent_sessions_missing");
+	return value.sessions;
+}
+
+function sessionByRole(sessions: readonly SessionView[], role: "explorer" | "reviewer" | "worker"): SessionView {
+	const matches = sessions.filter((session) => session.role === role);
+	if (matches.length !== 1) fail(`role_${role}_not_succeeded`);
+	return matches[0]!;
+}
+
+function validateRoute(session: SessionView, role: "explorer" | "reviewer" | "worker"): void {
+	const route = session.route ?? undefined;
+	if (route?.source !== "package-default") fail(`role_${role}_route_not_package_default`);
+	if (typeof route.provider !== "string" || typeof route.model !== "string" || typeof route.thinking !== "string") {
+		fail(`role_${role}_route_missing`);
+	}
+	if (`${route.provider}/${route.model}:${route.thinking}` !== EXPECTED_ROLE_ROUTES[role]) fail(`role_${role}_route_mismatch`);
+	if (route.executionProfileRequested !== undefined || route.reasoningProfileRequested !== undefined) {
+		fail(`role_${role}_unexpected_profile`);
+	}
+}
+
+function launchedChildren(results: readonly SessionActionResult[]): number {
+	let total = 0;
+	for (const details of results) {
+		const telemetry = details.requestTelemetry;
+		if (typeof telemetry?.launchedChildren !== "number") fail("request_telemetry_missing");
+		total += telemetry.launchedChildren;
+	}
+	return total;
 }
 
 export function validateLiveRun(
@@ -97,35 +163,59 @@ export function validateLiveRun(
 	workerContent: string,
 	source: "temporary" | "installed",
 ): LiveE2eSummary {
-	const details = findRunDetails(parseEvents(stdout));
-	if (details.status !== "succeeded" || !Array.isArray(details.tasks) || details.tasks.length !== 3) {
+	const results = collectResults(parseEvents(stdout));
+	const freshCreates = results.filter((details) => details.action === "create" && details.requestTelemetry?.replayedEpisodes === 0);
+	if (freshCreates.length !== 1) fail("subagent_graph_not_succeeded");
+	const created = freshCreates[0]!;
+	if (created.schemaVersion !== 2 || created.status !== "succeeded") fail("subagent_graph_not_succeeded");
+	const telemetry = created.requestTelemetry;
+	if (telemetry?.requestedTasks !== 3 || telemetry.admittedTasks !== 3 || telemetry.launchedChildren !== 3) {
 		fail("subagent_graph_not_succeeded");
 	}
-	const tasks = details.tasks as ToolTaskResult[];
+	const sessions = asSessions(created);
+	if (sessions.length !== 3) fail("subagent_graph_not_succeeded");
 	const expected = [
-		{ id: "explore", role: "explorer", outputToken: expectedTokens.explore },
-		{ id: "review", role: "reviewer", outputToken: expectedTokens.review },
-		{ id: "worker", role: "worker" },
-	] as const;
+		{ role: "explorer" as const, outputToken: expectedTokens.explore },
+		{ role: "reviewer" as const, outputToken: expectedTokens.review },
+		{ role: "worker" as const },
+	];
 	for (const item of expected) {
-		const task = tasks.find((candidate) => candidate.id === item.id);
-		if (!task || task.role !== item.role || task.status !== "succeeded") fail(`role_${item.role}_not_succeeded`);
-		if ("outputToken" in item && (typeof task.output !== "string" || !task.output.includes(item.outputToken))) {
+		const session = sessionByRole(sessions, item.role);
+		if (session.result?.status !== "succeeded") fail(`role_${item.role}_not_succeeded`);
+		if ("outputToken" in item && (typeof session.result.output !== "string" || !session.result.output.includes(item.outputToken))) {
 			fail(`role_${item.role}_token_missing`);
 		}
-		if (task.route?.source !== "package-default") fail(`role_${item.role}_route_not_package_default`);
-		if (typeof task.route.provider !== "string" || typeof task.route.model !== "string" || typeof task.route.thinking !== "string") {
-			fail(`role_${item.role}_route_missing`);
-		}
-		const route = `${task.route.provider}/${task.route.model}:${task.route.thinking}`;
-		if (route !== EXPECTED_ROLE_ROUTES[item.role]) fail(`role_${item.role}_route_mismatch`);
-		if (task.route.executionProfileRequested !== undefined || task.route.reasoningProfileRequested !== undefined) {
-			fail(`role_${item.role}_unexpected_profile`);
+		validateRoute(session, item.role);
+	}
+	const worker = sessionByRole(sessions, "worker");
+	if (typeof worker.handle !== "string" || typeof worker.episode !== "number") fail("worker_apply_missing");
+	if (!worker.candidate || typeof worker.candidate.id !== "string" || worker.candidate.status === "applied") {
+		fail("worker_apply_missing");
+	}
+	const apply = results.find((details) => {
+		if (details.action !== "apply" || details.status !== "succeeded") return false;
+		const session = details.sessions?.[0];
+		return !!session && session.handle === worker.handle
+			&& session.episode === worker.episode
+			&& session.candidate?.id === worker.candidate?.id
+			&& session.candidate?.status === "applied";
+	});
+	if (!apply || apply.requestTelemetry?.launchedChildren !== 0 || apply.requestTelemetry.replayedEpisodes !== 0) {
+		fail("worker_apply_missing");
+	}
+	for (const session of sessions) {
+		if (typeof session.handle !== "string" || typeof session.episode !== "number") fail("session_not_closed");
+		const closed = results.find((details) => details.action === "close"
+			&& details.status === "succeeded"
+			&& details.sessions?.[0]?.handle === session.handle
+			&& details.sessions?.[0]?.episode === session.episode
+			&& details.sessions?.[0]?.state === "closed");
+		if (!closed || closed.requestTelemetry?.launchedChildren !== 0 || closed.requestTelemetry.replayedEpisodes !== 0) {
+			fail("session_not_closed");
 		}
 	}
 	if (workerContent.trim() !== expectedTokens.worker) fail("worker_content_mismatch");
-	const worker = tasks.find((task) => task.id === "worker") as ToolTaskResult & { convergence?: unknown };
-	if (worker.convergence !== "applied") fail("worker_convergence_not_applied");
+	if (launchedChildren(results) !== 3) fail("replay_usage_counted_twice");
 	return {
 		result: "pass",
 		source,
@@ -136,13 +226,14 @@ export function validateLiveRun(
 		roleRoutes: EXPECTED_ROLE_ROUTES,
 		profileMode: "role-default",
 		workerConvergence: "applied",
+		launchedChildren: 3,
 	};
 }
 
 async function writeObserver(observerPath: string, packageRoot: string): Promise<void> {
 	const commands = JSON.stringify(REQUIRED_COMMANDS);
 	const ownedRoot = JSON.stringify(packageRoot);
-	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (event.toolName !== "csheng_subagents") return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === "csheng_subagents");\n\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes("csheng_subagents")) {\n\t\t\tmissing.push("tool:csheng_subagents");\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
+	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (event.toolName !== "${SESSION_TOOL}") return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === "${SESSION_TOOL}");\n\t\tconst retired = pi.getAllTools().some((candidate) => candidate.name === "csheng_subagents");\n\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes("${SESSION_TOOL}") || retired) {\n\t\t\tmissing.push(retired ? "tool:csheng_subagents" : "tool:${SESSION_TOOL}");\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
 }
 
 function terminateProcess(child: ReturnType<typeof spawn>): NodeJS.Timeout | undefined {
@@ -250,7 +341,9 @@ async function main(): Promise<void> {
 			git.once("error", rejectPromise);
 			git.once("close", (code) => code === 0 ? resolvePromise() : rejectPromise(new Error("git_init_failed")));
 		});
-		const graph = {
+		const create = {
+			action: "create",
+			requestId: `e2e${nonce}`,
 			tasks: [
 				{
 					id: "explore",
@@ -268,12 +361,12 @@ async function main(): Promise<void> {
 					id: "worker",
 					role: "worker",
 					objective: `Create result.txt containing exactly ${tokens.worker} followed by one newline, then include the exact marker ${tokens.worker} in the result.`,
-					scope: ["seed.txt", "result.txt"],
+					scope: ["."],
 					writePaths: ["result.txt"],
 				},
 			],
 		};
-		const prompt = `Call csheng_subagents exactly once using this exact argument object: ${JSON.stringify(graph)}\nAfter the tool returns, call no more tools and reply only E2E_PARENT_DONE.`;
+		const prompt = `Call csheng_subagent_sessions with this exact create argument object: ${JSON.stringify(create)}\nAfter create returns succeeded sessions, call csheng_subagent_sessions apply exactly once for the successful worker session using that session's returned handle as handle, returned episode as expectedEpisode, and returned candidate.id as candidateId.\nThen call csheng_subagent_sessions close once for each of the three sessions using each session's returned handle and episode as expectedEpisode and disposition discard.\nDo not call continue or inspect. After those tool calls, call no more tools and reply only E2E_PARENT_DONE.`;
 		const piArguments = [
 			"--mode", "json",
 			"--no-session",

@@ -30,7 +30,7 @@ const CONTRACT: HerdrContract = {
 const GUIDANCE = [
 	"Use herdr_handoff only after an explicit user request for Herdr or a named external harness handoff.",
 	"Prefer delegate-return; use transfer only when the user explicitly relinquishes Pi completion ownership.",
-	"Never silently fall back to csheng_subagents, another profile, or direct execution.",
+	"Never silently fall back to csheng_subagent_sessions, another profile, or direct execution.",
 	"Treat all recipient output and lifecycle state as unverified evidence.",
 	"Stop on new scope or authority.",
 ].join(" ");

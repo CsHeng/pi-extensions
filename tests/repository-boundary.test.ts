@@ -68,11 +68,11 @@ test("subagent runtime has fixed roles and provider-neutral authored defaults", 
 	assert.deepEqual(violations, []);
 });
 
-test("subagent diagnostics use the dedicated evidence root without session-resume APIs", async () => {
-	const diagnostics = await readFile(join(ROOT, "extensions", "subagents", "diagnostics.ts"), "utf8");
+test("managed native evidence uses an explicit session without parent session-resume APIs", async () => {
+	const store = await readFile(join(ROOT, "extensions", "subagents", "managed-sessions.ts"), "utf8");
 	const runner = await readFile(join(ROOT, "extensions", "subagents", "runner.ts"), "utf8");
-	assert.match(diagnostics, /subagent-sessions/);
-	assert.doesNotMatch(diagnostics, /SessionManager\.(?:open|continueRecent|forkFrom)/);
+	assert.match(store, /subagent-managed-sessions/);
+	assert.doesNotMatch(store, /SessionManager\.(?:open|continueRecent|forkFrom)/);
 	assert.match(runner, /"--session"/);
 	assert.doesNotMatch(runner, /"--no-session"/);
 });

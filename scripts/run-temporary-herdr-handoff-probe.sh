@@ -13,11 +13,17 @@ probe_extension="${work_root}/probe.ts"
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+const packageRoot = process.env.CSHENG_PROBE_PACKAGE_ROOT ?? "";
+
+const isPackagePath = (value: unknown): boolean =>
+	typeof value === "string" && packageRoot.length > 0 && (value === packageRoot || value.startsWith(packageRoot + "/"));
+
 export default function probe(pi: ExtensionAPI): void {
 	pi.registerCommand("herdr-handoff-probe", {
 		description: "Redacted herdr-handoff package probe",
 		handler: async () => {
-			const present = pi.getAllTools().some((tool) => tool.name === "herdr_handoff");
+			const tool = pi.getAllTools().find((candidate) => candidate.name === "herdr_handoff");
+			const present = tool !== undefined && isPackagePath(tool.sourceInfo?.path);
 			pi.appendEntry("csheng-herdr-handoff-probe", { present });
 		},
 	});
@@ -30,7 +36,7 @@ rpc_output=$(
 		'{"type":"get_commands"}' \
 		'{"type":"prompt","message":"/herdr-handoff-probe"}' \
 		'{"type":"get_entries"}' |
-		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
+		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
 			pi \
 			--mode rpc \
 			--no-session \
@@ -52,7 +58,7 @@ off_output=$(
 	printf '%s\n' \
 		'{"type":"prompt","message":"/herdr-handoff-probe"}' \
 		'{"type":"get_entries"}' |
-		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
+		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
 			pi \
 			--mode rpc \
 			--no-session \

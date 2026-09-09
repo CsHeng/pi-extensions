@@ -16,7 +16,7 @@ import { getRole } from "../extensions/subagents/roles.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 
-import type { SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+import { ManagedError, MANAGED_LIMITS, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 function assertReplay(actual: SessionActionResult, expected: SessionActionResult) {
 	const { requestTelemetry: current, ...core } = actual;
@@ -102,6 +102,29 @@ async function serviceFixture(t: test.TestContext) {
 		cancelOnSearch: (controller: AbortController) => { cancellation = { controller, tool: "find", pidFile: "search.pid" }; },
 	};
 }
+
+test("explicit close releases a slot but cannot reclaim mandatory-history capacity", async (t) => {
+	const f = await serviceFixture(t);
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const graph = validateGraph({ tasks: Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ id: `scan-${index}`, role: "explorer", objective: "scan", scope: ["."] })) });
+	if (!graph.ok) throw new Error("fixture");
+	const records = (await f.store.allocate(owner, "slots", graph.tasks)).records;
+	await assert.rejects(f.store.allocate(owner, "overflow", [graph.tasks[0]!]), /session_limit/);
+	const close = { action: "close", handle: records[0]!.handle, expectedEpisode: 0, disposition: "retain" };
+	assert.equal((await f.service.execute(close, f.ctx)).status, "succeeded");
+	assert.equal((await f.store.allocate(owner, "new-slot", [graph.tasks[0]!])).fresh, true);
+	assert.equal((await f.service.execute({ ...close, disposition: "discard" }, f.ctx)).error?.code, "close_disposition_conflict");
+	// Budget exhaustion is injected here; sparse-file/entry admission is tested by the store suite.
+	f.store.checkCapacity = async () => { throw new ManagedError("managed_storage_limit"); };
+	const native = join(f.store.path(records[1]!.handle), "native.jsonl");
+	await writeFile(native, "retained-required-evidence");
+	assert.equal((await f.service.execute({ ...close, handle: records[1]!.handle, disposition: "discard" }, f.ctx)).status, "succeeded");
+	assert.equal(await readFile(native, "utf8"), "retained-required-evidence");
+	const refused = await f.service.execute({ action: "create", requestId: "history-full", tasks: [{ id: "new", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
+	assert.equal(refused.error?.code, "managed_storage_limit");
+	assert.equal(refused.requestTelemetry?.launchedChildren, 0);
+	assert.equal(f.launches(), 0);
+});
 
 const createWorker = { action: "create", requestId: "create-worker", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] }] };
 
@@ -379,4 +402,51 @@ test("episode provenance and actual route survive config changes and fresh repla
 	const historical = await service.execute(createWorker, f.ctx);
 	assertReplay(historical, first);
 	assert.equal(reads, 2);
+});
+
+test("native explorer create/continue reads an explicit external Git file without shell", async (t) => {
+	const f = await serviceFixture(t);
+	const sibling = join(f.base, "sibling"); await mkdir(sibling);
+	await promisify(execFile)("git", ["init", "-q", sibling]);
+	const external = join(sibling, "external.txt");
+	await writeFile(external, "external-bytes");
+	const first = await f.service.execute({ action: "create", requestId: "explore", tasks: [{ id: "explorer", role: "explorer", objective: "host-explorer-fixture", scope: ["."], externalReadRoots: [external] }] }, f.ctx);
+	assert.equal(first.status, "succeeded", JSON.stringify(first));
+	assert.equal(first.sessions[0]!.result!.observation?.available, true);
+	assert.match(first.sessions[0]!.result!.output, /external-bytes/);
+	assert.deepEqual(new Set(first.sessions[0]!.result!.observation!.toolNames), new Set(["read", "grep", "find", "ls"]));
+	const handle = first.sessions[0]!.handle;
+	const native = join(f.store.path(handle), "native.jsonl");
+	assert.equal((await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message?.role === "user").length, 1);
+	const next = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "explore-again", expectedEpisode: 1, message: "host-explorer-fixture" }] }, f.ctx);
+	assert.equal(next.status, "succeeded", JSON.stringify(next));
+	assert.match(next.sessions[0]!.result!.output, /users=2/);
+	assert.match(next.sessions[0]!.result!.output, /external-bytes/);
+	assert.equal(next.sessions[0]!.result!.observation!.ownerSessionId, first.sessions[0]!.result!.observation!.ownerSessionId);
+	assert.equal((await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message?.role === "user").length, 2);
+});
+
+test("same-create report-only DAG hides unapplied worker candidates from a dependent reviewer", async (t) => {
+	const f = await serviceFixture(t);
+	const created = await f.service.execute({ action: "create", requestId: "report-only", tasks: [
+		{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] },
+		{ id: "reviewer", role: "reviewer", objective: "host-reviewer-fixture", scope: ["."], dependsOn: ["worker"] },
+	] }, f.ctx);
+	assert.equal(created.status, "succeeded", JSON.stringify(created));
+	const worker = created.sessions[0]!;
+	const review = created.sessions[1]!;
+	assert.equal(worker.role, "worker");
+	assert.equal(review.role, "reviewer");
+	assert.ok(worker.candidate);
+	assert.equal(await readFile(join(f.store.path(worker.handle), "source", "candidate.txt"), "utf8"), "candidate-1");
+	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
+	assert.match(await readFile(join(f.store.path(review.handle), "native.jsonl"), "utf8"), /Predecessor worker \(succeeded\)/);
+	assert.doesNotMatch(review.result!.output, /candidate-1/);
+	const apply = await f.service.execute({ action: "apply", handle: worker.handle, expectedEpisode: 1, candidateId: worker.candidate!.id }, f.ctx);
+	assert.equal(apply.status, "succeeded");
+	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-1");
+	const later = await f.service.execute({ action: "create", requestId: "review-after-apply", tasks: [{ id: "reviewer", role: "reviewer", objective: "host-reviewer-fixture", scope: ["."] }] }, f.ctx);
+	assert.equal(later.status, "succeeded", JSON.stringify(later));
+	assert.notEqual(later.sessions[0]!.handle, review.handle);
+	assert.match(later.sessions[0]!.result!.output, /candidate-1/);
 });

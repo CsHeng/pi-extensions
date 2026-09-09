@@ -1,6 +1,6 @@
 ---
 name: evaluate-subagent-runs
-description: "Use for read-only evaluation of explicit Pi session JSONL files containing one-shot or managed subagent results and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition."
+description: "Use for read-only evaluation of explicit Pi session JSONL files containing historical one-shot csheng_subagents results, managed csheng_subagent_sessions results, and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition."
 ---
 
 # Evaluate Subagent Runs
@@ -16,7 +16,7 @@ Evaluate one explicitly named Pi session without changing Pi state, runtime rout
 - Treat runtime telemetry schema two through four as authoritative for the fields they declare. Treat schema one as authoritative only for its available launch, admission, duration, and concurrency fields. Label legacy launch, width, and timing derivation as inference.
 - Never reconstruct topology, explicit model or thinking requests, or other new metrics from assistant tool arguments, prompts, or legacy prose. Report unavailable evidence as `null` per run and through `unavailableRuns` totals.
 - Report legacy mechanical dispatch-correction candidates separately. Semantic repair, takeover, and acceptance stay unavailable unless an explicit scoped parent disposition supplies them; report or apply status never implies acceptance.
-- Existing totals/roles/routes/runs remain one-shot-only. Use `managedDispatch` for v2 invocation counts/selection independent of settled windows, with owner/invocation deduplication and explicit legacy/invalid/unassigned coverage. Use `observations` for native/managed evidence, with owner/entry and episode deduplication. Never add its usage to a referenced legacy aggregate or charge replay as new model work.
+- Existing totals/roles/routes/runs remain historical `csheng_subagents-only` one-shot counters. They do not describe the registered managed tool. Use `managedDispatch` for v2 invocation counts/selection independent of settled windows, with owner/invocation deduplication and explicit legacy/invalid/unassigned coverage. Use `observations` for native/managed evidence, with owner/entry and episode deduplication. Never add its usage to a referenced legacy aggregate or charge replay as new model work.
 - Do not invoke subagents, change routing, retry provider calls, or mutate a report unless an explicit new output path is provided.
 
 ## Run

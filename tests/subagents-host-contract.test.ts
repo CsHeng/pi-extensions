@@ -13,36 +13,13 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import {
-	SUBAGENT_TOOL_NAME,
-	TELEMETRY_SCHEMA_VERSION,
-	emptyUsage,
-	type RunStatus,
-	type SubagentRunResult,
-} from "../extensions/subagents/contracts.ts";
+import { SUBAGENT_TOOL_NAME } from "../extensions/subagents/contracts.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
 
-function runResult(status: RunStatus): SubagentRunResult {
-	return {
-		status,
-		tasks: [],
-		usage: emptyUsage(),
-		telemetry: {
-			schemaVersion: TELEMETRY_SCHEMA_VERSION,
-			runId: "host-contract",
-			runDurationMs: 0,
-			requestedTasks: 0,
-			admittedTasks: 0,
-			requestedDependencyEdges: 0,
-			admittedDependencyEdges: 0,
-			explicitModelTasks: 0,
-			explicitThinkingTasks: 0,
-			launchedChildren: 0,
-			peakConcurrency: 0,
-			peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 0 },
-		},
-	};
+function managedResult(status: SessionActionResult["status"], schemaVersion: 1 | 2 = 2): SessionActionResult {
+	return { schemaVersion, action: "create", status, sessions: [] };
 }
 
 async function extensionRunner(t: test.TestContext): Promise<ExtensionRunner> {
@@ -64,29 +41,32 @@ async function extensionRunner(t: test.TestContext): Promise<ExtensionRunner> {
 	);
 }
 
-function event(status: RunStatus) {
+function event(status: SessionActionResult["status"], toolName = SUBAGENT_SESSION_TOOL_NAME, details: unknown = managedResult(status)) {
 	return {
 		type: "tool_result" as const,
 		toolCallId: `call-${status}`,
-		toolName: SUBAGENT_TOOL_NAME,
+		toolName,
 		input: {},
 		content: [{ type: "text" as const, text: status }],
-		details: runResult(status),
+		details,
 		isError: false,
 	};
 }
 
-test("Pi host result interception maps subagent domain status to transport errors", async (t) => {
+test("Pi host result interception maps managed session status to transport errors", async (t) => {
 	const runner = await extensionRunner(t);
-	assert.equal((await runner.emitToolResult(event("succeeded")))?.isError, false);
-	assert.equal((await runner.emitToolResult(event("partial")))?.isError, true);
-	assert.equal((await runner.emitToolResult(event("failed")))?.isError, true);
-	assert.equal((await runner.emitToolResult(event("aborted")))?.isError, true);
+	for (const schemaVersion of [1, 2] as const) {
+		assert.equal((await runner.emitToolResult(event("succeeded", SUBAGENT_SESSION_TOOL_NAME, managedResult("succeeded", schemaVersion))))?.isError, false);
+		assert.equal((await runner.emitToolResult(event("partial", SUBAGENT_SESSION_TOOL_NAME, managedResult("partial", schemaVersion))))?.isError, true);
+		assert.equal((await runner.emitToolResult(event("failed", SUBAGENT_SESSION_TOOL_NAME, managedResult("failed", schemaVersion))))?.isError, true);
+		assert.equal((await runner.emitToolResult(event("aborted", SUBAGENT_SESSION_TOOL_NAME, managedResult("aborted", schemaVersion))))?.isError, true);
+	}
 });
 
-test("Pi host result interception ignores other tools and malformed details", async (t) => {
+test("Pi host result interception ignores other tools, the retired one-shot name, and malformed details", async (t) => {
 	const runner = await extensionRunner(t);
 	assert.equal(await runner.emitToolResult({ ...event("failed"), toolName: "other_tool" }), undefined);
+	assert.equal(await runner.emitToolResult(event("failed", SUBAGENT_TOOL_NAME, managedResult("failed"))), undefined);
 	assert.equal(await runner.emitToolResult({ ...event("failed"), details: { status: "failed" } }), undefined);
 });
 

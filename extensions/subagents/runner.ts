@@ -16,7 +16,17 @@ import {
 	type EffectiveRoute,
 	type TaskResult,
 } from "./contracts.ts";
-import type { DiagnosticLimitResult, DiagnosticTaskSession } from "./diagnostics.ts";
+/** Native history evidence supplied by the managed store; not a one-shot allocator. */
+export interface DiagnosticTaskSession {
+	path: string;
+	ref: string;
+	removeUnused(): Promise<void>;
+}
+export interface DiagnosticLimitResult {
+	ok: boolean;
+	code?: "diagnostic_session_limit";
+	scope?: "child" | "run";
+}
 import type { NormalizedTask } from "./graph.ts";
 import { JsonlProtocolParser } from "./protocol.ts";
 import type { RoleDefinition } from "./roles.ts";

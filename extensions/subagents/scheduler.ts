@@ -14,7 +14,7 @@ import {
 	type RunTiming,
 	type WaitReason,
 } from "./contracts.ts";
-import type { CancelReceiptOutcome } from "./events.ts";
+type CancelReceiptOutcome = "accepted" | "not-active" | "unknown-task" | "already-settled" | "too-late";
 import type { NormalizedTask } from "./graph.ts";
 import { createRunClock, spanDuration, type RunClock } from "./telemetry.ts";
 
