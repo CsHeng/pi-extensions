@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, `herdr-handoff`, `session-id-footer`, and `work-timing` while preserving Pi's authoritative host agent loop. `subagents-ui` remains available in source but is not loaded by default.
+This repository contains small, independently removable Pi extensions. It exports `plan-mode`, `multi-skill-mentions`, `fast-gpt`, `subagents`, `herdr-handoff`, `status-footer`, and `work-timing` while preserving Pi's authoritative host agent loop. `subagents-ui` remains available in source but is not loaded by default.
 
 ## Plan Mode
 
@@ -62,9 +62,9 @@ Recipient write authority is cooperative. First-release recipients must occupy a
 
 See [`docs/architecture/herdr-handoff.md`](docs/architecture/herdr-handoff.md) for the request/return protocol, launch profiles, workspace evidence, cancellation, failure, redaction, and removal contracts.
 
-## Session ID Footer
+## Status Footer
 
-`session-id-footer` keeps Pi's built-in TUI footer and appends the current session UUID to its first line. Long working-directory text is truncated before the session label so the identifier remains visible when terminal width permits. The extension is inactive in RPC, JSON, and print modes and stores no state.
+`status-footer` replaces the TUI footer with one compact line: `Grok 4.6 high (xai sub) | ~/project | <session-uuid> | ↑952k ↓62k R13M CH99.7% $8.979 | 270k/500k (54.0%) | MCP 2/2`. Subscription status sits in the model parentheses; `R`/`W` are cache read/write and `CH` is the latest prompt cache-hit rate. Narrow terminals shrink the workdir and traffic first, then other optional fields, preserving the full UUID whenever it fits alone. Identity and traffic use a fixed palette; separators, context/MCP indicators, and lower thinking levels use the active Pi theme. Extension statuses are not shown. The extension is inactive in RPC, JSON, and print modes and stores no state.
 
 ## Work Timing
 
@@ -80,7 +80,7 @@ extensions/multi-skill-mentions/index.ts
 extensions/fast-gpt/index.ts
 extensions/subagents/index.ts
 extensions/herdr-handoff/index.ts
-extensions/session-id-footer/index.ts
+extensions/status-footer/index.ts
 extensions/work-timing/index.ts
 ```
 
@@ -97,7 +97,7 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt, session-footer, and work-timing boundaries are owned by deterministic unit tests and add no probe commands. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
+Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt, status-footer, and work-timing boundaries are owned by deterministic unit tests and add no probe commands. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
 The opt-in live subagent E2E uses Pi's ambient authentication, creates and removes a disposable Git repository under `~/tmp`, loads all package extensions together, and requires the three package-default role routes plus successful `explorer`, `reviewer`, and converged `worker` results:
 

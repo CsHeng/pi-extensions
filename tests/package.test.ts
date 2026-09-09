@@ -31,7 +31,7 @@ test("package exposes the seven maintained extensions and their Pi peers", async
 		"./extensions/fast-gpt/index.ts",
 		"./extensions/subagents/index.ts",
 		"./extensions/herdr-handoff/index.ts",
-		"./extensions/session-id-footer/index.ts",
+		"./extensions/status-footer/index.ts",
 		"./extensions/work-timing/index.ts",
 	]);
 	assert.deepEqual(manifest.peerDependencies, {

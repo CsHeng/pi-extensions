@@ -15,7 +15,7 @@
     "fast-gpt",
     "subagents",
     "herdr-handoff",
-    "session-id-footer",
+    "status-footer",
     "work-timing",
     "subagents-ui"
   ],
@@ -46,7 +46,7 @@
       "./extensions/fast-gpt/index.ts",
       "./extensions/subagents/index.ts",
       "./extensions/herdr-handoff/index.ts",
-      "./extensions/session-id-footer/index.ts",
+      "./extensions/status-footer/index.ts",
       "./extensions/work-timing/index.ts"
     ]
   }
