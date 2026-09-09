@@ -49,6 +49,7 @@ function asInput(value: Record<string, unknown>): HandoffToolInput {
 
 test("tool schema accepts the four actions and every mode/target combination", () => {
 	assert.equal(HANDOFF_TOOL_NAME, "herdr_handoff");
+	assert.equal(HandoffToolSchema.type, "object");
 	assert.deepEqual(HANDOFF_ACTIONS, ["begin", "continue", "wait", "cancel"]);
 	assert.deepEqual(HANDOFF_MODES, ["delegate-return", "transfer"]);
 	assert.deepEqual(TARGET_TYPES, ["message-existing", "start-and-ask"]);

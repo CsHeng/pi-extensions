@@ -228,14 +228,16 @@ export const CancelHandoffSchema = Type.Object({
 	handle: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxHandleBytes }),
 }, { additionalProperties: false });
 
-export const HandoffToolSchema = Type.Union([
-	BeginHandoffSchema,
-	ContinueHandoffSchema,
-	WaitHandoffSchema,
-	CancelHandoffSchema,
-], {
+export const HandoffToolSchema = {
+	...Type.Union([
+		BeginHandoffSchema,
+		ContinueHandoffSchema,
+		WaitHandoffSchema,
+		CancelHandoffSchema,
+	]),
+	type: "object" as const,
 	description: "Hand one bounded implementation package to a persistent Herdr-managed coding agent. Use only after an explicit user request for Herdr or a named external harness handoff.",
-});
+};
 
 export interface InlinePlan {
 	source: "inline";
