@@ -4,7 +4,7 @@ import {
 	truncateHead,
 	truncateLine,
 } from "@earendil-works/pi-coding-agent";
-import { truncateUtf8, utf8Bytes, type SubagentRunResult, type TaskResult } from "./contracts.ts";
+import { truncateUtf8, utf8Bytes, type SubagentRunResult, type TaskResult, type EffectiveRoute } from "./contracts.ts";
 import { isNativeObservation, type ObservedUsage } from "./observability.ts";
 import type { SessionActionResult, SessionView } from "./session-contracts.ts";
 
@@ -182,6 +182,10 @@ function truncateReport(text: string, maxBytes: number): { report: string; trunc
 	return { report: result.text, truncated: result.truncatedBytes > 0 };
 }
 
+function managedRoute(route: EffectiveRoute): Record<string, unknown> {
+	return { provider: boundScalar(route.provider), model: boundScalar(route.model), thinking: boundScalar(route.thinking), source: route.source, selectionSource: route.selectionSource ?? null };
+}
+
 function sessionPayload(session: SessionView, reportBudget: number | null): Record<string, unknown> {
 	const payload: Record<string, unknown> = {
 		handle: boundScalar(session.handle),
@@ -189,8 +193,9 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 		episode: session.episode,
 		state: session.state,
 		reportComplete: session.reportComplete,
-		parentAcceptance: "unavailable",
 	};
+	const route = session.result?.route ?? session.route;
+	if (route) payload.route = managedRoute(route);
 	if (session.requestError) payload.requestError = { code: boundScalar(session.requestError.code) };
 	if (session.result) {
 		const result: Record<string, unknown> = {
@@ -226,10 +231,9 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		schemaVersion: details.schemaVersion,
 		action: details.action,
 		status: details.status,
-		parentAcceptance: "unavailable",
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
 	};
-	if (details.error) payload.error = { code: boundScalar(details.error.code) };
+	if (details.error) payload.error = { code: boundScalar(details.error.code), ...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}) };
 	return payload;
 }
 
@@ -268,10 +272,9 @@ function stateMeaning(state: SessionView["state"]): string {
 
 export function formatManagedResult(details: SessionActionResult, expanded = false): string {
 	const lines = [
-		`Managed session ${details.action}: ${details.status}`,
-		"parent acceptance unavailable",
+		`Managed session ${details.action ?? "request"}: ${details.status}`,
 	];
-	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}`);
+	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {
 		const parts = [
 			`[${boundScalar(session.handle)}] ${session.role} episode=${session.episode} ${stateMeaning(session.state)}`,
@@ -290,7 +293,8 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 		parts.push(native.recorded
 			? `native-usage recorded input=${native.input} output=${native.output}`
 			: "native-usage unrecorded");
-		parts.push("parent acceptance unavailable");
+		const route = session.result?.route ?? session.route;
+		if (route) parts.push(`route=${boundScalar(route.provider)}/${boundScalar(route.model)} thinking=${boundScalar(route.thinking)} source=${route.source} selection=${route.selectionSource ?? "unknown"}`);
 		lines.push(parts.join(" "));
 	}
 	// Reserve every session/candidate header before any expanded report can consume its budget.

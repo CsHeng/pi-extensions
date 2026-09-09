@@ -30,7 +30,9 @@ for (const installed of [false, true]) test(`native ${installed ? "installed" : 
 	const entries = (await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 	const parents: ParentObservation[] = entries.filter((entry) => entry.type === "custom" && entry.customType === "csheng-parent-observation").map((entry) => entry.data);
 	assert.equal(parents.length, 3, JSON.stringify({ observations: parents.length, users: entries.filter((entry) => entry.message?.role === "user").length, toolResults: entries.filter((entry) => entry.message?.role === "toolResult").length, runs: parents.map((parent) => parent.runs.length), ownInput: parents.map((parent) => parent.native.usage.input) }));
-	const results = entries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "csheng_subagent_sessions").map((entry) => entry.message.details);
+	const toolMessages = entries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "csheng_subagent_sessions").map((entry) => entry.message);
+	assert.ok(toolMessages.every(message => message.usage === undefined), "no native billing forwarding on fresh calls or replay");
+	const results = toolMessages.map(message => message.details);
 	assert.equal(results.length, 3); assert.ok(results.every((result) => result.status === "succeeded"));
 	const children: NativeObservation[] = results.map((result) => result.sessions[0].result.observation);
 	for (const parent of parents) {

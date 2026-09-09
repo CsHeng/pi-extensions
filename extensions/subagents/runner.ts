@@ -259,12 +259,11 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const durationMs = now() - started;
 		const observationAfter = await readObservationNative(options.diagnosticSession.path);
 		const observationEnd = observationAfter === undefined ? undefined : nativeLeaf(observationAfter);
-		let observation = observationStart === undefined || observationEnd === undefined || observationAfter === undefined
+		const observation = observationStart === undefined || observationEnd === undefined || observationAfter === undefined
 			? unavailableObservation()
 			: boundNativeObservation(collectNativeObservation(observationAfter, { startLeaf: observationStart, endLeaf: observationEnd, launched: childDidStart }));
-		// A launched v1 producer must leave its completion observation. Missing
-		// optional evidence is unavailable, never a known-zero retained prefix.
-		if (childDidStart && !observation.timing) observation = unavailableObservation();
+		// Timing is optional evidence. A readable owned range can retain usage,
+		// commands and capabilities without a terminal timing marker.
 		const base: TaskResult = {
 			observation, observationVersion: 1,
 			id: options.task.id,

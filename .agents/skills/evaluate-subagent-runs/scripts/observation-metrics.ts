@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isNativeObservation, mergeOwnedUsage, nativeLeaf, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/subagents/observability.ts";
+import { isNativeObservation, mergeOwnedUsage, nativeLeaf, normalizeCommandCorrelation, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/subagents/observability.ts";
 import { isLocalTiming, spanDuration } from "../../../../extensions/subagents/telemetry.ts";
 import type { TimeSpan } from "../../../../extensions/subagents/contracts.ts";
 
@@ -97,6 +97,7 @@ function directRowMatches(row: NativeObservation["entries"][number], source: Rec
 }
 
 function observationSignature(item: NativeObservation): string {
+	item = normalizeCommandCorrelation(item);
 	return canonical({ entries: item.entries, commands: item.commands, timing: item.timing ?? null, commandCoverage: item.commandCoverage ?? null,
 		capabilityKey: item.capabilityKey, contextWindow: item.contextWindow, toolNames: item.toolNames });
 }
@@ -104,7 +105,8 @@ function summarizeChildren(observations: NativeObservation[], result: Observatio
 	const episodes = new Map<string, NativeObservation>();
 	const commands = new Map<string, NativeObservation["commands"][number]>();
 	let commandConflict = false; let commandComplete = true;
-	for (const observation of observations) {
+	for (const raw of observations) {
+		const observation = normalizeCommandCorrelation(raw);
 		const key = canonical([observation.ownerSessionId, observation.entries.map((entry) => entry.entryId)]);
 		const prior = episodes.get(key);
 		if (prior && observationSignature(prior) !== observationSignature(observation)) return;
@@ -186,7 +188,7 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 		for (const item of scope) {
 			const message = object(item.message); const details = object(message?.details);
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
-			if (message.toolName === "csheng_subagent_sessions" && details.schemaVersion === 1 && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
+			if (message.toolName === "csheng_subagent_sessions" && (details.schemaVersion === 1 || details.schemaVersion === 2) && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
 				for (const raw of details.sessions) {
 					const view = object(raw); if (!view || !id(view.handle) || !Number.isSafeInteger(view.episode) || (view.episode as number) < 0) { invalidEvidence = true; continue; }

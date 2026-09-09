@@ -1,3 +1,4 @@
+import { commandCorrelationKey } from "./command-correlation.ts";
 import { createHash } from "node:crypto";
 import { MANAGED_LIMITS } from "./session-contracts.ts";
 import { isLocalTiming, type LocalTiming } from "./telemetry.ts";
@@ -44,6 +45,7 @@ export interface NativeObservation {
 	capabilityKey: string | null;
 	timing?: LocalTiming | null;
 	commandCoverage?: "complete" | "partial";
+	commandCorrelationVersion?: 2;
 }
 
 const OPAQUE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
@@ -58,7 +60,7 @@ const MAX_TOOL_NAMES = 16;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
 const OBSERVATION_KEYS = new Set([
 	"available", "ownerSessionId", "entries", "commands", "usage", "contextWindow",
-	"toolNames", "capabilityKey", "timing", "commandCoverage",
+	"toolNames", "capabilityKey", "timing", "commandCoverage", "commandCorrelationVersion",
 ]);
 const USAGE_ROW_KEYS = new Set(["ownerSessionId", "entryId", "kind", "modelKey", "usage"]);
 const COMMAND_ROW_KEYS = new Set([
@@ -91,6 +93,7 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 	let capabilityKey: string | null = null;
 	let timing: LocalTiming | null | undefined;
 	const pendingCommands = new Set<string>();
+	const seenCommands = new Set<string>();
 	let commandCoverage = true;
 	for (const { id, entry } of selected) {
 		if (entry.type === "message") {
@@ -104,9 +107,9 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 				if (!Array.isArray(message.content)) commandCoverage = false;
 				else for (const part of message.content) {
 					if (!isRecord(part) || part.type !== "toolCall" || part.name !== "bash") continue;
-					const callId = opaqueId(part.id);
-					if (!callId || pendingCommands.has(callId)) commandCoverage = false;
-					else pendingCommands.add(callId);
+					const callId = commandCorrelationKey(part.id);
+					if (!callId || seenCommands.has(callId)) commandCoverage = false;
+					else { pendingCommands.add(callId); seenCommands.add(callId); }
 				}
 			}
 		} else if (entry.type === "compaction" || entry.type === "branch_summary") {
@@ -117,7 +120,7 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 			});
 		} else if (entry.type === "custom" && entry.customType === "csheng-worker-command") {
 			const command = parseCommand(ownerSessionId, id, entry.data);
-			if (!command.toolCallId || !pendingCommands.delete(command.toolCallId)) commandCoverage = false;
+			if (!command.toolCallId || !pendingCommands.delete(command.toolCallId) || !completeCommandEvidence(command)) commandCoverage = false;
 			commands.push(command);
 		} else if (entry.type === "custom" && entry.customType === "csheng-episode-observation") {
 			const data = isRecord(entry.data) ? entry.data : undefined;
@@ -134,7 +137,7 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 		}
 	}
 	const observation: NativeObservation = {
-		available: true, ownerSessionId, entries, commands,
+		available: true, ownerSessionId, entries, commands, commandCorrelationVersion: 2,
 		usage: sumUsage(entries), contextWindow, toolNames, capabilityKey,
 	};
 	if (timing !== undefined) observation.timing = timing;
@@ -170,18 +173,34 @@ export function isNativeObservation(value: unknown): value is NativeObservation 
 		|| !validUsage(value.usage) || (value.contextWindow !== null && positiveFinite(value.contextWindow) === null)
 		|| (value.toolNames !== null && parseToolNames(value.toolNames) === null) || (value.capabilityKey !== null && sha256Key(value.capabilityKey) === null)
 		|| (value.timing !== undefined && value.timing !== null && !isLocalTiming(value.timing))
+		|| (value.commandCorrelationVersion !== undefined && value.commandCorrelationVersion !== 2)
 		|| (value.commandCoverage !== undefined && value.commandCoverage !== "complete" && value.commandCoverage !== "partial")) return false;
 	const ownerSessionId = value.ownerSessionId as string | null;
 	return value.entries.every((row) => isUsageRow(row, ownerSessionId))
-		&& value.commands.every((row) => isCommandRow(row, ownerSessionId));
+		&& value.commands.every((row) => isCommandRow(row, ownerSessionId) && (value.commandCorrelationVersion !== 2 || row.toolCallId == null || sha256Key(row.toolCallId) !== null));
 }
 
 export function unavailableObservation(): NativeObservation {
 	return unavailable();
 }
 
+function completeCommandEvidence(row: NativeCommandRow): boolean {
+	return !!row.toolCallId && row.status !== "unknown" && row.startMs !== null && row.endMs !== null && row.endMs >= row.startMs
+		&& row.sourceBeforeKey !== null && row.sourceAfterKey !== null
+		&& typeof row.environmentBeforeKey === "string" && typeof row.environmentAfterKey === "string";
+}
+
+export function normalizeCommandCorrelation(value: NativeObservation): NativeObservation {
+	if (!isNativeObservation(value)) return unavailable();
+	const commands = value.commandCorrelationVersion === 2 ? value.commands : value.commands.map((row) => ({ ...row, ...(row.toolCallId === undefined ? {} : { toolCallId: commandCorrelationKey(row.toolCallId) }) }));
+	return { ...value, commandCorrelationVersion: 2, commands,
+		...(value.commandCoverage === "complete" && commands.some(row => !completeCommandEvidence(row)) ? { commandCoverage: "partial" } : {}),
+	};
+}
+
 export function boundNativeObservation(value: NativeObservation): NativeObservation {
 	if (!isNativeObservation(value)) return unavailable();
+	value = normalizeCommandCorrelation(value);
 	try {
 		if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_OBSERVATION_BYTES) return unavailable();
 	} catch {
@@ -298,7 +317,7 @@ function parseCommand(ownerSessionId: string, entryId: string, value: unknown): 
 		sourceBeforeKey: sha256Key(data?.sourceBeforeKey),
 		sourceAfterKey: sha256Key(data?.sourceAfterKey),
 	};
-	if (data !== undefined && "toolCallId" in data) row.toolCallId = opaqueId(data.toolCallId);
+	if (data !== undefined && "toolCallId" in data) row.toolCallId = data.version === 2 ? sha256Key(data.toolCallId) : data.version === undefined || data.version === 1 ? commandCorrelationKey(opaqueId(data.toolCallId)) : null;
 	if (data !== undefined && ("environmentBeforeKey" in data || "environmentAfterKey" in data)) {
 		row.environmentBeforeKey = sha256Key(data.environmentBeforeKey);
 		row.environmentAfterKey = sha256Key(data.environmentAfterKey);

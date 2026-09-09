@@ -208,7 +208,8 @@ test("managed model content is parseable JSON with headers for ten huge reports"
 	assert.equal(parsed.action, "inspect");
 	assert.equal(parsed.status, "succeeded");
 	assert.equal(parsed.error?.code, "partial_failure");
-	assert.equal(parsed.parentAcceptance, "unavailable");
+	assert.equal(parsed.parentAcceptance, undefined);
+	assert.doesNotMatch(content, /parentAcceptance|parent acceptance/);
 	assert.equal(parsed.sessions.length, 10);
 	for (let index = 0; index < 10; index += 1) {
 		const row = parsed.sessions[index]!;
@@ -264,7 +265,9 @@ test("managed TUI separates request, stored state, episode outcome, and never in
 	assert.match(text, /episode-outcome=succeeded/);
 	assert.match(text, /requestError=stale_request/);
 	assert.match(text, /candidate=cand-0 apply=applied/);
-	assert.match(text, /parent acceptance unavailable/);
+	assert.doesNotMatch(text, /parent acceptance/);
+	assert.match(text, /route=synthetic\/model-/);
+	assert.match(text, /thinking=high/);
 	assert.doesNotMatch(text, /committed-output|background agent|bash |sourceBefore|environment/);
 	assert.doesNotMatch(formatManagedResult(managed([stale]), false), /--- \[handle-0\] report ---/);
 	const expanded = formatManagedResult(managed([stale]), true);

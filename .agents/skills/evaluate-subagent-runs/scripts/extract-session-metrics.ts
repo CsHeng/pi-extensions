@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractObservationMetrics, type ObservationMetrics } from "./observation-metrics.ts";
+import { extractManagedDispatch, ManagedDispatchCollector, type ManagedDispatchMetrics } from "./managed-dispatch.ts";
 import { workerIntervalTotals } from "../../../../extensions/subagents/telemetry.ts";
 
 const OUTPUT_SCHEMA_VERSION = 4;
@@ -71,6 +72,7 @@ export interface SessionMetrics {
 	schemaVersion: typeof OUTPUT_SCHEMA_VERSION;
 	/** Legacy counters above observations cover csheng_subagents only. */
 	observations: ObservationMetrics;
+	managedDispatch: ManagedDispatchMetrics;
 	source: {
 		legacyCountersScope: "csheng_subagents-only";
 		sessionId: string;
@@ -488,6 +490,7 @@ export function extractSessionMetrics(text: string, sourcePath = "session.jsonl"
 	return {
 		schemaVersion: OUTPUT_SCHEMA_VERSION,
 		observations,
+		managedDispatch: extractManagedDispatch(text),
 		source: {
 			legacyCountersScope: "csheng_subagents-only",
 			sessionId: sessionIdFromPath(sourcePath),
@@ -664,6 +667,7 @@ async function walkSessionFiles(root: string, files: string[], depth: number, st
 
 export async function extractCurrentEpochMetrics(sessionsRoot: string, manifestPath: string): Promise<SessionMetrics> {
 	const manifest = await readEpochManifest(manifestPath);
+	const managed = new ManagedDispatchCollector(manifest);
 	const files: string[] = [];
 	await walkSessionFiles(resolve(sessionsRoot), files, 0, { entries: 0 });
 	let totalBytes = 0;
@@ -676,7 +680,9 @@ export async function extractCurrentEpochMetrics(sessionsRoot: string, manifestP
 		const info = await lstat(path);
 		totalBytes += info.size;
 		if (totalBytes > MAX_TOTAL_BYTES) throw new Error("input_too_large");
-		const filtered = filterEpochSessionText(await readFile(path, "utf8"), manifest);
+		const text = await readFile(path, "utf8");
+		managed.add(text);
+		const filtered = filterEpochSessionText(text, manifest);
 		selected += filtered.selected;
 		excluded += filtered.excluded;
 		unavailable += filtered.unavailable;
@@ -686,6 +692,7 @@ export async function extractCurrentEpochMetrics(sessionsRoot: string, manifestP
 		}
 	}
 	const metrics = extractSessionMetrics(chunks.join("\n"), "current-epoch.jsonl");
+	metrics.managedDispatch = managed.result();
 	metrics.source.sessionId = "current-epoch";
 	metrics.source.selectionMode = "current-epoch";
 	metrics.source.scannedSessions = files.length;

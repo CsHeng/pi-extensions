@@ -69,7 +69,7 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					message.content = [input.includes("host-reviewer-fixture")
 						? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: "candidate.txt" } }
 						: input.includes("host-search-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "find", arguments: { pattern: "*.txt", path: "." } }
-						: { type: "toolCall", id: `fixture-${count}`, name: "bash", arguments: { command: workerCommand(input, count) } }];
+						: { type: "toolCall", id: `fixture-${count}|provider:command`, name: "bash", arguments: { command: workerCommand(input, count) } }];
 					message.stopReason = "toolUse";
 					stream.push({ type: "done", reason: "toolUse", message });
 					stream.end();

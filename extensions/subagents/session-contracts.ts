@@ -2,10 +2,10 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { validateGraphStructure } from "./graph.ts";
-import { HARD_LIMITS, SubagentTaskSchema, type TaskResult } from "./contracts.ts";
+import { HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
 export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
-export const MANAGED_SESSION_VERSION = 1;
+export const MANAGED_SESSION_VERSION = 2;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
 	maxStoreBytes: 512 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
@@ -17,18 +17,19 @@ const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
 export const SubagentSessionToolSchema = Type.Object({
-	action: StringEnum(["create", "continue", "inspect", "apply", "close"] as const),
-	requestId: Type.Optional(opaque),
+	action: StringEnum(["create", "continue", "inspect", "apply", "close"] as const, { description: "create requires requestId and tasks; continue requires episodes (handle, requestId, expectedEpisode, message); inspect accepts an optional handle; apply requires handle, expectedEpisode and candidateId; close requires handle and expectedEpisode." }),
+	requestId: Type.Optional(Type.String({ ...opaque, description: "Required for create. Stable caller-selected identity for replay; reuse only for the same request." })),
 	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Full workers require scope [\".\"] for one coherent source/tool view; writePaths remain exact. Read-only roles may use narrower scopes." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks })),
-	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(version), candidateId: Type.Optional(opaque),
+	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
 }, { additionalProperties: false });
 export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
 
 export class ManagedError extends Error {
 	readonly code: string;
-	constructor(code: string) { super(code); this.name = "ManagedError"; this.code = code; }
+	readonly missingFields?: string[];
+	constructor(code: string, missingFields?: string[]) { super(code); this.name = "ManagedError"; this.code = code; if (missingFields) this.missingFields = missingFields; }
 }
 export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(SubagentSessionToolSchema, raw)) throw new ManagedError("invalid_session_request");
@@ -40,7 +41,7 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 	};
 	if (Object.keys(input).some((key) => !fields[input.action].includes(key))) throw new ManagedError("invalid_action_fields");
 	if (input.action === "create") {
-		if (!input.requestId || !input.tasks) throw new ManagedError("missing_create_fields");
+		if (!input.requestId || !input.tasks) throw new ManagedError("missing_create_fields", [!input.requestId && "requestId", !input.tasks && "tasks"].filter((value): value is string => !!value));
 		const graph = validateGraphStructure({ tasks: input.tasks });
 		if (!graph.ok) throw new ManagedError(graph.error.code);
 	}
@@ -48,7 +49,7 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 		if (!input.episodes || new Set(input.episodes.map((item) => item.handle)).size !== input.episodes.length) throw new ManagedError("invalid_episodes");
 		if (input.episodes.some((item) => Buffer.byteLength(item.message) > HARD_LIMITS.maxInputBytes)) throw new ManagedError("message_too_large");
 	}
-	if ((input.action === "apply" || input.action === "close") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version");
+	if ((input.action === "apply" || input.action === "close") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value));
 	if (input.action === "apply" && !input.candidateId) throw new ManagedError("missing_candidate");
 	return input;
 }
@@ -69,7 +70,26 @@ export interface CandidateRef {
 	changedPaths: string[];
 	appliedPaths: string[];
 }
+export interface EpisodeExecution {
+	startedAtMs: number;
+	provenance: ProvenanceTelemetry;
+}
+export interface ManagedRequestTelemetry {
+	version: 1;
+	ownerSessionId: string;
+	invocationId: string;
+	startedAtMs: number;
+	durationMs: number | null;
+	extensionEpoch: string | null;
+	configurationEpoch: string | null;
+	requestedTasks: number | null;
+	admittedTasks: number | null;
+	launchedChildren: number;
+	replayedEpisodes: number;
+}
 export interface SessionView {
+	execution?: EpisodeExecution;
+	route?: EffectiveRoute;
 	handle: string;
 	role: "explorer" | "reviewer" | "worker";
 	episode: number;
@@ -82,9 +102,10 @@ export interface SessionView {
 	requestError?: { code: string };
 }
 export interface SessionActionResult {
-	schemaVersion: 1;
-	action: SessionRequest["action"];
+	schemaVersion: 1 | 2;
+	action: SessionRequest["action"] | null;
+	requestTelemetry?: ManagedRequestTelemetry;
 	status: "succeeded" | "partial" | "failed" | "aborted";
 	sessions: SessionView[];
-	error?: { code: string };
+	error?: { code: string; missingFields?: string[] };
 }

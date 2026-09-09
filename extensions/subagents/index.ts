@@ -698,7 +698,7 @@ export function createSubagentsExtension(overrides: Partial<SubagentDependencies
 		});
 		const observations = registerObservationHooks(pi, { now: dependencies.now });
 		const managed = registerContinuationTool(pi, {
-			now: dependencies.now, onRun: observations.recordRun,
+			now: dependencies.now, onRun: observations.recordRun, provenance,
 			loadConfig: dependencies.loadConfig,
 			runChild: dependencies.runChild,
 			repositoryHost: dependencies.repositoryHost,

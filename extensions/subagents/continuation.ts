@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { ProvenanceCore } from "./provenance.ts";
 import { lstat, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +15,7 @@ import { runChild, type ChildRunOptions } from "./runner.ts";
 import { runScheduledTasks, type ChildLifecycle } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, type ManagedRecord } from "./managed-sessions.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
-import { MANAGED_LIMITS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView } from "./session-contracts.ts";
+import { MANAGED_LIMITS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
 import { createRunClock, monotonicNow, type RunClock } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
@@ -27,6 +29,7 @@ export interface ContinuationDependencies {
 	legacyBusy(): boolean;
 	now(): number;
 	onRun?: (run: ObservedRun) => void;
+	provenance?: ProvenanceCore;
 }
 
 export class ContinuationService {
@@ -46,12 +49,27 @@ export class ContinuationService {
 
 	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void): Promise<SessionActionResult> {
 		const clock = createRunClock(this.dependencies.now);
+		const telemetry: ManagedRequestTelemetry = { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), invocationId: randomUUID(), startedAtMs: Date.now(), durationMs: null, extensionEpoch: null, configurationEpoch: null, requestedTasks: null, admittedTasks: null, launchedChildren: 0, replayedEpisodes: 0 };
+		try {
+			const provenance = await this.dependencies.provenance?.observeExtension();
+			if (provenance?.available) telemetry.extensionEpoch = provenance.extensionEpoch;
+		} catch { /* Optional provenance cannot fail execution. */ }
+		const result = await this.executeRequest(raw, ctx, clock, telemetry, signal, onProgress);
+		const elapsed = clock.elapsed();
+		telemetry.durationMs = clock.valid ? elapsed : null;
+		return { ...result, schemaVersion: 2, requestTelemetry: telemetry };
+	}
+	private async executeRequest(raw: unknown, ctx: ExtensionContext, clock: RunClock, telemetry: ManagedRequestTelemetry, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void): Promise<SessionActionResult> {
 		let request: SessionRequest;
 		try { request = parseSessionRequest(raw); }
-		catch (error) { return this.failed("inspect", error); }
+		catch (error) {
+			const action = raw && typeof raw === "object" ? (raw as { action?: unknown }).action : undefined;
+			return this.failed(typeof action === "string" && ["create", "continue", "inspect", "apply", "close"].includes(action) ? action as SessionRequest["action"] : null, error);
+		}
+		telemetry.requestedTasks = request.action === "create" ? request.tasks!.length : request.action === "continue" ? request.episodes!.length : null;
 		if (!ctx.isProjectTrusted()) return this.failed(request.action, new ManagedError("project_trust_required"));
 		if (request.action === "inspect") {
-			try { return await this.action(request, await this.owner(ctx), ctx, signal, clock); }
+			try { return await this.action(request, await this.owner(ctx), ctx, signal, clock, telemetry); }
 			catch (error) { return this.failed(request.action, error); }
 		}
 		if (this.busy || this.dependencies.legacyBusy()) return this.failed(request.action, new ManagedError("managed_batch_active"));
@@ -59,25 +77,25 @@ export class ContinuationService {
 		this.active = controller;
 		const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
 		const execution = (async () => {
-			try { combined.throwIfAborted(); return await this.action(request, await this.owner(ctx), ctx, combined, clock, onProgress); }
+			try { combined.throwIfAborted(); return await this.action(request, await this.owner(ctx), ctx, combined, clock, telemetry, onProgress); }
 			catch (error) { return this.failed(request.action, error, combined.aborted); }
 			finally { this.active = undefined; }
 		})();
 		this.completion = execution;
 		return execution;
 	}
-	private failed(action: SessionRequest["action"], error: unknown, aborted = false): SessionActionResult {
-		return { schemaVersion: 1, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: error instanceof ManagedError || error instanceof RepositoryPolicyError ? error.code : "managed_operation_failed" } };
+	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
+		return { schemaVersion: 2, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: error instanceof ManagedError || error instanceof RepositoryPolicyError ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
 	}
 	private async owner(ctx: ExtensionContext): Promise<CurrentOwner> {
 		return { repo: await findCanonicalGitRoot(ctx.cwd, this.dependencies.repositoryHost), parentSessionId: ctx.sessionManager.getSessionId(),
 			anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map((entry) => entry.id),
 		};
 	}
-	private async action(request: SessionRequest, owner: CurrentOwner, ctx: ExtensionContext, signal: AbortSignal | undefined, clock: RunClock, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void): Promise<SessionActionResult> {
+	private async action(request: SessionRequest, owner: CurrentOwner, ctx: ExtensionContext, signal: AbortSignal | undefined, clock: RunClock, telemetry: ManagedRequestTelemetry, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void): Promise<SessionActionResult> {
 		const store = this.dependencies.store;
 		if (request.action === "inspect") {
-			return { schemaVersion: 1, action: request.action, status: "succeeded", sessions: request.handle ? [store.view(await store.load(request.handle, owner))] : await store.list(owner) };
+			return { schemaVersion: 2, action: request.action, status: "succeeded", sessions: request.handle ? [store.view(await store.load(request.handle, owner))] : await store.list(owner) };
 		}
 		if (request.action === "apply" || request.action === "close") {
 			const view = await store.withSession(request.handle!, owner, async (record) => {
@@ -98,14 +116,14 @@ export class ContinuationService {
 				}
 				return store.view(record);
 			});
-			return { schemaVersion: 1, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
+			return { schemaVersion: 2, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
 		}
 		let records: ManagedRecord[] = [];
 		const identityGraph = request.tasks ? validateGraphStructure({ tasks: request.tasks }) : undefined;
 		const requestDigest = fingerprint(identityGraph?.ok ? identityGraph.tasks : []);
 		if (request.action === "create") {
 			const replay = await store.replayBatch(owner, request.requestId!, requestDigest);
-			if (replay) return replay;
+			if (replay) { telemetry.replayedEpisodes = replay.sessions.filter(view => view.episode > 0 && view.result).length; return replay; }
 		} else {
 			records = await Promise.all(request.episodes!.map((episode) => store.load(episode.handle, owner)));
 			const completed = records.map((record, index) => {
@@ -116,10 +134,17 @@ export class ContinuationService {
 			});
 			if (completed.every(Boolean)) {
 				const sessions = await Promise.all(records.map((record, index) => this.replayed(record, request.episodes![index]!.requestId)));
-				return { schemaVersion: 1, action: request.action, status: this.status(sessions), sessions };
+				telemetry.replayedEpisodes = sessions.length;
+				return { schemaVersion: 2, action: request.action, status: this.status(sessions), sessions };
 			}
 		}
 		const loaded = await this.dependencies.loadConfig();
+		try {
+			if (loaded.source) {
+				const provenance = await this.dependencies.provenance?.observeConfiguration(loaded.source);
+				if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; }
+			}
+		} catch { /* Optional provenance cannot fail execution. */ }
 		if (!loaded.config) throw new ManagedError(loaded.diagnostic?.code ?? "invalid_route_config");
 		let tasks: NormalizedTask[];
 		if (request.action === "create") {
@@ -130,6 +155,7 @@ export class ContinuationService {
 			const related = validateGraphRelationships(admitted.tasks);
 			if (!related.ok) throw new ManagedError(related.error.code);
 			tasks = related.tasks;
+			telemetry.admittedTasks = tasks.length;
 			if (tasks.some((task) => task.role === "worker" && (task.scope.length !== 1 || task.scope[0] !== "."))) throw new ManagedError("full_worker_scope_required");
 			// Resolve every route before creating persistent objects.
 			for (const task of tasks) this.route(task, loaded.config, ctx);
@@ -138,10 +164,12 @@ export class ContinuationService {
 			if (!allocation.fresh) {
 				const replay = await store.replayBatch(owner, request.requestId!, requestDigest);
 				if (!replay) throw new ManagedError("request_outcome_unknown");
+				telemetry.replayedEpisodes = replay.sessions.filter(view => view.episode > 0 && view.result).length;
 				return replay;
 			}
 		} else {
 			tasks = records.map((record) => ({ ...record.task, id: record.handle, dependsOn: [] }));
+			telemetry.admittedTasks = tasks.length;
 		}
 		const views = new Map<string, SessionView>();
 		const requestErrors = new Map<string, string>();
@@ -159,7 +187,8 @@ export class ContinuationService {
 				const requestId = continuation?.requestId ?? fingerprint([request.requestId, record.task.id]);
 				const expected = continuation?.expectedEpisode ?? 0;
 				try {
-					const episode = await this.episode(record.handle, owner, requestId, expected, message, routes.get(record.handle), episodeSignal, lifecycle);
+					const episode = await this.episode(record.handle, owner, requestId, expected, message, routes.get(record.handle), episodeSignal, lifecycle, telemetry);
+					if (episode.replayed) telemetry.replayedEpisodes++;
 					views.set(record.handle, episode.view);
 					return { ...episode.view.result!, id: task.id, ...(episode.replayed ? { usage: emptyUsage(), durationMs: 0, telemetry: emptyTaskTelemetry() } : {}) };
 				} catch (error) {
@@ -173,7 +202,7 @@ export class ContinuationService {
 			const code = requestErrors.get(record.handle) ?? (!views.has(record.handle) ? scheduled.tasks[index]?.error?.code : undefined);
 			return code ? { ...view, requestError: { code } } : view;
 		}));
-		const response: SessionActionResult = { schemaVersion: 1, action: request.action, status: scheduled.status, sessions };
+		const response: SessionActionResult = { schemaVersion: 2, action: request.action, status: scheduled.status, sessions };
 		if (request.action === "create") await store.completeBatch(owner, request.requestId!, response);
 		// Required commits may evict derived caches, including an earlier peer's.
 		response.sessions = await Promise.all(sessions.map(async (view) => ({ ...view,
@@ -199,7 +228,7 @@ export class ContinuationService {
 	private async replayed(record: ManagedRecord, requestId: string): Promise<SessionView> {
 		const prior = record.requests.find((request) => request.id === requestId);
 		if (prior?.state !== "complete" || !prior.result) throw new ManagedError("request_outcome_unknown");
-		return { handle: record.handle, role: record.task.role, episode: prior.episode, state: "idle", reportComplete: prior.result.reportComplete === true, result: await this.dependencies.store.withObservation(record.handle, prior.episode, prior.result), ...(prior.candidate ? { candidate: prior.candidate } : {}) };
+		return { handle: record.handle, role: record.task.role, episode: prior.episode, state: "idle", ...(prior.execution ? { execution: prior.execution } : {}), ...(prior.result.route ? { route: prior.result.route } : {}), reportComplete: prior.result.reportComplete === true, result: await this.dependencies.store.withObservation(record.handle, prior.episode, prior.result), ...(prior.candidate ? { candidate: prior.candidate } : {}) };
 	}
 	private route(task: NormalizedTask, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
 		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), scopedModels: ctx.scopedModels as RouteContext["scopedModels"], modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
@@ -207,7 +236,7 @@ export class ContinuationService {
 		if (!result.ok) throw new ManagedError(result.error.code);
 		return result.route;
 	}
-	private async episode(handle: string, owner: CurrentOwner, requestId: string, expected: number, message: string, route: EffectiveRoute | undefined, signal: AbortSignal, lifecycle: ChildLifecycle): Promise<{ view: SessionView; replayed: boolean }> {
+	private async episode(handle: string, owner: CurrentOwner, requestId: string, expected: number, message: string, route: EffectiveRoute | undefined, signal: AbortSignal, lifecycle: ChildLifecycle, telemetry: ManagedRequestTelemetry): Promise<{ view: SessionView; replayed: boolean }> {
 		const store = this.dependencies.store;
 		return store.withSession(handle, owner, async (record) => {
 			const digest = fingerprint([expected, message]);
@@ -232,6 +261,8 @@ export class ContinuationService {
 			}
 			record.episode++; record.state = "running"; delete record.result; delete record.candidate;
 			const operation: ManagedRecord["requests"][number] = { id: requestId, fingerprint: digest, episode: record.episode, state: "running" };
+			record.execution = { startedAtMs: Date.now(), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
+			operation.execution = record.execution;
 			record.requests.push(operation); record.route = route;
 			await store.save(record);
 			try {
@@ -247,7 +278,7 @@ export class ContinuationService {
 					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map((file) => resolve(cwd, file)), writePaths: record.task.writePaths.map((file) => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [] },
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
 					checkDiagnosticLimits: async () => ({ ok: (await lstat(native)).size <= HARD_LIMITS.diagnosticChildBytes, code: "diagnostic_session_limit", scope: "child" }),
-					onChildStarted: lifecycle.childStarted, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
+					onChildStarted: () => { telemetry.launchedChildren++; lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
 				});
 				record.result = result; record.nativeLeaf = (await store.nativeRevision(handle)).leaf;
 				record.state = worker && result.workerToolsSettled !== true ? "interrupted" : "idle";
@@ -272,6 +303,11 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		name: SUBAGENT_SESSION_TOOL_NAME, label: "Subagent sessions",
 		description: "Create or continue a bounded foreground task with retained native history and working state. Trusted host workers can run local tools; return candidates for parent-selected apply. Inspect or close without running a model. Not an OS sandbox or an automatic review/repair workflow.",
 		promptSnippet: "Create/continue/inspect/apply/close same-task worker or reviewer sessions; parent owns acceptance.",
+		promptGuidelines: [
+			'csheng_subagent_sessions create requires requestId and tasks, e.g. {"action":"create","requestId":"r1","tasks":[{"id":"review","role":"reviewer","objective":"Review the change","scope":["."]}]}.',
+			'csheng_subagent_sessions continue requires episodes, e.g. {"action":"continue","episodes":[{"handle":"returned-handle","requestId":"r2","expectedEpisode":1,"message":"Check the repair"}]}. Use returned identities/versions, not these example values.',
+			'csheng_subagent_sessions apply requires handle, expectedEpisode and candidateId; close requires handle and expectedEpisode, with optional disposition. Example shapes: {"action":"apply","handle":"returned-handle","expectedEpisode":1,"candidateId":"returned-candidate"}; {"action":"close","handle":"returned-handle","expectedEpisode":1,"disposition":"retain"}.',
+		],
 		parameters: SubagentSessionToolSchema,
 		async execute(_id, input, signal, onUpdate, context) {
 			const details = await service.execute(input, context, signal, (tasks, elapsedMs) => onUpdate?.({ content: [{ type: "text", text: formatProgress(tasks, elapsedMs) }], details: undefined }));
@@ -285,7 +321,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== SUBAGENT_SESSION_TOOL_NAME) return;
 		const details = event.details as SessionActionResult | undefined;
-		if (details?.schemaVersion === 1) return { isError: details.status !== "succeeded" };
+		if (details?.schemaVersion === 1 || details?.schemaVersion === 2) return { isError: details.status !== "succeeded" };
 	});
 	pi.on("session_shutdown", async () => { await service.shutdown(); });
 	registerManagedContext(pi, (ctx) => service.contextIndex(ctx));

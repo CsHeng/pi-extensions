@@ -10,9 +10,11 @@ export function managedContextIndex(views: readonly SessionView[]): string | und
 	if (!active.length) return undefined;
 	const lines = active.map((view) => {
 		if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(view.handle) || !Number.isSafeInteger(view.episode) || view.episode < 0) throw new Error("managed_index_invalid");
-		return `${view.handle} role=${view.role} episode=${view.episode} stored=${view.state} report=${view.reportComplete ? "complete" : "incomplete"} candidate=${view.candidate?.status ?? "none"}`;
+		const route = view.result?.route ?? view.route;
+		const scalar = (value: string) => value.replace(/\s+/g, " ").slice(0, 300);
+		return `${view.handle} role=${view.role} episode=${view.episode} stored=${view.state} report=${view.reportComplete ? "complete" : "incomplete"} candidate=${view.candidate?.status ?? "none"}${route ? ` route=${scalar(route.provider)}/${scalar(route.model)} thinking=${scalar(route.thinking)}` : ""}`;
 	});
-	return `Stored local-task index, not proof of active execution or parent acceptance. Use ${SUBAGENT_SESSION_TOOL_NAME} inspect before continuing or applying; never replay an unknown request automatically.\n${lines.join("\n")}`;
+	return `Stored local-task index; idle means no running process. Use ${SUBAGENT_SESSION_TOOL_NAME} inspect before continuing or applying; never replay an unknown request automatically.\n${lines.join("\n")}`;
 }
 
 export function registerManagedContext(pi: ExtensionAPI, list: (ctx: ExtensionContext) => Promise<readonly SessionView[]>): void {

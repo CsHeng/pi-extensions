@@ -42,24 +42,26 @@ test("identical source and configuration fingerprints reuse opaque epochs", asyn
 	assert.equal(configAgain.configurationEpoch, config.configurationEpoch);
 });
 
-test("content transitions mint a new epoch and changed-back bytes do not revive the old id", async (t) => {
+test("reloaded content transitions mint epochs while disk edits cannot relabel a loaded runtime", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-provenance-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
 	const sourceRoot = join(root, "src");
 	await mkdir(sourceRoot);
 	await writeFile(join(sourceRoot, "index.ts"), "one\n");
 	const ids = ["one", "two", "three"];
-	const provenance = createProvenance({
+	const makeRuntime = () => createProvenance({
 		now: () => 1,
 		randomId: () => ids.shift() ?? "overflow",
 		agentDir: root,
 		sourceRoot,
 	});
+	const provenance = makeRuntime();
 	const first = await provenance.observeExtension();
 	await writeFile(join(sourceRoot, "index.ts"), "two\n");
-	const second = await provenance.observeExtension();
+	assert.deepEqual(await provenance.observeExtension(), first, "same loaded runtime keeps its original identity");
+	const second = await makeRuntime().observeExtension();
 	await writeFile(join(sourceRoot, "index.ts"), "one\n");
-	const third = await provenance.observeExtension();
+	const third = await makeRuntime().observeExtension();
 	assert.equal(first.available && second.available && third.available, true);
 	if (!first.available || !second.available || !third.available) return;
 	assert.equal(first.extensionEpoch, "one");

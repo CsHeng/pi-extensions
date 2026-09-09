@@ -6,6 +6,7 @@
 
 - `source.legacyCountersScope`: `csheng_subagents-only`; existing `totals`, `roles`, `routes`, `errors`, `concurrency`, and `runs` do not include managed calls or parent-native usage.
 - `observations`: separately owned native/managed evidence described below; never add its usage to the legacy aggregate a second time.
+- `managedDispatch`: additive metric-v4 transport evidence, independent of settled observation windows and one-shot totals. Older reports lacking this section have unavailable managed dispatch evidence, not known zero.
 - `source.sessionId`: identifier derived from the selected JSONL filename.
 - `source.telemetryMode`: `authoritative`, `legacy`, or `mixed`. Recognized runtime telemetry versions are authoritative only for the fields they declare.
 - `totals`: run, requested/admitted/persisted task, launch, usage, duration, changed-path, singleton, zero-change-worker, and correction evidence.
@@ -92,7 +93,23 @@ Direct assistant, compaction, and branch-summary rows contribute once; nested to
 
 `childCapabilities` reports the count of known manifest identities, distinct configured context windows, and configured tool sets. Missing configurations remain null. These are host-state observations, not final provider payload, stronger sandbox permissions, token utilization, or provider quotas. No manifest paths or hashes are emitted.
 
-Current-epoch mode retains the legacy provenance selector. Managed create/continue result envelopes without an effective extension/configuration pair contribute unavailable dispatch records, including cached transport calls; they are not silently matched from current settings, file time, or prose. Native `observations` are unavailable for the epoch-filtered projection; select an exact session to inspect this evidence.
+Current-epoch mode retains the historical source counters/provenance selector and its unassigned create/continue accounting for backward compatibility. The separate `managedDispatch` selector consumes v2 invocation telemetry with its own explicit denominator. Neither selector infers a missing pair from current settings, file time, or prose. Native `observations` remain unavailable for the epoch-filtered projection; select an exact session to inspect them.
+
+Missing native timing does not erase otherwise validated owned rows, command records, or capabilities. Each plane retains its own completeness. Usage is still scoped to committed recorded rows and does not assert a complete bill for a killed in-flight request. New command projections declare `commandCorrelationVersion: 2`; legacy raw-ID and current hashed-key representations normalize before comparison/deduplication. Unknown keys/versions and conflicting evidence remain conservative.
+
+## Managed dispatch
+
+This section counts transport evidence, not missions, acceptance, fresh work on replay, or cost. It reads only structured managed tool results; it never reconstructs historical actions from assistant arguments or error prose. Result v2 contains `requestTelemetry` version one with native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A queued task with no committed episode does not become a replayed episode.
+
+- `recordedResults`: all encountered managed tool-result records within bounds, including invalid and copied records.
+- `ownedRequests`: distinct valid v2 owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records do not gain ownership.
+- `selectedRequests`, `excludedRequests`, `unassignedRequests`: partition valid owned requests. Exact-session mode selects all valid owned requests. Current-epoch mode selects only matching extension/configuration pairs with an eligible start; missing pairs are unassigned. Returned session/episode provenance never substitutes for invocation provenance.
+- `legacyResults` and `legacyActions`: v1 recorded-result counts by recorded action/status, without claiming unique ownership, correcting historically mislabeled inspect, or inventing launch evidence.
+- `invalidRecords`, `conflictingRequests`, `duplicateRecords`, `copiedRecords`: independently named exclusions/duplicate evidence; a conflict removes that invocation from authoritative counts.
+- `actions`: bounded selected-request groups containing only action, status, and count. Null action is `invalid-request`, never inspect. `errors` contains bounded selected stable request-code counts.
+- `launchedChildren` and `replayedEpisodes`: `{ known, unavailableRequests }`. Known sums cover selected valid requests; unavailable requests count legacy records, invalid records, and conflicting identities. Excluded and unassigned valid requests are reported through their selection buckets rather than silently merged into the known sums.
+
+All fields preserve the one-shot-only meaning of the pre-existing aggregate sections. No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output. Static parent-acceptance ownership remains documentation; missing disposition remains an offline nullable metric, not a routine runtime warning.
 
 ## Explicit parent disposition
 

@@ -1,3 +1,4 @@
+import { commandCorrelationKey } from "./command-correlation.ts";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -165,7 +166,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 				if (closed || unsettled) throw new Error("worker_tools_closed");
 				const combined = AbortSignal.any([shutdownController.signal, ...(signal ? [signal] : [])]);
 				combined.throwIfAborted();
-				activeToolCallId = typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id) ? id : null;
+				activeToolCallId = commandCorrelationKey(id);
 				try {
 					// Native search may download a missing executable. Require the existing
 					// host tool first; this wrapper never provisions tools or changes PATH.
@@ -250,7 +251,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 				const environment = await inspectWorkerInputs(root, state);
 				return { sourceKey: await workerSourceFingerprint(root, state), environmentKey: environment.environmentKey };
 			},
-			onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value,
+			onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value, version: 2,
 				status: value.endMs === null ? "unknown" : value.status === "exited" ? (value.exitCode === 0 ? "succeeded" : "failed") : value.status === "aborted" ? "aborted" : value.status === "timed-out" ? "timeout" : "failed",
 			}),
 		});

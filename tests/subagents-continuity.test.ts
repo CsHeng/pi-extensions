@@ -9,7 +9,8 @@ test("managed context contains bounded state, not reports, file paths or accepta
 	const text = managedContextIndex([{ ...view, result: { output: "private-prose /private/source" } as any }]);
 	assert.match(text!, /session_example.*episode=2.*stored=idle/);
 	assert.doesNotMatch(text!, /private-prose|\/private\/source/);
-	assert.match(text!, /not proof of active execution or parent acceptance/);
+	assert.match(text!, /idle means no running process/);
+	assert.doesNotMatch(text!, /acceptance/);
 	assert.equal(managedContextIndex([{ ...view, state: "closed" }]), undefined);
 	assert.throws(() => managedContextIndex(Array.from({ length: 11 }, () => view)), /limit/);
 });

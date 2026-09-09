@@ -16,6 +16,17 @@ import { getRole } from "../extensions/subagents/roles.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 
+import type { SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+
+function assertReplay(actual: SessionActionResult, expected: SessionActionResult) {
+	const { requestTelemetry: current, ...core } = actual;
+	const { requestTelemetry: previous, ...prior } = expected;
+	assert.deepEqual(core, prior);
+	assert.equal(current?.launchedChildren, 0);
+	assert.notEqual(current?.invocationId, previous?.invocationId);
+	assert.equal(current?.configurationEpoch, null, "replay does not resolve current routes");
+}
+
 const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
 
 test("real native worker reopens one history and edits the same state with host bash", async (t) => {
@@ -43,7 +54,7 @@ test("real native worker reopens one history and edits the same state with host 
 		assert.equal(result.observation?.available, true);
 		assert.equal(result.observation?.entries.length, 2, "native usage is this episode, not all retained history");
 		assert.equal(result.observation?.usage.input, result.usage.input);
-		assert.equal(result.observation?.commandCoverage, "complete");
+		assert.equal(result.observation?.commandCoverage, "partial", "standalone fixture has no source/environment endpoint evidence");
 		assert.equal(result.observation?.commands[0]?.status, "succeeded");
 		assert.equal(result.observation?.commands[0]?.sourceBeforeKey, null, "missing runtime input state is unavailable");
 		assert.equal(result.observation?.timing?.complete, count !== 3, "done-only thinking has no measured endpoints");
@@ -109,12 +120,12 @@ test("managed service keeps B0 through C1/C2, replays inertly, restores on a new
 	assert.equal(second.status, "succeeded", JSON.stringify(second));
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
 	const before = await readFile(join(f.store.path(handle), "native.jsonl"), "utf8");
-	assert.deepEqual(await f.service.execute(next, f.ctx), second);
+	assertReplay(await f.service.execute(next, f.ctx), second);
 	const beforeReplay = f.runs.length;
-	assert.deepEqual(await f.service.execute(createWorker, f.ctx), first);
+	assertReplay(await f.service.execute(createWorker, f.ctx), first);
 	assert.equal(f.runs.length, beforeReplay, "cached create is not a new execution wave");
 	assert.equal(f.runs[0]!.telemetry.timing?.children[0]?.taskId, first.sessions[0]!.result!.observation!.ownerSessionId);
-	assert.deepEqual(await f.service.execute({ ...createWorker, tasks: createWorker.tasks.map((task) => ({ scope: task.scope, objective: task.objective, writePaths: task.writePaths, inputs: [], role: task.role, id: task.id })) }, f.ctx), first);
+	assertReplay(await f.service.execute({ ...createWorker, tasks: createWorker.tasks.map((task) => ({ scope: task.scope, objective: task.objective, writePaths: task.writePaths, inputs: [], role: task.role, id: task.id })) }, f.ctx), first);
 	assert.equal(await readFile(join(f.store.path(handle), "native.jsonl"), "utf8"), before);
 	assert.equal(f.launches(), 2);
 	const apply = { action: "apply", handle, expectedEpisode: 2, candidateId: second.sessions[0]!.candidate!.id };
@@ -137,7 +148,7 @@ test("managed service keeps B0 through C1/C2, replays inertly, restores on a new
 	assert.equal((await restored.execute(close, f.ctx)).status, "succeeded");
 	await assert.rejects(readFile(join(f.store.path(handle), "source", "candidate.txt")), { code: "ENOENT" });
 	const calls = f.launches();
-	assert.deepEqual(await restored.execute(next, f.ctx), second);
+	assertReplay(await restored.execute(next, f.ctx), second);
 	assert.equal((await restored.execute({ action: "continue", episodes: [{ handle, requestId: "after-close", expectedEpisode: 3, message: "host-worker-fixture" }] }, f.ctx)).status, "failed");
 	assert.equal(f.launches(), calls);
 });
@@ -214,8 +225,8 @@ test("completed create and continue replay without execution configuration; new 
 	const second = await f.service.execute(request, f.ctx);
 	assert.equal(second.status, "succeeded");
 	const unavailable = new ContinuationService({ ...f.dependencies, loadConfig: async () => ({ diagnostic: { code: "invalid_route_config", message: "fixture" } }) });
-	assert.deepEqual(await unavailable.execute(createWorker, f.ctx), first);
-	assert.deepEqual(await unavailable.execute(request, f.ctx), second);
+	assertReplay(await unavailable.execute(createWorker, f.ctx), first);
+	assertReplay(await unavailable.execute(request, f.ctx), second);
 	const fresh = await unavailable.execute({ action: "continue", episodes: [{ ...request.episodes[0], requestId: "new", expectedEpisode: 2 }] }, f.ctx);
 	assert.equal(fresh.error?.code, "invalid_route_config");
 	assert.equal(f.launches(), 2);
@@ -238,7 +249,7 @@ test("create replay preserves partial and dependency-blocked terminal responses 
 		assert.equal(response.status, dependent ? "failed" : "partial", JSON.stringify(response));
 		if (dependent) assert.equal(response.sessions[1]!.requestError?.code, "dependency_failed");
 		const before = calls;
-		assert.deepEqual(await service.execute(request, f.ctx), response);
+		assertReplay(await service.execute(request, f.ctx), response);
 		assert.equal(calls, before);
 	}
 });
@@ -257,7 +268,7 @@ test("optional observation persistence failure leaves the required candidate and
 	assert.equal(view.result?.observation?.available, false);
 	assert.equal(view.result?.observation?.usage.cost, null);
 	assert.doesNotMatch(await readFile(join(f.store.path(view.handle), "registry.json"), "utf8"), /"observation":/);
-	assert.deepEqual(await new ContinuationService(f.dependencies).execute(createWorker, f.ctx), initial);
+	assertReplay(await new ContinuationService(f.dependencies).execute(createWorker, f.ctx), initial);
 	assert.equal(f.launches(), 1);
 	const applied = await f.service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id }, f.ctx);
 	assert.equal(applied.status, "succeeded");
@@ -334,6 +345,38 @@ test("create cancellation with queued tasks has an exact inert terminal replay",
 	assert.equal(response.status, "aborted", JSON.stringify(response));
 	assert.equal(response.sessions[1]!.requestError?.code, "aborted");
 	assert.equal(f.launches(), 1);
-	assert.deepEqual(await service.execute(request, f.ctx), response);
+	const replay = await service.execute(request, f.ctx);
+	assertReplay(replay, response);
+	assert.equal(replay.requestTelemetry?.replayedEpisodes, 1, "queued task never had an episode");
 	assert.equal(f.launches(), 1);
+});
+
+test("episode provenance and actual route survive config changes and fresh replay envelopes", async (t) => {
+	const f = await serviceFixture(t);
+	let epoch = "config-one", reads = 0;
+	const service = new ContinuationService({ ...f.dependencies,
+		loadConfig: async () => { reads++; return { config: defaultConfig(), source: { packageBytes: Buffer.from("fixture") } }; },
+		provenance: {
+			observeExtension: async () => ({ available: true, extensionEpoch: "extension", configurationEpoch: epoch }),
+			observeConfiguration: async () => ({ available: true, extensionEpoch: "extension", configurationEpoch: epoch }),
+		},
+	});
+	const first = await service.execute(createWorker, f.ctx);
+	assert.equal(first.status, "succeeded");
+	assert.equal(first.requestTelemetry?.configurationEpoch, "config-one");
+	assert.equal(first.requestTelemetry?.launchedChildren, 1);
+	assert.deepEqual(first.sessions[0]?.execution?.provenance, { available: true, extensionEpoch: "extension", configurationEpoch: "config-one" });
+	assert.ok(first.sessions[0]?.route?.model);
+	epoch = "config-two";
+	const replay = await service.execute(createWorker, f.ctx);
+	assertReplay(replay, first);
+	assert.equal(reads, 1);
+	const handle = first.sessions[0]!.handle;
+	const next = await service.execute({ action: "continue", episodes: [{ handle, requestId: "new-epoch", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
+	assert.equal(next.status, "succeeded");
+	assert.equal(next.requestTelemetry?.configurationEpoch, "config-two");
+	assert.deepEqual(next.sessions[0]?.execution?.provenance, { available: true, extensionEpoch: "extension", configurationEpoch: "config-two" });
+	const historical = await service.execute(createWorker, f.ctx);
+	assertReplay(historical, first);
+	assert.equal(reads, 2);
 });

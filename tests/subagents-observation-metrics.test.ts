@@ -117,7 +117,7 @@ test("child effort, command endpoints and configured capabilities are deduplicat
 		observation.contextWindow = 4096; observation.toolNames = ["read", "bash"]; observation.capabilityKey = "a".repeat(64);
 		observation.timing = { ...structuredClone(f.observation.timing), clockKey: `child-clock-${index}`,
 			spans: { assistant: [{ startMs: 0, endMs: 100 }], reasoning: [{ startMs: 10, endMs: 20 }], localTool: [{ startMs: 100, endMs: 200 }], compaction: [{ startMs: 200, endMs: 300 }], delegationWait: [] } };
-		observation.commands = [{ ownerSessionId: observation.ownerSessionId!, entryId: "command", startMs: 100, endMs: 150, exitCode: index === 0 ? 1 : 0, status: index === 0 ? "failed" : "succeeded", sourceBeforeKey: "a".repeat(64), sourceAfterKey: "b".repeat(64), environmentBeforeKey: "c".repeat(64), environmentAfterKey: "c".repeat(64) }];
+		observation.commands = [{ ownerSessionId: observation.ownerSessionId!, entryId: "command", toolCallId: "d".repeat(64), startMs: 100, endMs: 150, exitCode: index === 0 ? 1 : 0, status: index === 0 ? "failed" : "succeeded", sourceBeforeKey: "a".repeat(64), sourceAfterKey: "b".repeat(64), environmentBeforeKey: "c".repeat(64), environmentAfterKey: "c".repeat(64) }];
 	}
 	replay(f);
 	const metrics = extractObservationMetrics(f.text());

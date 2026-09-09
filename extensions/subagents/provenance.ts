@@ -123,6 +123,8 @@ export function createProvenance(dependencies: ProvenanceDependencies = {}): Pro
 	const randomId = dependencies.randomId ?? randomUUID;
 	const sourceRoot = dependencies.sourceRoot ?? fileURLToPath(new URL(".", import.meta.url));
 	const listSourceFiles = dependencies.listSourceFiles ?? defaultListSourceFiles;
+	// Pin the loaded runtime's source identity. A disk edit is not a reload.
+	const runtimeFingerprint = Promise.resolve().then(() => listSourceFiles(sourceRoot)).then(fingerprintSources).catch(() => null);
 	const agentDir = () => dependencies.agentDir ?? getAgentDir();
 	let cachedExtension: { fingerprint: string; epoch: string; activatedAtMs: number } | undefined;
 	let cachedConfiguration: { fingerprint: string; epoch: string } | undefined;
@@ -220,8 +222,8 @@ export function createProvenance(dependencies: ProvenanceDependencies = {}): Pro
 	return {
 		async observeExtension() {
 			try {
-				const files = await listSourceFiles(sourceRoot);
-				const fingerprint = await fingerprintSources(files);
+				const fingerprint = await runtimeFingerprint;
+				if (fingerprint === null) return { available: false };
 				const directory = await root();
 				if (!directory) return { available: false };
 				const observed = await withLock(directory, async (token) => {

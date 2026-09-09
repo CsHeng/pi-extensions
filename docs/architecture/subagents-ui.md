@@ -9,7 +9,7 @@
 - `/subagents-ui` and `Ctrl+Alt+F` overlay inspector
 - custom entry `csheng-subagents-run` after a settled snapshot
 
-The inspector can request confirmed run or task cancellation over `csheng.subagents.cancel.request.v1`. Receipts prove only that the core accepted or rejected the request. The structured tool result remains the outcome authority. These panel/inspector snapshots and cancellation receipts remain one-shot-only. Managed episodes use their own native inline tool progress and result renderer, including idle/closed state and the distinction between report, apply, and parent acceptance; the optional panel does not invent managed scheduler state.
+The inspector can request confirmed run or task cancellation over `csheng.subagents.cancel.request.v1`. Receipts prove only that the core accepted or rejected the request. The structured tool result remains the outcome authority. These panel/inspector snapshots and cancellation receipts remain one-shot-only. Managed episodes use their own native inline tool progress and result renderer, including idle/closed state, actual provider/model/thinking, report completeness and apply facts without runtime acceptance pseudo-state; the optional panel does not invent managed scheduler state.
 
 ## Independence
 
