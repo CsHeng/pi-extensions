@@ -87,6 +87,10 @@ test("retention prunes expired then oldest settled runs without touching active 
 	await handle.truncate(200 * 1024 * 1024);
 	await handle.close();
 	await oldest.settle();
+	// Retention orders filesystem mtimes, not the injected expiry clock.
+	// Set both the run and child times so fast/concurrent tests cannot tie.
+	await utimes(oldestTask.path, now / 1_000, now / 1_000);
+	await utimes(oldest.path, now / 1_000, now / 1_000);
 	now += 1_000;
 	const newer = await store.allocateRun("parent", "newer");
 	const newerTask = await newer.createTask("task");
@@ -94,6 +98,8 @@ test("retention prunes expired then oldest settled runs without touching active 
 	await handle.truncate(200 * 1024 * 1024);
 	await handle.close();
 	await newer.settle();
+	await utimes(newerTask.path, now / 1_000, now / 1_000);
+	await utimes(newer.path, now / 1_000, now / 1_000);
 	const admitted = await store.allocateRun("parent", "admitted");
 	await assert.rejects(lstat(oldest.path), /ENOENT/);
 	await lstat(newer.path);
