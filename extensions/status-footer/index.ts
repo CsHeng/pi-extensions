@@ -41,6 +41,7 @@ export interface FooterRenderInput {
 	provider: string | undefined;
 	usingSubscription: boolean;
 	workdir: string;
+	gitBranch: string | null;
 	mcp: McpCounts | undefined;
 	contextTokens: number | null;
 	contextWindow: number;
@@ -54,6 +55,7 @@ type ThemeLike = Pick<Theme, "fg">;
 const POWERLINE = {
 	model: "#d787af",
 	path: "#00afaf",
+	branch: "#5fd7af",
 	session: "#b281d6",
 	subscription: "#febc38",
 	output: "#febc38",
@@ -331,7 +333,12 @@ export function renderFooterLines(
 		packSegments(
 			[
 				{ text: identity },
-				{ text: hexFg(POWERLINE.path, input.workdir), shrink: true },
+				{
+					text:
+						hexFg(POWERLINE.path, input.workdir) +
+						(input.gitBranch ? ` ${hexFg(POWERLINE.branch, `(${input.gitBranch})`)}` : ""),
+					shrink: true,
+				},
 				{ text: hexFg(POWERLINE.session, input.sessionId), preserve: true },
 				{ text: formatTrafficParts(input), shrink: true },
 				{ text: theme.fg(contextColor(input.contextPercent), formatContextSegment(input)) },
@@ -368,6 +375,7 @@ function footerInput(
 	ctx: ExtensionContext,
 	state: FooterState,
 	mcp: McpCounts | undefined,
+	gitBranch: string | null,
 ): FooterRenderInput {
 	const usage = collectUsageTotals(ctx.sessionManager.getEntries());
 	const contextUsage = ctx.getContextUsage();
@@ -378,6 +386,7 @@ function footerInput(
 		provider: state.model?.provider,
 		usingSubscription: isUsingSubscription(ctx, state.model),
 		workdir: originalWorkdir(ctx),
+		gitBranch,
 		mcp,
 		contextTokens: contextUsage?.tokens ?? null,
 		contextWindow: contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0,
@@ -407,14 +416,20 @@ export default function statusFooter(pi: ExtensionAPI): void {
 		};
 		activeFooter = active;
 
-		ctx.ui.setFooter((tui, theme) => {
+		ctx.ui.setFooter((tui, theme, footerData) => {
 			active.requestRender = () => tui.requestRender();
+			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 			return {
 				render(width: number): string[] {
-					return renderFooterLines(footerInput(ctx, active.state, mcpCounts), width, theme);
+					return renderFooterLines(
+						footerInput(ctx, active.state, mcpCounts, footerData.getGitBranch()),
+						width,
+						theme,
+					);
 				},
 				invalidate(): void {},
 				dispose(): void {
+					unsubscribeBranch();
 					if (activeFooter === active) activeFooter = undefined;
 				},
 			};

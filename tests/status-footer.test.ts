@@ -23,7 +23,7 @@ type FooterFactory = (
 	tui: TUI,
 	theme: Theme,
 	footerData: ReadonlyFooterDataProvider,
-) => Component;
+) => Component & { dispose?(): void };
 
 class FakePi {
 	readonly handlers = new Map<string, Handler>();
@@ -117,6 +117,28 @@ const footerData = {
 	getAvailableProviderCount: () => 1,
 	onBranchChange: () => () => {},
 } satisfies ReadonlyFooterDataProvider;
+
+function branchFooterData(current: () => string | null): {
+	provider: ReadonlyFooterDataProvider;
+	emitBranchChange: () => void;
+} {
+	const callbacks = new Set<() => void>();
+	return {
+		provider: {
+			getGitBranch: current,
+			getExtensionStatuses: () => new Map(),
+			getAvailableProviderCount: () => 1,
+			onBranchChange: (callback: () => void) => {
+				callbacks.add(callback);
+				return () => callbacks.delete(callback);
+			},
+		} satisfies ReadonlyFooterDataProvider,
+		emitBranchChange: () => {
+			// Snapshot first: a callback may unsubscribe while it runs.
+			for (const callback of [...callbacks]) callback();
+		},
+	};
+}
 
 const tui = {
 	requestRender: () => {},
@@ -214,6 +236,7 @@ test("renders one compact footer line without extension statuses", () => {
 			provider: "xai",
 			usingSubscription: true,
 			workdir: "/workspace/project",
+			gitBranch: "main",
 			mcp: { enabled: 2, all: 2 },
 			contextTokens: 229_000,
 			contextWindow: 500_000,
@@ -235,7 +258,7 @@ test("renders one compact footer line without extension statuses", () => {
 	assert.equal(lines.length, 1);
 	assert.equal(
 		stripAnsi(lines[0] ?? ""),
-		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑952k ↓62k R13M CH99.7% $8.979 | 229k/500k (45.9%) | MCP 2/2",
+		"Grok 4.6 high (xai sub) | /workspace/project (main) | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑952k ↓62k R13M CH99.7% $8.979 | 229k/500k (45.9%) | MCP 2/2",
 	);
 });
 
@@ -245,7 +268,7 @@ test("actual footer preserves the UUID whenever it fits alone", () => {
 		for (const width of [0, 20, 36, 40, 60, 80, 120]) {
 			const [line = ""] = renderFooterLines({
 				modelName, thinkingLevel: "high", reasoning: true, provider: "xai", usingSubscription: true,
-				workdir: "/workspace/project", mcp: { enabled: 2, all: 2 }, sessionId,
+				workdir: "/workspace/project", gitBranch: "main", mcp: { enabled: 2, all: 2 }, sessionId,
 				contextTokens: 229_000, contextWindow: 500_000, contextPercent: 45.9,
 				usage: { input: 952_000, output: 62_000, cacheRead: 13_000_000, cacheWrite: 0, cost: 8.979, cacheHitPercent: 99.7 },
 			}, width, identityTheme);
@@ -253,6 +276,37 @@ test("actual footer preserves the UUID whenever it fits alone", () => {
 			if (width >= sessionId.length) assert.ok(stripAnsi(line).includes(sessionId));
 		}
 	}
+});
+
+test("shows the Pi-provided git branch and follows branch changes", async () => {
+	const pi = new FakePi();
+	statusFooter(pi as unknown as ExtensionAPI);
+	const { ctx, getFooterFactory } = context("tui");
+
+	await invoke(pi, "session_start", { reason: "startup" }, ctx);
+	const factory = getFooterFactory();
+	assert.ok(factory);
+
+	let branch: string | null = "main";
+	const { provider, emitBranchChange } = branchFooterData(() => branch);
+	let renders = 0;
+	const countingTui = {
+		requestRender: () => {
+			renders += 1;
+		},
+	} as unknown as TUI;
+
+	const footer = factory(countingTui, identityTheme, provider);
+	assert.match(stripAnsi(footer.render(240)[0] ?? ""), /\| \/workspace\/project \(main\) \|/);
+
+	branch = "feature/footer";
+	emitBranchChange();
+	assert.equal(renders, 1);
+	assert.match(stripAnsi(footer.render(240)[0] ?? ""), /\(feature\/footer\)/);
+
+	footer.dispose?.();
+	emitBranchChange();
+	assert.equal(renders, 1);
 });
 
 test("installs the compact footer in TUI mode and refreshes MCP counts", async () => {
