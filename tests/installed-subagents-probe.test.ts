@@ -53,6 +53,8 @@ else
 		'{"type":"response","command":"get_commands","success":true,"data":{"commands":[]}}' \\
 		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":false,"managed":false,"managedSource":false,"ui":false,"debug":false}}]}}'
 fi
+# Real Pi reads stdin to EOF; a shim that exits first sends SIGPIPE to the probe's pipefail writer.
+cat >/dev/null || true
 `);
 	await chmod(shim, 0o700);
 	const result = spawnSync("bash", [SCRIPT], {

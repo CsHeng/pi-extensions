@@ -35,6 +35,8 @@ if [[ $instance == 1 ]]; then
 else
 	printf '%s\\n' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-herdr-handoff-probe","data":{"present":false}}]}}'
 fi
+# Real Pi reads stdin to EOF; a shim that exits first sends SIGPIPE to the probe's pipefail writer.
+cat >/dev/null || true
 `);
 	await chmod(shim, 0o700);
 	const result = spawnSync("bash", [SCRIPT], {
