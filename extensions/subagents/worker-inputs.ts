@@ -52,7 +52,7 @@ async function inventory(directory: string, exclude: readonly string[] = [], log
 			if (++budget.count > MANAGED_LIMITS.maxEntries) throw new ManagedError("worker_input_limit");
 			await assertNoSymlinkComponent(directory, dirname(file));
 			const info = await lstat(file); budget.bytes += info.size;
-			if (budget.bytes > MANAGED_LIMITS.maxStoreBytes) throw new ManagedError("worker_input_limit");
+			if (budget.bytes > MANAGED_LIMITS.maxWorkspaceBytes) throw new ManagedError("worker_input_limit");
 			if (info.isDirectory()) { entries.set(key, { kind: "directory", mode: info.mode & 0o777 }); await visit(file); }
 			else if (info.isSymbolicLink()) {
 				const link = await readlink(file);

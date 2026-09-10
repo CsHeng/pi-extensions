@@ -16,11 +16,12 @@ import { getRole } from "../extensions/subagents/roles.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 
-import { ManagedError, MANAGED_LIMITS, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+import { ManagedError, MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 function assertReplay(actual: SessionActionResult, expected: SessionActionResult) {
-	const { requestTelemetry: current, ...core } = actual;
-	const { requestTelemetry: previous, ...prior } = expected;
+	// Advice describes current storage, not the replayed execution.
+	const { requestTelemetry: current, warnings: currentWarnings, ...core } = actual;
+	const { requestTelemetry: previous, warnings: previousWarnings, ...prior } = expected;
 	assert.deepEqual(core, prior);
 	assert.equal(current?.launchedChildren, 0);
 	assert.notEqual(current?.invocationId, previous?.invocationId);
@@ -103,7 +104,7 @@ async function serviceFixture(t: test.TestContext) {
 	};
 }
 
-test("explicit close releases a slot but cannot reclaim mandatory-history capacity", async (t) => {
+test("explicit close releases a slot and retained-history warnings do not block new work", async (t) => {
 	const f = await serviceFixture(t);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	const graph = validateGraph({ tasks: Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ id: `scan-${index}`, role: "explorer", objective: "scan", scope: ["."] })) });
@@ -114,19 +115,76 @@ test("explicit close releases a slot but cannot reclaim mandatory-history capaci
 	assert.equal((await f.service.execute(close, f.ctx)).status, "succeeded");
 	assert.equal((await f.store.allocate(owner, "new-slot", [graph.tasks[0]!])).fresh, true);
 	assert.equal((await f.service.execute({ ...close, disposition: "discard" }, f.ctx)).error?.code, "close_disposition_conflict");
-	// Budget exhaustion is injected here; sparse-file/entry admission is tested by the store suite.
-	f.store.checkCapacity = async () => { throw new ManagedError("managed_storage_limit"); };
+	// Large-root estimation is covered by the store suite; advice never gates the action.
+	f.store.storageWarning = async () => MANAGED_STORAGE_WARNINGS.high;
 	const native = join(f.store.path(records[1]!.handle), "native.jsonl");
 	await writeFile(native, "retained-required-evidence");
 	assert.equal((await f.service.execute({ ...close, handle: records[1]!.handle, disposition: "discard" }, f.ctx)).status, "succeeded");
 	assert.equal(await readFile(native, "utf8"), "retained-required-evidence");
-	const refused = await f.service.execute({ action: "create", requestId: "history-full", tasks: [{ id: "new", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
-	assert.equal(refused.error?.code, "managed_storage_limit");
-	assert.equal(refused.requestTelemetry?.launchedChildren, 0);
-	assert.equal(f.launches(), 0);
+	const admitted = await f.service.execute({ action: "create", requestId: "history-full", tasks: [{ id: "new", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
+	assert.equal(admitted.status, "succeeded");
+	assert.deepEqual(admitted.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(admitted.requestTelemetry?.launchedChildren, 1);
+	assert.equal(f.launches(), 1);
 });
 
 const createWorker = { action: "create", requestId: "create-worker", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] }] };
+
+test("storage warnings are fresh request advice and never alter replay, continuation, apply or close", async (t) => {
+	const f = await serviceFixture(t);
+	let scans = 0;
+	f.store.storageWarning = async () => { scans++; return MANAGED_STORAGE_WARNINGS.high; };
+	const first = await f.service.execute(createWorker, f.ctx);
+	assert.equal(first.status, "succeeded");
+	assert.equal(scans, 1, "one post-request scan, not per-episode admission checks");
+	assert.deepEqual(first.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	const handle = first.sessions[0]!.handle;
+	f.store.storageWarning = async () => { scans++; return undefined; };
+	const replay = await new ContinuationService(f.dependencies).execute(createWorker, f.ctx);
+	assertReplay(replay, first);
+	assert.equal(replay.warnings, undefined, "old warning is not persisted with replay state");
+	assert.equal(f.launches(), 1);
+	f.store.storageWarning = async () => MANAGED_STORAGE_WARNINGS.high;
+	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
+	assert.equal(continued.status, "succeeded");
+	assert.deepEqual(continued.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	const applied = await f.service.execute({ action: "apply", handle, expectedEpisode: 2, candidateId: continued.sessions[0]!.candidate!.id }, f.ctx);
+	assert.equal(applied.status, "succeeded");
+	assert.deepEqual(applied.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
+	const closed = await f.service.execute({ action: "close", handle, expectedEpisode: 2, disposition: "discard" }, f.ctx);
+	assert.equal(closed.status, "succeeded");
+	assert.deepEqual(closed.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
+	f.store.storageWarning = async () => { throw new Error("private storage path"); };
+	const inspected = await f.service.execute({ action: "inspect", handle }, f.ctx);
+	assert.equal(inspected.status, "succeeded");
+	assert.deepEqual(inspected.warnings, [MANAGED_STORAGE_WARNINGS.unavailable]);
+	assert.doesNotMatch(JSON.stringify(inspected), /private storage path/);
+});
+
+function errnoError(code: string, message: string): NodeJS.ErrnoException {
+	const error = new Error(message) as NodeJS.ErrnoException;
+	error.code = code;
+	return error;
+}
+
+test("an untyped failure keeps its managed code and a bounded, path-free cause", async (t) => {
+	const f = await serviceFixture(t);
+	const failing = new ContinuationService({ ...f.dependencies, runChild: async () => { throw errnoError("ENOENT", "ENOENT: no such file or directory, lstat '/tmp/secret/native.jsonl'"); } });
+	const episode = await failing.execute(createWorker, f.ctx);
+	assert.equal(episode.status, "failed");
+	assert.equal(episode.sessions[0]!.requestError?.code, "managed_operation_failed");
+	assert.equal(episode.sessions[0]!.requestError?.detail, "ENOENT");
+	assert.equal(episode.sessions[0]!.state, "interrupted", "an untyped child failure still commits the interrupted episode");
+	const request = await new ContinuationService({ ...f.dependencies, loadConfig: async () => { throw errnoError("EACCES", "EACCES: permission denied, open '/tmp/secret/routes.json'"); } }).execute({ ...createWorker, requestId: "create-worker-config" }, f.ctx);
+	assert.equal(request.status, "failed");
+	assert.equal(request.error?.code, "managed_operation_failed");
+	assert.equal(request.error?.detail, "EACCES");
+	for (const response of [episode, request]) {
+		assert.doesNotMatch(JSON.stringify(response), /\/tmp\/secret|lstat|permission denied/);
+	}
+});
 
 test("managed service keeps B0 through C1/C2, replays inertly, restores on a new service and continues a reviewer on actual new bytes", async (t) => {
 	const f = await serviceFixture(t);

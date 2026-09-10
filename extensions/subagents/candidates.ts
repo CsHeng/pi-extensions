@@ -29,18 +29,17 @@ export async function prepareManagedWorkspace(store: ManagedSessionStore, record
 	if (record.task.role !== "worker") return;
 	if (record.task.writePaths.some((file) => file === ".git" || file.startsWith(".git/"))) throw new ManagedError("managed_git_write_forbidden");
 	if (record.workspace) return;
-	const snapshot = await createWorkerWorkspace(record.owner.repo, record.task, { maxBytes: MANAGED_LIMITS.maxStoreBytes, maxEntries: MANAGED_LIMITS.maxEntries });
-	const source = sourcePath(store, record); let created = false; let persisted = false;
+	const snapshot = await createWorkerWorkspace(record.owner.repo, record.task, { maxBytes: MANAGED_LIMITS.maxWorkspaceBytes, maxEntries: MANAGED_LIMITS.maxEntries });
+	const source = sourcePath(store, record); let created = false;
 	try {
 		await mkdir(source, { mode: 0o700 }); created = true;
 		await cp(snapshot.root, source, { recursive: true, verbatimSymlinks: true });
 		const inputs = await prepareWorkerInputs(record.owner.repo, source);
 		if (record.task.writePaths.some((file) => inputs.dependencyRoots.some((root) => file === root || file.startsWith(`${root}/`)))) throw new ManagedError("managed_runtime_write_forbidden");
 		record.workspace = { baseline: Object.fromEntries(await scanWorkerSource(source, inputs)), parentBaseline: Object.fromEntries(snapshot.parentBaselines), inputs };
-		await store.save(record); persisted = true;
-		await store.checkCapacity();
+		await store.save(record);
 	} catch (error) {
-		if (!persisted) { delete record.workspace; if (created) await rm(source, { recursive: true, force: true }); }
+		delete record.workspace; if (created) await rm(source, { recursive: true, force: true });
 		throw error;
 	} finally { await snapshot.cleanup(); }
 }
@@ -54,7 +53,7 @@ export async function syncManagedInputs(store: ManagedSessionStore, record: Mana
 		await assertNoSymlinkComponent(record.owner.repo, join(record.owner.repo, file));
 		if (!sameState(await state(join(record.owner.repo, file)), record.workspace.parentBaseline[file] ?? absent)) throw new ManagedError("convergence_conflict");
 	}
-	const snapshot = await createWorkerWorkspace(record.owner.repo, record.task, { maxBytes: MANAGED_LIMITS.maxStoreBytes, maxEntries: MANAGED_LIMITS.maxEntries });
+	const snapshot = await createWorkerWorkspace(record.owner.repo, record.task, { maxBytes: MANAGED_LIMITS.maxWorkspaceBytes, maxEntries: MANAGED_LIMITS.maxEntries });
 	try {
 		const current = await scanManaged(source, record.workspace);
 		const baseline = asMap(record.workspace.baseline);
@@ -115,7 +114,6 @@ export async function freezeCandidate(store: ManagedSessionStore, record: Manage
 	}
 	const manifest: FrozenCandidate = { version: 1, episode: record.episode, fingerprint: scanFingerprint(current), environmentKey: (await inspectWorkerInputs(source, record.workspace.inputs)).environmentKey, files };
 	await store.write(join(directory, "manifest.json"), manifest);
-	await store.checkCapacity();
 	record.candidate = { id, episode: record.episode, status: "not-applied", changedPaths: changed, appliedPaths: [] };
 	await store.save(record);
 	return record.candidate;

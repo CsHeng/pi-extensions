@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, opendir, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { NormalizedTask } from "./graph.ts";
 import { SubagentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
 import { boundNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
 import type { SavedWorkspace } from "./candidates.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS, type ManagedStorageWarning, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
 function withoutObservation(result: TaskResult): TaskResult {
 	const copy = { ...result }; delete copy.observation; return copy;
@@ -42,6 +42,8 @@ export function fingerprint(value: unknown): string {
 	)).digest("hex");
 }
 const identity = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });
+/** Path-free classifier for a failure the extension could not type: an errno code or error name. */
+const causeSchema = Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_]{0,31}$" });
 const digestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const fileStateSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("absent") }, { additionalProperties: false }),
@@ -64,8 +66,8 @@ const executionSchema = Type.Object({ startedAtMs: Type.Number({ minimum: 0 }), 
 	Type.Object({ available: Type.Literal(false) }, { additionalProperties: false }),
 	Type.Object({ available: Type.Literal(true), extensionEpoch: identity, configurationEpoch: identity }, { additionalProperties: false }),
 ]) }, { additionalProperties: false });
-const viewSchema = Type.Object({ handle: identity, role: Type.String({ pattern: "^(worker|reviewer|explorer)$" }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), requestError: Type.Optional(Type.Object({ code: identity }, { additionalProperties: false })) }, { additionalProperties: false });
-const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSchema, handles: Type.Array(identity, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions, uniqueItems: true }), complete: Type.Boolean(), requestFingerprint: Type.Optional(digestSchema), response: Type.Optional(Type.Object({ schemaVersion: storageVersion, action: Type.Literal("create"), status: Type.String({ pattern: "^(succeeded|partial|failed|aborted)$" }), sessions: Type.Array(viewSchema, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions }), error: Type.Optional(Type.Object({ code: identity }, { additionalProperties: false })) }, { additionalProperties: false })) }, { additionalProperties: false });
+const viewSchema = Type.Object({ handle: identity, role: Type.String({ pattern: "^(worker|reviewer|explorer)$" }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), requestError: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false });
+const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSchema, handles: Type.Array(identity, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions, uniqueItems: true }), complete: Type.Boolean(), requestFingerprint: Type.Optional(digestSchema), response: Type.Optional(Type.Object({ schemaVersion: storageVersion, action: Type.Literal("create"), status: Type.String({ pattern: "^(succeeded|partial|failed|aborted)$" }), sessions: Type.Array(viewSchema, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions }), error: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false })) }, { additionalProperties: false });
 const recordSchema = Type.Object({
 	version: storageVersion, handle: identity, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: identity, anchor: Type.Union([identity, Type.Null()]) }, { additionalProperties: false }),
@@ -98,8 +100,8 @@ async function readJson<T>(file: string): Promise<T> {
 	} finally { await handle.close(); }
 }
 
-export function exceedsManagedStorageBudget(bytes: number, entries: number): boolean {
-	return bytes > MANAGED_LIMITS.maxStoreBytes || entries > MANAGED_LIMITS.maxStoreEntries;
+export function exceedsManagedStorageThreshold(bytes: number, entries: number): boolean {
+	return bytes > MANAGED_STORAGE_THRESHOLDS.bytes || entries > MANAGED_STORAGE_THRESHOLDS.entries;
 }
 
 export class ManagedSessionStore {
@@ -162,31 +164,34 @@ export class ManagedSessionStore {
 		await this.load(handle, owner);
 		return this.lock(this.path(handle), async () => action(await this.load(handle, owner)));
 	}
-	async checkCapacity(extraBytes = 0, requiredExtraBytes = 0): Promise<void> {
-		if ([extraBytes, requiredExtraBytes].some((value) => !Number.isSafeInteger(value) || value < 0)) throw new ManagedError("managed_storage_limit");
-		let bytes = extraBytes + requiredExtraBytes; let entries = extraBytes ? 1 : 0;
-		let requiredBytes = requiredExtraBytes; let requiredEntries = 0;
-		const disposable: string[] = [];
-		const visit = async (directory: string, sessionRoot = false): Promise<void> => {
-			for (const entry of await readdir(directory, { withFileTypes: true })) {
-				const file = join(directory, entry.name);
-				const match = sessionRoot && /^observation_([1-9][0-9]*)\.json(?:\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp)?$/.exec(entry.name);
-				let info;
-				try { info = await lstat(file); } catch (error) { if (match && missing(error)) continue; throw error; }
-				bytes += info.size; entries++;
-				if (match && Number(match[1]) <= MANAGED_LIMITS.maxEpisodes && info.isFile()) disposable.push(file);
-				else { requiredBytes += info.size; requiredEntries++; }
-				if (exceedsManagedStorageBudget(requiredBytes, requiredEntries)
-					|| (extraBytes > 0 && exceedsManagedStorageBudget(bytes, entries))
-					|| disposable.length > MANAGED_LIMITS.maxStoreEntries + MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_storage_limit");
-				if (info.isDirectory()) await visit(file, directory === this.root && /^session_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(entry.name));
+	/** Advisory, read-only estimate. Stop early rather than delaying work for precise accounting. */
+	async storageWarning(): Promise<ManagedStorageWarning | undefined> {
+		let bytes = 0; let entries = 0;
+		const deadline = performance.now() + 1_000;
+		const visit = async (directory: string): Promise<ManagedStorageWarning | undefined> => {
+			try {
+				for await (const entry of await opendir(directory)) {
+					if (performance.now() >= deadline) return MANAGED_STORAGE_WARNINGS.unavailable;
+					const file = join(directory, entry.name);
+					let info;
+					try { info = await lstat(file); } catch (error) { if (missing(error)) continue; throw error; }
+					bytes += info.size; entries++;
+					if (exceedsManagedStorageThreshold(bytes, entries)) return MANAGED_STORAGE_WARNINGS.high;
+					if (info.isDirectory()) {
+						const warning = await visit(file);
+						if (warning) return warning;
+					}
+				}
+			} catch (error) {
+				if (!missing(error)) return MANAGED_STORAGE_WARNINGS.unavailable;
 			}
+			return undefined;
 		};
-		await visit(this.root);
-		if (exceedsManagedStorageBudget(bytes, entries)) {
-			// Only disposable derived observations, including an in-flight optional
-			// write, may be reclaimed. Never touch native history/core/candidates.
-			for (const file of disposable) await rm(file, { force: true });
+		try {
+			await this.ensure(false);
+			return await visit(this.root);
+		} catch (error) {
+			return missing(error) ? undefined : MANAGED_STORAGE_WARNINGS.unavailable;
 		}
 	}
 	/** Derived performance data is separate from the required registry/ACK commit. */
@@ -194,11 +199,7 @@ export class ManagedSessionStore {
 		try {
 			if (!Number.isSafeInteger(episode) || episode < 1 || episode > MANAGED_LIMITS.maxEpisodes) return unavailableObservation();
 			const bounded = boundNativeObservation(value);
-			await this.checkCapacity(Buffer.byteLength(JSON.stringify(bounded)) + 1);
 			await this.write(join(this.path(handle), `observation_${episode}.json`), bounded);
-			// Concurrent required growth wins over optional evidence. A postflight
-			// can evict this cache rather than poison another episode's admission.
-			await this.checkCapacity();
 			return await this.readObservation(handle, episode);
 		} catch { return unavailableObservation(); }
 	}
@@ -258,7 +259,6 @@ export class ManagedSessionStore {
 				sessions: response.sessions.map((view) => ({ ...view, ...(view.result ? { result: withoutObservation(view.result) } : {}) })),
 			} };
 			const path = this.batchPath(owner, requestId);
-			await this.checkCapacity(0, Math.max(0, Buffer.byteLength(JSON.stringify(terminal)) - (await lstat(path)).size));
 			await this.write(path, terminal);
 		});
 	}
@@ -280,7 +280,6 @@ export class ManagedSessionStore {
 				if (fingerprint(records.map((record) => record.task)) !== digest) throw new ManagedError("managed_registry_invalid");
 				return { records, fresh: false };
 			}
-			await this.checkCapacity();
 			let count = 0;
 			for (const entry of await readdir(this.root)) {
 				if (!entry.startsWith("session_")) continue;

@@ -196,7 +196,7 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 	};
 	const route = session.result?.route ?? session.route;
 	if (route) payload.route = managedRoute(route);
-	if (session.requestError) payload.requestError = { code: boundScalar(session.requestError.code) };
+	if (session.requestError) payload.requestError = { code: boundScalar(session.requestError.code), ...(session.requestError.detail ? { detail: boundScalar(session.requestError.detail) } : {}) };
 	if (session.result) {
 		const result: Record<string, unknown> = {
 			id: boundScalar(session.result.id),
@@ -233,7 +233,8 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		status: details.status,
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
 	};
-	if (details.error) payload.error = { code: boundScalar(details.error.code), ...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}) };
+	if (details.warnings?.length) payload.warnings = details.warnings;
+	if (details.error) payload.error = { code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}), ...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}) };
 	return payload;
 }
 
@@ -274,13 +275,14 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 	const lines = [
 		`Managed session ${details.action ?? "request"}: ${details.status}`,
 	];
-	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);
+	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
+	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {
 		const parts = [
 			`[${boundScalar(session.handle)}] ${session.role} episode=${session.episode} ${stateMeaning(session.state)}`,
 			`reportComplete=${session.reportComplete}`,
 		];
-		if (session.requestError) parts.push(`requestError=${boundScalar(session.requestError.code)}`);
+		if (session.requestError) parts.push(`requestError=${boundScalar(session.requestError.code)}${session.requestError.detail ? ` cause=${boundScalar(session.requestError.detail)}` : ""}`);
 		if (session.result) {
 			parts.push(`episode-outcome=${session.result.status} id=${boundScalar(session.result.id)} elapsed=${formatDuration(session.result.durationMs)}`);
 			if (session.result.stopReason !== undefined) parts.push(`stopReason=${boundScalar(session.result.stopReason)}`);

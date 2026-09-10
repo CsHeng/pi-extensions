@@ -8,10 +8,19 @@ export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
 export const MANAGED_SESSION_VERSION = 2;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
-	maxStoreBytes: 8 * 1024 * 1024 * 1024, maxStoreEntries: 1_000_000, maxNativeBytes: 32 * 1024 * 1024,
+	maxWorkspaceBytes: 8 * 1024 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
 	// Native JSONL parsing remains bounded independently of filesystem entries.
 	maxEntries: 100_000, maxNativeLineBytes: 1024 * 1024, maxCandidateBytes: 64 * 1024 * 1024,
 });
+// Aggregate storage is advisory; per-workspace, record and parsing limits remain hard bounds.
+export const MANAGED_STORAGE_THRESHOLDS = Object.freeze({ bytes: 8 * 1024 ** 3, entries: 1_000_000 });
+const cleanupGuidance = "Cleanup is optional and user-owned: close unneeded handles with disposition=discard to remove their working files (registry/native history remains). For a full reset, stop all Pi/subagent processes using this agent directory, then back up and remove <agent-dir>/subagent-managed-sessions (default ~/.pi/agent/subagent-managed-sessions). A reset loses retained histories, candidates and replay records. No automatic cleanup is performed.";
+export const MANAGED_STORAGE_WARNINGS = {
+	high: { code: "managed_storage_high", message: `Managed storage exceeds the advisory 8 GiB or 1,000,000-entry threshold; work is not blocked. ${cleanupGuidance}` },
+	unavailable: { code: "managed_storage_unavailable", message: `Managed storage could not be fully estimated; work is not blocked. ${cleanupGuidance}` },
+} as const;
+export type ManagedStorageWarning = (typeof MANAGED_STORAGE_WARNINGS)[keyof typeof MANAGED_STORAGE_WARNINGS];
+
 const opaque = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });
 const version = Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes });
 const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode: version,
@@ -100,13 +109,15 @@ export interface SessionView {
 	candidate?: CandidateRef;
 	retained?: boolean;
 	/** This request failed; result remains the latest committed episode evidence. */
-	requestError?: { code: string };
+	requestError?: { code: string; detail?: string };
 }
 export interface SessionActionResult {
 	schemaVersion: 1 | 2;
 	action: SessionRequest["action"] | null;
 	requestTelemetry?: ManagedRequestTelemetry;
+	/** Current best-effort storage advice, not persisted replay state or an execution outcome. */
+	warnings?: ManagedStorageWarning[];
 	status: "succeeded" | "partial" | "failed" | "aborted";
 	sessions: SessionView[];
-	error?: { code: string; missingFields?: string[] };
+	error?: { code: string; missingFields?: string[]; detail?: string };
 }

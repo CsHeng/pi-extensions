@@ -16,7 +16,7 @@ import {
 	formatProgress,
 	formatRunResult,
 } from "../extensions/subagents/render.ts";
-import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
+import { MANAGED_STORAGE_WARNINGS, type SessionActionResult, type SessionView } from "../extensions/subagents/session-contracts.ts";
 import type { NativeObservation } from "../extensions/subagents/observability.ts";
 
 function task(index: number, output: string): TaskResult {
@@ -249,6 +249,33 @@ test("managed content preserves zero native metrics and does not infer protocol 
 	const zeroParsed = JSON.parse(formatManagedContent(managed([zero]))) as { sessions: Array<{ nativeUsage: { recorded: boolean; input: number } }> };
 	assert.equal(zeroParsed.sessions[0]!.nativeUsage.recorded, true);
 	assert.equal(zeroParsed.sessions[0]!.nativeUsage.input, 0);
+});
+
+test("storage warnings retain cleanup guidance without changing the successful outcome", () => {
+	const details = managed([sessionView(0)], { warnings: [MANAGED_STORAGE_WARNINGS.high] });
+	const parsed = JSON.parse(formatManagedContent(details)) as SessionActionResult;
+	assert.equal(parsed.status, "succeeded");
+	assert.equal(parsed.error, undefined);
+	assert.deepEqual(parsed.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	for (const expanded of [false, true]) {
+		const text = formatManagedResult(details, expanded);
+		assert.match(text, /Warning: Managed storage exceeds/);
+		assert.match(text, /disposition=discard/);
+		assert.match(text, /stop all Pi\/subagent processes/);
+		assert.match(text, /No automatic cleanup/);
+	}
+});
+
+test("managed results keep a path-free cause for a failure the extension could not type", () => {
+	const untyped = sessionView(0, { requestError: { code: "managed_operation_failed", detail: "ENOENT" } });
+	const text = formatManagedResult(managed([untyped], { status: "failed", error: { code: "managed_operation_failed", detail: "ENOENT" } }), false);
+	assert.match(text, /request error=managed_operation_failed cause=ENOENT/);
+	assert.match(text, /requestError=managed_operation_failed cause=ENOENT/);
+	const parsed = JSON.parse(formatManagedContent(managed([untyped], { status: "failed", error: { code: "managed_operation_failed", detail: "ENOENT" } }))) as SessionActionResult;
+	assert.deepEqual(parsed.sessions[0]!.requestError, { code: "managed_operation_failed", detail: "ENOENT" });
+	assert.deepEqual(parsed.error, { code: "managed_operation_failed", detail: "ENOENT" });
+	const typed = sessionView(1, { requestError: { code: "stale_episode" } });
+	assert.doesNotMatch(formatManagedResult(managed([typed]), false), /cause=/);
 });
 
 test("managed TUI separates request, stored state, episode outcome, and never infers acceptance", () => {

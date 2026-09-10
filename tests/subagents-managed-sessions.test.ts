@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { exceedsManagedStorageBudget, fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
+import { exceedsManagedStorageThreshold, fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { validateGraph } from "../extensions/subagents/graph.ts";
 import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { collectNativeObservation } from "../extensions/subagents/observability.ts";
-import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS } from "../extensions/subagents/session-contracts.ts";
 
 async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
@@ -21,22 +21,14 @@ async function setup(t: test.TestContext) {
 	return { base, owner, tasks: graph.tasks, store };
 }
 
-async function retainedBytes(directory: string): Promise<number> {
-	let bytes = 0;
-	for (const name of await readdir(directory)) {
-		const file = join(directory, name); const info = await lstat(file); bytes += info.size;
-		if (info.isDirectory()) bytes += await retainedBytes(file);
-	}
-	return bytes;
-}
-
-test("managed root budget grows independently of native parsing and per-record bounds", () => {
-	assert.equal(MANAGED_LIMITS.maxStoreBytes, 8 * 1024 ** 3);
-	assert.equal(MANAGED_LIMITS.maxStoreEntries, 1_000_000);
-	assert.equal(exceedsManagedStorageBudget(900 * 1024 ** 2, 110_000), false);
-	assert.equal(exceedsManagedStorageBudget(MANAGED_LIMITS.maxStoreBytes, MANAGED_LIMITS.maxStoreEntries), false);
-	assert.equal(exceedsManagedStorageBudget(MANAGED_LIMITS.maxStoreBytes + 1, 0), true);
-	assert.equal(exceedsManagedStorageBudget(0, MANAGED_LIMITS.maxStoreEntries + 1), true);
+test("advisory storage thresholds are independent of hard workspace and parsing bounds", () => {
+	assert.equal(MANAGED_STORAGE_THRESHOLDS.bytes, 8 * 1024 ** 3);
+	assert.equal(MANAGED_STORAGE_THRESHOLDS.entries, 1_000_000);
+	assert.equal(MANAGED_LIMITS.maxWorkspaceBytes, 8 * 1024 ** 3);
+	assert.equal(exceedsManagedStorageThreshold(900 * 1024 ** 2, 110_000), false);
+	assert.equal(exceedsManagedStorageThreshold(MANAGED_STORAGE_THRESHOLDS.bytes, MANAGED_STORAGE_THRESHOLDS.entries), false);
+	assert.equal(exceedsManagedStorageThreshold(MANAGED_STORAGE_THRESHOLDS.bytes + 1, 0), true);
+	assert.equal(exceedsManagedStorageThreshold(0, MANAGED_STORAGE_THRESHOLDS.entries + 1), true);
 	assert.equal(MANAGED_LIMITS.maxEntries, 100_000);
 	assert.equal(MANAGED_LIMITS.maxSessions, 10);
 	assert.equal(MANAGED_LIMITS.maxNativeBytes, 32 * 1024 ** 2);
@@ -51,47 +43,71 @@ test("required source above the previous root byte cap is admitted without delet
 	const padding = join(store.path(record.handle), "required-source");
 	await writeFile(padding, "");
 	await truncate(padding, 600 * 1024 ** 2); // Sparse metadata fixture, not a 600 MiB allocation.
-	await store.checkCapacity();
+	assert.equal(await store.storageWarning(), undefined);
 	assert.equal((await lstat(padding)).size, 600 * 1024 ** 2);
 	assert.deepEqual(await readFile(join(store.path(record.handle), "registry.json")), registry);
 });
 
-test("required admission reclaims only disposable observations instead of failing another episode", async (t) => {
+test("above-threshold storage warns without blocking allocation or deleting any evidence", async (t) => {
 	const { store, owner, tasks } = await setup(t);
 	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
 	const native = join(store.path(record.handle), "native.jsonl"); const registry = join(store.path(record.handle), "registry.json");
 	const original = await readFile(registry);
-	const source = join(store.path(record.handle), "source"); await mkdir(source);
-	await writeFile(join(source, "observation_1.json"), "protected source");
+	const padding = join(store.root, "required-padding"); await writeFile(padding, "");
+	await truncate(padding, MANAGED_STORAGE_THRESHOLDS.bytes + 1); // Sparse file; no 8 GiB allocation.
 	const value = collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false });
 	assert.equal((await store.saveObservation(record.handle, 1, value)).available, true);
 	const observation = join(store.path(record.handle), "observation_1.json");
-	const padding = join(store.root, "required-padding"); await writeFile(padding, "");
-	await truncate(padding, MANAGED_LIMITS.maxStoreBytes - await retainedBytes(store.root) - 64);
-	await store.checkCapacity();
-	await store.checkCapacity(0, 128);
-	await assert.rejects(readFile(observation), { code: "ENOENT" });
-	await writeFile(join(store.root, "later-required-data"), "x".repeat(128)); await store.checkCapacity();
-	assert.equal(await readFile(join(source, "observation_1.json"), "utf8"), "protected source");
-	assert.deepEqual(await readFile(registry), original); assert.equal((await readFile(native)).length, 0);
-	assert.ok(await retainedBytes(store.root) <= MANAGED_LIMITS.maxStoreBytes);
-	await assert.rejects(store.checkCapacity(0, MANAGED_LIMITS.maxStoreBytes), /managed_storage_limit/);
+	const observed = await readFile(observation);
+	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.high);
+	assert.equal((await store.allocate(owner, "another", tasks)).fresh, true);
+	await store.completeBatch(owner, "request", { schemaVersion: 2, action: "create", status: "succeeded", sessions: [store.view(record)] });
+	assert.deepEqual(await readFile(observation), observed);
+	assert.deepEqual(await readFile(registry), original);
+	assert.equal((await readFile(native)).length, 0);
+	assert.equal((await lstat(padding)).size, MANAGED_STORAGE_THRESHOLDS.bytes + 1);
+	assert.match(MANAGED_STORAGE_WARNINGS.high.message, /stop all Pi\/subagent processes/);
+	assert.match(MANAGED_STORAGE_WARNINGS.high.message, /loses retained histories, candidates and replay records/);
 });
 
-test("optional postflight yields to concurrent required growth", async (t) => {
+test("missing storage is empty and an unreadable estimate returns advice, never an exception", async (t) => {
+	const { store } = await setup(t);
+	assert.equal(await store.storageWarning(), undefined);
+	await writeFile(store.root, "not a directory");
+	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.unavailable);
+});
+
+test("a slow estimate stops with advice and leaves stored files intact", async (t) => {
 	const { store, owner, tasks } = await setup(t);
 	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
-	const padding = join(store.root, "required-padding"); await writeFile(padding, "");
-	await truncate(padding, MANAGED_LIMITS.maxStoreBytes - await retainedBytes(store.root) - 1000);
+	const registry = join(store.path(record.handle), "registry.json");
+	const before = await readFile(registry);
+	let clockReads = 0;
+	t.mock.method(performance, "now", () => clockReads++ === 0 ? 0 : 1_001);
+	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.unavailable);
+	assert.equal(clockReads, 2, "stop before visiting the first listed entry");
+	assert.deepEqual(await readFile(registry), before);
+});
+
+test("concurrent writes and subtree removal do not turn advisory scans into errors", async (t) => {
+	const { store, owner, tasks } = await setup(t);
+	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
+	const directory = store.path(record.handle);
+	const scratch = join(directory, "scratch");
 	const write = store.write.bind(store);
-	store.write = async (file, value) => {
-		if (file.endsWith("observation_1.json")) await writeFile(join(store.root, "later-required-data"), "x".repeat(900));
-		await write(file, value);
-	};
-	const observed = await store.saveObservation(record.handle, 1, collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false }));
-	assert.equal(observed.available, false); assert.equal(observed.usage.cost, null);
-	await store.checkCapacity(); assert.ok(await retainedBytes(store.root) <= MANAGED_LIMITS.maxStoreBytes);
-	assert.equal((await readFile(join(store.root, "later-required-data"))).length, 900);
+	// Best-effort stress coverage, not an exact-size or deterministic interleaving oracle.
+	const peer = (async () => {
+		for (let round = 0; round < 20; round++) {
+			await write(join(directory, "peer.json"), { round, pad: "x".repeat(2_000) });
+			await mkdir(scratch, { recursive: true });
+			await writeFile(join(scratch, "file"), "x");
+			await rm(scratch, { recursive: true, force: true });
+		}
+	})();
+	const scans = (async () => { for (let round = 0; round < 20; round++) await store.storageWarning(); })();
+	const settled = await Promise.allSettled([peer, scans]);
+	assert.ok(settled.every((result) => result.status === "fulfilled"));
+	assert.equal(await store.storageWarning(), undefined);
 });
 
 test("managed allocation is idempotent and rejects request or parent-branch drift", async (t) => {

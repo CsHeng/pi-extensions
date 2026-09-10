@@ -15,13 +15,27 @@ import { runChild, type ChildRunOptions } from "./runner.ts";
 import { runScheduledTasks, type ChildLifecycle } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, type ManagedRecord } from "./managed-sessions.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
-import { MANAGED_LIMITS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
 import { createRunClock, monotonicNow, type RunClock } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
 import { registerManagedContext } from "./context.ts";
 import { ManagedObserver } from "./managed-observer.ts";
 import { OBSERVER_EVENT, type ObserverSnapshot } from "./observer-events.ts";
+
+/**
+ * Bounded, path-free classifier for a failure the extension could not type. Managed and
+ * repository errors already carry a precise code; anything else would otherwise surface
+ * as an opaque `managed_operation_failed` with no evidence of its cause.
+ */
+function failureDetail(error: unknown): string | undefined {
+	if (error instanceof ManagedError || error instanceof RepositoryPolicyError) return undefined;
+	const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+	if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(code)) return code;
+	const name = error instanceof Error ? error.name : undefined;
+	if (typeof name === "string" && name !== "Error" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(name)) return name;
+	return "unclassified";
+}
 
 export interface ContinuationDependencies {
 	store: ManagedSessionStore;
@@ -73,6 +87,14 @@ export class ContinuationService {
 				this.observer = undefined;
 			}
 		}
+		// Current advice belongs to the request envelope, never to a stored outcome.
+		// One best-effort scan after execution; no per-episode admission scans or cleanup.
+		if (ctx.isProjectTrusted() && (result.sessions.length > 0 || result.action === "inspect")) {
+			try {
+				const warning = await this.dependencies.store.storageWarning();
+				if (warning) result = { ...result, warnings: [warning] };
+			} catch { result = { ...result, warnings: [MANAGED_STORAGE_WARNINGS.unavailable] }; }
+		}
 		const elapsed = clock.elapsed();
 		telemetry.durationMs = clock.valid ? elapsed : null;
 		return { ...result, schemaVersion: 2, requestTelemetry: telemetry };
@@ -103,7 +125,8 @@ export class ContinuationService {
 		return execution;
 	}
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
-		return { schemaVersion: 2, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: error instanceof ManagedError || error instanceof RepositoryPolicyError ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
+		const detail = failureDetail(error);
+		return { schemaVersion: 2, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: error instanceof ManagedError || error instanceof RepositoryPolicyError ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}), ...(detail ? { detail } : {}) } };
 	}
 	private async owner(ctx: ExtensionContext): Promise<CurrentOwner> {
 		return { repo: await findCanonicalGitRoot(ctx.cwd, this.dependencies.repositoryHost), parentSessionId: ctx.sessionManager.getSessionId(),
@@ -190,7 +213,7 @@ export class ContinuationService {
 			telemetry.admittedTasks = tasks.length;
 		}
 		const views = new Map<string, SessionView>();
-		const requestErrors = new Map<string, string>();
+		const requestErrors = new Map<string, { code: string; detail?: string }>();
 		const routes = new Map(records.flatMap((record, index) => record.requests.some((entry) => entry.id === request.episodes?.[index]?.requestId && entry.state === "complete") ? [] : [[record.handle, this.route(record.task, loaded.config!, ctx)] as const]));
 		if (ctx.mode === "tui" && this.dependencies.onObserver) {
 			this.observer = new ManagedObserver(telemetry.invocationId, owner, this.generation,
@@ -226,22 +249,20 @@ export class ContinuationService {
 					views.set(record.handle, episode.view);
 					return { ...episode.view.result!, id: task.id, ...(episode.replayed ? { usage: emptyUsage(), durationMs: 0, telemetry: emptyTaskTelemetry() } : {}) };
 				} catch (error) {
-					requestErrors.set(record.handle, error instanceof ManagedError ? error.code : "managed_operation_failed");
+					const detail = failureDetail(error);
+					requestErrors.set(record.handle, { code: error instanceof ManagedError ? error.code : "managed_operation_failed", ...(detail ? { detail } : {}) });
 					throw error;
 				}
 			},
 		});
 		const sessions = await Promise.all(records.map(async (record, index) => {
 			const view = views.get(record.handle) ?? store.view(await store.load(record.handle, owner));
-			const code = requestErrors.get(record.handle) ?? (!views.has(record.handle) ? scheduled.tasks[index]?.error?.code : undefined);
-			return code ? { ...view, requestError: { code } } : view;
+			const scheduledError = views.has(record.handle) ? undefined : scheduled.tasks[index]?.error;
+			const failure = requestErrors.get(record.handle) ?? (scheduledError ? { code: scheduledError.code } : undefined);
+			return failure ? { ...view, requestError: failure } : view;
 		}));
 		const response: SessionActionResult = { schemaVersion: 2, action: request.action, status: scheduled.status, sessions };
 		if (request.action === "create") await store.completeBatch(owner, request.requestId!, response);
-		// Required commits may evict derived caches, including an earlier peer's.
-		response.sessions = await Promise.all(sessions.map(async (view) => ({ ...view,
-			...(view.result ? { result: await store.withObservation(view.handle, view.episode, view.result) } : {}),
-		})));
 		try {
 			const identities = new Map(tasks.map((task, index) => [task.id, scheduled.tasks[index]?.observation?.ownerSessionId ?? fingerprint(records[index]!.handle)]));
 			const telemetry = structuredClone(scheduled.telemetry);
@@ -288,7 +309,6 @@ export class ContinuationService {
 			if (revision.leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 			const admission = await admitRepositoryTasks(owner.repo, [{ ...record.task, dependsOn: [] }], this.dependencies.repositoryHost);
 			if (!admission.ok) throw new ManagedError(admission.error.code);
-			await store.checkCapacity();
 			if (record.task.role === "worker") {
 				if (record.workspace) await syncManagedInputs(store, record);
 				else await prepareManagedWorkspace(store, record);
@@ -319,7 +339,7 @@ export class ContinuationService {
 				if (worker && result.status === "succeeded" && result.reportComplete) await freezeCandidate(store, record);
 				operation.state = "complete"; operation.result = result;
 				if (record.candidate) operation.candidate = structuredClone(record.candidate);
-				await store.checkCapacity(); await store.save(record); await store.checkCapacity();
+				await store.save(record);
 				if (result.observation) result.observation = await store.saveObservation(handle, record.episode, result.observation);
 				return { view: store.view(record), replayed: false };
 			} catch (error) {
@@ -341,7 +361,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		promptSnippet: "Create/continue/inspect/apply/close explorer, reviewer or worker sessions; parent owns acceptance.",
 		promptGuidelines: [
 			"A single create episode can finish a task. Workers require scope [\".\"] and trusted host bash; candidate guards do not sandbox filesystem, credentials or network. Apply is explicit. Dependency edges pass reports, not candidate files: apply file changes before dispatching file-dependent successors.",
-			"Close explicitly when same-task work is no longer needed: at most ten unclosed records per parent/repository. Retain/discard is a parent choice. Close releases slots, not all history; discard preserves native/registry evidence. Mandatory history can exhaust storage without a general reclamation action. Never automatically resume, apply or discard interrupted records.",
+			"Close explicitly when same-task work is no longer needed: at most ten unclosed records per parent/repository. Retain/discard is a parent choice. Close releases slots, not all history; discard preserves native/registry evidence. Aggregate storage warnings are advisory; cleanup is user-owned and never automatic. Never automatically resume, apply or discard interrupted records.",
 			'csheng_subagent_sessions create requires requestId and tasks, e.g. {"action":"create","requestId":"r1","tasks":[{"id":"review","role":"reviewer","objective":"Review the change","scope":["."]}]}.',
 			'csheng_subagent_sessions continue requires episodes, e.g. {"action":"continue","episodes":[{"handle":"returned-handle","requestId":"r2","expectedEpisode":1,"message":"Check the repair"}]}. Use returned identities/versions, not these example values.',
 			'csheng_subagent_sessions apply requires handle, expectedEpisode and candidateId; close requires handle and expectedEpisode, with optional disposition. Example shapes: {"action":"apply","handle":"returned-handle","expectedEpisode":1,"candidateId":"returned-candidate"}; {"action":"close","handle":"returned-handle","expectedEpisode":1,"disposition":"retain"}.',
