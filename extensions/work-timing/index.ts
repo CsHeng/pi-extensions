@@ -2,17 +2,31 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
-const WORK_TIMING_VERSION = 2;
-const STATUS_UPDATE_INTERVAL_MS = 250;
+const WORK_TIMING_VERSION = 3;
+/**
+ * Clock cadence. Time fields are re-sampled on this tick, so every duration on the
+ * label advances in the same frame; the label is only reposted when it changed.
+ */
+const STATUS_UPDATE_INTERVAL_MS = 1_000;
+/** Stream events repaint the token counters at most this often between clock ticks. */
+const STATUS_STREAM_PAINT_MS = 150;
 const OUTPUT_CHARS_PER_TOKEN = 4;
+/** Inter-delta gaps longer than this are stream stalls, not generation time. */
+const GENERATION_GAP_LIMIT_MS = 1_000;
 
 export interface WorkTimingEntryData {
-	version: 1 | 2;
+	version: 1 | 2 | 3;
 	totalMs: number;
 	reasoningMs: number;
 	lastTurnReasoningMs: number;
-	/** Request-cumulative output tokens; absent on version 1 entries. */
+	/** Request-cumulative output (downstream) tokens; absent before version 2. */
 	outputTokens: number;
+	/** Request-cumulative input (upstream) tokens; absent before version 3. */
+	inputTokens: number;
+	/** Active streaming time used as the `tok/s` denominator; absent before version 3. */
+	generationMs: number;
+	/** Output tokens produced by turns that actually streamed; the `tok/s` numerator. */
+	streamedOutputTokens: number;
 }
 
 interface WorkTimingDependencies {
@@ -24,8 +38,15 @@ interface WorkTimingDependencies {
 interface TurnTiming {
 	completedReasoningMs: number;
 	activeReasoning: Map<number, number>;
-	outputChars: number;
+	/** Characters seen in streamed text, thinking, and tool-call deltas. */
+	deltaChars: number;
+	/** Characters in the current assistant message content, when the host exposes it. */
+	messageChars: number;
 	providerOutputTokens: number;
+	providerInputTokens: number;
+	/** Active streaming time: inter-delta gaps that stayed within the stall limit. */
+	generationMs: number;
+	lastDeltaAt: number | undefined;
 }
 
 interface RequestTiming {
@@ -33,6 +54,9 @@ interface RequestTiming {
 	completedReasoningMs: number;
 	lastTurnReasoningMs: number;
 	completedOutputTokens: number;
+	completedInputTokens: number;
+	completedGenerationMs: number;
+	completedStreamedOutputTokens: number;
 	turn: TurnTiming | undefined;
 	ctx: ExtensionContext;
 	lastStatus?: string;
@@ -43,6 +67,9 @@ interface TimingSnapshot {
 	reasoningMs: number;
 	turnReasoningMs: number;
 	outputTokens: number;
+	inputTokens: number;
+	generationMs: number;
+	streamedOutputTokens: number;
 }
 
 export function formatReasoningShare(reasoningMs: number, totalMs: number): string {
@@ -67,6 +94,38 @@ export function formatTokens(count: number): string {
 	return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(count)));
 }
 
+/** `↑ input ↓ output tokens`, omitting whichever side the provider has not reported. */
+export function formatTokenCounts(inputTokens: number, outputTokens: number): string {
+	const parts: string[] = [];
+	if (inputTokens > 0) parts.push(`↑ ${formatTokens(inputTokens)}`);
+	if (outputTokens > 0) parts.push(`↓ ${formatTokens(outputTokens)}`);
+	return parts.length === 0 ? "" : ` • ${parts.join(" ")} tokens`;
+}
+
+/**
+ * Downstream throughput over the streamed generation window, e.g. `720 tok/s`.
+ * Community tooling (llama.cpp eval time, Ollama `eval rate`, LM Studio) divides
+ * generated tokens by the generation window, not by the whole turn.
+ */
+export function formatTokenRate(outputTokens: number, generationMs: number): string {
+	if (!(outputTokens > 0) || !(generationMs > 0)) return "";
+	const rate = outputTokens / (generationMs / 1_000);
+	if (rate >= 10) return `${formatTokens(Math.round(rate))} tok/s`;
+	return `${Math.round(rate * 10) / 10} tok/s`;
+}
+
+/** ` • 720 tok/s`, or nothing while the rate is not measurable. */
+function rateSuffix(outputTokens: number, generationMs: number): string {
+	const rate = formatTokenRate(outputTokens, generationMs);
+	return rate ? ` • ${rate}` : "";
+}
+
+/** Reasoning durations keep their share readable: a non-zero sub-second value is not "0s". */
+export function formatReasoningDuration(durationMs: number): string {
+	const value = Math.max(0, durationMs);
+	return value > 0 && value < 1_000 ? "<1s" : formatDuration(value);
+}
+
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
 	const handle = globalThis.setInterval(callback, intervalMs);
 	handle.unref();
@@ -83,7 +142,7 @@ function validDuration(value: unknown): number {
 
 function normalizeEntryData(data: unknown): WorkTimingEntryData {
 	if (!data || typeof data !== "object") {
-		return { version: WORK_TIMING_VERSION, totalMs: 0, reasoningMs: 0, lastTurnReasoningMs: 0, outputTokens: 0 };
+		return { version: WORK_TIMING_VERSION, totalMs: 0, reasoningMs: 0, lastTurnReasoningMs: 0, outputTokens: 0, inputTokens: 0, generationMs: 0, streamedOutputTokens: 0 };
 	}
 	const candidate = data as Partial<WorkTimingEntryData>;
 	return {
@@ -92,17 +151,83 @@ function normalizeEntryData(data: unknown): WorkTimingEntryData {
 		reasoningMs: validDuration(candidate.reasoningMs),
 		lastTurnReasoningMs: validDuration(candidate.lastTurnReasoningMs),
 		outputTokens: validDuration(candidate.outputTokens),
+		inputTokens: validDuration(candidate.inputTokens),
+		generationMs: validDuration(candidate.generationMs),
+		streamedOutputTokens: validDuration(candidate.streamedOutputTokens),
 	};
 }
 
 function turnOutputTokens(turn: TurnTiming): number {
-	return Math.max(turn.providerOutputTokens, Math.round(turn.outputChars / OUTPUT_CHARS_PER_TOKEN));
+	const chars = Math.max(turn.deltaChars, turn.messageChars);
+	return Math.max(turn.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
 }
 
-function usageOutputTokens(event: unknown): number {
-	const usage = (event as { partial?: { usage?: { output?: unknown } } } | undefined)?.partial?.usage;
-	const output = Number(usage?.output);
-	return Number.isFinite(output) && output > 0 ? Math.round(output) : 0;
+/**
+ * Streamed generation time of one turn. Zero for a usage-only turn and for a turn that
+ * delivered its whole content in a single delta: neither exposes a measurable duration,
+ * so their tokens stay on the label but out of the `tok/s` numerator.
+ */
+function turnGenerationMs(turn: TurnTiming): number {
+	return turn.generationMs;
+}
+
+/** Streamed deltas of every output kind, including tool-call arguments. */
+function streamedOutputChars(event: { type?: unknown; delta?: unknown }): number {
+	if (event.type !== "text_delta" && event.type !== "thinking_delta" && event.type !== "toolcall_delta") return 0;
+	return typeof event.delta === "string" ? event.delta.length : 0;
+}
+
+/** Output characters of a complete or partial assistant message, independent of stream deltas. */
+function messageOutputChars(message: unknown): number {
+	const content = (message as { content?: unknown } | undefined)?.content;
+	if (!Array.isArray(content)) return 0;
+	let chars = 0;
+	for (const block of content) {
+		const type = (block as { type?: unknown } | undefined)?.type;
+		if (type === "text") {
+			const text = (block as { text?: unknown }).text;
+			if (typeof text === "string") chars += text.length;
+		} else if (type === "thinking") {
+			const thinking = (block as { thinking?: unknown }).thinking;
+			if (typeof thinking === "string") chars += thinking.length;
+		} else if (type === "toolCall" && (block as { arguments?: unknown }).arguments !== undefined) {
+			try {
+				chars += JSON.stringify((block as { arguments: unknown }).arguments)?.length ?? 0;
+			} catch {
+				/* Non-serializable arguments cannot be measured. */
+			}
+		}
+	}
+	return chars;
+}
+
+function usageTokenCount(source: unknown, field: "input" | "output"): number {
+	const usage = (source as { usage?: Record<string, unknown> } | undefined)?.usage;
+	const value = Number(usage?.[field]);
+	return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+}
+
+function recordTurnOutput(turn: TurnTiming, event: { type?: unknown; delta?: unknown; partial?: unknown }, message: unknown, at: number): void {
+	const deltaChars = streamedOutputChars(event);
+	if (deltaChars > 0) {
+		if (turn.lastDeltaAt !== undefined) {
+			const gap = at - turn.lastDeltaAt;
+			if (gap > 0 && gap <= GENERATION_GAP_LIMIT_MS) turn.generationMs += gap;
+		}
+		turn.lastDeltaAt = at;
+	}
+	turn.deltaChars += deltaChars;
+	turn.messageChars = Math.max(turn.messageChars, messageOutputChars(message));
+	turn.providerOutputTokens = Math.max(
+		turn.providerOutputTokens,
+		usageTokenCount(message, "output"),
+		usageTokenCount(event.partial, "output"),
+	);
+	turn.providerInputTokens = Math.max(
+		turn.providerInputTokens,
+		usageTokenCount(message, "input"),
+		usageTokenCount(event.partial, "input"),
+	);
 }
 
 export function createWorkTimingExtension(
@@ -126,33 +251,57 @@ export function createWorkTimingExtension(
 
 		const snapshotAt = (at: number): TimingSnapshot | undefined => {
 			if (!request) return undefined;
-			const turnReasoningMs = request.turn
-				? turnReasoningAt(request.turn, at)
-				: request.lastTurnReasoningMs;
+			const turn = request.turn;
+			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : request.lastTurnReasoningMs;
+			const currentOutputTokens = turn ? turnOutputTokens(turn) : 0;
+			const currentInputTokens = turn ? turn.providerInputTokens : 0;
+			const currentGenerationMs = turn ? turnGenerationMs(turn) : 0;
 			return {
 				totalMs: Math.max(0, at - request.startedAt),
-				reasoningMs:
-					request.completedReasoningMs +
-					(request.turn ? turnReasoningMs : 0),
+				reasoningMs: request.completedReasoningMs + (turn ? turnReasoningMs : 0),
 				turnReasoningMs,
-				outputTokens:
-					request.completedOutputTokens +
-					(request.turn ? turnOutputTokens(request.turn) : 0),
+				outputTokens: request.completedOutputTokens + currentOutputTokens,
+				inputTokens: request.completedInputTokens + currentInputTokens,
+				generationMs: request.completedGenerationMs + currentGenerationMs,
+				streamedOutputTokens:
+					request.completedStreamedOutputTokens +
+					(currentGenerationMs > 0 ? currentOutputTokens : 0),
 			};
 		};
 
-		const updateWorkingMessage = (): void => {
+		// Time fields render from the last clock sample, so every duration on the label
+		// advances in the same frame; token fields always come from the live counters.
+		let clock: Pick<TimingSnapshot, "totalMs" | "reasoningMs" | "turnReasoningMs"> | undefined;
+		let lastPaintAt = Number.NEGATIVE_INFINITY;
+
+		const sampleClock = (at: number): void => {
+			const snapshot = snapshotAt(at);
+			clock = snapshot
+				? { totalMs: snapshot.totalMs, reasoningMs: snapshot.reasoningMs, turnReasoningMs: snapshot.turnReasoningMs }
+				: undefined;
+		};
+
+		const paint = (at: number, resampleClock: boolean): void => {
 			if (!request) return;
-			const snapshot = snapshotAt(now());
+			if (resampleClock) sampleClock(at);
+			const snapshot = snapshotAt(at);
 			if (!snapshot) return;
+			const durations = clock ?? snapshot;
 			const status =
-				`Working... R ${formatDuration(snapshot.turnReasoningMs)}` +
-				` / ΣR ${formatDuration(snapshot.reasoningMs)}` +
-				` • total ${formatDuration(snapshot.totalMs)}` +
-				(snapshot.outputTokens > 0 ? ` • ↓ ${formatTokens(snapshot.outputTokens)} tokens` : "");
+				`Working... ${formatDuration(durations.totalMs)}` +
+				formatTokenCounts(snapshot.inputTokens, snapshot.outputTokens) +
+				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
+				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
+				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
+			lastPaintAt = at;
 			if (status === request.lastStatus) return;
 			request.lastStatus = status;
 			request.ctx.ui.setWorkingMessage(status);
+		};
+
+		const paintStreamProgress = (at: number): void => {
+			if (at - lastPaintAt < STATUS_STREAM_PAINT_MS) return;
+			paint(at, false);
 		};
 
 		const stopInterval = (): void => {
@@ -163,7 +312,7 @@ export function createWorkTimingExtension(
 
 		const startInterval = (): void => {
 			if (intervalHandle !== undefined) return;
-			intervalHandle = schedule(updateWorkingMessage, STATUS_UPDATE_INTERVAL_MS);
+			intervalHandle = schedule(() => paint(now(), true), STATUS_UPDATE_INTERVAL_MS);
 		};
 
 		const finishTurn = (at: number): void => {
@@ -171,23 +320,28 @@ export function createWorkTimingExtension(
 			const reasoningMs = turnReasoningAt(request.turn, at);
 			request.completedReasoningMs += reasoningMs;
 			request.lastTurnReasoningMs = reasoningMs;
-			request.completedOutputTokens += turnOutputTokens(request.turn);
+			const outputTokens = turnOutputTokens(request.turn);
+			const generationMs = turnGenerationMs(request.turn);
+			request.completedOutputTokens += outputTokens;
+			request.completedInputTokens += request.turn.providerInputTokens;
+			request.completedGenerationMs += generationMs;
+			if (generationMs > 0) request.completedStreamedOutputTokens += outputTokens;
 			request.turn = undefined;
 		};
 
 		pi.registerEntryRenderer<WorkTimingEntryData>(
 			WORK_TIMING_ENTRY_TYPE,
-			(entry, { expanded }, theme) => {
+			(entry, _options, theme) => {
 				const data = normalizeEntryData(entry.data);
 				const share = formatReasoningShare(data.reasoningMs, data.totalMs);
-				let text = theme.fg(
+				// Settled summary: request-cumulative values only (turn detail stays in the live label).
+				const text = theme.fg(
 					"muted",
-					`Worked for ${formatDuration(data.totalMs)} • reasoning ${formatDuration(data.reasoningMs)} (${share})` +
-					(data.outputTokens > 0 ? ` • ↓ ${formatTokens(data.outputTokens)} tokens` : ""),
+					`Worked for ${formatDuration(data.totalMs)}` +
+					formatTokenCounts(data.inputTokens, data.outputTokens) +
+					` • ΣR ${formatReasoningDuration(data.reasoningMs)} (${share})` +
+					rateSuffix(data.streamedOutputTokens, data.generationMs),
 				);
-				if (expanded) {
-					text += theme.fg("dim", ` • last turn ${formatDuration(data.lastTurnReasoningMs)}`);
-				}
 				return new Text(text, 1, 0);
 			},
 		);
@@ -200,11 +354,14 @@ export function createWorkTimingExtension(
 					completedReasoningMs: 0,
 					lastTurnReasoningMs: 0,
 					completedOutputTokens: 0,
+					completedInputTokens: 0,
+					completedGenerationMs: 0,
+					completedStreamedOutputTokens: 0,
 					turn: undefined,
 					ctx,
 				};
 			}
-			updateWorkingMessage();
+			paint(now(), true);
 			startInterval();
 		});
 
@@ -214,10 +371,14 @@ export function createWorkTimingExtension(
 			request.turn = {
 				completedReasoningMs: 0,
 				activeReasoning: new Map(),
-				outputChars: 0,
+				deltaChars: 0,
+				messageChars: 0,
 				providerOutputTokens: 0,
+				providerInputTokens: 0,
+				generationMs: 0,
+				lastDeltaAt: undefined,
 			};
-			updateWorkingMessage();
+			paint(now(), true);
 		});
 
 		pi.on("message_update", (event, ctx) => {
@@ -233,20 +394,16 @@ export function createWorkTimingExtension(
 					request.turn.completedReasoningMs += Math.max(0, now() - startedAt);
 					request.turn.activeReasoning.delete(assistantEvent.contentIndex);
 				}
-			} else if (assistantEvent.type === "thinking_delta" || assistantEvent.type === "text_delta") {
-				request.turn.outputChars += typeof assistantEvent.delta === "string" ? assistantEvent.delta.length : 0;
 			}
-			const providerTokens = usageOutputTokens(assistantEvent);
-			if (providerTokens > request.turn.providerOutputTokens) {
-				request.turn.providerOutputTokens = providerTokens;
-			}
-			updateWorkingMessage();
+			recordTurnOutput(request.turn, assistantEvent, event.message, now());
+			paintStreamProgress(now());
 		});
 
-		pi.on("turn_end", (_event, ctx) => {
+		pi.on("turn_end", (event, ctx) => {
 			if (ctx.mode !== "tui" || !request) return;
+			if (request.turn) recordTurnOutput(request.turn, {}, event.message, now());
 			finishTurn(now());
-			updateWorkingMessage();
+			paint(now(), true);
 		});
 
 		pi.on("agent_settled", (_event, ctx) => {
@@ -257,6 +414,7 @@ export function createWorkTimingExtension(
 			stopInterval();
 			ctx.ui.setWorkingMessage();
 			request = undefined;
+			clock = undefined;
 			if (!snapshot) return;
 			pi.appendEntry<WorkTimingEntryData>(WORK_TIMING_ENTRY_TYPE, {
 				version: WORK_TIMING_VERSION,
@@ -264,6 +422,9 @@ export function createWorkTimingExtension(
 				reasoningMs: snapshot.reasoningMs,
 				lastTurnReasoningMs: snapshot.turnReasoningMs,
 				outputTokens: snapshot.outputTokens,
+				inputTokens: snapshot.inputTokens,
+				generationMs: snapshot.generationMs,
+				streamedOutputTokens: snapshot.streamedOutputTokens,
 			});
 		});
 
