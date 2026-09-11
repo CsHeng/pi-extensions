@@ -2,14 +2,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
-const WORK_TIMING_VERSION = 1;
+const WORK_TIMING_VERSION = 2;
 const STATUS_UPDATE_INTERVAL_MS = 250;
+const OUTPUT_CHARS_PER_TOKEN = 4;
 
 export interface WorkTimingEntryData {
-	version: 1;
+	version: 1 | 2;
 	totalMs: number;
 	reasoningMs: number;
 	lastTurnReasoningMs: number;
+	/** Request-cumulative output tokens; absent on version 1 entries. */
+	outputTokens: number;
 }
 
 interface WorkTimingDependencies {
@@ -21,12 +24,15 @@ interface WorkTimingDependencies {
 interface TurnTiming {
 	completedReasoningMs: number;
 	activeReasoning: Map<number, number>;
+	outputChars: number;
+	providerOutputTokens: number;
 }
 
 interface RequestTiming {
 	startedAt: number;
 	completedReasoningMs: number;
 	lastTurnReasoningMs: number;
+	completedOutputTokens: number;
 	turn: TurnTiming | undefined;
 	ctx: ExtensionContext;
 	lastStatus?: string;
@@ -36,6 +42,7 @@ interface TimingSnapshot {
 	totalMs: number;
 	reasoningMs: number;
 	turnReasoningMs: number;
+	outputTokens: number;
 }
 
 export function formatReasoningShare(reasoningMs: number, totalMs: number): string {
@@ -55,6 +62,11 @@ export function formatDuration(durationMs: number): string {
 	return `${seconds}s`;
 }
 
+/** Group digits the same way Pi's own counters do. */
+export function formatTokens(count: number): string {
+	return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(count)));
+}
+
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
 	const handle = globalThis.setInterval(callback, intervalMs);
 	handle.unref();
@@ -71,7 +83,7 @@ function validDuration(value: unknown): number {
 
 function normalizeEntryData(data: unknown): WorkTimingEntryData {
 	if (!data || typeof data !== "object") {
-		return { version: WORK_TIMING_VERSION, totalMs: 0, reasoningMs: 0, lastTurnReasoningMs: 0 };
+		return { version: WORK_TIMING_VERSION, totalMs: 0, reasoningMs: 0, lastTurnReasoningMs: 0, outputTokens: 0 };
 	}
 	const candidate = data as Partial<WorkTimingEntryData>;
 	return {
@@ -79,7 +91,18 @@ function normalizeEntryData(data: unknown): WorkTimingEntryData {
 		totalMs: validDuration(candidate.totalMs),
 		reasoningMs: validDuration(candidate.reasoningMs),
 		lastTurnReasoningMs: validDuration(candidate.lastTurnReasoningMs),
+		outputTokens: validDuration(candidate.outputTokens),
 	};
+}
+
+function turnOutputTokens(turn: TurnTiming): number {
+	return Math.max(turn.providerOutputTokens, Math.round(turn.outputChars / OUTPUT_CHARS_PER_TOKEN));
+}
+
+function usageOutputTokens(event: unknown): number {
+	const usage = (event as { partial?: { usage?: { output?: unknown } } } | undefined)?.partial?.usage;
+	const output = Number(usage?.output);
+	return Number.isFinite(output) && output > 0 ? Math.round(output) : 0;
 }
 
 export function createWorkTimingExtension(
@@ -112,6 +135,9 @@ export function createWorkTimingExtension(
 					request.completedReasoningMs +
 					(request.turn ? turnReasoningMs : 0),
 				turnReasoningMs,
+				outputTokens:
+					request.completedOutputTokens +
+					(request.turn ? turnOutputTokens(request.turn) : 0),
 			};
 		};
 
@@ -122,7 +148,8 @@ export function createWorkTimingExtension(
 			const status =
 				`Working... R ${formatDuration(snapshot.turnReasoningMs)}` +
 				` / ΣR ${formatDuration(snapshot.reasoningMs)}` +
-				` • total ${formatDuration(snapshot.totalMs)}`;
+				` • total ${formatDuration(snapshot.totalMs)}` +
+				(snapshot.outputTokens > 0 ? ` • ↓ ${formatTokens(snapshot.outputTokens)} tokens` : "");
 			if (status === request.lastStatus) return;
 			request.lastStatus = status;
 			request.ctx.ui.setWorkingMessage(status);
@@ -144,6 +171,7 @@ export function createWorkTimingExtension(
 			const reasoningMs = turnReasoningAt(request.turn, at);
 			request.completedReasoningMs += reasoningMs;
 			request.lastTurnReasoningMs = reasoningMs;
+			request.completedOutputTokens += turnOutputTokens(request.turn);
 			request.turn = undefined;
 		};
 
@@ -154,7 +182,8 @@ export function createWorkTimingExtension(
 				const share = formatReasoningShare(data.reasoningMs, data.totalMs);
 				let text = theme.fg(
 					"muted",
-					`Worked for ${formatDuration(data.totalMs)} • reasoning ${formatDuration(data.reasoningMs)} (${share})`,
+					`Worked for ${formatDuration(data.totalMs)} • reasoning ${formatDuration(data.reasoningMs)} (${share})` +
+					(data.outputTokens > 0 ? ` • ↓ ${formatTokens(data.outputTokens)} tokens` : ""),
 				);
 				if (expanded) {
 					text += theme.fg("dim", ` • last turn ${formatDuration(data.lastTurnReasoningMs)}`);
@@ -170,6 +199,7 @@ export function createWorkTimingExtension(
 					startedAt: now(),
 					completedReasoningMs: 0,
 					lastTurnReasoningMs: 0,
+					completedOutputTokens: 0,
 					turn: undefined,
 					ctx,
 				};
@@ -184,6 +214,8 @@ export function createWorkTimingExtension(
 			request.turn = {
 				completedReasoningMs: 0,
 				activeReasoning: new Map(),
+				outputChars: 0,
+				providerOutputTokens: 0,
 			};
 			updateWorkingMessage();
 		});
@@ -201,6 +233,12 @@ export function createWorkTimingExtension(
 					request.turn.completedReasoningMs += Math.max(0, now() - startedAt);
 					request.turn.activeReasoning.delete(assistantEvent.contentIndex);
 				}
+			} else if (assistantEvent.type === "thinking_delta" || assistantEvent.type === "text_delta") {
+				request.turn.outputChars += typeof assistantEvent.delta === "string" ? assistantEvent.delta.length : 0;
+			}
+			const providerTokens = usageOutputTokens(assistantEvent);
+			if (providerTokens > request.turn.providerOutputTokens) {
+				request.turn.providerOutputTokens = providerTokens;
 			}
 			updateWorkingMessage();
 		});
@@ -225,6 +263,7 @@ export function createWorkTimingExtension(
 				totalMs: snapshot.totalMs,
 				reasoningMs: snapshot.reasoningMs,
 				lastTurnReasoningMs: snapshot.turnReasoningMs,
+				outputTokens: snapshot.outputTokens,
 			});
 		});
 

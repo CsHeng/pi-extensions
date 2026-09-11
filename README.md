@@ -62,7 +62,7 @@ See [`docs/architecture/herdr-handoff.md`](docs/architecture/herdr-handoff.md) f
 
 ## Work Timing
 
-`work-timing` replaces the active TUI working label with client-observed timing for the current model turn's reasoning, reasoning accumulated across the active user interaction, and total elapsed time through final settlement. Durations use carried `h`, `m`, and `s` units, such as `1h 1m 1s`. On `agent_settled`, the loading row disappears and a TUI-only `Worked for 18s • reasoning 7s (39%)` entry is persisted in the session without entering model context; expanded rendering also shows last-turn reasoning. RPC, JSON, and print modes do not run or persist this display timer.
+`work-timing` replaces the active TUI working label with client-observed timing for the current model turn's reasoning, reasoning accumulated across the active user interaction, and total elapsed time through final settlement. Durations use carried `h`, `m`, and `s` units, such as `1h 1m 1s`. Once the stream reports or streams output, the label also carries a request-cumulative `• ↓ 3,500 tokens` suffix, preferring provider `usage.output` over the streamed chars/4 estimate. On `agent_settled`, the loading row disappears and a TUI-only `Worked for 18s • reasoning 7s (39%) • ↓ 3,500 tokens` entry is persisted in the session without entering model context; expanded rendering also shows last-turn reasoning, and version-one entries render without the token suffix. RPC, JSON, and print modes do not run or persist this display timer.
 
 ## Package
 

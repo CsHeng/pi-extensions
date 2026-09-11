@@ -143,10 +143,11 @@ test("shows live per-turn and request reasoning then appends the settled total",
 	assert.deepEqual(pi.entries, [{
 		customType: WORK_TIMING_ENTRY_TYPE,
 		data: {
-			version: 1,
+			version: 2,
 			totalMs: 15_000,
 			reasoningMs: 7_000,
 			lastTurnReasoningMs: 2_000,
+			outputTokens: 0,
 		},
 	}]);
 	const renderer = pi.renderers.get(WORK_TIMING_ENTRY_TYPE);
@@ -183,6 +184,55 @@ test("shows live per-turn and request reasoning then appends the settled total",
 		theme,
 	);
 	assert.equal(zeroTotal?.render(80)[0]?.trim(), "Worked for 0s • reasoning 0s (—) • last turn 0s");
+});
+
+test("appends a live output-token count to the working label and the settled entry", async () => {
+	let now = 0;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback) => scheduler.setInterval(callback),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+
+	await invoke(pi, "before_agent_start", {}, ctx);
+	now = 1_000;
+	await invoke(pi, "turn_start", {}, ctx);
+	now = 2_000;
+	await invoke(pi, "message_update", {
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
+	}, ctx);
+	assert.equal(workingMessages.at(-1), "Working... R 0s / ΣR 0s • total 2s • ↓ 100 tokens");
+
+	now = 3_000;
+	await invoke(pi, "message_update", {
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { output: 3_500 } } },
+	}, ctx);
+	assert.equal(workingMessages.at(-1), "Working... R 0s / ΣR 0s • total 3s • ↓ 3,500 tokens");
+
+	now = 4_000;
+	await invoke(pi, "turn_end", {}, ctx);
+	now = 5_000;
+	await invoke(pi, "agent_settled", {}, ctx);
+	assert.deepEqual(pi.entries, [{
+		customType: WORK_TIMING_ENTRY_TYPE,
+		data: { version: 2, totalMs: 5_000, reasoningMs: 0, lastTurnReasoningMs: 0, outputTokens: 3_500 },
+	}]);
+
+	const renderer = pi.renderers.get(WORK_TIMING_ENTRY_TYPE);
+	assert.ok(renderer);
+	const theme = { fg: (_tone: string, text: string) => text } as unknown as Theme;
+	const collapsed = renderer({ data: pi.entries[0]?.data } as never, { expanded: false }, theme);
+	assert.equal(collapsed?.render(80)[0]?.trim(), "Worked for 5s • reasoning 0s (0%) • ↓ 3,500 tokens");
+	const legacy = renderer(
+		{ data: { version: 1, totalMs: 8_000, reasoningMs: 4_000, lastTurnReasoningMs: 1_000 } } as never,
+		{ expanded: false },
+		theme,
+	);
+	assert.equal(legacy?.render(80)[0]?.trim(), "Worked for 8s • reasoning 4s (50%)");
 });
 
 test("session shutdown cancels active timing without appending a completed entry", async () => {
