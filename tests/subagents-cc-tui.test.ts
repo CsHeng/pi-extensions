@@ -54,7 +54,8 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	await waitFor(() => output.includes("finished 1") && output.includes("t8"), "observer did not update to settled work");
 	assert.ok(output.includes("running 1"));
 	assert.equal(output.includes("CC_HIDDEN_LIVE_MARKER"), false, "CC must really replace/hide the partial tool card in this oracle");
-	child.stdin.write("\u001b"); await delay(200); child.stdin.write("/quit\r");
-	await waitFor(() => child.exitCode !== null, "host did not shut down after closing observer");
+	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F toggles the observer closed.
+	await delay(200); child.stdin.write("/quit\r");
+	await waitFor(() => child.exitCode !== null, "host did not shut down after toggling the observer closed");
 	assert.equal(await exited, 0);
 });

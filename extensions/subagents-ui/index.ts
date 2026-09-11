@@ -1,13 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import { Key, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
 import {
 	OBSERVER_EVENT,
 	parseObserverSnapshot,
 	type ObserverSnapshot,
 } from "../subagents/observer-events.ts";
-import { SubagentsOverlay, type OverlaySnapshot } from "./component.ts";
+import { SubagentsOverlay, type OverlaySnapshot, type OverlayTheme } from "./component.ts";
 import {
 	OBSERVER_STALE_MS,
+	OVERLAY_HORIZONTAL_MARGIN,
 	SUBAGENTS_UI_COMMAND,
 	SUBAGENTS_UI_PANEL_KEY,
 	SUBAGENTS_UI_STATUS_KEY,
@@ -41,6 +42,7 @@ interface OwnerState {
 }
 
 const REPAINT_MS = 250;
+const FALLBACK_TERMINAL_COLUMNS = 80;
 
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
 	const handle = globalThis.setInterval(callback, intervalMs);
@@ -96,6 +98,8 @@ export function createSubagentsUiExtension(
 		let current: CachedObservation | undefined;
 		let latestTerminal: CachedObservation | undefined;
 		let overlay: SubagentsOverlay | undefined;
+		let overlayLayout: OverlayOptions | undefined;
+		let overlayTui: TUI | undefined;
 		let intervalHandle: unknown;
 		let dismissOverlay: (() => void) | undefined;
 		let overlayVersion = 0;
@@ -165,9 +169,17 @@ export function createSubagentsUiExtension(
 			if (latestTerminal && !ownedBy(latestTerminal.snapshot, owner)) latestTerminal = undefined;
 		};
 
+		// The host resolves this object before every render, so growing content widens the panel
+		// instead of wrapping, and short content keeps it near the previous default width.
+		const syncOverlayWidth = (): void => {
+			if (!overlay || !overlayLayout || !overlayTui) return;
+			overlayLayout.width = overlay.desiredWidth(overlayTui.terminal?.columns ?? FALLBACK_TERMINAL_COLUMNS);
+		};
+
 		const publishOverlay = (): void => {
 			if (!overlay) return;
 			overlay.update(displayed());
+			syncOverlayWidth();
 			startRepaint();
 		};
 
@@ -192,17 +204,31 @@ export function createSubagentsUiExtension(
 			revalidate();
 			const version = ++overlayVersion;
 			const model = displayed();
+			const layout: OverlayOptions = {
+				anchor: "center",
+				width: FALLBACK_TERMINAL_COLUMNS,
+				margin: { left: OVERLAY_HORIZONTAL_MARGIN, right: OVERLAY_HORIZONTAL_MARGIN },
+			};
 			await Promise.resolve(ctx.ui.custom<null>(
-				(tuiInstance, _theme, _kb, done) => {
+				(tuiInstance, theme, _kb, done) => {
 					dismissOverlay = () => done(null);
-					overlay = new SubagentsOverlay(model, tuiInstance, dismissOverlay, { now });
+					overlay = new SubagentsOverlay(model, tuiInstance, dismissOverlay, { now, theme });
+					overlayTui = tuiInstance;
+					overlayLayout = layout;
+					syncOverlayWidth();
 					startRepaint();
 					return overlay;
 				},
-				{ overlay: true, onHandle: (handle) => { handle.focus(); } },
+				{
+					overlay: true,
+					overlayOptions: layout,
+					onHandle: (handle) => { handle.focus(); },
+				},
 			)).finally(() => {
 				if (version !== overlayVersion) return;
 				overlay = undefined;
+				overlayLayout = undefined;
+				overlayTui = undefined;
 				dismissOverlay = undefined;
 				stopRepaint();
 			});

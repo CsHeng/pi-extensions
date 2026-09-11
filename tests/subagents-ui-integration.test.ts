@@ -59,7 +59,7 @@ test("UI consumer projects v2 observer snapshots through the registered overlay 
 			notify() {},
 			custom: async (factory: (tui: TUI, theme: unknown, kb: unknown, done: (value: null) => void) => unknown, options: { overlay?: boolean }) => {
 				overlayFlag = options.overlay === true;
-				overlay = factory(tui, {}, {}, () => {}) as SubagentsOverlay;
+				overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
 				return null;
 			},
 		},
