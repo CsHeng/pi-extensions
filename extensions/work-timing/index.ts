@@ -8,8 +8,6 @@ const WORK_TIMING_VERSION = 3;
  * label advances in the same frame; the label is only reposted when it changed.
  */
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
-/** Stream events repaint the token counters at most this often between clock ticks. */
-const STATUS_STREAM_PAINT_MS = 150;
 const OUTPUT_CHARS_PER_TOKEN = 4;
 
 export interface WorkTimingEntryData {
@@ -21,9 +19,9 @@ export interface WorkTimingEntryData {
 	outputTokens: number;
 	/** Request-cumulative input (upstream) tokens; absent before version 3. */
 	inputTokens: number;
-	/** Model occupancy used as the `tok/s` denominator; absent before version 3. */
+	/** Decode-window milliseconds used as the `tok/s` denominator; absent before version 3. */
 	generationMs: number;
-	/** Output tokens produced during model occupancy; the `tok/s` numerator. */
+	/** Output tokens from turns that had a decode window; the `tok/s` numerator. */
 	streamedOutputTokens: number;
 }
 
@@ -42,10 +40,10 @@ interface TurnTiming {
 	messageChars: number;
 	providerOutputTokens: number;
 	providerInputTokens: number;
-	/** Host-visible start of this model request; retimed to `before_provider_request`. */
-	occupancyStartedAt: number | undefined;
+	/** First thinking or output token of this turn. */
+	decodeStartedAt: number | undefined;
 	/** First pause: assistant output ended or a tool started. */
-	occupancyPausedAt: number | undefined;
+	decodePausedAt: number | undefined;
 }
 
 interface RequestTiming {
@@ -55,6 +53,7 @@ interface RequestTiming {
 	completedOutputTokens: number;
 	completedInputTokens: number;
 	completedGenerationMs: number;
+	completedStreamedOutputTokens: number;
 	turn: TurnTiming | undefined;
 	ctx: ExtensionContext;
 	lastStatus?: string;
@@ -101,9 +100,9 @@ export function formatTokenCounts(inputTokens: number, outputTokens: number): st
 }
 
 /**
- * Downstream throughput over model occupancy, e.g. `720 tok/s`.
- * Occupancy is the request-to-output window of each turn, including thinking and
- * TTFT, and excluding tool execution.
+ * Downstream throughput over the decode window, e.g. `720 tok/s`.
+ * Decode time runs from the first thinking or output token through stream stalls
+ * until assistant `message_end` or the first `tool_execution_start`.
  */
 export function formatTokenRate(outputTokens: number, generationMs: number): string {
 	if (!(outputTokens > 0) || !(generationMs > 0)) return "";
@@ -160,16 +159,25 @@ function turnOutputTokens(turn: TurnTiming): number {
 	return Math.max(turn.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
 }
 
-function pauseTurnOccupancy(turn: TurnTiming, at: number): void {
-	if (turn.occupancyPausedAt !== undefined || turn.occupancyStartedAt === undefined) return;
-	turn.occupancyPausedAt = Math.max(turn.occupancyStartedAt, at);
+function startTurnDecode(turn: TurnTiming, at: number): void {
+	if (turn.decodeStartedAt !== undefined || turn.decodePausedAt !== undefined) return;
+	turn.decodeStartedAt = at;
 }
 
-/** Request-to-output occupancy of one turn, including thinking and TTFT. */
-function turnOccupancyMs(turn: TurnTiming, at: number): number {
-	if (turn.occupancyStartedAt === undefined) return 0;
-	const end = turn.occupancyPausedAt ?? at;
-	return Math.max(0, end - turn.occupancyStartedAt);
+function pauseTurnDecode(turn: TurnTiming, at: number): void {
+	if (turn.decodePausedAt !== undefined || turn.decodeStartedAt === undefined) return;
+	turn.decodePausedAt = Math.max(turn.decodeStartedAt, at);
+}
+
+/** First-token-to-pause decode time of one turn, including thinking and stream stalls. */
+function turnDecodeMs(turn: TurnTiming, at: number): number {
+	if (turn.decodeStartedAt === undefined) return 0;
+	const end = turn.decodePausedAt ?? at;
+	return Math.max(0, end - turn.decodeStartedAt);
+}
+
+function isDecodeSignal(type: unknown): boolean {
+	return type === "thinking_start" || type === "thinking_delta" || type === "text_delta" || type === "toolcall_delta";
 }
 
 /** Streamed deltas of every output kind, including tool-call arguments. */
@@ -249,7 +257,10 @@ export function createWorkTimingExtension(
 			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : request.lastTurnReasoningMs;
 			const currentOutputTokens = turn ? turnOutputTokens(turn) : 0;
 			const currentInputTokens = turn ? turn.providerInputTokens : 0;
-			const currentGenerationMs = turn ? turnOccupancyMs(turn, at) : 0;
+			const currentGenerationMs = turn ? turnDecodeMs(turn, at) : 0;
+			const currentStreamedTokens = turn && turn.decodeStartedAt !== undefined && currentGenerationMs > 0
+				? currentOutputTokens
+				: 0;
 			const outputTokens = request.completedOutputTokens + currentOutputTokens;
 			return {
 				totalMs: Math.max(0, at - request.startedAt),
@@ -258,14 +269,13 @@ export function createWorkTimingExtension(
 				outputTokens,
 				inputTokens: request.completedInputTokens + currentInputTokens,
 				generationMs: request.completedGenerationMs + currentGenerationMs,
-				streamedOutputTokens: outputTokens,
+				streamedOutputTokens: request.completedStreamedOutputTokens + currentStreamedTokens,
 			};
 		};
 
 		// Time fields render from the last clock sample, so every duration on the label
 		// advances in the same frame; token fields always come from the live counters.
 		let clock: Pick<TimingSnapshot, "totalMs" | "reasoningMs" | "turnReasoningMs"> | undefined;
-		let lastPaintAt = Number.NEGATIVE_INFINITY;
 
 		const sampleClock = (at: number): void => {
 			const snapshot = snapshotAt(at);
@@ -286,15 +296,9 @@ export function createWorkTimingExtension(
 				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
 				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
 				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
-			lastPaintAt = at;
 			if (status === request.lastStatus) return;
 			request.lastStatus = status;
 			request.ctx.ui.setWorkingMessage(status);
-		};
-
-		const paintStreamProgress = (at: number): void => {
-			if (at - lastPaintAt < STATUS_STREAM_PAINT_MS) return;
-			paint(at, false);
 		};
 
 		const stopInterval = (): void => {
@@ -313,11 +317,13 @@ export function createWorkTimingExtension(
 			const reasoningMs = turnReasoningAt(request.turn, at);
 			request.completedReasoningMs += reasoningMs;
 			request.lastTurnReasoningMs = reasoningMs;
-			pauseTurnOccupancy(request.turn, at);
+			pauseTurnDecode(request.turn, at);
 			const outputTokens = turnOutputTokens(request.turn);
+			const generationMs = turnDecodeMs(request.turn, at);
 			request.completedOutputTokens += outputTokens;
 			request.completedInputTokens += request.turn.providerInputTokens;
-			request.completedGenerationMs += turnOccupancyMs(request.turn, at);
+			request.completedGenerationMs += generationMs;
+			if (generationMs > 0) request.completedStreamedOutputTokens += outputTokens;
 			request.turn = undefined;
 		};
 
@@ -348,6 +354,7 @@ export function createWorkTimingExtension(
 					completedOutputTokens: 0,
 					completedInputTokens: 0,
 					completedGenerationMs: 0,
+					completedStreamedOutputTokens: 0,
 					turn: undefined,
 					ctx,
 				};
@@ -366,16 +373,9 @@ export function createWorkTimingExtension(
 				messageChars: 0,
 				providerOutputTokens: 0,
 				providerInputTokens: 0,
-				occupancyStartedAt: now(),
-				occupancyPausedAt: undefined,
+				decodeStartedAt: undefined,
+				decodePausedAt: undefined,
 			};
-			paint(now(), true);
-		});
-
-		pi.on("before_provider_request", (_event, ctx) => {
-			if (ctx.mode !== "tui" || !request?.turn) return;
-			if (request.turn.occupancyPausedAt !== undefined) return;
-			request.turn.occupancyStartedAt = now();
 			paint(now(), true);
 		});
 
@@ -393,20 +393,21 @@ export function createWorkTimingExtension(
 					request.turn.activeReasoning.delete(assistantEvent.contentIndex);
 				}
 			}
+			if (isDecodeSignal(assistantEvent.type)) startTurnDecode(request.turn, now());
 			recordTurnOutput(request.turn, assistantEvent, event.message);
-			paintStreamProgress(now());
+			paint(now(), false);
 		});
 
 		pi.on("message_end", (event, ctx) => {
 			if (ctx.mode !== "tui" || !request?.turn) return;
 			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
-			pauseTurnOccupancy(request.turn, now());
+			pauseTurnDecode(request.turn, now());
 			paint(now(), true);
 		});
 
 		pi.on("tool_execution_start", (_event, ctx) => {
 			if (ctx.mode !== "tui" || !request?.turn) return;
-			pauseTurnOccupancy(request.turn, now());
+			pauseTurnDecode(request.turn, now());
 			paint(now(), true);
 		});
 
