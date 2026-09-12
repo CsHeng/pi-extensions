@@ -30,6 +30,7 @@ class FakePi {
 	readonly handlers = new Map<string, (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown>();
 	readonly notifications: Array<{ message: string; level: string }> = [];
 	readonly statuses: Array<string | undefined> = [];
+	readonly statusKeys: string[] = [];
 	branch: FakeEntry[] = [];
 
 	appendEntry(customType: string, data: unknown): void {
@@ -71,7 +72,10 @@ function context(pi: FakePi, model: FakeModel = openAiModel()): ExtensionContext
 		},
 		ui: {
 			notify: (message: string, level: string) => pi.notifications.push({ message, level }),
-			setStatus: (_key: string, value: string | undefined) => pi.statuses.push(value),
+			setStatus: (key: string, value: string | undefined) => {
+				pi.statusKeys.push(key);
+				pi.statuses.push(value);
+			},
 			theme: { fg: (_tone: string, value: string) => value },
 		},
 	} as unknown as ExtensionContext;
@@ -115,7 +119,8 @@ test("command toggles correlated requests between priority and explicit default"
 	const priority = await invoke(pi, "before_provider_request", { payload: original }, ctx);
 	assert.deepEqual(priority, { ...original, service_tier: "priority" });
 	assert.equal("service_tier" in original, false);
-	assert.equal(pi.statuses.at(-1), "fast-gpt");
+	assert.equal(pi.statusKeys.at(-1), "fast-gpt");
+	assert.equal(pi.statuses.at(-1), "\u26A1");
 	assert.deepEqual(pi.entries.at(-1), {
 		customType: FAST_GPT_ENTRY_TYPE,
 		data: { version: 1, selection: "priority" },
@@ -182,7 +187,7 @@ test("active branch state restores across startup and tree navigation", async ()
 	const ctx = context(pi);
 
 	await invoke(pi, "session_start", { type: "session_start", reason: "resume" }, ctx);
-	assert.equal(pi.statuses.at(-1), "fast-gpt");
+	assert.equal(pi.statuses.at(-1), "\u26A1");
 	assert.deepEqual(await invoke(pi, "before_provider_request", {
 		payload: { model: "gpt-5.6-sol" },
 	}, ctx), { model: "gpt-5.6-sol", service_tier: "priority" });
@@ -242,5 +247,5 @@ test("model selection updates applicability without discarding priority selectio
 	assert.equal(pi.statuses.at(-1), undefined);
 
 	await invoke(pi, "model_select", { model: openAiModel() }, ctx);
-	assert.equal(pi.statuses.at(-1), "fast-gpt");
+	assert.equal(pi.statuses.at(-1), "\u26A1");
 });

@@ -4,6 +4,7 @@ export const FAST_GPT_ENTRY_TYPE = "csheng-fast-gpt";
 
 const FAST_GPT_STATE_VERSION = 1 as const;
 const STATUS_KEY = "fast-gpt";
+const STATUS_MARK = "\u26A1";
 type FastGptSelection = "untouched" | "priority" | "default";
 type SelectedServiceTier = Exclude<FastGptSelection, "untouched">;
 
@@ -46,7 +47,7 @@ export default function fastGptExtension(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext, model = ctx.model): void {
 		const value = selection === "priority" && supportsFastGpt(model)
-			? ctx.ui.theme.fg("warning", "fast-gpt")
+			? ctx.ui.theme.fg("warning", STATUS_MARK)
 			: undefined;
 		ctx.ui.setStatus(STATUS_KEY, value);
 	}

@@ -18,7 +18,7 @@ Type `$` in the TUI to search loaded skills and insert one or more `$skill-name`
 
 `/fast-gpt` toggles a branch-local request profile between priority and explicit default service tiers. The extension leaves requests untouched until the first command. In priority mode it adds top-level `service_tier: priority` to correlated official OpenAI and OpenAI-Codex Responses requests; the next toggle sends top-level `service_tier: default`. Unsupported provider, API, or model correlations remain unchanged.
 
-This is only a request payload profile. Its status confirms that priority was requested, not that the provider served it. Pi's extension API does not expose the final response body's `service_tier`, and the OpenAI-Codex endpoint has an additional response-accounting caveat. Pi and provider-side billing remain authoritative for usage and cost. The extension supplies no model alias, provider override, pricing parser, live call, or workflow behavior. See [`docs/architecture/fast-gpt.md`](docs/architecture/fast-gpt.md) for state, correlation, response observability, ownership, and removal contracts.
+This is only a request payload profile. Its keyed status is a lightning mark confirming that priority was requested, not that the provider served it. Pi's extension API does not expose the final response body's `service_tier`, and the OpenAI-Codex endpoint has an additional response-accounting caveat. Pi and provider-side billing remain authoritative for usage and cost. The extension supplies no model alias, provider override, pricing parser, live call, or workflow behavior. See [`docs/architecture/fast-gpt.md`](docs/architecture/fast-gpt.md) for state, correlation, response observability, ownership, and removal contracts.
 
 ## Subagents
 
@@ -58,7 +58,7 @@ See [`docs/architecture/herdr-handoff.md`](docs/architecture/herdr-handoff.md) f
 
 ## Status Footer
 
-`status-footer` replaces the TUI footer with one compact line: `Grok 4.6 high (xai sub) | ~/project (main) | <session-uuid> | ↑952k ↓62k R13M CH99.7% $8.979 | 270k/500k (54.0%) | MCP 2/2`. Subscription status sits in the model parentheses; the branch comes from Pi's footer data and disappears outside a repository; `R`/`W` are cache read/write and `CH` is the latest prompt cache-hit rate. Narrow terminals shrink the workdir and traffic first, then other optional fields, preserving the full UUID whenever it fits alone. Identity and traffic use a fixed palette; separators, context/MCP indicators, and lower thinking levels use the active Pi theme. Extension statuses are not shown. The extension is inactive in RPC, JSON, and print modes and stores no state.
+`status-footer` replaces the TUI footer with one compact line: `Grok 4.6 high (xai sub) | ~/project (main) | <session-uuid> | ↑952k ↓62k R13M CH99.7% $8.979 | 270k/500k (54.0%) | MCP 2/2`. Subscription status sits in the model parentheses; the branch comes from Pi's footer data and disappears outside a repository; `R`/`W` are cache read/write and `CH` is the latest prompt cache-hit rate. When the `fast-gpt` keyed status is present, a warning-colored ⚡ sits after thinking, as in `GPT-5.4 high ⚡ (openai sub)`. Narrow terminals shrink the workdir and traffic first, then other optional fields, preserving the full UUID whenever it fits alone. Identity and traffic use a fixed palette; separators, context/MCP indicators, and lower thinking levels use the active Pi theme. Other extension statuses are not shown. The extension is inactive in RPC, JSON, and print modes and stores no state.
 
 ## Work Timing
 

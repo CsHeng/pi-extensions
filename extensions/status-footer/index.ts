@@ -9,6 +9,8 @@ import type {
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const MCP_STATUS_EVENT = "pi-mcp-adapter/status/v1";
+const FAST_GPT_STATUS_KEY = "fast-gpt";
+const FAST_GPT_MARK = "\u26A1";
 
 interface FooterState {
 	model: ExtensionContext["model"];
@@ -38,6 +40,7 @@ export interface FooterRenderInput {
 	modelName: string;
 	thinkingLevel: string | undefined;
 	reasoning: boolean;
+	fastGpt?: boolean;
 	provider: string | undefined;
 	usingSubscription: boolean;
 	workdir: string;
@@ -323,7 +326,8 @@ export function renderFooterLines(
 		input.usingSubscription
 			? hexFg(POWERLINE.subscription, input.provider ? `(${input.provider} sub)` : "(sub)")
 			: "";
-	const identity = [model, thinking, subscription].filter(Boolean).join(" ");
+	const fastGpt = input.fastGpt ? theme.fg("warning", FAST_GPT_MARK) : "";
+	const identity = [model, thinking, fastGpt, subscription].filter(Boolean).join(" ");
 	const mcpText =
 		input.mcp && input.mcp.all > 0
 			? theme.fg(mcpColor(input.mcp), `MCP ${input.mcp.enabled}/${input.mcp.all}`)
@@ -376,6 +380,7 @@ function footerInput(
 	state: FooterState,
 	mcp: McpCounts | undefined,
 	gitBranch: string | null,
+	fastGpt: boolean,
 ): FooterRenderInput {
 	const usage = collectUsageTotals(ctx.sessionManager.getEntries());
 	const contextUsage = ctx.getContextUsage();
@@ -383,6 +388,7 @@ function footerInput(
 		modelName: modelName(state.model),
 		thinkingLevel: state.thinkingLevel,
 		reasoning: state.model?.reasoning === true,
+		fastGpt,
 		provider: state.model?.provider,
 		usingSubscription: isUsingSubscription(ctx, state.model),
 		workdir: originalWorkdir(ctx),
@@ -422,7 +428,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
 			return {
 				render(width: number): string[] {
 					return renderFooterLines(
-						footerInput(ctx, active.state, mcpCounts, footerData.getGitBranch()),
+						footerInput(
+							ctx,
+							active.state,
+							mcpCounts,
+							footerData.getGitBranch(),
+							footerData.getExtensionStatuses().has(FAST_GPT_STATUS_KEY),
+						),
 						width,
 						theme,
 					);

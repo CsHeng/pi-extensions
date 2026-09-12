@@ -262,6 +262,69 @@ test("renders one compact footer line without extension statuses", () => {
 	);
 });
 
+test("places a lightning mark after thinking when fast-gpt is requested", () => {
+	const withThinking = renderFooterLines(
+		{
+			modelName: "GPT-5.4",
+			thinkingLevel: "high",
+			reasoning: true,
+			fastGpt: true,
+			provider: "openai",
+			usingSubscription: true,
+			workdir: "/workspace/project",
+			gitBranch: null,
+			mcp: undefined,
+			contextTokens: 12_000,
+			contextWindow: 200_000,
+			contextPercent: 6.0,
+			sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0.01,
+				cacheHitPercent: undefined,
+			},
+		},
+		200,
+		identityTheme,
+	);
+	assert.equal(
+		stripAnsi(withThinking[0] ?? ""),
+		"GPT-5.4 high \u26A1 (openai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | \u2191100 \u219320 $0.010 | 12k/200k (6.0%)",
+	);
+
+	const withoutThinking = renderFooterLines(
+		{
+			modelName: "GPT-5.4",
+			thinkingLevel: "off",
+			reasoning: false,
+			fastGpt: true,
+			provider: "openai",
+			usingSubscription: false,
+			workdir: "/workspace/project",
+			gitBranch: null,
+			mcp: undefined,
+			contextTokens: 12_000,
+			contextWindow: 200_000,
+			contextPercent: 6.0,
+			sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0.01,
+				cacheHitPercent: undefined,
+			},
+		},
+		200,
+		identityTheme,
+	);
+	assert.match(stripAnsi(withoutThinking[0] ?? ""), /^GPT-5\.4 \u26A1 \|/);
+});
+
 test("actual footer preserves the UUID whenever it fits alone", () => {
 	const sessionId = "01a08555-9ee8-72b3-9af1-481c7d4b58e1";
 	for (const modelName of ["Grok 4.6", "long-model-name-".repeat(20)]) {
@@ -336,6 +399,34 @@ test("installs the compact footer in TUI mode and refreshes MCP counts", async (
 
 	await invoke(pi, "thinking_level_select", { level: "medium" }, ctx);
 	assert.match(footer.render(160)[0] ?? "", /medium/);
+});
+
+test("compacts the fast-gpt keyed status after thinking and ignores other statuses", async () => {
+	const pi = new FakePi();
+	statusFooter(pi as unknown as ExtensionAPI);
+	const { ctx, getFooterFactory } = context("tui");
+
+	await invoke(pi, "session_start", { reason: "startup" }, ctx);
+	const factory = getFooterFactory();
+	assert.ok(factory);
+
+	let statuses = new Map([["mode", "fast-gpt"]]);
+	const provider = {
+		getGitBranch: () => null,
+		getExtensionStatuses: () => statuses,
+		getAvailableProviderCount: () => 1,
+		onBranchChange: () => () => {},
+	} satisfies ReadonlyFooterDataProvider;
+
+	const footer = factory(tui, identityTheme, provider);
+	assert.equal(stripAnsi(footer.render(220)[0] ?? "").includes("\u26A1"), false);
+
+	statuses = new Map([["fast-gpt", "fast-gpt"], ["plan-mode", "plan"]]);
+	const line = stripAnsi(footer.render(220)[0] ?? "");
+	assert.match(line, /Grok 4\.6 high \u26A1 \(xai sub\)/);
+	assert.equal(line.includes("fast-gpt"), false);
+	assert.equal(line.includes("plan-mode"), false);
+	assert.equal(line.includes("plan"), false);
 });
 
 test("does not install a custom footer outside TUI mode", async () => {
