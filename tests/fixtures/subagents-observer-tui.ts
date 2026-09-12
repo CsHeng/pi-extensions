@@ -30,7 +30,7 @@ export default function observerTuiFixture(pi: ExtensionAPI): void {
 		async execute(_id, _args, signal, update, ctx) {
 			const start = performance.now();
 			const observer = new ManagedObserver("fixture-run", { repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) }, "fixture-generation",
-				[{ id: "fixture-task", role: "reviewer", episode: 1, replayed: false, route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } as EffectiveRoute }],
+				[{ id: "fixture-task", role: "reviewer", episode: 1, replayed: false, objective: "review fixture", route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } as EffectiveRoute }],
 				() => performance.now() - start, snapshot => pi.events.emit(OBSERVER_EVENT, snapshot));
 			observer.begin(); observer.childStarted("fixture-task");
 			await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "observer-ready"), "ready");

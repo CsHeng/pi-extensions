@@ -1,9 +1,23 @@
 import { THINKING_LEVELS, type ThinkingLevel, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import type { CurrentOwner } from "./session-contracts.ts";
-import { parseObserverSnapshot, type ObserverSnapshot, type ObserverTask } from "./observer-events.ts";
+import {
+	OBSERVER_VERSION,
+	observerHeadline,
+	observerTools,
+	parseObserverSnapshot,
+	type ObserverSnapshot,
+	type ObserverTask,
+} from "./observer-events.ts";
 
 export const OBSERVER_HEARTBEAT_MS = 5_000;
-interface RowInput { id: string; role: ObserverTask["role"]; episode: number; route?: EffectiveRoute; replayed: boolean }
+interface RowInput {
+	id: string;
+	role: ObserverTask["role"];
+	episode: number;
+	route?: EffectiveRoute;
+	replayed: boolean;
+	objective?: string;
+}
 function displayRoute(route: EffectiveRoute | undefined): ObserverTask["route"] {
 	if (!route || !THINKING_LEVELS.includes(route.thinking as ThinkingLevel)
 		|| [route.provider, route.model].some(value => !value || Buffer.byteLength(value) > 512 || /[\u0000-\u001f\u007f-\u009f]/.test(value))) return null;
@@ -39,7 +53,8 @@ export class ManagedObserver {
 		this.nextRevision = nextRevision ?? (() => ++this.revision);
 		this.rows = input.map((row, index) => ({ id: row.id, ordinal: index + 1, role: row.role,
 			episode: row.episode, route: displayRoute(row.route),
-			status: "pending", executionPhase: "queued", assistantTurns: 0, elapsedMs: null, replayed: row.replayed }));
+			status: "pending", executionPhase: "queued", assistantTurns: 0, elapsedMs: null, replayed: row.replayed,
+			headline: observerHeadline(row.objective ?? ""), activeTools: [] }));
 	}
 	begin(): void {
 		this.emit();
@@ -56,7 +71,10 @@ export class ManagedObserver {
 	childStopped(id: string): void {
 		if (this.closed || !this.active.delete(id)) return;
 		const row = this.rows.find(row => row.id === id);
-		if (row) row.elapsedMs = this.taskElapsed(id);
+		if (row) {
+			row.elapsedMs = this.taskElapsed(id);
+			row.activeTools = [];
+		}
 		if (this.active.size === 0) this.phase = "settling";
 		this.emit();
 	}
@@ -68,17 +86,19 @@ export class ManagedObserver {
 			const terminal = result.status !== "running" && result.status !== "pending";
 			// A cached result is evidence, never live child activity.
 			if (row.replayed && !terminal) return row;
+			const live = !terminal && !row.replayed && this.active.has(row.id);
 			return { ...row, status: result.status,
 				executionPhase: terminal ? "settled" : (this.active.has(row.id) ? "child-execution" : this.started.has(row.id) ? "convergence-critical" : result.status === "running" ? "workspace-preparation" : row.executionPhase),
 				assistantTurns: result.activity?.assistantTurns ?? result.usage.turns,
-				elapsedMs: row.replayed ? null : this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs };
+				elapsedMs: row.replayed ? null : this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs,
+				activeTools: live ? (result.activity ? observerTools(result.activity.activeTools) : row.activeTools) : [] };
 		});
 		this.emit();
 	}
 	finish(failed: boolean, aborted: boolean): void {
 		if (this.closed) return;
 		if (this.timer) clearInterval(this.timer); this.timer = undefined;
-		this.rows = this.rows.map(row => ({ ...row,
+		this.rows = this.rows.map(row => ({ ...row, activeTools: [],
 			elapsedMs: row.replayed ? null : this.started.has(row.id) ? this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs : null,
 			...(["running", "pending"].includes(row.status) ? { status: aborted ? "aborted" as const : "failed" as const, executionPhase: "settled" as const } : {}),
 		}));
@@ -93,7 +113,7 @@ export class ManagedObserver {
 	private emit(): void {
 		if (this.closed) return;
 		const tasks = this.rows.map(row => ({ ...row, elapsedMs: this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs }));
-		const snapshot: ObserverSnapshot = { version: 2, parentSessionId: this.owner.parentSessionId, anchor: this.owner.anchor,
+		const snapshot: ObserverSnapshot = { version: OBSERVER_VERSION, parentSessionId: this.owner.parentSessionId, anchor: this.owner.anchor,
 			generation: this.generation, runId: this.runId, revision: this.nextRevision(), phase: this.phase,
 			requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: this.started.size,
 			activeChildren: this.active.size, settledTasks: tasks.filter(row => row.status !== "pending" && row.status !== "running").length,

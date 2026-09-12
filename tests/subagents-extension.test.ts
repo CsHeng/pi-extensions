@@ -643,6 +643,7 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	assert.equal(snapshots.at(-1)?.launchedChildren, 1);
 	assert.equal(snapshots.at(-1)?.tasks[0]?.route?.model, parentModel.id);
 	assert.equal(snapshots.at(-1)?.tasks[0]?.assistantTurns, 1);
+	assert.equal(snapshots.at(-1)?.tasks[0]?.headline, "scan");
 	const length = snapshots.length;
 	const replay = await state.tool.execute("replay", input, undefined, undefined, ctx);
 	assert.equal(replay.details.requestTelemetry.launchedChildren, 0);

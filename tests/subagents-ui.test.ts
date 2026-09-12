@@ -11,7 +11,13 @@ import {
 } from "../extensions/subagents-ui/index.ts";
 import { SubagentsOverlay } from "../extensions/subagents-ui/component.ts";
 import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
-import { EMPTY_OBSERVER_MESSAGE, OBSERVER_STALE_MS, closeMarkerColumns } from "../extensions/subagents-ui/render.ts";
+import {
+	EMPTY_OBSERVER_MESSAGE,
+	OBSERVER_STALE_MS,
+	closeMarkerColumns,
+	formatTaskAssignment,
+	formatTaskMeta,
+} from "../extensions/subagents-ui/render.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<unknown> | unknown;
@@ -70,6 +76,8 @@ function task(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): Obser
 		assistantTurns: 2,
 		elapsedMs: 4_000,
 		replayed: false,
+		headline: "scan the bounded facts",
+		activeTools: [],
 		...overrides,
 	};
 }
@@ -232,6 +240,22 @@ test("default TUI snapshots never write widgets, status, footer, working, or ent
 	assert.ok(pi.commands.has(SUBAGENTS_UI_COMMAND));
 });
 
+test("task rows put assignment beside turns and keep route status tools on the next line", () => {
+	const row = task({
+		role: "explorer",
+		assistantTurns: 5,
+		headline: "搜索确认治理边界主入口与旧条款是否对齐",
+		activeTools: ["read", "grep"],
+		status: "running",
+		route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "high" },
+	});
+	assert.equal(formatTaskAssignment(row), "explorer t5 搜索确认治理边界主入口与旧条款是否对齐");
+	assert.equal(
+		formatTaskMeta(row, "live", 48_800),
+		"  openai-codex gpt-5.6-luna thinking:high  running 48.8s  read,grep",
+	);
+});
+
 test("registered command and shortcut open the overlay with route, counts, and no execution controls", async () => {
 	const pi = install();
 	let overlay: SubagentsOverlay | undefined;
@@ -257,7 +281,8 @@ test("registered command and shortcut open the overlay with route, counts, and n
 	assert.match(text, /gpt-4\.1/);
 	assert.match(text, /thinking:off/);
 	assert.match(text, /t2/);
-	assert.match(text, /child-execution/);
+	assert.match(text, /scan the bounded facts/);
+	assert.doesNotMatch(text, /child-execution/);
 	assert.match(text, /ctrl\+alt\+f close/);
 	assert.match(text, /Subagents · running/);
 	assert.match(text, /\[ ✕ \]/);
@@ -290,8 +315,9 @@ test("content-fitted overlay options keep rows complete and expose one clickable
 		},
 	});
 	await pi.handlers.get("session_start")?.({}, ctx);
+	const headline = "search confirm the governance entry against the old clauses and the source matrix now";
 	pi.events.emit(OBSERVER_EVENT, snapshot({
-		tasks: [task({ route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" } })],
+		tasks: [task({ headline, route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" } })],
 	}));
 	await openWith(pi, ctx);
 	assert.equal(customOptions?.overlay, true);
@@ -309,8 +335,10 @@ test("content-fitted overlay options keep rows complete and expose one clickable
 	assert.ok(chip.end < width, "close hit range stays off the panel edge");
 	assert.equal(lines.filter(line => line.includes("✕")).length, 1);
 	assert.ok(lines.every(line => visibleWidth(line) === width), "every panel row fills the width");
-	const taskRow = lines.find(line => line.includes("gpt-5.6-luna")) ?? "";
-	assert.ok(taskRow.includes("ep0"), "a task row stays on one panel row");
+	const assignment = lines.find(line => line.includes(headline)) ?? "";
+	assert.ok(assignment.includes("explorer t2"), "assignment stays on one panel row");
+	const meta = lines.find(line => line.includes("gpt-5.6-luna")) ?? "";
+	assert.ok(meta.includes("thinking:medium") && meta.includes("running"), "route status stay on one panel row");
 	overlay.handleMouse({ type: "click", button: "left", x: chip.start - 1, y: 0 });
 	overlay.handleMouse({ type: "click", button: "left", x: chip.start, y: 1 });
 	overlay.handleMouse({ type: "wheel", button: "none", x: chip.start, y: 0 });
@@ -338,7 +366,10 @@ test("live observations widen an open panel without filling the terminal", async
 	const opening = openWith(pi, ctx);
 	assert.equal(Number(layout?.width), 80);
 	pi.events.emit(OBSERVER_EVENT, snapshot({
-		tasks: [task({ route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" } })],
+		tasks: [task({
+			headline: "search confirm the governance entry against the old clauses and the source matrix now",
+			route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" },
+		})],
 	}));
 	const widened = Number(layout?.width);
 	assert.ok(widened > 80 && widened < 200, `panel width ${widened} must grow with content without filling the terminal`);
@@ -350,7 +381,10 @@ test("panel width grows with observed content and themed rows stay edge to edge"
 	const tui = { requestRender() {} } as TUI;
 	const overlay = new SubagentsOverlay({ snapshot: undefined, receivedAt: 0 }, tui, () => {}, { now: () => 0 });
 	assert.equal(overlay.desiredWidth(200), 80);
-	overlay.update({ snapshot: snapshot({ tasks: [task({ route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" } })] }), receivedAt: 0 });
+	overlay.update({ snapshot: snapshot({ tasks: [task({
+		headline: "search confirm the governance entry against the old clauses and the source matrix now",
+		route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" },
+	})] }), receivedAt: 0 });
 	const width = overlay.desiredWidth(200);
 	assert.ok(width > 80 && width < 200, `busy panel width ${width} must fit content without filling the terminal`);
 	const codes: Record<string, string> = { accent: "35", borderMuted: "34", dim: "90", text: "37" };

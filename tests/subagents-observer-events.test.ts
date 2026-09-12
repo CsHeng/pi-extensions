@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	MAX_HEADLINE_BYTES,
 	OBSERVER_EVENT,
+	OBSERVER_LEGACY_VERSION,
 	OBSERVER_VERSION,
+	observerHeadline,
+	observerTools,
 	parseObserverSnapshot,
 	type ObserverSnapshot,
 } from "../extensions/subagents/observer-events.ts";
@@ -19,6 +23,8 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
 		assistantTurns: 3,
 		elapsedMs: 1400,
 		replayed: false,
+		headline: "scan the bounded facts",
+		activeTools: ["read"],
 		...overrides,
 	};
 }
@@ -46,19 +52,22 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 
 test("observer event name and version are exact", () => {
 	assert.equal(OBSERVER_EVENT, "csheng.subagents.observer.v2");
-	assert.equal(OBSERVER_VERSION, 2);
+	assert.equal(OBSERVER_VERSION, 3);
+	assert.equal(OBSERVER_LEGACY_VERSION, 2);
 });
 
-test("snapshots accept the frozen v2 allowlist including native parent punctuation and null route", () => {
+test("snapshots accept the frozen v3 allowlist including native parent punctuation and null route", () => {
 	const parsed = parseObserverSnapshot(snapshot());
 	assert.equal(parsed.ok, true);
 	if (!parsed.ok) return;
 	const value: ObserverSnapshot = parsed.value;
-	assert.equal(value.version, 2);
+	assert.equal(value.version, 3);
 	assert.equal(value.parentSessionId, "parent_session-1");
 	assert.equal(value.anchor, "leaf_entry-1");
 	assert.equal(value.tasks[0]?.route?.model, "gpt-4.1");
 	assert.equal(value.tasks[0]?.replayed, false);
+	assert.equal(value.tasks[0]?.headline, "scan the bounded facts");
+	assert.deepEqual(value.tasks[0]?.activeTools, ["read"]);
 	const withoutRoute = parseObserverSnapshot(snapshot({
 		tasks: [task({ route: null, episode: null, elapsedMs: null, assistantTurns: 0, status: "pending", executionPhase: "queued" })],
 		elapsedMs: null,
@@ -72,6 +81,32 @@ test("snapshots accept the frozen v2 allowlist including native parent punctuati
 	assert.equal(withoutRoute.value.tasks[0]?.episode, null);
 	assert.equal(withoutRoute.value.elapsedMs, null);
 	assert.equal(parseObserverSnapshot(snapshot({ anchor: null })).ok, true);
+});
+
+test("parser still accepts frozen v2 rows without headline or tools", () => {
+	const { headline, activeTools, ...legacyTask } = task();
+	void headline; void activeTools;
+	const parsed = parseObserverSnapshot(snapshot({
+		version: OBSERVER_LEGACY_VERSION,
+		tasks: [legacyTask],
+	}));
+	assert.equal(parsed.ok, true);
+	if (!parsed.ok) return;
+	assert.equal(parsed.value.version, 2);
+	assert.equal(parsed.value.tasks[0]?.headline, "");
+	assert.deepEqual(parsed.value.tasks[0]?.activeTools, []);
+	assert.equal(parseObserverSnapshot(snapshot({ version: OBSERVER_LEGACY_VERSION })).ok, false);
+});
+
+test("headline projection is single-line, bounded, and drops controls", () => {
+	assert.equal(observerHeadline("search confirm the entry\nand extra"), "search confirm the entry and extra");
+	assert.equal(observerHeadline(" \n\t "), "");
+	assert.equal(observerHeadline("keep\u0007this"), "keep this");
+	const long = "汉".repeat(MAX_HEADLINE_BYTES);
+	const projected = observerHeadline(long);
+	assert.ok(projected.endsWith("…"));
+	assert.ok(Buffer.byteLength(projected, "utf8") <= MAX_HEADLINE_BYTES);
+	assert.deepEqual(observerTools(["read", "grep", "read", "../escape", "tool execution"]), ["read", "grep"]);
 });
 
 test("parser rejects legacy, sensitive, and non-allowlisted keys", () => {
@@ -90,6 +125,21 @@ test("parser rejects legacy, sensitive, and non-allowlisted keys", () => {
 	})).ok, false);
 	assert.equal(parseObserverSnapshot(snapshot({
 		tasks: [task({ inactiveForMs: 0 })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ objective: "SECRET" })],
+	})).ok, false);
+	const { headline, ...missingHeadline } = task();
+	void headline;
+	assert.equal(parseObserverSnapshot(snapshot({ tasks: [missingHeadline] })).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ headline: "line\nfeed" })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ activeTools: ["read", "read"] })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ activeTools: ["../secret"] })],
 	})).ok, false);
 });
 

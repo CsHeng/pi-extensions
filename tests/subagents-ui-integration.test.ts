@@ -16,7 +16,7 @@ class FakeEvents {
 	}
 }
 
-test("UI consumer projects v2 observer snapshots through the registered overlay without default chrome", async () => {
+test("UI consumer projects observer snapshots through the registered overlay without default chrome", async () => {
 	const events = new FakeEvents();
 	const statuses: unknown[] = [];
 	const widgets: unknown[] = [];
@@ -91,6 +91,8 @@ test("UI consumer projects v2 observer snapshots through the registered overlay 
 			assistantTurns: 1,
 			elapsedMs: 1000,
 			replayed: false,
+			headline: "scan the bounded facts",
+			activeTools: ["read"],
 		}],
 	};
 	events.emit(OBSERVER_EVENT, snapshot);
@@ -102,6 +104,8 @@ test("UI consumer projects v2 observer snapshots through the registered overlay 
 	assert.equal(overlayFlag, true);
 	const text = overlay?.render(80).join("\n") ?? "";
 	assert.match(text, /thinking:medium/);
+	assert.match(text, /scan the bounded facts/);
+	assert.match(text, /read/);
 	assert.match(text, /launched 1 running 1 finished 0/);
 	events.emit(OBSERVER_EVENT, { ...snapshot, revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1 });
 	assert.deepEqual(working, []);

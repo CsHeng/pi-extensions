@@ -133,7 +133,8 @@ export function overlayRows(
 		text: `${formatCounts(snapshot, freshness)} · ${snapshot.aggregateAssistantTurns} turns · ${formatDuration(headerElapsed)}`,
 	});
 	for (const task of snapshot.tasks) {
-		rows.push({ kind: "task", text: formatTaskLine(task, freshness, taskElapsed(task)) });
+		rows.push({ kind: "task", text: formatTaskAssignment(task) });
+		rows.push({ kind: "task", text: formatTaskMeta(task, freshness, taskElapsed(task)) });
 	}
 	const hidden = snapshot.admittedTasks - snapshot.tasks.length;
 	if (hidden > 0) rows.push({ kind: "more", text: `+${hidden} more` });
@@ -141,18 +142,21 @@ export function overlayRows(
 	return rows;
 }
 
-export function formatTaskLine(
+export function formatTaskAssignment(task: ObserverTask): string {
+	const turns = `t${task.assistantTurns}`;
+	return task.headline ? `${task.role} ${turns} ${task.headline}` : `${task.role} ${turns}`;
+}
+
+export function formatTaskMeta(
 	task: ObserverTask,
 	freshness: ObserverFreshness,
 	elapsedMs: number | null,
 ): string {
 	const liveStatus = task.status === "pending" || task.status === "running";
-	const state = freshness === "stale" && liveStatus
-		? "stale/unknown"
-		: `${task.status} ${task.executionPhase}`;
+	const state = freshness === "stale" && liveStatus ? "stale/unknown" : task.status;
+	const tools = task.activeTools.length > 0 ? `  ${task.activeTools.join(",")}` : "";
 	const replay = task.replayed ? " replayed" : "";
-	const episode = task.episode === null ? "" : ` ep${task.episode}`;
-	return `${task.ordinal} ${task.role} ${formatRoute(task)} ${state} t${task.assistantTurns} ${formatDuration(elapsedMs)}${episode}${replay}`;
+	return `  ${formatRoute(task)}  ${state} ${formatDuration(elapsedMs)}${tools}${replay}`;
 }
 
 export function formatStatus(snapshot: ObserverSnapshot): string {
@@ -162,7 +166,8 @@ export function formatStatus(snapshot: ObserverSnapshot): string {
 export function formatPanel(snapshot: ObserverSnapshot): string[] {
 	const lines = [formatStatus(snapshot)];
 	for (const task of snapshot.tasks) {
-		lines.push(formatTaskLine(task, "live", task.elapsedMs));
+		lines.push(formatTaskAssignment(task));
+		lines.push(formatTaskMeta(task, "live", task.elapsedMs));
 	}
 	const hidden = snapshot.admittedTasks - snapshot.tasks.length;
 	if (hidden > 0) lines.push(`+${hidden} more`);

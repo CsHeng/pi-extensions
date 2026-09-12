@@ -221,7 +221,7 @@ export class ContinuationService {
 					const prior = record.requests.find(entry => entry.id === request.episodes?.[index]?.requestId && entry.state === "complete");
 					const route = routes.get(record.handle) ?? prior?.result?.route;
 					return { id: record.handle, role: record.task.role, episode: prior?.episode ?? record.episode + 1,
-						replayed: !!prior, ...(route ? { route } : {}) };
+						replayed: !!prior, objective: record.task.objective, ...(route ? { route } : {}) };
 				}),
 				() => clock.valid ? clock.elapsed() : null, this.dependencies.onObserver, () => ++this.observerRevision);
 			this.observer.begin();
