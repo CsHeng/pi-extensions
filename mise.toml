@@ -1,0 +1,3 @@
+[tasks.publish-local-package]
+description = "Sync package.json, config/, and extensions/ into the local Pi package snapshot"
+run = "bash scripts/publish-local-package.sh"

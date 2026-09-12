@@ -19,12 +19,24 @@ The package exposes eight maintained extensions: `plan-mode` as a reversible loo
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
 - `.agents/skills/evaluate-subagent-runs/`: maintainer-only read-only evaluator, excluded from the npm package
 - `tests/`: deterministic, fake-Pi, subprocess, filesystem, evaluator, and disposable-Git tests
-- `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes
+- `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes, plus the local package snapshot publisher
+- `mise.toml`: `publish-local-package` task for the local Pi package snapshot
 - `docs/architecture/`: stable product and maintenance truth
 - `docs/evaluations/`: bounded retained evidence, not a second truth owner
 - `docs/plans/`: stage artifacts and migration history, not runtime input
 - `docs/.ignore`: default search boundary that excludes stage history without affecting Git tracking
 - `contracts/markdown-prose.toml`: exact immutable prose-format exceptions for retained historical artifacts
+
+## Local Package Snapshot
+
+This checkout is authored source. Daily Pi must load a copied local Pi package, not this working tree and not `~/.pi/agent/extensions/`.
+
+- Pi `packages` local paths load a directory without copying. Pointing user settings at this checkout applies dirty edits on every new process or reload.
+- `~/.pi/agent/extensions/` is auto-discovery for loose `*.ts` files and `*/index.ts` trees. It is not this package's install location. `rsync --delete` there would remove unrelated files, and subagents resolves packaged routes as `../../config/csheng-subagents.json` from the extension file, so an extensions-only dump breaks the package baseline.
+- Publish with `mise run publish-local-package`. The task runs `scripts/publish-local-package.sh` and rsyncs `package.json`, `config/`, and `extensions/` into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/packages/csheng-pi-extensions`.
+- The publisher is bash plus a mise task because the copy is short linear rsync orchestration, this repository already owns bash probes, and mise is the local task runner. It does not edit `settings.json`, the user route overlay, provider/model settings, or `~/.pi/agent/extensions/`, and it does not npm-publish.
+- One-time switch: `pi remove` this checkout path from user packages, then `pi install` the snapshot directory. Later publishes only refresh the snapshot; restart Pi to load it. `pi update --extensions` does not update local-path packages.
+- Temporary-load probes keep binding to this checkout. Installed-host probes use a disposable settings file that also points at this checkout; they do not publish the snapshot. Live `--installed` E2E uses the real globally installed package.
 
 ## Boundaries
 
@@ -52,7 +64,7 @@ The package exposes eight maintained extensions: `plan-mode` as a reversible loo
 - Keep probe and evaluator output redacted. Never print raw user settings, route files, model selectors, prompts, task IDs, credentials, environment values, session paths, or external file content.
 - Treat package and user route files as read-only persistent defaults. Never create, edit, or delete either file to satisfy one dispatch; explicit task route failure is typed and has no fallback or retry.
 - Do not add dynamic roles, shell to read-only/legacy children, background missions, durable orchestration ledgers, hidden model fallback, automatic retry, or a Skill-specific runtime contract without a separately approved design.
-- Do not commit, push, publish, deploy, create a remote, install packages globally, create a user route file, or change provider/model settings without explicit authority.
+- Do not commit, push, npm-publish, deploy, create a remote, install packages globally, create a user route file, or change provider/model settings without explicit authority. The local snapshot publisher is `mise run publish-local-package` and still requires that explicit authority; it must not rewrite Pi settings.
 
 ## Validation
 

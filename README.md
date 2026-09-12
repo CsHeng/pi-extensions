@@ -92,6 +92,8 @@ npm ci --ignore-scripts
 npm run check
 ```
 
+Daily Pi should load the local package snapshot at `~/.pi/agent/packages/csheng-pi-extensions`, not this checkout and not `~/.pi/agent/extensions/`. Publish with `mise run publish-local-package`. First-time install is `pi install` of that snapshot after removing the checkout path from user packages. Restart Pi after publishing; `pi update --extensions` does not refresh local-path packages.
+
 Temporary-load and installed-package probes live under `scripts/`. Plan-mode, subagent, and herdr-handoff probes use RPC fixtures without model calls. The small fast-gpt, status-footer, and work-timing boundaries are owned by deterministic unit tests and add no probe commands. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
 The six offline probes bind temporary loading or installed-host package discovery to this checkout; installed-host success does not mean the real installed package was updated. `tests/subagents-cc-tui.test.ts` separately exercises the real installed Pi/CC on and compact TUI through a PTY with a synthetic provider and disposable settings, and `npm run e2e:subagents-ui` runs the deliberate installed-Pi fullscreen close-marker click check from `tests/subagents-ui-tui.e2e.ts`. They explicitly skip when their local PTY prerequisites are absent; see [`docs/architecture/subagents-ui.md`](docs/architecture/subagents-ui.md) for the evidence boundary.
