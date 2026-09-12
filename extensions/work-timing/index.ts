@@ -11,8 +11,6 @@ const STATUS_UPDATE_INTERVAL_MS = 1_000;
 /** Stream events repaint the token counters at most this often between clock ticks. */
 const STATUS_STREAM_PAINT_MS = 150;
 const OUTPUT_CHARS_PER_TOKEN = 4;
-/** Inter-delta gaps longer than this are stream stalls, not generation time. */
-const GENERATION_GAP_LIMIT_MS = 1_000;
 
 export interface WorkTimingEntryData {
 	version: 1 | 2 | 3;
@@ -23,9 +21,9 @@ export interface WorkTimingEntryData {
 	outputTokens: number;
 	/** Request-cumulative input (upstream) tokens; absent before version 3. */
 	inputTokens: number;
-	/** Active streaming time used as the `tok/s` denominator; absent before version 3. */
+	/** Model occupancy used as the `tok/s` denominator; absent before version 3. */
 	generationMs: number;
-	/** Output tokens produced by turns that actually streamed; the `tok/s` numerator. */
+	/** Output tokens produced during model occupancy; the `tok/s` numerator. */
 	streamedOutputTokens: number;
 }
 
@@ -44,9 +42,10 @@ interface TurnTiming {
 	messageChars: number;
 	providerOutputTokens: number;
 	providerInputTokens: number;
-	/** Active streaming time: inter-delta gaps that stayed within the stall limit. */
-	generationMs: number;
-	lastDeltaAt: number | undefined;
+	/** Host-visible start of this model request; retimed to `before_provider_request`. */
+	occupancyStartedAt: number | undefined;
+	/** First pause: assistant output ended or a tool started. */
+	occupancyPausedAt: number | undefined;
 }
 
 interface RequestTiming {
@@ -56,7 +55,6 @@ interface RequestTiming {
 	completedOutputTokens: number;
 	completedInputTokens: number;
 	completedGenerationMs: number;
-	completedStreamedOutputTokens: number;
 	turn: TurnTiming | undefined;
 	ctx: ExtensionContext;
 	lastStatus?: string;
@@ -103,9 +101,9 @@ export function formatTokenCounts(inputTokens: number, outputTokens: number): st
 }
 
 /**
- * Downstream throughput over the streamed generation window, e.g. `720 tok/s`.
- * Community tooling (llama.cpp eval time, Ollama `eval rate`, LM Studio) divides
- * generated tokens by the generation window, not by the whole turn.
+ * Downstream throughput over model occupancy, e.g. `720 tok/s`.
+ * Occupancy is the request-to-output window of each turn, including thinking and
+ * TTFT, and excluding tool execution.
  */
 export function formatTokenRate(outputTokens: number, generationMs: number): string {
 	if (!(outputTokens > 0) || !(generationMs > 0)) return "";
@@ -162,13 +160,16 @@ function turnOutputTokens(turn: TurnTiming): number {
 	return Math.max(turn.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
 }
 
-/**
- * Streamed generation time of one turn. Zero for a usage-only turn and for a turn that
- * delivered its whole content in a single delta: neither exposes a measurable duration,
- * so their tokens stay on the label but out of the `tok/s` numerator.
- */
-function turnGenerationMs(turn: TurnTiming): number {
-	return turn.generationMs;
+function pauseTurnOccupancy(turn: TurnTiming, at: number): void {
+	if (turn.occupancyPausedAt !== undefined || turn.occupancyStartedAt === undefined) return;
+	turn.occupancyPausedAt = Math.max(turn.occupancyStartedAt, at);
+}
+
+/** Request-to-output occupancy of one turn, including thinking and TTFT. */
+function turnOccupancyMs(turn: TurnTiming, at: number): number {
+	if (turn.occupancyStartedAt === undefined) return 0;
+	const end = turn.occupancyPausedAt ?? at;
+	return Math.max(0, end - turn.occupancyStartedAt);
 }
 
 /** Streamed deltas of every output kind, including tool-call arguments. */
@@ -207,15 +208,8 @@ function usageTokenCount(source: unknown, field: "input" | "output"): number {
 	return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
 }
 
-function recordTurnOutput(turn: TurnTiming, event: { type?: unknown; delta?: unknown; partial?: unknown }, message: unknown, at: number): void {
+function recordTurnOutput(turn: TurnTiming, event: { type?: unknown; delta?: unknown; partial?: unknown }, message: unknown): void {
 	const deltaChars = streamedOutputChars(event);
-	if (deltaChars > 0) {
-		if (turn.lastDeltaAt !== undefined) {
-			const gap = at - turn.lastDeltaAt;
-			if (gap > 0 && gap <= GENERATION_GAP_LIMIT_MS) turn.generationMs += gap;
-		}
-		turn.lastDeltaAt = at;
-	}
 	turn.deltaChars += deltaChars;
 	turn.messageChars = Math.max(turn.messageChars, messageOutputChars(message));
 	turn.providerOutputTokens = Math.max(
@@ -255,17 +249,16 @@ export function createWorkTimingExtension(
 			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : request.lastTurnReasoningMs;
 			const currentOutputTokens = turn ? turnOutputTokens(turn) : 0;
 			const currentInputTokens = turn ? turn.providerInputTokens : 0;
-			const currentGenerationMs = turn ? turnGenerationMs(turn) : 0;
+			const currentGenerationMs = turn ? turnOccupancyMs(turn, at) : 0;
+			const outputTokens = request.completedOutputTokens + currentOutputTokens;
 			return {
 				totalMs: Math.max(0, at - request.startedAt),
 				reasoningMs: request.completedReasoningMs + (turn ? turnReasoningMs : 0),
 				turnReasoningMs,
-				outputTokens: request.completedOutputTokens + currentOutputTokens,
+				outputTokens,
 				inputTokens: request.completedInputTokens + currentInputTokens,
 				generationMs: request.completedGenerationMs + currentGenerationMs,
-				streamedOutputTokens:
-					request.completedStreamedOutputTokens +
-					(currentGenerationMs > 0 ? currentOutputTokens : 0),
+				streamedOutputTokens: outputTokens,
 			};
 		};
 
@@ -320,12 +313,11 @@ export function createWorkTimingExtension(
 			const reasoningMs = turnReasoningAt(request.turn, at);
 			request.completedReasoningMs += reasoningMs;
 			request.lastTurnReasoningMs = reasoningMs;
+			pauseTurnOccupancy(request.turn, at);
 			const outputTokens = turnOutputTokens(request.turn);
-			const generationMs = turnGenerationMs(request.turn);
 			request.completedOutputTokens += outputTokens;
 			request.completedInputTokens += request.turn.providerInputTokens;
-			request.completedGenerationMs += generationMs;
-			if (generationMs > 0) request.completedStreamedOutputTokens += outputTokens;
+			request.completedGenerationMs += turnOccupancyMs(request.turn, at);
 			request.turn = undefined;
 		};
 
@@ -356,7 +348,6 @@ export function createWorkTimingExtension(
 					completedOutputTokens: 0,
 					completedInputTokens: 0,
 					completedGenerationMs: 0,
-					completedStreamedOutputTokens: 0,
 					turn: undefined,
 					ctx,
 				};
@@ -375,9 +366,16 @@ export function createWorkTimingExtension(
 				messageChars: 0,
 				providerOutputTokens: 0,
 				providerInputTokens: 0,
-				generationMs: 0,
-				lastDeltaAt: undefined,
+				occupancyStartedAt: now(),
+				occupancyPausedAt: undefined,
 			};
+			paint(now(), true);
+		});
+
+		pi.on("before_provider_request", (_event, ctx) => {
+			if (ctx.mode !== "tui" || !request?.turn) return;
+			if (request.turn.occupancyPausedAt !== undefined) return;
+			request.turn.occupancyStartedAt = now();
 			paint(now(), true);
 		});
 
@@ -395,13 +393,26 @@ export function createWorkTimingExtension(
 					request.turn.activeReasoning.delete(assistantEvent.contentIndex);
 				}
 			}
-			recordTurnOutput(request.turn, assistantEvent, event.message, now());
+			recordTurnOutput(request.turn, assistantEvent, event.message);
 			paintStreamProgress(now());
+		});
+
+		pi.on("message_end", (event, ctx) => {
+			if (ctx.mode !== "tui" || !request?.turn) return;
+			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
+			pauseTurnOccupancy(request.turn, now());
+			paint(now(), true);
+		});
+
+		pi.on("tool_execution_start", (_event, ctx) => {
+			if (ctx.mode !== "tui" || !request?.turn) return;
+			pauseTurnOccupancy(request.turn, now());
+			paint(now(), true);
 		});
 
 		pi.on("turn_end", (event, ctx) => {
 			if (ctx.mode !== "tui" || !request) return;
-			if (request.turn) recordTurnOutput(request.turn, {}, event.message, now());
+			if (request.turn) recordTurnOutput(request.turn, {}, event.message);
 			finishTurn(now());
 			paint(now(), true);
 		});
