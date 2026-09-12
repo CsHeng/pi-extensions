@@ -273,8 +273,8 @@ export function createWorkTimingExtension(
 			};
 		};
 
-		// Time fields render from the last clock sample, so every duration on the label
-		// advances in the same frame; token fields always come from the live counters.
+		// The slow lane samples durations; the stream lane refreshes tokens/rate.
+		// Both publish through the same formatter and working-message writer.
 		let clock: Pick<TimingSnapshot, "totalMs" | "reasoningMs" | "turnReasoningMs"> | undefined;
 
 		const sampleClock = (at: number): void => {

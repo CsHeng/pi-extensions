@@ -378,7 +378,7 @@ test("samples the clock on a one-second tick", async () => {
 	assert.equal(scheduler.intervalMs, 1_000);
 });
 
-test("repaints streamed tokens between clock ticks without moving the clock", async () => {
+test("stream and clock lanes publish the same complete line at different cadences", async () => {
 	let now = 0;
 	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
@@ -407,12 +407,17 @@ test("repaints streamed tokens between clock ticks without moving the clock", as
 		message: { content: [{ type: "text", text: "x".repeat(400) + "y".repeat(400) }] },
 		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400) },
 	}, ctx);
-	// Tokens and rate advance while the clock stays on the last whole-second sample.
 	assert.equal(workingMessages.at(-1), "Working... 1s • ↓ 200 tokens • R 0s / ΣR 0s • 1,333 tok/s");
 
 	now = 2_000;
 	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 2s • ↓ 200 tokens • R 0s / ΣR 0s • 211 tok/s");
+	// Neither lane may publish a shortened, competing Working... template.
+	for (const line of workingMessages) assert.match(line!, /^Working\.\.\. .* • R .* \/ ΣR /);
+
+	const paintCount = workingMessages.length;
+	scheduler.callback?.();
+	assert.equal(workingMessages.length, paintCount, "unchanged snapshots do not repaint");
 });
 
 test("excludes usage-only turns from tok/s", async () => {
