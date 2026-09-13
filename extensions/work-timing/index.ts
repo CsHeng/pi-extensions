@@ -10,6 +10,8 @@ const WORK_TIMING_VERSION = 3;
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
 const LOADER_PADDING_X = 1;
+/** The spinner frame plus its trailing space prefix the first line of the label. */
+const SPINNER_WIDTH = 2;
 
 /** Same width source pi-tui's ProcessTerminal uses, so folds match host rendering exactly. */
 function defaultColumns(): number {
@@ -23,21 +25,24 @@ function defaultOnResize(listener: () => void): () => void {
 
 /**
  * Fold a ` • `-separated label onto multiple lines, breaking only at field
- * boundaries. Fields that alone exceed the width pass through unchanged; the
- * host's word wrap (or wrapTextWithAnsi for entry rows) handles those.
+ * boundaries. `firstLineExtra` reserves columns taken on the first line only
+ * (the spinner prefix). Fields that alone exceed the width pass through
+ * unchanged; the host's word wrap (or wrapTextWithAnsi for entry rows) handles those.
  */
-export function foldStatusLine(status: string, width: number): string {
+export function foldStatusLine(status: string, width: number, firstLineExtra = 0): string {
 	if (width <= 0) return status;
-	if (visibleWidth(status) <= width) return status;
+	let budget = Math.max(1, width - firstLineExtra);
+	if (visibleWidth(status) <= budget) return status;
 	const lines: string[] = [];
 	let current = "";
 	for (const field of status.split(" • ")) {
 		const candidate = current ? `${current} • ${field}` : field;
-		if (!current || visibleWidth(candidate) <= width) {
+		if (!current || visibleWidth(candidate) <= budget) {
 			current = candidate;
 		} else {
 			lines.push(current);
 			current = field;
+			budget = width;
 		}
 	}
 	if (current) lines.push(current);
@@ -344,7 +349,7 @@ export function createWorkTimingExtension(
 				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
 				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
 			// Fold at field boundaries for narrow terminals; the host word-wraps the rest.
-			const label = foldStatusLine(status, Math.max(1, columns() - LOADER_PADDING_X * 2));
+			const label = foldStatusLine(status, Math.max(1, columns() - LOADER_PADDING_X * 2), SPINNER_WIDTH);
 			if (label === request.lastStatus) return;
 			request.lastStatus = label;
 			request.ctx.ui.setWorkingMessage(label);

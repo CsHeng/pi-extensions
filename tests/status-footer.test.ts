@@ -325,7 +325,7 @@ test("places a lightning mark after thinking when fast-gpt is requested", () => 
 	assert.match(stripAnsi(withoutThinking[0] ?? ""), /^GPT-5\.4 \u26A1 \|/);
 });
 
-test("wraps to two semantic rows when a single line cannot fit", () => {
+test("wraps into semantic rows when a single line cannot fit", () => {
 	const input = {
 		modelName: "Grok 4.6",
 		thinkingLevel: "high",
@@ -362,11 +362,50 @@ test("wraps to two semantic rows when a single line cannot fit", () => {
 	);
 	for (const line of wrapped) assert.ok(visibleWidth(line) <= 100);
 
-	// Below the exact fit, row 2 shrinks traffic but keeps the UUID intact.
+	// Below the exact fit, row 2 wraps further instead of shrinking or dropping fields.
 	const shrunk = renderFooterLines(input, 90, identityTheme);
-	assert.equal(shrunk.length, 2);
+	assert.equal(shrunk.length, 3);
 	for (const line of shrunk) assert.ok(visibleWidth(line) <= 90);
 	assert.ok((stripAnsi(shrunk[1] ?? "")).includes("01a08555-9ee8-72b3-9af1-481c7d4b58e1"));
+	assert.equal(stripAnsi(shrunk[2] ?? ""), "MCP 2/2");
+});
+
+test("keeps every field when wrapping into more rows on very narrow terminals", () => {
+	const lines = renderFooterLines({
+		modelName: "Grok 4.6",
+		thinkingLevel: "high",
+		reasoning: true,
+		provider: "xai",
+		usingSubscription: true,
+		workdir: "/workspace/project",
+		gitBranch: "main",
+		mcp: { enabled: 2, all: 2 },
+		contextTokens: 229_000,
+		contextWindow: 500_000,
+		contextPercent: 45.9,
+		sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+		usage: {
+			input: 952_000,
+			output: 62_000,
+			cacheRead: 13_000_000,
+			cacheWrite: 0,
+			cost: 8.979,
+			cacheHitPercent: 99.7,
+		},
+	}, 60, identityTheme);
+	assert.ok(lines.length >= 3);
+	const all = lines.map((line) => stripAnsi(line)).join("\n");
+	for (const part of [
+		"Grok 4.6 high (xai sub)",
+		"/workspace/project (main)",
+		"01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+		"↑952k ↓62k R13M CH99.7% $8.979",
+		"229k/500k (45.9%)",
+		"MCP 2/2",
+	]) {
+		assert.ok(all.includes(part), part);
+	}
+	for (const line of lines) assert.ok(visibleWidth(line) <= 60);
 });
 
 test("actual footer preserves the UUID whenever it fits alone", () => {

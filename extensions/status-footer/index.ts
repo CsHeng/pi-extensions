@@ -274,40 +274,47 @@ function formatTrafficParts(input: FooterRenderInput): string {
 	return parts.join(" ");
 }
 
-function packSegments(
-	segments: Array<{ text: string; shrink?: boolean; preserve?: boolean }>,
+interface FooterSegment {
+	text: string;
+}
+
+/**
+ * Pack segments onto as many rows as needed. Segments are never dropped: a row
+ * breaks before the first segment that no longer fits, and only a lone segment
+ * wider than the whole row is truncated.
+ */
+function packRows(
+	segments: FooterSegment[],
 	width: number,
 	theme: ThemeLike,
-): string {
+): string[] {
 	const sep = theme.fg("dim", " | ");
 	const ellipsis = theme.fg("dim", "...");
-	const present = segments.filter((segment) => segment.text);
-	const joined = () => present.map((segment) => segment.text).join(sep);
-	if (visibleWidth(joined()) <= width) return joined();
-
-	// Shrink workdir/traffic first, then other optional segments, never the UUID.
-	for (const segment of [...present.filter((item) => item.shrink), ...present.filter((item) => !item.shrink && !item.preserve)]) {
-		const others = present
-			.filter((candidate) => candidate !== segment)
-			.reduce((total, candidate) => total + visibleWidth(candidate.text), 0);
-		const separators = visibleWidth(sep) * Math.max(0, present.length - 1);
-		const budget = width - others - separators;
-		if (budget < 4) {
-			const index = present.indexOf(segment);
-			if (index >= 0) present.splice(index, 1);
-		} else {
-			segment.text = truncateToWidth(segment.text, budget, ellipsis);
+	const sepWidth = visibleWidth(sep);
+	const rows: string[] = [];
+	let row: string[] = [];
+	let rowWidth = 0;
+	for (const segment of segments) {
+		if (!segment.text) continue;
+		let text = segment.text;
+		if (visibleWidth(text) > width) text = truncateToWidth(text, width, ellipsis);
+		const textWidth = visibleWidth(text);
+		if (row.length > 0 && rowWidth + sepWidth + textWidth > width) {
+			rows.push(row.join(sep));
+			row = [];
+			rowWidth = 0;
 		}
-		if (visibleWidth(joined()) <= width) return joined();
+		row.push(text);
+		rowWidth += (row.length > 1 ? sepWidth : 0) + textWidth;
 	}
-
-	return truncateToWidth(joined(), width, ellipsis);
+	if (row.length > 0) rows.push(row.join(sep));
+	return rows;
 }
 
 function buildSegments(
 	input: FooterRenderInput,
 	theme: ThemeLike,
-): Array<{ text: string; shrink?: boolean; preserve?: boolean }> {
+): FooterSegment[] {
 	const model = hexFg(POWERLINE.model, input.modelName || "no-model");
 	const thinkingLabel =
 		input.reasoning && input.thinkingLevel && input.thinkingLevel !== "off"
@@ -336,10 +343,9 @@ function buildSegments(
 			text:
 				hexFg(POWERLINE.path, input.workdir) +
 				(input.gitBranch ? ` ${hexFg(POWERLINE.branch, `(${input.gitBranch})`)}` : ""),
-			shrink: true,
 		},
-		{ text: hexFg(POWERLINE.session, input.sessionId), preserve: true },
-		{ text: formatTrafficParts(input), shrink: true },
+		{ text: hexFg(POWERLINE.session, input.sessionId) },
+		{ text: formatTrafficParts(input) },
 		{ text: theme.fg(contextColor(input.contextPercent), formatContextSegment(input)) },
 		{ text: mcpText },
 	];
@@ -358,13 +364,14 @@ export function renderFooterLines(
 		.filter((segment) => segment.text)
 		.map((segment) => segment.text)
 		.join(sep);
-	if (visibleWidth(joined) <= width) return [packSegments(segments, width, theme)];
+	if (visibleWidth(joined) <= width) return [joined];
 
-	// Too narrow for one line: wrap into two semantic rows instead of dropping
-	// fields. Row 1 keeps identity and location; row 2 keeps the session id and metrics.
+	// Too narrow for one line: wrap into semantic rows instead of dropping
+	// fields. Identity and location come first; the session id and metrics follow
+	// on as many rows as needed.
 	return [
-		packSegments(segments.slice(0, 2), width, theme),
-		packSegments(segments.slice(2), width, theme),
+		...packRows(segments.slice(0, 2), width, theme),
+		...packRows(segments.slice(2), width, theme),
 	];
 }
 

@@ -625,6 +625,8 @@ test("folds labels only at field boundaries", () => {
 	assert.equal(foldStatusLine("A • B • C", 8), "A • B\nC");
 	assert.equal(foldStatusLine("AAAA • B", 2), "AAAA\nB");
 	assert.equal(foldStatusLine("A • B • C", 0), "A • B • C");
+	assert.equal(foldStatusLine("Working... 2s • R 0s / ΣR 0s", 28, 2), "Working... 2s\nR 0s / ΣR 0s");
+	assert.equal(foldStatusLine("Working... 2s • R 0s / ΣR 0s", 30, 2), "Working... 2s • R 0s / ΣR 0s");
 });
 
 test("folds the working label at field boundaries on narrow terminals and on resize", async () => {
