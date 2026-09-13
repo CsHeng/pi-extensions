@@ -304,13 +304,10 @@ function packSegments(
 	return truncateToWidth(joined(), width, ellipsis);
 }
 
-export function renderFooterLines(
+function buildSegments(
 	input: FooterRenderInput,
-	width: number,
 	theme: ThemeLike,
-): string[] {
-	if (width <= 0) return [""];
-
+): Array<{ text: string; shrink?: boolean; preserve?: boolean }> {
 	const model = hexFg(POWERLINE.model, input.modelName || "no-model");
 	const thinkingLabel =
 		input.reasoning && input.thinkingLevel && input.thinkingLevel !== "off"
@@ -334,23 +331,40 @@ export function renderFooterLines(
 			: "";
 
 	return [
-		packSegments(
-			[
-				{ text: identity },
-				{
-					text:
-						hexFg(POWERLINE.path, input.workdir) +
-						(input.gitBranch ? ` ${hexFg(POWERLINE.branch, `(${input.gitBranch})`)}` : ""),
-					shrink: true,
-				},
-				{ text: hexFg(POWERLINE.session, input.sessionId), preserve: true },
-				{ text: formatTrafficParts(input), shrink: true },
-				{ text: theme.fg(contextColor(input.contextPercent), formatContextSegment(input)) },
-				{ text: mcpText },
-			],
-			width,
-			theme,
-		),
+		{ text: identity },
+		{
+			text:
+				hexFg(POWERLINE.path, input.workdir) +
+				(input.gitBranch ? ` ${hexFg(POWERLINE.branch, `(${input.gitBranch})`)}` : ""),
+			shrink: true,
+		},
+		{ text: hexFg(POWERLINE.session, input.sessionId), preserve: true },
+		{ text: formatTrafficParts(input), shrink: true },
+		{ text: theme.fg(contextColor(input.contextPercent), formatContextSegment(input)) },
+		{ text: mcpText },
+	];
+}
+
+export function renderFooterLines(
+	input: FooterRenderInput,
+	width: number,
+	theme: ThemeLike,
+): string[] {
+	if (width <= 0) return [""];
+
+	const segments = buildSegments(input, theme);
+	const sep = theme.fg("dim", " | ");
+	const joined = segments
+		.filter((segment) => segment.text)
+		.map((segment) => segment.text)
+		.join(sep);
+	if (visibleWidth(joined) <= width) return [packSegments(segments, width, theme)];
+
+	// Too narrow for one line: wrap into two semantic rows instead of dropping
+	// fields. Row 1 keeps identity and location; row 2 keeps the session id and metrics.
+	return [
+		packSegments(segments.slice(0, 2), width, theme),
+		packSegments(segments.slice(2), width, theme),
 	];
 }
 

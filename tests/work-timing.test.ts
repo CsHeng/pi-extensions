@@ -7,9 +7,11 @@ import type {
 	ExtensionContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 import {
 	createWorkTimingExtension,
+	foldStatusLine,
 	formatDuration,
 	formatReasoningDuration,
 	formatReasoningShare,
@@ -76,6 +78,10 @@ async function invoke(
 	const handler = pi.handlers.get(eventName);
 	if (!handler) throw new Error(`missing handler ${eventName}`);
 	return handler(event, ctx);
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 test("formats elapsed time with second, minute, and hour carry", () => {
@@ -611,4 +617,99 @@ test("headless modes do not start timers or persist display entries", async () =
 	assert.equal(scheduler.callback, undefined);
 	assert.deepEqual(workingMessages, []);
 	assert.deepEqual(pi.entries, []);
+});
+
+test("folds labels only at field boundaries", () => {
+	assert.equal(foldStatusLine("A • B • C", 20), "A • B • C");
+	assert.equal(foldStatusLine("A • B • C", 9), "A • B • C");
+	assert.equal(foldStatusLine("A • B • C", 8), "A • B\nC");
+	assert.equal(foldStatusLine("AAAA • B", 2), "AAAA\nB");
+	assert.equal(foldStatusLine("A • B • C", 0), "A • B • C");
+});
+
+test("folds the working label at field boundaries on narrow terminals and on resize", async () => {
+	let now = 0;
+	let width = 40;
+	let resizeListener: (() => void) | undefined;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+		columns: () => width,
+		onResize: (listener) => {
+			resizeListener = listener;
+			return () => {
+				resizeListener = undefined;
+			};
+		},
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+
+	await invoke(pi, "before_agent_start", {}, ctx);
+	assert.ok(resizeListener);
+	now = 1_000;
+	await invoke(pi, "turn_start", {}, ctx);
+	now = 2_000;
+	await invoke(pi, "message_update", {
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
+	}, ctx);
+	now = 2_800;
+	await invoke(pi, "message_update", {
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 12_000, output: 3_500 } } },
+	}, ctx);
+	scheduler.callback?.();
+	assert.equal(
+		workingMessages.at(-1),
+		"Working... 2s\n↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s\n4,375 tok/s",
+	);
+
+	width = 120;
+	resizeListener?.();
+	assert.equal(workingMessages.at(-1), "Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s • 4,375 tok/s");
+
+	await invoke(pi, "session_shutdown", { reason: "reload" }, ctx);
+	assert.equal(resizeListener, undefined);
+});
+
+test("folds the settled entry at field boundaries and word-wraps lone over-wide fields", () => {
+	const pi = new FakePi();
+	createWorkTimingExtension()(pi as unknown as ExtensionAPI);
+	const renderer = pi.renderers.get(WORK_TIMING_ENTRY_TYPE);
+	assert.ok(renderer);
+	const theme = { fg: (_tone: string, text: string) => text } as unknown as Theme;
+	const component = renderer(
+		{
+			data: {
+				version: 3,
+				totalMs: 12_000,
+				reasoningMs: 5_400,
+				lastTurnReasoningMs: 1_000,
+				inputTokens: 17_234,
+				outputTokens: 4_321,
+				generationMs: 16_000,
+				streamedOutputTokens: 11_520,
+			},
+		} as never,
+		{ expanded: false },
+		theme,
+	);
+	assert.ok(component);
+
+	const folded = component.render(40).map((line) => stripAnsi(line).trim());
+	assert.deepEqual(folded, [
+		"Worked for 12s",
+		"↑ 17,234 ↓ 4,321 tokens • ΣR 5s (45%)",
+		"720 tok/s",
+	]);
+	for (const line of component.render(40)) assert.ok(visibleWidth(line) <= 40);
+
+	const narrow = component.render(10);
+	assert.ok(narrow.length > folded.length);
+	for (const line of narrow) assert.ok(visibleWidth(line) <= 10);
+	const joined = narrow.map((line) => stripAnsi(line).trim()).join(" ");
+	assert.ok(joined.includes("Worked for"));
+	assert.ok(joined.includes("720 tok/s"));
 });

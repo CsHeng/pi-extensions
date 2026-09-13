@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
 const WORK_TIMING_VERSION = 3;
@@ -9,6 +9,40 @@ const WORK_TIMING_VERSION = 3;
  */
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
+const LOADER_PADDING_X = 1;
+
+/** Same width source pi-tui's ProcessTerminal uses, so folds match host rendering exactly. */
+function defaultColumns(): number {
+	return process.stdout.columns || Number(process.env.COLUMNS) || 80;
+}
+
+function defaultOnResize(listener: () => void): () => void {
+	process.stdout.on("resize", listener);
+	return () => process.stdout.removeListener("resize", listener);
+}
+
+/**
+ * Fold a ` • `-separated label onto multiple lines, breaking only at field
+ * boundaries. Fields that alone exceed the width pass through unchanged; the
+ * host's word wrap (or wrapTextWithAnsi for entry rows) handles those.
+ */
+export function foldStatusLine(status: string, width: number): string {
+	if (width <= 0) return status;
+	if (visibleWidth(status) <= width) return status;
+	const lines: string[] = [];
+	let current = "";
+	for (const field of status.split(" • ")) {
+		const candidate = current ? `${current} • ${field}` : field;
+		if (!current || visibleWidth(candidate) <= width) {
+			current = candidate;
+		} else {
+			lines.push(current);
+			current = field;
+		}
+	}
+	if (current) lines.push(current);
+	return lines.join("\n");
+}
 
 export interface WorkTimingEntryData {
 	version: 1 | 2 | 3;
@@ -29,6 +63,10 @@ interface WorkTimingDependencies {
 	now?: () => number;
 	setInterval?: (callback: () => void, intervalMs: number) => unknown;
 	clearInterval?: (handle: unknown) => void;
+	/** Reports the host render width in columns; defaults to pi-tui's terminal width source. */
+	columns?: () => number;
+	/** Subscribes a terminal-resize listener; the returned function unsubscribes. */
+	onResize?: (listener: () => void) => () => void;
 }
 
 interface TurnTiming {
@@ -91,12 +129,18 @@ export function formatTokens(count: number): string {
 	return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(count)));
 }
 
-/** `↑ input ↓ output tokens`, omitting whichever side the provider has not reported. */
-export function formatTokenCounts(inputTokens: number, outputTokens: number): string {
+/** `↑ input ↓ output tokens` as one field, omitting whichever side is unreported. */
+export function tokenCountFields(inputTokens: number, outputTokens: number): string[] {
 	const parts: string[] = [];
 	if (inputTokens > 0) parts.push(`↑ ${formatTokens(inputTokens)}`);
 	if (outputTokens > 0) parts.push(`↓ ${formatTokens(outputTokens)}`);
-	return parts.length === 0 ? "" : ` • ${parts.join(" ")} tokens`;
+	return parts.length === 0 ? [] : [`${parts.join(" ")} tokens`];
+}
+
+/** ` • ↑ input ↓ output tokens`, omitting whichever side the provider has not reported. */
+export function formatTokenCounts(inputTokens: number, outputTokens: number): string {
+	const fields = tokenCountFields(inputTokens, outputTokens);
+	return fields.length === 0 ? "" : ` • ${fields[0]}`;
 }
 
 /**
@@ -238,10 +282,13 @@ export function createWorkTimingExtension(
 	const now = dependencies.now ?? (() => performance.now());
 	const schedule = dependencies.setInterval ?? defaultSetInterval;
 	const cancel = dependencies.clearInterval ?? defaultClearInterval;
+	const columns = dependencies.columns ?? defaultColumns;
+	const onResize = dependencies.onResize ?? defaultOnResize;
 
 	return (pi: ExtensionAPI): void => {
 		let request: RequestTiming | undefined;
 		let intervalHandle: unknown;
+		let unsubscribeResize: (() => void) | undefined;
 
 		const turnReasoningAt = (turn: TurnTiming, at: number): number => {
 			let total = turn.completedReasoningMs;
@@ -296,9 +343,11 @@ export function createWorkTimingExtension(
 				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
 				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
 				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
-			if (status === request.lastStatus) return;
-			request.lastStatus = status;
-			request.ctx.ui.setWorkingMessage(status);
+			// Fold at field boundaries for narrow terminals; the host word-wraps the rest.
+			const label = foldStatusLine(status, Math.max(1, columns() - LOADER_PADDING_X * 2));
+			if (label === request.lastStatus) return;
+			request.lastStatus = label;
+			request.ctx.ui.setWorkingMessage(label);
 		};
 
 		const stopInterval = (): void => {
@@ -333,19 +382,37 @@ export function createWorkTimingExtension(
 				const data = normalizeEntryData(entry.data);
 				const share = formatReasoningShare(data.reasoningMs, data.totalMs);
 				// Settled summary: request-cumulative values only (turn detail stays in the live label).
-				const text = theme.fg(
-					"muted",
-					`Worked for ${formatDuration(data.totalMs)}` +
-					formatTokenCounts(data.inputTokens, data.outputTokens) +
-					` • ΣR ${formatReasoningDuration(data.reasoningMs)} (${share})` +
-					rateSuffix(data.streamedOutputTokens, data.generationMs),
-				);
-				return new Text(text, 1, 0);
+				const rate = formatTokenRate(data.streamedOutputTokens, data.generationMs);
+				const fields = [
+					`Worked for ${formatDuration(data.totalMs)}`,
+					...tokenCountFields(data.inputTokens, data.outputTokens),
+					`ΣR ${formatReasoningDuration(data.reasoningMs)} (${share})`,
+					...(rate ? [rate] : []),
+				];
+				const text = fields.join(" • ");
+				return {
+					render(width: number): string[] {
+						// Fold at field boundaries; a lone over-wide field falls back to word wrap.
+						const limit = Math.max(1, width - LOADER_PADDING_X * 2);
+						const rows = foldStatusLine(text, limit)
+							.split("\n")
+							.flatMap((row) => (visibleWidth(row) > limit ? wrapTextWithAnsi(row, limit) : [row]));
+						return rows.map((row) => {
+							const padding = " ".repeat(Math.max(0, width - visibleWidth(row)));
+							return theme.fg("muted", row) + padding;
+						});
+					},
+					invalidate(): void {},
+				};
 			},
 		);
 
 		pi.on("before_agent_start", (_event, ctx) => {
 			if (ctx.mode !== "tui") return;
+			if (!unsubscribeResize) {
+				// Display-only refresh: realigns the fold with the new width immediately.
+				unsubscribeResize = onResize(() => paint(now(), false));
+			}
 			if (!request) {
 				request = {
 					startedAt: now(),
@@ -442,6 +509,8 @@ export function createWorkTimingExtension(
 
 		pi.on("session_shutdown", () => {
 			stopInterval();
+			unsubscribeResize?.();
+			unsubscribeResize = undefined;
 			request = undefined;
 		});
 	};
