@@ -378,9 +378,12 @@ function modelName(model: ExtensionContext["model"]): string {
 	return model.id;
 }
 
-function isUsingSubscription(ctx: ExtensionContext, model: ExtensionContext["model"]): boolean {
+/** Providers whose API keys are coding-plan subscriptions rather than metered billing. */
+const API_KEY_SUBSCRIPTION_PROVIDERS = new Set(["kimi-coding", "zai-coding-cn"]);
+
+export function isUsingSubscription(ctx: ExtensionContext, model: ExtensionContext["model"]): boolean {
 	if (!model) return false;
-	if (model.provider === "kimi-coding") return true;
+	if (API_KEY_SUBSCRIPTION_PROVIDERS.has(model.provider)) return true;
 	if (!ctx.modelRegistry.isUsingOAuth(model)) return false;
 	if (ctx.modelRegistry.getProvider(model.provider)?.auth?.oauth?.isSubscription === true) return true;
 	// xAI browser/OAuth login is SuperGrok or X Premium even if a wrapped provider omits the flag.

@@ -14,6 +14,7 @@ import statusFooter, {
 	collectUsageTotals,
 	formatTokens,
 	formatWorkdir,
+	isUsingSubscription,
 	parseMcpCounts,
 	renderFooterLines,
 } from "../extensions/status-footer/index.ts";
@@ -410,6 +411,25 @@ test("keeps every field when wrapping into more rows on very narrow terminals", 
 		assert.ok(all.includes(part), part);
 	}
 	for (const line of lines) assert.ok(visibleWidth(line) <= 60);
+});
+
+test("classifies coding-plan api-key providers as subscriptions", () => {
+	const ctx = {
+		modelRegistry: { isUsingOAuth: () => false, getProvider: () => undefined },
+	} as unknown as ExtensionContext;
+	assert.equal(isUsingSubscription(ctx, { provider: "zai-coding-cn" } as ExtensionContext["model"]), true);
+	assert.equal(isUsingSubscription(ctx, { provider: "kimi-coding" } as ExtensionContext["model"]), true);
+	assert.equal(isUsingSubscription(ctx, { provider: "deepseek" } as ExtensionContext["model"]), false);
+	// OAuth providers keep the registry-flag path.
+	const oauthCtx = {
+		modelRegistry: {
+			isUsingOAuth: () => true,
+			getProvider: (id: string) =>
+				id === "openai-codex" ? { auth: { oauth: { isSubscription: true } } } : undefined,
+		},
+	} as unknown as ExtensionContext;
+	assert.equal(isUsingSubscription(oauthCtx, { provider: "openai-codex" } as ExtensionContext["model"]), true);
+	assert.equal(isUsingSubscription(oauthCtx, { provider: "shanqu" } as ExtensionContext["model"]), false);
 });
 
 test("actual footer preserves the UUID whenever it fits alone", () => {
