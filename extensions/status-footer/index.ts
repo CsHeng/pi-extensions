@@ -366,13 +366,10 @@ export function renderFooterLines(
 		.join(sep);
 	if (visibleWidth(joined) <= width) return [joined];
 
-	// Too narrow for one line: wrap into semantic rows instead of dropping
-	// fields. Identity and location come first; the session id and metrics follow
-	// on as many rows as needed.
-	return [
-		...packRows(segments.slice(0, 2), width, theme),
-		...packRows(segments.slice(2), width, theme),
-	];
+	// Too narrow for one line: wrap field by field — each field flows onto the
+	// next row only when it no longer fits the remaining whitespace; no field
+	// is ever dropped.
+	return packRows(segments, width, theme);
 }
 
 function modelName(model: ExtensionContext["model"]): string {

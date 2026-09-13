@@ -325,7 +325,7 @@ test("places a lightning mark after thinking when fast-gpt is requested", () => 
 	assert.match(stripAnsi(withoutThinking[0] ?? ""), /^GPT-5\.4 \u26A1 \|/);
 });
 
-test("wraps into semantic rows when a single line cannot fit", () => {
+test("wraps field by field when a single line cannot fit", () => {
 	const input = {
 		modelName: "Grok 4.6",
 		thinkingLevel: "high",
@@ -355,19 +355,23 @@ test("wraps into semantic rows when a single line cannot fit", () => {
 	const wrapped = renderFooterLines(input, 100, identityTheme);
 	assert.equal(wrapped.length, 2);
 	const [row1 = "", row2 = ""] = wrapped.map((line) => stripAnsi(line));
-	assert.equal(row1, "Grok 4.6 high (xai sub) | /workspace/project (main)");
+	// The session id flows up into row 1's remaining whitespace (flat greedy fill).
+	assert.equal(
+		row1,
+		"Grok 4.6 high (xai sub) | /workspace/project (main) | 01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+	);
 	assert.equal(
 		row2,
-		"01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑952k ↓62k R13M CH99.7% $8.979 | 229k/500k (45.9%) | MCP 2/2",
+		"↑952k ↓62k R13M CH99.7% $8.979 | 229k/500k (45.9%) | MCP 2/2",
 	);
 	for (const line of wrapped) assert.ok(visibleWidth(line) <= 100);
 
-	// Below the exact fit, row 2 wraps further instead of shrinking or dropping fields.
-	const shrunk = renderFooterLines(input, 90, identityTheme);
+	// Below that fit, the uuid wraps to its own row and metrics follow on the next.
+	const shrunk = renderFooterLines(input, 88, identityTheme);
 	assert.equal(shrunk.length, 3);
-	for (const line of shrunk) assert.ok(visibleWidth(line) <= 90);
+	for (const line of shrunk) assert.ok(visibleWidth(line) <= 88);
 	assert.ok((stripAnsi(shrunk[1] ?? "")).includes("01a08555-9ee8-72b3-9af1-481c7d4b58e1"));
-	assert.equal(stripAnsi(shrunk[2] ?? ""), "MCP 2/2");
+	assert.equal(stripAnsi(shrunk[2] ?? ""), "229k/500k (45.9%) | MCP 2/2");
 });
 
 test("keeps every field when wrapping into more rows on very narrow terminals", () => {
