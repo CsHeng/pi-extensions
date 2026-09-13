@@ -9,9 +9,14 @@ const WORK_TIMING_VERSION = 3;
  */
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
-const LOADER_PADDING_X = 1;
-/** The spinner frame plus its trailing space prefix the first line of the label. */
-const SPINNER_WIDTH = 2;
+/** Entry rows mirror the host Text component's one-column side padding. */
+const TEXT_PADDING_X = 1;
+/**
+ * Chrome the fullscreen working row reserves around the message: the `─ ` rule
+ * prefix, the two spinner columns, a separating space, and the minimum dash
+ * fill. The live label compacts to what remains of the terminal width.
+ */
+const WORKING_ROW_CHROME = 8;
 
 /** Same width source pi-tui's ProcessTerminal uses, so folds match host rendering exactly. */
 function defaultColumns(): number {
@@ -25,13 +30,12 @@ function defaultOnResize(listener: () => void): () => void {
 
 /**
  * Fold a ` • `-separated label onto multiple lines, breaking only at field
- * boundaries. `firstLineExtra` reserves columns taken on the first line only
- * (the spinner prefix). Fields that alone exceed the width pass through
- * unchanged; the host's word wrap (or wrapTextWithAnsi for entry rows) handles those.
+ * boundaries. Fields that alone exceed the width pass through unchanged; the
+ * host's word wrap (or wrapTextWithAnsi for entry rows) handles those.
  */
-export function foldStatusLine(status: string, width: number, firstLineExtra = 0): string {
+export function foldStatusLine(status: string, width: number): string {
 	if (width <= 0) return status;
-	let budget = Math.max(1, width - firstLineExtra);
+	const budget = Math.max(1, width);
 	if (visibleWidth(status) <= budget) return status;
 	const lines: string[] = [];
 	let current = "";
@@ -42,11 +46,51 @@ export function foldStatusLine(status: string, width: number, firstLineExtra = 0
 		} else {
 			lines.push(current);
 			current = field;
-			budget = width;
 		}
 	}
 	if (current) lines.push(current);
 	return lines.join("\n");
+}
+
+const FIELD_SEPARATOR_WIDTH = 3;
+
+/**
+ * Compact the live label to ONE line for the host's single-line working row
+ * (fullscreen renders only the first line of a multi-line or over-wide
+ * message). Fields keep their order; the `R x / ΣR y` structure is always
+ * kept; fields that no longer fit are omitted whole rather than truncated
+ * mid-field — matching the zero-state label, which omits tokens and rate
+ * until they exist.
+ */
+export function compactStatusLabel(status: string, width: number): string {
+	if (width <= 0) return status;
+	const budget = Math.max(1, width);
+	if (visibleWidth(status) <= budget) return status;
+	const fields = status.split(" • ");
+	const coreIndex = fields.findIndex((field) => /^R .* \/ ΣR /.test(field));
+	if (coreIndex < 0) return status;
+	const head = fields[0]!;
+	const core = fields[coreIndex]!;
+	const kept: string[] = [head];
+	let current = visibleWidth(head);
+	for (let index = 1; index < fields.length; index += 1) {
+		const field = fields[index]!;
+		const candidate = current + FIELD_SEPARATOR_WIDTH + visibleWidth(field);
+		if (index === coreIndex) {
+			kept.push(field);
+			current = candidate;
+		} else if (index < coreIndex) {
+			// Before the core: keep the optional field only while the core still fits after it.
+			if (candidate + FIELD_SEPARATOR_WIDTH + visibleWidth(core) <= budget) {
+				kept.push(field);
+				current = candidate + FIELD_SEPARATOR_WIDTH + visibleWidth(core);
+			}
+		} else if (candidate <= budget) {
+			kept.push(field);
+			current = candidate;
+		}
+	}
+	return kept.join(" • ");
 }
 
 export interface WorkTimingEntryData {
@@ -348,8 +392,8 @@ export function createWorkTimingExtension(
 				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
 				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
 				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
-			// Fold at field boundaries for narrow terminals; the host word-wraps the rest.
-			const label = foldStatusLine(status, Math.max(1, columns() - LOADER_PADDING_X * 2), SPINNER_WIDTH);
+			// Compact to the host's single-line working row; fields that cannot fit are omitted.
+			const label = compactStatusLabel(status, Math.max(1, columns() - WORKING_ROW_CHROME));
 			if (label === request.lastStatus) return;
 			request.lastStatus = label;
 			request.ctx.ui.setWorkingMessage(label);
@@ -398,7 +442,7 @@ export function createWorkTimingExtension(
 				return {
 					render(width: number): string[] {
 						// Fold at field boundaries; a lone over-wide field falls back to word wrap.
-						const limit = Math.max(1, width - LOADER_PADDING_X * 2);
+						const limit = Math.max(1, width - TEXT_PADDING_X * 2);
 						const rows = foldStatusLine(text, limit)
 							.split("\n")
 							.flatMap((row) => (visibleWidth(row) > limit ? wrapTextWithAnsi(row, limit) : [row]));

@@ -10,6 +10,7 @@ import type {
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import {
+	compactStatusLabel,
 	createWorkTimingExtension,
 	foldStatusLine,
 	formatDuration,
@@ -625,11 +626,22 @@ test("folds labels only at field boundaries", () => {
 	assert.equal(foldStatusLine("A • B • C", 8), "A • B\nC");
 	assert.equal(foldStatusLine("AAAA • B", 2), "AAAA\nB");
 	assert.equal(foldStatusLine("A • B • C", 0), "A • B • C");
-	assert.equal(foldStatusLine("Working... 2s • R 0s / ΣR 0s", 28, 2), "Working... 2s\nR 0s / ΣR 0s");
-	assert.equal(foldStatusLine("Working... 2s • R 0s / ΣR 0s", 30, 2), "Working... 2s • R 0s / ΣR 0s");
 });
 
-test("folds the working label at field boundaries on narrow terminals and on resize", async () => {
+test("compacts the working label to the single-line row", () => {
+	const label = "Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s • 4,375 tok/s";
+	assert.equal(compactStatusLabel(label, 80), label);
+	assert.equal(compactStatusLabel(label, 41), "Working... 2s • R 0s / ΣR 0s");
+	// Rate fits after the protected core even when tokens do not.
+	assert.equal(compactStatusLabel(label, 44), "Working... 2s • R 0s / ΣR 0s • 4,375 tok/s");
+	// Tokens return before the core once the row allows them.
+	assert.equal(
+		compactStatusLabel(label, 62),
+		"Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s",
+	);
+});
+
+test("compacts the working label on narrow terminals and on resize", async () => {
 	let now = 0;
 	let width = 40;
 	let resizeListener: (() => void) | undefined;
@@ -663,10 +675,7 @@ test("folds the working label at field boundaries on narrow terminals and on res
 		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 12_000, output: 3_500 } } },
 	}, ctx);
 	scheduler.callback?.();
-	assert.equal(
-		workingMessages.at(-1),
-		"Working... 2s\n↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s\n4,375 tok/s",
-	);
+	assert.equal(workingMessages.at(-1), "Working... 2s • R 0s / ΣR 0s");
 
 	width = 120;
 	resizeListener?.();
