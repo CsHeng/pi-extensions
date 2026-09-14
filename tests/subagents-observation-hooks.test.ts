@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SUBAGENT_TOOL_NAME, type RunTelemetry } from "../extensions/subagents/contracts.ts";
+import type { RunTelemetry } from "../extensions/subagents/contracts.ts";
 import { registerObservationHooks } from "../extensions/subagents/observation-hooks.ts";
 import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
 import { isLocalTiming } from "../extensions/subagents/telemetry.ts";
@@ -92,9 +92,10 @@ test("missing thinking start and a lost compaction usage marker cannot look comp
 });
 
 test("retired one-shot tool name does not create live parent delegation observations", () => {
+	const retiredTool = "csheng_subagents";
 	const f = harness();
-	f.pi.setTools([SUBAGENT_TOOL_NAME]);
-	f.emit("before_agent_start"); f.emit("tool_execution_start", tool(SUBAGENT_TOOL_NAME)); f.emit("tool_execution_end", tool(SUBAGENT_TOOL_NAME)); f.emit("agent_settled");
+	f.pi.setTools([retiredTool]);
+	f.emit("before_agent_start"); f.emit("tool_execution_start", tool(retiredTool)); f.emit("tool_execution_end", tool(retiredTool)); f.emit("agent_settled");
 	assert.equal(f.customs.length, 0);
 });
 

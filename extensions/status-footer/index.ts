@@ -129,32 +129,6 @@ export function formatWorkdir(cwd: string, home: string | undefined = homedir())
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
-export function pinRight(
-	left: string,
-	right: string,
-	width: number,
-	style: (text: string) => string = (text) => text,
-): string {
-	if (width <= 0) return "";
-	const ellipsis = style("...");
-	if (!left) return truncateToWidth(right, width, ellipsis);
-	const sep = style(" | ");
-	const rightWidth = visibleWidth(right);
-	const sepWidth = visibleWidth(sep);
-	if (rightWidth >= width) return truncateToWidth(right, width, ellipsis);
-	if (sepWidth + rightWidth >= width) return truncateToWidth(right, width, ellipsis);
-	return truncateToWidth(left, width - sepWidth - rightWidth, ellipsis) + sep + right;
-}
-
-export function addSessionIdToFooterLine(
-	line: string,
-	sessionId: string,
-	width: number,
-	style: (text: string) => string = (text) => text,
-): string {
-	return pinRight(line, sessionId, width, style);
-}
-
 export function collectUsageTotals(entries: readonly unknown[]): UsageSnapshot {
 	const usage: UsageSnapshot = {
 		input: 0,

@@ -13,7 +13,6 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import { SUBAGENT_TOOL_NAME } from "../extensions/subagents/contracts.ts";
 import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
@@ -66,7 +65,7 @@ test("Pi host result interception maps managed session status to transport error
 test("Pi host result interception ignores other tools, the retired one-shot name, and malformed details", async (t) => {
 	const runner = await extensionRunner(t);
 	assert.equal(await runner.emitToolResult({ ...event("failed"), toolName: "other_tool" }), undefined);
-	assert.equal(await runner.emitToolResult(event("failed", SUBAGENT_TOOL_NAME, managedResult("failed"))), undefined);
+	assert.equal(await runner.emitToolResult(event("failed", "csheng_subagents", managedResult("failed"))), undefined);
 	assert.equal(await runner.emitToolResult({ ...event("failed"), details: { status: "failed" } }), undefined);
 });
 

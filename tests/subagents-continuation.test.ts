@@ -13,7 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { runChild } from "../extensions/subagents/runner.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
-import { validateGraph } from "../extensions/subagents/graph.ts";
+import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 
 import { ManagedError, MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
@@ -36,7 +36,7 @@ test("real native worker reopens one history and edits the same state with host 
 	const cwd = join(base, "source"); const scratch = join(base, "scratch");
 	await mkdir(cwd); await mkdir(scratch);
 	const path = join(base, "native.jsonl"); await writeFile(path, "", { mode: 0o600 });
-	const graph = validateGraph({ tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] }] });
+	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] }] });
 	if (!graph.ok) throw new Error("fixture");
 	for (const count of [1, 2, 3]) {
 		const result = await runChild({
@@ -107,7 +107,7 @@ async function serviceFixture(t: test.TestContext) {
 test("explicit close releases a slot and retained-history warnings do not block new work", async (t) => {
 	const f = await serviceFixture(t);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
-	const graph = validateGraph({ tasks: Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ id: `scan-${index}`, role: "explorer", objective: "scan", scope: ["."] })) });
+	const graph = validateGraphStructure({ tasks: Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ id: `scan-${index}`, role: "explorer", objective: "scan", scope: ["."] })) });
 	if (!graph.ok) throw new Error("fixture");
 	const records = (await f.store.allocate(owner, "slots", graph.tasks)).records;
 	await assert.rejects(f.store.allocate(owner, "overflow", [graph.tasks[0]!]), /session_limit/);

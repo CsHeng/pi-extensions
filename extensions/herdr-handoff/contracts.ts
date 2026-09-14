@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 
 export const HANDOFF_TOOL_NAME = "herdr_handoff";
 export const HANDOFF_STATUS_COMMAND = "herdr-handoff";
@@ -46,7 +46,6 @@ export const HARD_LIMITS = Object.freeze({
 export const HANDOFF_ACTIONS = ["begin", "continue", "wait", "cancel"] as const;
 export const HANDOFF_MODES = ["delegate-return", "transfer"] as const;
 export const TARGET_TYPES = ["message-existing", "start-and-ask"] as const;
-export const PLAN_SOURCES = ["inline", "file"] as const;
 export const CONTINUE_INTENTS = ["clarification", "repair"] as const;
 export const HANDOFF_STATES = [
 	"new",
@@ -133,9 +132,6 @@ export const HANDOFF_ERROR_CODES = [
 
 export type HandoffAction = (typeof HANDOFF_ACTIONS)[number];
 export type HandoffMode = (typeof HANDOFF_MODES)[number];
-export type TargetType = (typeof TARGET_TYPES)[number];
-export type PlanSource = (typeof PLAN_SOURCES)[number];
-export type ContinueIntent = (typeof CONTINUE_INTENTS)[number];
 export type HandoffState = (typeof HANDOFF_STATES)[number];
 export type HandoffEvent = (typeof HANDOFF_EVENTS)[number];
 export type BridgeStatus = (typeof BRIDGE_STATUSES)[number];
@@ -145,6 +141,52 @@ export type CheckoutKind = (typeof CHECKOUT_KINDS)[number];
 export type RouteEvidence = (typeof ROUTE_EVIDENCE)[number];
 export type LifecycleState = (typeof LIFECYCLE_STATES)[number];
 export type HandoffErrorCode = (typeof HANDOFF_ERROR_CODES)[number];
+
+/** One owner for the code-to-message mapping; the Record type forces every code to have a message. */
+const HANDOFF_ERROR_MESSAGES: Record<HandoffErrorCode, string> = {
+	herdr_environment_required: "Herdr environment is required.",
+	herdr_cli_unavailable: "Herdr CLI is unavailable.",
+	herdr_cli_incompatible: "Herdr CLI is incompatible.",
+	herdr_protocol_error: "Herdr CLI protocol is invalid.",
+	handoff_active: "A handoff is already active.",
+	invalid_handoff_request: "Handoff request is invalid.",
+	plan_outside_repository: "Plan file is outside the repository.",
+	plan_too_large: "Canonical plan exceeds the size ceiling.",
+	invalid_write_path: "Write path is invalid.",
+	launch_config_invalid: "Launch configuration is invalid.",
+	launch_profile_not_found: "Launch profile was not found.",
+	agent_start_failed: "Agent start failed.",
+	agent_not_ready: "Agent is not ready.",
+	agent_auth_blocked: "Agent authentication is blocked.",
+	agent_not_found: "Agent was not found.",
+	agent_kind_mismatch: "Agent kind does not match.",
+	agent_busy: "Agent is busy.",
+	agent_blocked: "Agent is blocked.",
+	agent_unknown: "Agent state is unknown.",
+	self_target_rejected: "Caller pane cannot be the recipient.",
+	stale_handle: "Handoff handle is stale.",
+	workspace_not_git: "Workspace is not a Git checkout.",
+	workspace_mismatch: "Workspace does not match the trusted repository.",
+	workspace_dirty: "Workspace is dirty.",
+	transfer_requires_isolation: "Transfer requires an isolated linked worktree.",
+	baseline_unavailable: "Workspace baseline is unavailable.",
+	agent_prompt_stalled: "Agent prompt stalled.",
+	handoff_timed_out: "Handoff observation timed out.",
+	handoff_blocked: "Handoff is blocked.",
+	malformed_return: "Recipient return envelope is malformed.",
+	return_id_mismatch: "Recipient return envelope handoff ID does not match.",
+	scope_violation: "Workspace changes exceeded declared writes.",
+	history_changed: "Git history changed.",
+	index_changed: "Git index changed.",
+	claim_mismatch: "Recipient changed-path claim does not match postflight.",
+	continuation_budget_exhausted: "Continuation budget is exhausted.",
+	ownership_transferred: "Handoff ownership was transferred.",
+	cancel_unconfirmed: "Cancellation was not confirmed.",
+};
+
+export function handoffErrorMessage(code: HandoffErrorCode): string {
+	return HANDOFF_ERROR_MESSAGES[code];
+}
 
 const ModeSchema = StringEnum(HANDOFF_MODES);
 const IntentSchema = StringEnum(CONTINUE_INTENTS);
@@ -239,67 +281,16 @@ export const HandoffToolSchema = {
 	description: "Hand one bounded implementation package to a persistent Herdr-managed coding agent. Use only after an explicit user request for Herdr or a named external harness handoff.",
 };
 
-export interface InlinePlan {
-	source: "inline";
-	text: string;
-}
-
-export interface FilePlan {
-	source: "file";
-	path: string;
-}
-
-export type HandoffPlan = InlinePlan | FilePlan;
-
-export interface MessageExistingTarget {
-	type: "message-existing";
-	target: string;
-	kind: string;
-}
-
-export interface StartAndAskTarget {
-	type: "start-and-ask";
-	profileId: string;
-}
-
-export type HandoffTarget = MessageExistingTarget | StartAndAskTarget;
-
-export interface HandoffRequest {
-	objective: string;
-	plan: HandoffPlan;
-	allowedWrites: string[];
-	nonGoals: string[];
-	verification: string[];
-	context?: string[];
-}
-
-export interface BeginHandoffInput {
-	action: "begin";
-	mode: HandoffMode;
-	target: HandoffTarget;
-	request: HandoffRequest;
-	waitTimeoutMs?: number;
-}
-
-export interface ContinueHandoffInput {
-	action: "continue";
-	handle: string;
-	intent: ContinueIntent;
-	message: string;
-	waitTimeoutMs?: number;
-}
-
-export interface WaitHandoffInput {
-	action: "wait";
-	handle: string;
-	waitTimeoutMs: number;
-}
-
-export interface CancelHandoffInput {
-	action: "cancel";
-	handle: string;
-}
-
+/**
+ * Model-facing input types derive from their runtime schemas so a schema change cannot
+ * leave a second hand-written declaration behind.
+ */
+export type HandoffPlan = Static<typeof HandoffPlanSchema>;
+export type HandoffRequest = Static<typeof HandoffRequestSchema>;
+export type BeginHandoffInput = Static<typeof BeginHandoffSchema>;
+export type ContinueHandoffInput = Static<typeof ContinueHandoffSchema>;
+export type WaitHandoffInput = Static<typeof WaitHandoffSchema>;
+export type CancelHandoffInput = Static<typeof CancelHandoffSchema>;
 export type HandoffToolInput = BeginHandoffInput | ContinueHandoffInput | WaitHandoffInput | CancelHandoffInput;
 
 export interface LaunchProfile {
@@ -560,8 +551,4 @@ export function claimsCompletion(value: unknown): boolean {
 		if (claimsCompletion(nested)) return true;
 	}
 	return false;
-}
-
-export function isHandoffErrorCode(value: string): value is HandoffErrorCode {
-	return (HANDOFF_ERROR_CODES as readonly string[]).includes(value);
 }

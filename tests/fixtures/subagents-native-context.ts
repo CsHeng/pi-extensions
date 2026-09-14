@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ManagedSessionStore } from "../../extensions/subagents/managed-sessions.ts";
 import { registerContinuationTool } from "../../extensions/subagents/continuation.ts";
-import { validateGraph } from "../../extensions/subagents/graph.ts";
+import { validateGraphStructure } from "../../extensions/subagents/graph.ts";
 
 /** Native host-only fixture: metadata seeds and public compaction, never a child dispatch. */
 export default function nativeContextFixture(pi: ExtensionAPI): void {
@@ -26,7 +26,7 @@ export default function nativeContextFixture(pi: ExtensionAPI): void {
 	} });
 	if (mode === "disabled") pi.on("session_start", () => { pi.setActiveTools([]); });
 	if (mode === "seed") pi.on("agent_settled", async (_event, ctx) => {
-		const graph = validateGraph({ tasks: [{ id: "fixture", role: "explorer", objective: "PRIVATE_INDEX_PROSE", scope: ["."] }] });
+		const graph = validateGraphStructure({ tasks: [{ id: "fixture", role: "explorer", objective: "PRIVATE_INDEX_PROSE", scope: ["."] }] });
 		if (!graph.ok) throw new Error("fixture");
 		await store.allocate({ repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map((entry) => entry.id) }, "fixture-index", graph.tasks);
 	});

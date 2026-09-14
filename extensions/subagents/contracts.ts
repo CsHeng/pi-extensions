@@ -1,9 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-export const SUBAGENT_TOOL_NAME = "csheng_subagents";
 export const SUBAGENT_STATUS_COMMAND = "subagents";
-export const SUBAGENT_DEBUG_COMMAND = "subagents-debug";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
 export const TELEMETRY_SCHEMA_VERSION_V2 = 2 as const;
@@ -144,20 +142,6 @@ export const SubagentTaskSchema = Type.Object(
 		thinking: Type.Optional(ThinkingLevelSchema),
 	},
 	{ additionalProperties: false },
-);
-
-export const SubagentToolSchema = Type.Object(
-	{
-		tasks: Type.Array(SubagentTaskSchema, {
-			minItems: 1,
-			maxItems: HARD_LIMITS.maxTasks,
-			description: "A bounded foreground task batch. Keep ordinary exploration and review tasks independent and flat; dependsOn is only for eligible hard predecessor edges.",
-		}),
-	},
-	{
-		additionalProperties: false,
-		description: "Execute one bounded foreground batch of fixed-role subagent tasks.",
-	},
 );
 
 export interface SubagentTask {
@@ -366,12 +350,6 @@ export type NormalizedChildCapability = ChildCapabilityManifestV2;
  * the guard and runner slices migrate to normalized v2.
  */
 export type ChildCapabilityManifest = ChildCapabilityManifestV1 | ChildCapabilityManifestV2;
-
-export function isSafeDiagnosticRef(value: string): boolean {
-	if (value.length === 0 || value.startsWith("/") || value.includes("\\")) return false;
-	const segments = value.split("/");
-	return segments.length >= 3 && segments.length <= 4 && segments.every((segment) => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..");
-}
 
 export function emptyUsage(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };

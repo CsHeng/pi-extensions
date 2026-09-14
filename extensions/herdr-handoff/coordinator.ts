@@ -1,5 +1,6 @@
 import {
 	HANDOFF_RESULT_SCHEMA_VERSION,
+	handoffErrorMessage,
 	HARD_LIMITS,
 	initialHandoffMachine,
 	ownsLiveHandle,
@@ -15,7 +16,6 @@ import {
 	type HandoffMode,
 	type HandoffResult,
 	type HandoffToolInput,
-	type LifecycleState,
 	type PublicHandoffHandle,
 	type RouteEvidence,
 	type WaitHandoffInput,
@@ -75,47 +75,6 @@ interface Session {
 	routeEvidence: RouteEvidence;
 	recipientCwd: string;
 }
-
-const MESSAGES: Record<HandoffErrorCode, string> = {
-	herdr_environment_required: "Herdr environment is required.",
-	herdr_cli_unavailable: "Herdr CLI is unavailable.",
-	herdr_cli_incompatible: "Herdr CLI is incompatible.",
-	herdr_protocol_error: "Herdr CLI protocol is invalid.",
-	handoff_active: "A handoff is already active.",
-	invalid_handoff_request: "Handoff request is invalid.",
-	plan_outside_repository: "Plan file is outside the repository.",
-	plan_too_large: "Canonical plan exceeds the size ceiling.",
-	invalid_write_path: "Write path is invalid.",
-	launch_config_invalid: "Launch configuration is invalid.",
-	launch_profile_not_found: "Launch profile was not found.",
-	agent_start_failed: "Agent start failed.",
-	agent_not_ready: "Agent is not ready.",
-	agent_auth_blocked: "Agent authentication is blocked.",
-	agent_not_found: "Agent was not found.",
-	agent_kind_mismatch: "Agent kind does not match.",
-	agent_busy: "Agent is busy.",
-	agent_blocked: "Agent is blocked.",
-	agent_unknown: "Agent state is unknown.",
-	self_target_rejected: "Caller pane cannot be the recipient.",
-	stale_handle: "Handoff handle is stale.",
-	workspace_not_git: "Workspace is not a Git checkout.",
-	workspace_mismatch: "Workspace does not match the trusted repository.",
-	workspace_dirty: "Workspace is dirty.",
-	transfer_requires_isolation: "Transfer requires an isolated linked worktree.",
-	baseline_unavailable: "Workspace baseline is unavailable.",
-	agent_prompt_stalled: "Agent prompt stalled.",
-	handoff_timed_out: "Handoff observation timed out.",
-	handoff_blocked: "Handoff is blocked.",
-	malformed_return: "Recipient return envelope is malformed.",
-	return_id_mismatch: "Recipient return envelope handoff ID does not match.",
-	scope_violation: "Workspace changes exceeded declared writes.",
-	history_changed: "Git history changed.",
-	index_changed: "Git index changed.",
-	claim_mismatch: "Recipient changed-path claim does not match postflight.",
-	continuation_budget_exhausted: "Continuation budget is exhausted.",
-	ownership_transferred: "Handoff ownership was transferred.",
-	cancel_unconfirmed: "Cancellation was not confirmed.",
-};
 
 function agentName(handoffId: string): string {
 	return `h${handoffId.replaceAll("-", "").slice(0, 31)}`;
@@ -540,7 +499,7 @@ export class HandoffCoordinator {
 			this.apply("settled_blocked");
 			const collected = await this.collectReturn(action, started, agent);
 			collected.bridgeStatus = "blocked";
-			collected.error = { code: "handoff_blocked", message: MESSAGES.handoff_blocked };
+			collected.error = { code: "handoff_blocked", message: handoffErrorMessage("handoff_blocked") };
 			collected.lifecycleState = "blocked";
 			return collected;
 		}
@@ -573,7 +532,7 @@ export class HandoffCoordinator {
 				lifecycleState: agent.status,
 				...optionalSequence(agent.stateChangeSeq),
 				workspace: { status: postflight.status, changedPaths: postflight.changedPaths, violations: postflight.violations },
-				error: { code: parsed.code, message: MESSAGES[parsed.code] },
+				error: { code: parsed.code, message: handoffErrorMessage(parsed.code) },
 			});
 		}
 		if (postflight.error) {
@@ -601,7 +560,7 @@ export class HandoffCoordinator {
 				...optionalSequence(agent.stateChangeSeq),
 				recipientReturn: parsed.envelope,
 				workspace: { status: postflight.status, changedPaths: postflight.changedPaths, violations: postflight.violations },
-				error: { code: "claim_mismatch", message: MESSAGES.claim_mismatch },
+				error: { code: "claim_mismatch", message: handoffErrorMessage("claim_mismatch") },
 			});
 		}
 		return this.result(action, started, {
@@ -681,7 +640,7 @@ export class HandoffCoordinator {
 			planSha256,
 			bridgeStatus,
 			workspaceStatus: code === "handoff_timed_out" || code === "handoff_blocked" ? "not_inspected" : "unavailable",
-			error: { code, message: MESSAGES[code] },
+			error: { code, message: handoffErrorMessage(code) },
 		});
 	}
 

@@ -181,9 +181,3 @@ export function validateGraphRelationships(tasks: readonly NormalizedTask[]): Gr
 	}
 	return { ok: true, tasks: [...tasks] };
 }
-
-export function validateGraph(input: SubagentToolInput): GraphValidation {
-	const structural = validateGraphStructure(input);
-	if (!structural.ok) return structural;
-	return validateGraphRelationships(structural.tasks);
-}

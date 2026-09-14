@@ -11,13 +11,11 @@ import {
 	ROUTE_SELECTION_SOURCES,
 	STABLE_TASK_ERROR_CODES,
 	SubagentTaskSchema,
-	SubagentToolSchema,
 	TASK_EXECUTION_PHASES,
 	TELEMETRY_SCHEMA_VERSION,
 	TELEMETRY_SCHEMA_VERSION_V2,
 	TELEMETRY_SCHEMA_VERSION_V3,
 	THINKING_LEVELS,
-	isSafeDiagnosticRef,
 	isSafePathGrammar,
 	truncateUtf8,
 } from "../extensions/subagents/contracts.ts";
@@ -30,6 +28,7 @@ import type {
 	RunTelemetryV3,
 } from "../extensions/subagents/contracts.ts";
 import { ROLES } from "../extensions/subagents/roles.ts";
+import { SubagentSessionToolSchema } from "../extensions/subagents/session-contracts.ts";
 
 test("subagent roles have fixed least-authority tool sets", () => {
 	assert.deepEqual(ROLE_NAMES, ["explorer", "reviewer", "worker"]);
@@ -55,102 +54,75 @@ test("model-facing string choices serialize as provider-compatible enums", () =>
 	assert.equal(properties.role?.anyOf, undefined);
 });
 
-test("tool schema preserves old task shapes and accepts exact ephemeral overrides", () => {
+test("task schema preserves old task shapes and accepts exact ephemeral overrides", () => {
 	const valid = {
-		tasks: [{
-			id: "scan",
-			role: "explorer",
-			objective: "Find evidence",
-			scope: ["src"],
-			executionProfile: "fast",
-			reasoningProfile: "light",
-		}],
+		id: "scan",
+		role: "explorer",
+		objective: "Find evidence",
+		scope: ["src"],
+		executionProfile: "fast",
+		reasoningProfile: "light",
 	};
-	assert.equal(Check(SubagentToolSchema, valid), true);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{
-			id: "write",
-			role: "worker",
-			objective: "Apply the bounded change",
-			scope: ["."],
-			inputs: ["Approved task"],
-			dependsOn: ["scan"],
-			writePaths: ["src/file.ts"],
-			verification: ["focused test"],
-			resourceLocks: ["src/file.ts"],
-			executionProfile: "balanced",
-			reasoningProfile: "standard",
-		}],
+	const createRequest = (tasks: unknown[]) => ({ action: "create", requestId: "request", tasks });
+	assert.equal(Check(SubagentTaskSchema, valid), true);
+	assert.equal(Check(SubagentTaskSchema, {
+		id: "write",
+		role: "worker",
+		objective: "Apply the bounded change",
+		scope: ["."],
+		inputs: ["Approved task"],
+		dependsOn: ["scan"],
+		writePaths: ["src/file.ts"],
+		verification: ["focused test"],
+		resourceLocks: ["src/file.ts"],
+		executionProfile: "balanced",
+		reasoningProfile: "standard",
 	}), true);
-	assert.equal(Check(SubagentToolSchema, { ...valid, model: "some-model" }), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], model: "provider/model" }],
-	}), true);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], model: "" }],
-	}), false);
+	// The managed tool schema keeps the same closed batch shape.
+	assert.equal(Check(SubagentSessionToolSchema, { ...createRequest([valid]), model: "some-model" }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, model: "provider/model" }), true);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, model: "" }), false);
 	for (const thinking of THINKING_LEVELS) {
-		assert.equal(Check(SubagentToolSchema, {
-			tasks: [{ ...valid.tasks[0], thinking }],
-		}), true);
+		assert.equal(Check(SubagentTaskSchema, { ...valid, thinking }), true);
 	}
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], cwd: "/tmp" }],
-	}), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], executionProfile: "extreme" }],
-	}), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], thinking: "extreme" }],
-	}), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], model: "provider/model", unknown: true }],
-	}), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], externalReadRoots: [] }],
-	}), true);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, cwd: "/tmp" }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, executionProfile: "extreme" }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, thinking: "extreme" }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, model: "provider/model", unknown: true }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, externalReadRoots: [] }), true);
 	for (const count of [0, 1, 8]) {
-		assert.equal(Check(SubagentToolSchema, {
-			tasks: [{
-				...valid.tasks[0],
-				externalReadRoots: Array.from({ length: count }, (_, index) => `/external/root-${index}`),
-			}],
+		assert.equal(Check(SubagentTaskSchema, {
+			...valid,
+			externalReadRoots: Array.from({ length: count }, (_, index) => `/external/root-${index}`),
 		}), true);
 	}
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{
-			id: "review",
-			role: "reviewer",
-			objective: "Review evidence",
-			scope: ["."],
-			externalReadRoots: Array.from({ length: 8 }, (_, index) => `/external/root-${index}`),
-		}],
+	assert.equal(Check(SubagentTaskSchema, {
+		id: "review",
+		role: "reviewer",
+		objective: "Review evidence",
+		scope: ["."],
+		externalReadRoots: Array.from({ length: 8 }, (_, index) => `/external/root-${index}`),
 	}), true);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{
-			...valid.tasks[0],
-			externalReadRoots: Array.from({ length: 9 }, (_, index) => `/external/root-${index}`),
-		}],
+	assert.equal(Check(SubagentTaskSchema, {
+		...valid,
+		externalReadRoots: Array.from({ length: 9 }, (_, index) => `/external/root-${index}`),
 	}), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: [{ ...valid.tasks[0], externalReadRoots: [""] }],
-	}), false);
-	assert.equal(Check(SubagentToolSchema, { tasks: [] }), false);
-	assert.equal(Check(SubagentToolSchema, {
-		tasks: Array.from({ length: HARD_LIMITS.maxTasks + 1 }, (_, index) => ({
-			id: `t${index}`,
-			role: "explorer",
-			objective: "x",
-			scope: ["."],
-		})),
-	}), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, externalReadRoots: [""] }), false);
+	assert.equal(Check(SubagentSessionToolSchema, createRequest([valid])), true);
+	assert.equal(Check(SubagentSessionToolSchema, createRequest([])), false);
+	assert.equal(Check(SubagentSessionToolSchema, createRequest(Array.from({ length: HARD_LIMITS.maxTasks + 1 }, (_, index) => ({
+		id: `t${index}`,
+		role: "explorer",
+		objective: "x",
+		scope: ["."],
+	})))), false);
 });
 
 test("model-facing capability fields retain descriptions without freezing prose", () => {
 	const taskProperties = (SubagentTaskSchema as unknown as {
 		properties: Record<string, { description?: string }>;
 	}).properties;
-	const toolProperties = (SubagentToolSchema as unknown as {
+	const toolProperties = (SubagentSessionToolSchema as unknown as {
 		properties: Record<string, { description?: string }>;
 	}).properties;
 	for (const description of [
@@ -330,10 +302,6 @@ test("diagnostic and activity contracts are bounded and additive", () => {
 	assert.equal(HARD_LIMITS.maxDiagnosticTimelineEntries, 200);
 	assert.equal(HARD_LIMITS.maxDiagnosticLineBytes, 1024 * 1024);
 	assert.equal(HARD_LIMITS.maxDiagnosticRenderBytes, 64 * 1024);
-	assert.equal(isSafeDiagnosticRef("subagent-sessions/parent/run/task.jsonl"), true);
-	for (const unsafe of ["", "/absolute/run/task.jsonl", "../run/task.jsonl", "subagent-sessions/../run/task.jsonl", "subagent-sessions\\parent\\run\\task.jsonl"]) {
-		assert.equal(isSafeDiagnosticRef(unsafe), false);
-	}
 });
 
 test("UTF-8 truncation preserves complete characters and reports omitted bytes", () => {

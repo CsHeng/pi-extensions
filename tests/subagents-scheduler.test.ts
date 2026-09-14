@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
-import { validateGraph, type NormalizedTask } from "../extensions/subagents/graph.ts";
+import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "../extensions/subagents/graph.ts";
 import { runScheduledTasks } from "../extensions/subagents/scheduler.ts";
 import { createRunClock, workerIntervalTotals } from "../extensions/subagents/telemetry.ts";
 
@@ -20,7 +20,7 @@ function success(task: NormalizedTask, output = task.id): TaskResult {
 }
 
 function graph(tasks: Array<Record<string, unknown>>): NormalizedTask[] {
-	const result = validateGraph({ tasks } as never);
+	const result = validateGraphStructure({ tasks } as never);
 	assert.equal(result.ok, true, result.ok ? undefined : result.error.message);
 	return result.ok ? result.tasks : [];
 }
@@ -89,40 +89,43 @@ test("v4 marks unclosed child endpoints and backward clocks unavailable", async 
 });
 
 test("canonical repository-relative writes stay contained and still conflict when overlapping", () => {
-	assert.equal(validateGraph({ tasks: [
+	const outsideScope = validateGraphRelationships(graph([
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["lib/a.ts"] },
-	] }).ok, false);
-	assert.equal(validateGraph({ tasks: [
+	]));
+	assert.equal(outsideScope.ok, false);
+	if (outsideScope.ok) throw new Error("expected scope rejection");
+	assert.equal(outsideScope.error.code, "write_outside_scope");
+	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
 		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
 	] }).ok, false);
-	assert.equal(validateGraph({ tasks: [
+	assert.equal(validateGraphRelationships(graph([
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
-	] }).ok, true);
-	assert.equal(validateGraph({ tasks: [
+	])).ok, true);
+	assert.equal(validateGraphRelationships(graph([
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/..config/a.ts"] },
-	] }).ok, true);
+	])).ok, true);
 });
 
 test("graph admission rejects cycles, unknown dependencies, role writes, and concurrent write overlap", () => {
-	assert.equal(validateGraph({ tasks: [
+	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
 		{ id: "b", role: "explorer", objective: "b", scope: ["."], dependsOn: ["a"] },
 	] }).ok, false);
-	assert.deepEqual(validateGraph({ tasks: [
+	assert.deepEqual(validateGraphStructure({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["missing"] },
 	] }), { ok: false, error: { code: "unknown_dependency", message: "Task a depends on unknown task missing." } });
-	assert.equal(validateGraph({ tasks: [
+	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "reviewer", objective: "a", scope: ["."], writePaths: ["file.ts"] },
 	] }).ok, false);
-	assert.equal(validateGraph({ tasks: [
+	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
 		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
 	] }).ok, false);
 });
 
 test("graph admission rejects unknown semantic profiles before scheduling", () => {
-	assert.deepEqual(validateGraph({ tasks: [
+	assert.deepEqual(validateGraphStructure({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], executionProfile: "extreme" as never },
 	] }), {
 		ok: false,

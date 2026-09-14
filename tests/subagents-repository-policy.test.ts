@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { HARD_LIMITS } from "../extensions/subagents/contracts.ts";
-import { validateGraph, validateGraphRelationships, validateGraphStructure } from "../extensions/subagents/graph.ts";
+import { validateGraphRelationships, validateGraphStructure } from "../extensions/subagents/graph.ts";
 import {
 	admitRepositoryTasks,
 	canonicalizeExternalReadRoot,
@@ -268,11 +268,16 @@ test("injectable host avoids ambient repository dependence", async () => {
 	assert.ok(probes >= 1);
 });
 
-test("validateGraph still admits ordinary relative callers", () => {
-	assert.equal(validateGraph({
-		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
-	}).ok, true);
-	assert.equal(validateGraph({
-		tasks: [{ id: "write", role: "worker", objective: "edit", scope: ["src"], writePaths: ["src/a.ts"] }],
-	}).ok, true);
+test("staged repository admission accepts ordinary relative callers", async (t) => {
+	const { current } = await layout(t);
+	for (const tasks of [
+		[{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }],
+		[{ id: "write", role: "worker", objective: "edit", scope: ["src"], writePaths: ["src/a.ts"] }],
+	]) {
+		const normalized = await structure(tasks);
+		const admitted = await admitRepositoryTasks(current, normalized);
+		assert.equal(admitted.ok, true);
+		if (!admitted.ok) throw new Error("expected repository admission");
+		assert.equal(validateGraphRelationships(admitted.tasks).ok, true);
+	}
 });

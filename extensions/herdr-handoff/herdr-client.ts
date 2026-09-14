@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
 	HARD_LIMITS,
+	handoffErrorMessage,
 	type HandoffErrorCode,
 	type HandoffMode,
 	type LifecycleState,
@@ -8,46 +9,6 @@ import {
 
 export const MIN_HERDR_VERSION = [0, 8, 2] as const;
 const MAX_CLI_BYTES = 256 * 1024;
-const CATEGORICAL: Record<HandoffErrorCode, string> = {
-	herdr_environment_required: "Herdr environment is required.",
-	herdr_cli_unavailable: "Herdr CLI is unavailable.",
-	herdr_cli_incompatible: "Herdr CLI is incompatible.",
-	herdr_protocol_error: "Herdr CLI protocol is invalid.",
-	handoff_active: "A handoff is already active.",
-	invalid_handoff_request: "Handoff request is invalid.",
-	plan_outside_repository: "Plan file is outside the repository.",
-	plan_too_large: "Canonical plan exceeds the size ceiling.",
-	invalid_write_path: "Write path is invalid.",
-	launch_config_invalid: "Launch configuration is invalid.",
-	launch_profile_not_found: "Launch profile was not found.",
-	agent_start_failed: "Agent start failed.",
-	agent_not_ready: "Agent is not ready.",
-	agent_auth_blocked: "Agent authentication is blocked.",
-	agent_not_found: "Agent was not found.",
-	agent_kind_mismatch: "Agent kind does not match.",
-	agent_busy: "Agent is busy.",
-	agent_blocked: "Agent is blocked.",
-	agent_unknown: "Agent state is unknown.",
-	self_target_rejected: "Caller pane cannot be the recipient.",
-	stale_handle: "Handoff handle is stale.",
-	workspace_not_git: "Workspace is not a Git checkout.",
-	workspace_mismatch: "Workspace does not match the trusted repository.",
-	workspace_dirty: "Workspace is dirty.",
-	transfer_requires_isolation: "Transfer requires an isolated linked worktree.",
-	baseline_unavailable: "Workspace baseline is unavailable.",
-	agent_prompt_stalled: "Agent prompt stalled.",
-	handoff_timed_out: "Handoff observation timed out.",
-	handoff_blocked: "Handoff is blocked.",
-	malformed_return: "Recipient return envelope is malformed.",
-	return_id_mismatch: "Recipient return envelope handoff ID does not match.",
-	scope_violation: "Workspace changes exceeded declared writes.",
-	history_changed: "Git history changed.",
-	index_changed: "Git index changed.",
-	claim_mismatch: "Recipient changed-path claim does not match postflight.",
-	continuation_budget_exhausted: "Continuation budget is exhausted.",
-	ownership_transferred: "Handoff ownership was transferred.",
-	cancel_unconfirmed: "Cancellation was not confirmed.",
-};
 
 export interface ExecResult {
 	stdout: string;
@@ -100,7 +61,7 @@ export interface WorktreeSnapshot {
 export type ClientResult<T> = { ok: true; value: T } | { ok: false; code: HandoffErrorCode; message: string };
 
 function fail(code: HandoffErrorCode): ClientResult<never> {
-	return { ok: false, code, message: CATEGORICAL[code] };
+	return { ok: false, code, message: handoffErrorMessage(code) };
 }
 
 function ok<T>(value: T): ClientResult<T> {

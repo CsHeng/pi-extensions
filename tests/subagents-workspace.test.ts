@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { validateGraph, type NormalizedTask } from "../extensions/subagents/graph.ts";
+import { validateGraphStructure, type NormalizedTask } from "../extensions/subagents/graph.ts";
 import { createWorkerWorkspace, WorkspaceError } from "../extensions/subagents/workspace.ts";
 
 const exec = promisify(execFile);
@@ -60,12 +60,12 @@ test("snapshot permits repository components beginning with two dots", async (t)
 });
 
 test("graph path diagnostics keep write paths exact and repository-relative", () => {
-	const absoluteWrite = validateGraph({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."], writePaths: ["/tmp/file.ts"] }] });
+	const absoluteWrite = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."], writePaths: ["/tmp/file.ts"] }] });
 	assert.equal(absoluteWrite.ok, false);
 	if (absoluteWrite.ok) return;
 	assert.equal(absoluteWrite.error.code, "invalid_write_path");
 	assert.match(absoluteWrite.error.message, /unsafe write path/);
-	const missingWrites = validateGraph({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."] }] });
+	const missingWrites = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."] }] });
 	assert.equal(missingWrites.ok, false);
 	if (missingWrites.ok) return;
 	assert.equal(missingWrites.error.code, "worker_write_paths_required");

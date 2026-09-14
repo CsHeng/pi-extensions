@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { validateGraph } from "../extensions/subagents/graph.ts";
+import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
 import { WorkspaceError } from "../extensions/subagents/workspace.ts";
@@ -18,7 +18,7 @@ async function setup(t: test.TestContext, files = ["file"]) {
 	const repo = join(base, "repo"); await mkdir(repo);
 	await promisify(execFile)("git", ["init", "-q", repo]);
 	const owner = { repo, parentSessionId: "parent", anchor: "entry", branch: ["entry"] };
-	const graph = validateGraph({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: files }] });
+	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: files }] });
 	if (!graph.ok) throw new Error("fixture");
 	const store = new ManagedSessionStore(base);
 	const record = (await store.allocate(owner, "create", graph.tasks)).records[0]!;

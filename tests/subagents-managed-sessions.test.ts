@@ -6,7 +6,7 @@ import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { exceedsManagedStorageThreshold, fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { validateGraph } from "../extensions/subagents/graph.ts";
+import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { collectNativeObservation } from "../extensions/subagents/observability.ts";
 import { MANAGED_LIMITS, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS } from "../extensions/subagents/session-contracts.ts";
@@ -15,7 +15,7 @@ async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
 	t.after(() => rm(base, { recursive: true, force: true }));
 	const owner = { repo: base, parentSessionId: "parent", anchor: "branch", branch: ["branch"] };
-	const graph = validateGraph({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: ["file"] }] });
+	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: ["file"] }] });
 	assert.equal(graph.ok, true); if (!graph.ok) throw new Error("fixture");
 	const store = new ManagedSessionStore(base);
 	return { base, owner, tasks: graph.tasks, store };

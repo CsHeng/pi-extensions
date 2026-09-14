@@ -10,7 +10,6 @@ import type {
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import statusFooter, {
-	addSessionIdToFooterLine,
 	collectUsageTotals,
 	formatTokens,
 	formatWorkdir,
@@ -215,17 +214,6 @@ test("counts enabled MCP servers from an adapter snapshot", () => {
 		}),
 		{ enabled: 2, all: 3 },
 	);
-});
-
-test("keeps the session id visible when the original line needs truncation", () => {
-	const result = addSessionIdToFooterLine(
-		"↑421k ↓43k R8.6M CH99.9% $5.378 | 229k/500k (45.9%)",
-		"12345678",
-		28,
-	);
-
-	assert.equal(stripAnsi(result), "↑421k ↓43k R8.... | 12345678");
-	assert.ok(visibleWidth(result) <= 28);
 });
 
 test("renders one compact footer line without extension statuses", () => {
