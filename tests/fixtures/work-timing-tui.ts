@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 /** Offline stimulus and writer trace for the real host; never uses provider I/O. */
 export default function workTimingTuiFixture(pi: ExtensionAPI): void {
 	const writes: Array<{ at: number; text: string | undefined }> = [];
+	let turn = 0;
 	pi.on("session_start", (_event, ctx) => {
 		// Test-only interception: record every writer, while still rendering in the real TUI.
 		const original = ctx.ui.setWorkingMessage.bind(ctx.ui);
@@ -30,19 +31,33 @@ export default function workTimingTuiFixture(pi: ExtensionAPI): void {
 					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100,
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 				stream.push({ type: "start", partial: message });
-				stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
-				for (let index = 0; index < 24; index++) {
-					await new Promise(resolve => setTimeout(resolve, 125));
-					const thinking = message.content[0];
-					if (thinking?.type === "thinking") thinking.thinking += "tick ";
-					message.usage.output += 2;
-					stream.push({ type: "thinking_delta", contentIndex: 0, delta: "tick ", partial: message });
+				if (turn === 0) {
+					turn += 1;
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					for (let index = 0; index < 24; index++) {
+						await new Promise(resolve => setTimeout(resolve, 125));
+						const thinking = message.content[0];
+						if (thinking?.type === "thinking") thinking.thinking += "tick ";
+						message.usage.output += 2;
+						stream.push({ type: "thinking_delta", contentIndex: 0, delta: "tick ", partial: message });
+					}
+					stream.push({ type: "thinking_end", contentIndex: 0, content: "tick ".repeat(24), partial: message });
+					// A real bash call lets the host run one tool long enough for the live timer.
+					const toolCall = { type: "toolCall" as const, id: "working-fixture-bash", name: "bash",
+						arguments: { command: "sleep 7; echo WORK_TIMING_TOOL_DONE" } };
+					message.content.push(toolCall);
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 1, partial: message });
+					stream.push({ type: "toolcall_delta", contentIndex: 1, delta: JSON.stringify(toolCall.arguments), partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 1, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					stream.end();
+					return;
 				}
-				stream.push({ type: "thinking_end", contentIndex: 0, content: "tick ".repeat(24), partial: message });
-				message.content.push({ type: "text", text: "WORKING_FIXTURE_DONE" });
-				stream.push({ type: "text_start", contentIndex: 1, partial: message });
-				stream.push({ type: "text_delta", contentIndex: 1, delta: "WORKING_FIXTURE_DONE", partial: message });
-				stream.push({ type: "text_end", contentIndex: 1, content: "WORKING_FIXTURE_DONE", partial: message });
+				message.content = [{ type: "text", text: "WORKING_FIXTURE_DONE" }];
+				stream.push({ type: "text_start", contentIndex: 0, partial: message });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "WORKING_FIXTURE_DONE", partial: message });
+				stream.push({ type: "text_end", contentIndex: 0, content: "WORKING_FIXTURE_DONE", partial: message });
 				stream.push({ type: "done", reason: "stop", message });
 				stream.end();
 			})();

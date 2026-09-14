@@ -11,7 +11,7 @@ const cc = join(homedir(), ".pi/agent/npm/node_modules/pi-cc-extensions/extensio
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-test("installed Pi and CC: one working writer preserves fast tokens and slow durations", { timeout: 20_000 }, async t => {
+test("installed Pi and CC: one working writer preserves fast tokens and slow durations", { timeout: 40_000 }, async t => {
 	try { await access(cc); await access("/usr/bin/script"); } catch {
 		t.skip("requires installed CC and util-linux script; no installation performed"); return;
 	}
@@ -50,7 +50,7 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 		await rm(base, { recursive: true, force: true });
 	});
 	let timeout: ReturnType<typeof setTimeout> | undefined;
-	const exitCode = await Promise.race([exited, new Promise<"timeout">(resolve => { timeout = setTimeout(() => resolve("timeout"), 12_000); })]);
+	const exitCode = await Promise.race([exited, new Promise<"timeout">(resolve => { timeout = setTimeout(() => resolve("timeout"), 25_000); })]);
 	clearTimeout(timeout);
 	assert.equal(exitCode, 0, "offline installed-host fixture must finish");
 	assert.ok(output.includes("Working...") && output.includes("ΣR"), "custom working line must reach the real terminal");
@@ -67,4 +67,13 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 		return a && b && a.slice(1).join("|") === b.slice(1).join("|") && previous.text !== line.text;
 	}), "fast counters refresh between slow clock samples without replacing the template");
 	assert.ok(lines.some(line => /ΣR [12]s/.test(line.text)), "slow reasoning clock must also advance");
+	// The real bash tool runs `sleep 7`, so the live tool field must appear past its threshold and then vanish.
+	const toolLines = lines.filter(line => line.text.includes("$ bash "));
+	assert.ok(toolLines.length > 0, "the live tool timer must reach the real terminal while bash runs");
+	assert.ok(toolLines.some(line => {
+		const match = / \$ bash (\d+)s/.exec(line.text);
+		return match !== null && Number(match[1]) >= 5;
+	}), "the tool field appears once its threshold passes");
+	const lastToolLine = lines.findLastIndex(line => line.text.includes("$ bash "));
+	assert.ok(lines.slice(lastToolLine + 1).some(line => !line.text.includes("$ bash ")), "the tool field disappears when the tool ends");
 });

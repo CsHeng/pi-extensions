@@ -256,6 +256,64 @@ test("starts decode on the first token, includes stream stalls, and pauses while
 	assert.equal(workingMessages.at(-1), "Working... 16s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 67 tok/s");
 });
 
+test("times the longest-running tool and pauses that clock while the user is prompted", async () => {
+	let now = 0;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+
+	await invoke(pi, "before_agent_start", {}, ctx);
+	now = 1_000;
+	await invoke(pi, "turn_start", {}, ctx);
+	now = 2_000;
+	await invoke(pi, "tool_execution_start", { toolCallId: "a", toolName: "bash" }, ctx);
+	now = 6_000;
+	scheduler.callback?.();
+	// Four seconds of work: below the threshold, so the head clock is still the only timer.
+	assert.equal(workingMessages.at(-1), "Working... 6s • R 0s / ΣR 0s");
+
+	now = 7_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 7s • $ bash 5s • R 0s / ΣR 0s");
+
+	now = 8_000;
+	await invoke(pi, "tool_execution_start", { toolCallId: "b", toolName: "read" }, ctx);
+	now = 13_000;
+	scheduler.callback?.();
+	// The longest-running tool leads and the other concurrent tool is counted.
+	assert.equal(workingMessages.at(-1), "Working... 13s • $ bash 11s +1 • R 0s / ΣR 0s");
+
+	// Waiting on a blocking user prompt is not tool time: both tools freeze for its five seconds.
+	now = 20_000;
+	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
+	now = 25_000;
+	await invoke(pi, "ui_prompt_end", {}, ctx);
+	now = 26_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 26s • $ bash 19s +1 • R 0s / ΣR 0s");
+
+	now = 27_000;
+	await invoke(pi, "tool_execution_end", { toolCallId: "a", toolName: "bash" }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 27s • $ read 14s • R 0s / ΣR 0s");
+
+	now = 28_000;
+	await invoke(pi, "tool_execution_end", { toolCallId: "b", toolName: "read" }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 28s • R 0s / ΣR 0s");
+
+	// The turn boundary clears leftover tool state even without an end event.
+	now = 29_000;
+	await invoke(pi, "tool_execution_start", { toolCallId: "c", toolName: "grep" }, ctx);
+	now = 40_000;
+	await invoke(pi, "turn_end", {}, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 40s • R 0s / ΣR 0s");
+});
+
 test("counts the user message's tokens live and request-cumulative tokens in the settled entry", async () => {
 	let now = 0;
 	const scheduler = new FakeScheduler();
@@ -638,6 +696,20 @@ test("compacts the working label to the single-line row", () => {
 	assert.equal(
 		compactStatusLabel(label, 62),
 		"Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s",
+	);
+});
+
+test("keeps the live tool timer at narrow widths", () => {
+	const label = "Working... 47m 29s • $ bash 46m 51s • ↑ 9,861 ↓ 20,323 tokens • R 4s / ΣR 1m 33s • 217 tok/s";
+	assert.equal(compactStatusLabel(label, 200), label);
+	// The live tool timer and `R / ΣR` are both kept; tokens and rate are the optional fields.
+	assert.equal(
+		compactStatusLabel(label, 60),
+		"Working... 47m 29s • $ bash 46m 51s • R 4s / ΣR 1m 33s",
+	);
+	assert.equal(
+		compactStatusLabel(label, 80),
+		"Working... 47m 29s • $ bash 46m 51s • ↑ 9,861 ↓ 20,323 tokens • R 4s / ΣR 1m 33s",
 	);
 });
 

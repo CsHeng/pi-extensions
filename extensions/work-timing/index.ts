@@ -9,6 +9,10 @@ const WORK_TIMING_VERSION = 3;
  */
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
+/** A live tool field appears only after this much work, so quick reads never flash. */
+const TOOL_ELAPSED_MIN_MS = 5_000;
+/** The tool field's `$ ` prefix; the field survives narrow-width compaction like `R / ΣR`. */
+const TOOL_FIELD_PREFIX = "$ ";
 /** Entry rows mirror the host Text component's one-column side padding. */
 const TEXT_PADDING_X = 1;
 /**
@@ -69,23 +73,28 @@ export function compactStatusLabel(status: string, width: number): string {
 	const fields = status.split(" • ");
 	const coreIndex = fields.findIndex((field) => /^R .* \/ ΣR /.test(field));
 	if (coreIndex < 0) return status;
+	// `R / ΣR` and a live tool field are the row's identity while work is in flight;
+	// optional fields fill back in around them only while the budget allows.
+	const required = new Set<number>([coreIndex]);
+	const toolIndex = fields.findIndex((field) => field.startsWith(TOOL_FIELD_PREFIX));
+	if (toolIndex >= 0) required.add(toolIndex);
 	const head = fields[0]!;
-	const core = fields[coreIndex]!;
 	const kept: string[] = [head];
 	let current = visibleWidth(head);
 	for (let index = 1; index < fields.length; index += 1) {
 		const field = fields[index]!;
 		const candidate = current + FIELD_SEPARATOR_WIDTH + visibleWidth(field);
-		if (index === coreIndex) {
+		if (required.has(index)) {
 			kept.push(field);
 			current = candidate;
-		} else if (index < coreIndex) {
-			// Before the core: keep the optional field only while the core still fits after it.
-			if (candidate + FIELD_SEPARATOR_WIDTH + visibleWidth(core) <= budget) {
-				kept.push(field);
-				current = candidate + FIELD_SEPARATOR_WIDTH + visibleWidth(core);
-			}
-		} else if (candidate <= budget) {
+			continue;
+		}
+		// Reserve room for required fields that still come later before taking an optional one.
+		let reserve = 0;
+		for (const requiredIndex of required) {
+			if (requiredIndex > index) reserve += FIELD_SEPARATOR_WIDTH + visibleWidth(fields[requiredIndex]!);
+		}
+		if (candidate + reserve <= budget) {
 			kept.push(field);
 			current = candidate;
 		}
@@ -133,6 +142,14 @@ interface TurnTiming {
 	decodePausedAt: number | undefined;
 }
 
+interface ActiveTool {
+	toolCallId: string | undefined;
+	toolName: string;
+	startedAt: number;
+	/** Time spent waiting on extension UI prompts while this tool was active. */
+	promptMs: number;
+}
+
 interface RequestTiming {
 	startedAt: number;
 	completedReasoningMs: number;
@@ -142,6 +159,10 @@ interface RequestTiming {
 	completedGenerationMs: number;
 	completedStreamedOutputTokens: number;
 	turn: TurnTiming | undefined;
+	/** Tools executing right now, in start order. */
+	tools: ActiveTool[];
+	/** Start of the open extension UI prompt span, when the user is being asked. */
+	promptStartedAt: number | undefined;
 	ctx: ExtensionContext;
 	lastStatus?: string;
 }
@@ -154,6 +175,11 @@ interface TimingSnapshot {
 	inputTokens: number;
 	generationMs: number;
 	streamedOutputTokens: number;
+	/** Longest-running active tool, zero when no tool is executing. */
+	toolMs: number;
+	/** Name of that tool, empty when no tool is executing. */
+	toolName: string;
+	toolCount: number;
 }
 
 export function formatReasoningShare(reasoningMs: number, totalMs: number): string {
@@ -347,6 +373,24 @@ export function createWorkTimingExtension(
 			return total;
 		};
 
+		const toolSnapshotAt = (at: number): Pick<TimingSnapshot, "toolMs" | "toolName" | "toolCount"> => {
+			if (!request || request.tools.length === 0) return { toolMs: 0, toolName: "", toolCount: 0 };
+			const openPromptMs = request.promptStartedAt === undefined ? 0 : Math.max(0, at - request.promptStartedAt);
+			let toolMs = 0;
+			let toolName = "";
+			for (const tool of request.tools) {
+				// A prompt that opened after this tool started pauses only its own span.
+				const promptMs = Math.min(openPromptMs, Math.max(0, at - tool.startedAt));
+				const elapsed = Math.max(0, at - tool.startedAt - tool.promptMs - promptMs);
+				// The longest-running tool wins; ties keep the oldest (start order).
+				if (elapsed > toolMs) {
+					toolMs = elapsed;
+					toolName = tool.toolName;
+				}
+			}
+			return { toolMs, toolName, toolCount: request.tools.length };
+		};
+
 		const snapshotAt = (at: number): TimingSnapshot | undefined => {
 			if (!request) return undefined;
 			const turn = request.turn;
@@ -366,17 +410,18 @@ export function createWorkTimingExtension(
 				inputTokens: request.completedInputTokens + currentInputTokens,
 				generationMs: request.completedGenerationMs + currentGenerationMs,
 				streamedOutputTokens: request.completedStreamedOutputTokens + currentStreamedTokens,
+				...toolSnapshotAt(at),
 			};
 		};
 
 		// The slow lane samples durations; the stream lane refreshes tokens/rate.
 		// Both publish through the same formatter and working-message writer.
-		let clock: Pick<TimingSnapshot, "totalMs" | "reasoningMs" | "turnReasoningMs"> | undefined;
+		let clock: Pick<TimingSnapshot, "totalMs" | "reasoningMs" | "turnReasoningMs" | "toolMs"> | undefined;
 
 		const sampleClock = (at: number): void => {
 			const snapshot = snapshotAt(at);
 			clock = snapshot
-				? { totalMs: snapshot.totalMs, reasoningMs: snapshot.reasoningMs, turnReasoningMs: snapshot.turnReasoningMs }
+				? { totalMs: snapshot.totalMs, reasoningMs: snapshot.reasoningMs, turnReasoningMs: snapshot.turnReasoningMs, toolMs: snapshot.toolMs }
 				: undefined;
 		};
 
@@ -386,8 +431,14 @@ export function createWorkTimingExtension(
 			const snapshot = snapshotAt(at);
 			if (!snapshot) return;
 			const durations = clock ?? snapshot;
+			// Live tool timing: only a long-running tool is worth surfacing, and it
+			// vanishes the moment the tool ends.
+			const toolField = snapshot.toolName && durations.toolMs >= TOOL_ELAPSED_MIN_MS
+				? `${TOOL_FIELD_PREFIX}${snapshot.toolName} ${formatDuration(durations.toolMs)}${snapshot.toolCount > 1 ? ` +${snapshot.toolCount - 1}` : ""}`
+				: "";
 			const status =
 				`Working... ${formatDuration(durations.totalMs)}` +
+				(toolField ? ` • ${toolField}` : "") +
 				formatTokenCounts(snapshot.inputTokens, snapshot.outputTokens) +
 				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
 				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
@@ -411,7 +462,12 @@ export function createWorkTimingExtension(
 		};
 
 		const finishTurn = (at: number): void => {
-			if (!request?.turn) return;
+			if (!request) return;
+			// Tool events always precede the turn boundary; drop any leftover state so a
+			// stale timer can never outlive its turn.
+			request.tools.length = 0;
+			request.promptStartedAt = undefined;
+			if (!request.turn) return;
 			const reasoningMs = turnReasoningAt(request.turn, at);
 			request.completedReasoningMs += reasoningMs;
 			request.lastTurnReasoningMs = reasoningMs;
@@ -472,6 +528,8 @@ export function createWorkTimingExtension(
 					completedGenerationMs: 0,
 					completedStreamedOutputTokens: 0,
 					turn: undefined,
+					tools: [],
+					promptStartedAt: undefined,
 					ctx,
 				};
 			}
@@ -521,10 +579,50 @@ export function createWorkTimingExtension(
 			paint(now(), true);
 		});
 
-		pi.on("tool_execution_start", (_event, ctx) => {
-			if (ctx.mode !== "tui" || !request?.turn) return;
-			pauseTurnDecode(request.turn, now());
+		const toolNameOf = (event: { toolName?: unknown }): string =>
+			typeof event.toolName === "string" && event.toolName ? event.toolName : "tool";
+
+		const removeActiveTool = (event: { toolCallId?: unknown; toolName?: unknown }): void => {
+			if (!request) return;
+			const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
+			const toolName = typeof event.toolName === "string" && event.toolName ? event.toolName : undefined;
+			let index = toolCallId === undefined ? -1 : request.tools.findIndex((tool) => tool.toolCallId === toolCallId);
+			if (index < 0 && toolName !== undefined) index = request.tools.findIndex((tool) => tool.toolName === toolName);
+			if (index >= 0) request.tools.splice(index, 1);
+		};
+
+		pi.on("tool_execution_start", (event, ctx) => {
+			if (ctx.mode !== "tui" || !request) return;
+			const at = now();
+			if (request.turn) pauseTurnDecode(request.turn, at);
+			request.tools.push({
+				toolCallId: typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined,
+				toolName: toolNameOf(event),
+				startedAt: at,
+				promptMs: 0,
+			});
+			paint(at, true);
+		});
+
+		pi.on("tool_execution_end", (event, ctx) => {
+			if (ctx.mode !== "tui" || !request) return;
+			removeActiveTool(event);
 			paint(now(), true);
+		});
+
+		pi.on("ui_prompt_start", (_event, ctx) => {
+			if (ctx.mode !== "tui" || !request) return;
+			// Coalesced by the host into one outer span; waiting on the user is not tool time.
+			request.promptStartedAt ??= now();
+		});
+
+		pi.on("ui_prompt_end", (_event, ctx) => {
+			if (ctx.mode !== "tui" || !request || request.promptStartedAt === undefined) return;
+			const at = now();
+			const waitedMs = Math.max(0, at - request.promptStartedAt);
+			request.promptStartedAt = undefined;
+			for (const tool of request.tools) tool.promptMs += waitedMs;
+			paint(at, true);
 		});
 
 		pi.on("turn_end", (event, ctx) => {
