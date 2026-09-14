@@ -68,12 +68,10 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 	}), "fast counters refresh between slow clock samples without replacing the template");
 	assert.ok(lines.some(line => /ΣR [12]s/.test(line.text)), "slow reasoning clock must also advance");
 	// The real bash tool runs `sleep 7`, so the live tool field must appear past its threshold and then vanish.
-	const toolLines = lines.filter(line => line.text.includes("$ bash "));
+	const toolLines = lines.filter(line => line.text.includes("⚙ "));
 	assert.ok(toolLines.length > 0, "the live tool timer must reach the real terminal while bash runs");
-	assert.ok(toolLines.some(line => {
-		const match = / \$ bash (\d+)s/.exec(line.text);
-		return match !== null && Number(match[1]) >= 5;
-	}), "the tool field appears once its threshold passes");
-	const lastToolLine = lines.findLastIndex(line => line.text.includes("$ bash "));
-	assert.ok(lines.slice(lastToolLine + 1).some(line => !line.text.includes("$ bash ")), "the tool field disappears when the tool ends");
+	assert.ok(toolLines.some(line => line.text.includes("⚙ 2s ")), "the tool field appears on its two-second threshold");
+	assert.ok(!toolLines.some(line => line.text.includes("⚙ 1s ")), "the tool field never appears below the threshold");
+	const lastToolLine = lines.findLastIndex(line => line.text.includes("⚙ "));
+	assert.ok(lines.slice(lastToolLine + 1).some(line => !line.text.includes("⚙ ")), "the tool field disappears when the tool ends");
 });

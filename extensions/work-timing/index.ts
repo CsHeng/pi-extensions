@@ -10,9 +10,9 @@ const WORK_TIMING_VERSION = 3;
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
 /** A live tool field appears only after this much work, so quick reads never flash. */
-const TOOL_ELAPSED_MIN_MS = 5_000;
-/** The tool field's `$ ` prefix; the field survives narrow-width compaction like `R / ΣR`. */
-const TOOL_FIELD_PREFIX = "$ ";
+const TOOL_ELAPSED_MIN_MS = 2_000;
+/** The tool field's `⚙ ` prefix; the field survives narrow-width compaction like `R / ΣR`. */
+const TOOL_FIELD_PREFIX = "⚙ ";
 /** Entry rows mirror the host Text component's one-column side padding. */
 const TEXT_PADDING_X = 1;
 /**
@@ -177,8 +177,6 @@ interface TimingSnapshot {
 	streamedOutputTokens: number;
 	/** Longest-running active tool, zero when no tool is executing. */
 	toolMs: number;
-	/** Name of that tool, empty when no tool is executing. */
-	toolName: string;
 	toolCount: number;
 }
 
@@ -373,22 +371,18 @@ export function createWorkTimingExtension(
 			return total;
 		};
 
-		const toolSnapshotAt = (at: number): Pick<TimingSnapshot, "toolMs" | "toolName" | "toolCount"> => {
-			if (!request || request.tools.length === 0) return { toolMs: 0, toolName: "", toolCount: 0 };
+		const toolSnapshotAt = (at: number): Pick<TimingSnapshot, "toolMs" | "toolCount"> => {
+			if (!request || request.tools.length === 0) return { toolMs: 0, toolCount: 0 };
 			const openPromptMs = request.promptStartedAt === undefined ? 0 : Math.max(0, at - request.promptStartedAt);
 			let toolMs = 0;
-			let toolName = "";
 			for (const tool of request.tools) {
 				// A prompt that opened after this tool started pauses only its own span.
 				const promptMs = Math.min(openPromptMs, Math.max(0, at - tool.startedAt));
 				const elapsed = Math.max(0, at - tool.startedAt - tool.promptMs - promptMs);
-				// The longest-running tool wins; ties keep the oldest (start order).
-				if (elapsed > toolMs) {
-					toolMs = elapsed;
-					toolName = tool.toolName;
-				}
+				// The longest-running tool leads; ties keep the oldest (start order).
+				if (elapsed > toolMs) toolMs = elapsed;
 			}
-			return { toolMs, toolName, toolCount: request.tools.length };
+			return { toolMs, toolCount: request.tools.length };
 		};
 
 		const snapshotAt = (at: number): TimingSnapshot | undefined => {
@@ -433,8 +427,8 @@ export function createWorkTimingExtension(
 			const durations = clock ?? snapshot;
 			// Live tool timing: only a long-running tool is worth surfacing, and it
 			// vanishes the moment the tool ends.
-			const toolField = snapshot.toolName && durations.toolMs >= TOOL_ELAPSED_MIN_MS
-				? `${TOOL_FIELD_PREFIX}${snapshot.toolName} ${formatDuration(durations.toolMs)}${snapshot.toolCount > 1 ? ` +${snapshot.toolCount - 1}` : ""}`
+			const toolField = durations.toolMs >= TOOL_ELAPSED_MIN_MS
+				? `${TOOL_FIELD_PREFIX}${formatDuration(durations.toolMs)}${snapshot.toolCount > 1 ? ` +${snapshot.toolCount - 1}` : ""}`
 				: "";
 			const status =
 				`Working... ${formatDuration(durations.totalMs)}` +
