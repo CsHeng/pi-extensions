@@ -16,7 +16,7 @@ interface PackageManifest {
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes the eight maintained extensions and their Pi peers", async () => {
+test("package exposes the nine maintained extensions and their Pi peers", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -34,6 +34,7 @@ test("package exposes the eight maintained extensions and their Pi peers", async
 		"./extensions/status-footer/index.ts",
 		"./extensions/work-timing/index.ts",
 		"./extensions/subagents-ui/index.ts",
+		"./extensions/workflow/index.ts",
 	]);
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": "*",
@@ -41,9 +42,9 @@ test("package exposes the eight maintained extensions and their Pi peers", async
 		"@earendil-works/pi-tui": "*",
 		typebox: "*",
 	});
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-ai"], "0.84.4");
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.84.4");
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-tui"], "0.84.4");
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-ai"], "0.85.1");
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.85.1");
+	assert.equal(manifest.devDependencies?.["@earendil-works/pi-tui"], "0.85.1");
 	assert.equal(manifest.devDependencies?.typebox, "1.3.7");
 	assert.equal(manifest.dependencies, undefined);
 	assert.equal(manifest.scripts?.["e2e:subagents"], "node --experimental-strip-types scripts/run-live-subagents-e2e.ts");

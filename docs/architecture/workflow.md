@@ -1,0 +1,56 @@
+# Task Workflow
+
+`extensions/workflow/index.ts` registers `csheng_workflow`, the sole branch-local ledger for at most one enrolled workset. The main agent supplies intent, criteria, cohesive tasks, evidence and acceptance judgments. Code owns identities, revisions, DAG readiness, invalidation, persistence, mechanical completion checks and bounded reconciliation. Pi owns the model/tool loop, queues, cancellation and final responses. Execution stays with [`csheng_subagent_sessions`](subagent-execution.md); transport success or candidate apply never means semantic acceptance.
+
+## Activation and removal
+
+Loading registers the workflow tool, observation/alignment hooks and a nonce-protected internal `csheng-workflow-wait` command. An eligible foreground run may arm that command's public idle waiter even before enrollment; it neither becomes model input nor requires a special user input format. No ledger mutation or automatic model continuation occurs without an open workset. There is no configuration file, project overlay, provider change, separate state file, background scheduler or competing UI writer.
+
+Removing the extension removes its tool, command and hooks; shutdown invalidates pending waiters. Native `csheng-workflow-state` entries remain inert history. Loading or replaying them never automatically resumes work.
+
+## Tool operations
+
+- `open` enrolls a goal, delivery endpoint, source/authority references, criteria and tasks. The model may choose an automatic-review allowance of zero or one, not raise the cap.
+- `inspect` reads the bounded canonical view without mutation.
+- `align` confirms or acknowledges the current model-prepared input under existing authority, or pauses/cancels the workset. Unknown origin does not prohibit alignment or grant new permission.
+- `amend` updates goals, endpoints, criteria and tasks with explicit lineage, retirement and selective invalidation.
+- `start` captures an attempt's input basis; `record` stores outcomes/evidence and observed managed transport references; `assess` records an explicit judgment.
+- `pause`, `resume` and `close` record disposition. Only `close/completed` runs the completion predicate.
+
+Mutations echo `expectedRevision`. Invalid payloads, stale revisions and exceeded limits do not partially commit. Completion independently requires current supporting evidence for every accepted active task and required criterion, resolved attempts, current workset delivery evidence and current alignment. Retired criteria remain history, not obligations. All acceptance-supporting bindings are rechecked, or the bounded check budget causes a typed refusal rather than truncation.
+
+## Evidence and invalidation
+
+Evidence separates `host_observed`, `agent_declared`, `user_declared` and `review` provenance from semantic sufficiency. Host observations must be owned results from the current session/branch and cite a captured execution basis; unobserved, cross-session, abandoned or too-old results are refused. An observation without that basis is unavailable, never rebound to today's files. Declared evidence without an attempt remains an explicit agent assertion. A `managed:<handle>:<episode>` reference uses only the public managed result envelope.
+
+Semantic changes and loss of accepted predecessor evidence fence every affected retained execution, not just the latest attempt. Already-interrupted attempts retain their historical outcome but lose affected evidence bindings. Rejection, unresolved judgment and basis refresh propagate dependency invalidation. Every judgment supported by stale evidence is revoked, including criterion judgments supported by a task attempt. Interrupted attempts cannot be rebound, including in a compound record operation; the guard uses typed state, not outcome prose.
+
+Fingerprints bind scope to observed bytes, not correctness or an atomic filesystem transaction. Ordinary file links include link spelling and target bytes. Chained, directory, external-target and non-regular links/inputs that cannot be safely certified return unavailable. Excess scope entries are not silently omitted. Assessment refuses known overlapping active writers. Source changes require fresh evidence; hashes never manufacture acceptance.
+
+## Model-prepared input and provenance
+
+Effective input is a new native user-message occurrence participating in the public `context` hook before a model request. Receipt alone, editor drafts, withdrawn/replaced queue entries, historical context and retries do not advance alignment. `before_agent_start` associates unambiguous ordinary source classes; `message_start` observes occurrences, and `context` commits participation transactionally with the ledger. Failed snapshot append retains the pending occurrence and fences sensitive operations until a successful preparation. Shared tracking retains bounded structural digests, not raw input bodies; digest membership in cloned context never guesses a receipt's source.
+
+Pi 0.85.1 exposes no queued native source/receipt identity. Actually prepared steering/follow-up occurrences still advance the input generation and require main-agent alignment, but unknown origin never creates authority or replenishes automatic-review credit. The agent can confirm, acknowledge or amend under existing authority; `deliveryUnavailable` is a provenance warning, not an irrecoverable task lock. Identified ordinary interactive/RPC participation alone replenishes the finite allowance. Unambiguously identified ordinary extension controls are excluded.
+
+Mixed-source receipts, including an input subsequently handled by another extension, can make later ordinary participation unknown. They request non-authorizing alignment/reference only and preserve spent credit. Last-receipt-wins would grant false human credit under overlapping preparations and is not used. Arbitrary later context/payload transformers can still remove or replace content; this observes preparation at the public hook, not final network transmission or perfectly identical copies removed by another extension.
+
+Before enrollment and after closure, tracking remains ephemeral. Opening after unknown participation or recovery starts without automatic-review credit and permits explicit alignment. Model parameters cannot forge this host-owned enrollment provenance. Fork/tree recovery preserves spent credit and progress history; old snapshots and replayed context cannot mint a fresh human epoch.
+
+An alignment reminder is projected once beside its input, or kept at its existing position, never moved after every tool result. Ordinary read-only turns do not rearm it. Failed requests and compaction can rearm lost projection; projection consumption never substitutes for alignment.
+
+## Safe bounded reconciliation
+
+On trusted TUI/RPC runs with the workflow tool active, `settlement.ts` invokes its nonce-guarded internal command during `agent_start`. The command arms the documented `ExtensionCommandContext.waitForIdle()` while the run is active. The event handler does not await the command. That wait resolves after all extension settlement handlers and native settlement notification; a wait first called during settlement would be too late because `isIdle()` is already true.
+
+After the barrier, policy rechecks current state, actionable deficits, pending host messages and uncommitted input observations, successful stop, compaction, UI prompts, trust, active tools, meaningful progress and remaining allowance. Only then does ordinary `sendUserMessage` request reconciliation from the same main agent, preserving normal input and timing initialization. Abort, new real input after scheduling, session/tree replacement and shutdown invalidate pending work. No timer, private API, patched UI method, automatic apply or replay is involved. An absent/unarmed command waiter records `host_contract_unavailable`; print/JSON record `mode_unsupported` instead of continuing.
+
+Progress excludes allocated IDs, timestamps, unchanged evidence, pending/running churn and attempt-outcome prose. It includes structural outcomes and relevant input bases. Retired obligations do not make waiting work actionable; accepted task checkboxes do not hide unaccepted criteria. Repeated progress or spent allowance stops automatic review while leaving unfinished obligations visible.
+
+## Persistence, presentation and verification
+
+Every committed mutation appends one complete bounded non-model snapshot before installing memory state. Replay uses the latest entry on the active branch; corruption, unknown schema, missing/unsafe counters or exceeded bounds fail visibly instead of rolling back. Counters must include every required key and exceed retained identities; allocation also rejects unsafe values. Host tool-call identity deduplicates repeated mutations. Fork/tree recovery fences unowned attempts and observations; snapshots never replay external work.
+
+Tool results and `inspect` are the presentation. No task widget, footer or working-message writer is added. Dependency-host TUI/RPC tests co-load actual subagents, observer UI, timing and footer extensions with a later asynchronous settlement consumer. The installed Pi RPC test independently exercises the real CLI, ordinary continuation and explicit pause using a synthetic provider, disposable configuration and process-local trust. No real provider inference or daily installation is involved.
+
+The development and tested installed host are Pi 0.85.1. Ordinary-input continuation, model-prepared queued input, withdrawal/replacement, conservative unknown-source alignment and finite-credit recovery are verified without a host patch. Snapshot publication, real-user restart/load state and the live effectiveness pilot remain unverified and separately authorized.
