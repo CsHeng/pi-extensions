@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
-import { Type, type Static } from "typebox";
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { Type, type Static, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WORKFLOW_LIMITS, WORKFLOW_TOOL_NAME, type EvidenceBasis, type RecordOperation, type WorkflowErrorCode, type WorkflowOperation, type WorkflowView, type WorksetState } from "./contracts.ts";
 import { fingerprintScope } from "./fingerprints.ts";
@@ -46,7 +47,7 @@ const amendmentChange = Type.Union([
 	Type.Object({ kind: Type.Literal("cancel_task"), id: Type.String(), reason: Type.String({ maxLength: WORKFLOW_LIMITS.maxReason }) }, { additionalProperties: false }),
 ]);
 
-const parameters = Type.Union([
+const operationParameters = Type.Union([
 	Type.Object({
 		operation: Type.Literal("open"),
 		expectedRevision: Type.Literal(0),
@@ -154,7 +155,28 @@ const parameters = Type.Union([
 	}, { additionalProperties: false }),
 ]);
 
-export type WorkflowToolParams = Static<typeof parameters>;
+export type WorkflowToolParams = Static<typeof operationParameters>;
+
+// Providers require an object root, not the discriminated union used for local validation.
+// Derive the flat declaration from the same operation schemas so bounds and fields stay in sync.
+const parameters = (() => {
+	const fields = new Map<string, { schemas: Map<string, TSchema>; used: string[]; required: string[] }>();
+	for (const variant of operationParameters.anyOf) {
+		for (const [name, schema] of Object.entries(variant.properties)) {
+			const field = fields.get(name) ?? { schemas: new Map<string, TSchema>(), used: [], required: [] };
+			field.schemas.set(JSON.stringify(schema), schema);
+			field.used.push(variant.properties.operation.const);
+			if (variant.required?.some((required) => required === name)) field.required.push(variant.properties.operation.const);
+			fields.set(name, field);
+		}
+	}
+	return Type.Object(Object.fromEntries([...fields].map(([name, field]) => {
+		const schema = Type.Union([...field.schemas.values()], {
+			description: `Used by: ${field.used.join(", ")}.${field.required.length ? ` Required for: ${field.required.join(", ")}.` : ""}`,
+		});
+		return [name, name === "operation" ? schema : Type.Optional(schema)];
+	})), { additionalProperties: false });
+})();
 
 const truncate = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
@@ -501,7 +523,10 @@ export function registerWorkflowTool(pi: ExtensionAPI, store: WorkflowStore, obs
 		],
 		parameters,
 		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
-			const operation = params as unknown as WorkflowOperation;
+			const operation = validateToolArguments(
+				{ name: WORKFLOW_TOOL_NAME, description: "Workflow operation", parameters: operationParameters },
+				{ type: "toolCall", id: toolCallId, name: WORKFLOW_TOOL_NAME, arguments: params },
+			) as WorkflowToolParams;
 			const context = {
 				now: new Date().toISOString(),
 				cwd: ctx.cwd,

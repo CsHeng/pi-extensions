@@ -10,6 +10,8 @@ Removing the extension removes its tool, command and hooks; shutdown invalidates
 
 ## Tool operations
 
+The provider-facing parameters use an object root with flat operation fields derived from the local operation schemas. Field descriptions identify which operations use or require them. Before preparation or mutation, the tool validates the full discriminated operation schema, including operation-specific required fields and extra-field rejection. The offline provider regression exercises Pi's actual OpenAI Responses and Codex Responses request serializers with an injected transport; it does not make live provider calls.
+
 - `open` enrolls a goal, delivery endpoint, source/authority references, criteria and tasks. The model may choose an automatic-review allowance of zero or one, not raise the cap.
 - `inspect` reads the bounded canonical view without mutation.
 - `align` confirms or acknowledges the current model-prepared input under existing authority, or pauses/cancels the workset. Unknown origin does not prohibit alignment or grant new permission.
