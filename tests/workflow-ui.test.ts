@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import workflowExtension from "../extensions/workflow/index.ts";
+import workflowExtension from "./fixtures/workflow/legacy-extension.ts";
 import { WORKFLOW_ENTRY_TYPE, type WorkflowOperation } from "../extensions/workflow/contracts.ts";
 import { createWorkflowStore, type SessionEntryLike } from "../extensions/workflow/store.ts";
 import { registerWorkflowUi, WORKFLOW_WIDGET_KEY } from "../extensions/workflow/ui.ts";

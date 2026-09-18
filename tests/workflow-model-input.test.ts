@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import workflowExtension from "../extensions/workflow/index.ts";
+import workflowExtension from "./fixtures/workflow/legacy-extension.ts";
 import type { WorksetState } from "../extensions/workflow/contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace, type HostHarness } from "./fixtures/workflow/host-fixture.ts";
 const open = () => fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "open", expectedRevision: 0, goal: "Authorized original goal", deliveryEndpoint: "source", criteria: [{ key: "c", outcome: "criterion", verification: "check" }], tasks: [{ key: "t", outcome: "task", covers: ["c"] }] } as never));

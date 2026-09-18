@@ -7,7 +7,7 @@ import type { WorkflowOperation, WorksetState } from "../extensions/workflow/con
 import { applyOperation, markInputDelivered, type ReduceContext } from "../extensions/workflow/reducer.ts";
 import { REVIEW_PROMPT_MARKER, hasActionableDeficit, progressFingerprint, registerReviewPolicy } from "../extensions/workflow/review.ts";
 import { createWorkflowStore, type SessionEntryLike } from "../extensions/workflow/store.ts";
-import workflowExtension from "../extensions/workflow/index.ts";
+import workflowExtension from "./fixtures/workflow/legacy-extension.ts";
 import { prepareOperation } from "../extensions/workflow/tool.ts";
 import { createObservationIndex } from "../extensions/workflow/observation.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";

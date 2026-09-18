@@ -60,7 +60,7 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 	assert.equal(exitCode, 0, "offline installed-host continuation must settle and shut down cleanly");
 	assert.equal(extensionError, false);
 	const proof = JSON.parse(await readFile(join(agent, "continuation-proof.json"), "utf8"));
-	assert.deepEqual(proof, { calls: 4, settled: 2, starts: [0, 1], sources: ["rpc", "extension"], disposition: "paused", used: 1,
+	assert.deepEqual(proof, { calls: 4, settled: 2, starts: [0, 1], sources: ["rpc", "extension"], disposition: "cancelled", used: 1,
 		facts: [{ mode: "rpc", trusted: true, signal: true, idle: false }, { mode: "rpc", trusted: true, signal: true, idle: false }],
 	});
 });

@@ -138,7 +138,7 @@ export default function probe(pi: ExtensionAPI): void {
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop", content: [], usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 				stream.push({ type: "start", partial: message });
 				if (call === 0) {
-					const toolCall = { type: "toolCall" as const, id: "probe-open", name: "csheng_workflow", arguments: { operation: "open", expectedRevision: 0, goal: "Synthetic workflow probe", deliveryEndpoint: "probe session entry", criteria: [{ key: "c", outcome: "Criterion met", verification: "probe" }], tasks: [{ key: "t", outcome: "Task", covers: ["c"] }] } };
+					const toolCall = { type: "toolCall" as const, id: "probe-open", name: "csheng_workflow", arguments: { operation: "enroll", goal: "Synthetic workflow probe", delivery: "probe session entry", authority: "explicit fixture implementation", requirements: [{ key: "c", outcome: "Criterion met", verification: "probe" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }] } };
 					message.content = [toolCall];
 					message.stopReason = "toolUse";
 					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
@@ -178,7 +178,7 @@ session_file=$(find "${session_root}" -name '*.jsonl' -print -quit)
 [[ -n ${session_file} ]]
 snapshot_count=$(jq -s '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | length' "${session_file}")
 [[ ${snapshot_count} -ge 1 ]]
-goal=$(jq -sr '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | last | .data.state.workset.goal' "${session_file}")
+goal=$(jq -sr '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | last | .data.state.goal' "${session_file}")
 [[ ${goal} == "Synthetic workflow probe" ]]
 
 jq -cn '{result:"pass",source:"installed",tool:1,source_identity:1,extension_off_tool:0,coload:1,synthetic_snapshots:1}'

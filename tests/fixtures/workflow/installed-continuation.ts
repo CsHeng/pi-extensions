@@ -17,8 +17,8 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 		// This consumer is loaded AFTER workflow. An early timer/idle re-entry would record 0 twice.
 		await new Promise((resolve) => setTimeout(resolve, 40));
 		settled += 1;
-		const last = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: { workset: { disposition: string; review: { used: number } } } } };
-		await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "continuation-proof.json"), JSON.stringify({ calls, settled, starts, sources, disposition: last.data.state.workset.disposition, used: last.data.state.workset.review.used, facts }));
+		const last = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: { fulfillment: string; continuation: { dispatched: number } } } };
+		await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "continuation-proof.json"), JSON.stringify({ calls, settled, starts, sources, disposition: last.data.state.fulfillment, used: last.data.state.continuation.dispatched, facts }));
 		if (settled === 2) ctx.shutdown();
 	});
 	pi.registerProvider("workflow-installed-fixture", {
@@ -32,8 +32,8 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 			stream.push({ type: "start", partial: message });
 			if (call === 0 || call === 2) {
 				const args = call === 0
-					? { operation: "open", expectedRevision: 0, goal: "Installed continuation", deliveryEndpoint: "fixture", criteria: [{ key: "c", outcome: "criterion", verification: "check" }], tasks: [{ key: "t", outcome: "task", covers: ["c"] }] }
-					: { operation: "pause", expectedRevision: 2, reason: "fixture records a real waiting disposition" };
+					? { operation: "enroll", goal: "Installed continuation", delivery: "fixture", authority: "explicit fixture implementation", requirements: [{ key: "c", outcome: "criterion", verification: "check" }], tasks: [{ key: "t", title: "task", covers: ["c"] }] }
+					: { operation: "close", outcome: "cancelled", reason: "fixture explicitly cancels" };
 				const toolCall = { type: "toolCall" as const, id: `fixture-${call}`, name: "csheng_workflow", arguments: args };
 				message.content = [toolCall]; message.stopReason = "toolUse";
 				stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });

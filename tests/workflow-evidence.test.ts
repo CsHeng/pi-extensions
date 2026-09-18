@@ -10,7 +10,7 @@ import { MANAGED_SESSION_TOOL_NAME, createObservationIndex, summarizeHostObserva
 import { FINGERPRINT_LIMITS, fingerprintScope } from "../extensions/workflow/fingerprints.ts";
 import { createWorkflowStore } from "../extensions/workflow/store.ts";
 import { prepareOperation } from "../extensions/workflow/tool.ts";
-import workflowExtension from "../extensions/workflow/index.ts";
+import workflowExtension from "./fixtures/workflow/legacy-extension.ts";
 import {
 	createHostHarness,
 	createTrace,

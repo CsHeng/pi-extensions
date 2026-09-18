@@ -7,7 +7,7 @@ import subagentsUiExtension from "../extensions/subagents-ui/index.ts";
 import statusFooterExtension from "../extensions/status-footer/index.ts";
 import workTimingExtension, { WORK_TIMING_ENTRY_TYPE } from "../extensions/work-timing/index.ts";
 import workflowExtension from "../extensions/workflow/index.ts";
-import type { WorksetState } from "../extensions/workflow/contracts.ts";
+import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 
 // Deliberately register workflow before the real timing/observer consumers, not last.
@@ -41,11 +41,11 @@ for (const mode of ["tui", "rpc"] as const) {
 		t.after(async () => { release(); await harness.dispose(); });
 		harness.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("csheng_workflow", {
-				operation: "open", expectedRevision: 0, goal: "Co-loaded workflow", deliveryEndpoint: "co-load evidence",
-				criteria: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", outcome: "Task", covers: ["c"] }],
+				operation: "enroll", goal: "Co-loaded workflow", delivery: "co-load evidence", authority: "explicit fixture implementation",
+				requirements: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }],
 			} as never)),
 			fauxAssistantMessage("prematurely stopped"),
-			fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "pause", expectedRevision: 2, reason: "explicit fixture blocker" } as never)),
+			fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "close", outcome: "cancelled", reason: "explicit fixture cancellation" } as never)),
 			fauxAssistantMessage("truthfully paused"),
 		]);
 		const running = harness.session.prompt("go");
@@ -55,10 +55,10 @@ for (const mode of ["tui", "rpc"] as const) {
 		await running;
 		await waitForTrace(trace, () => trace.entries.filter((entry) => entry.event === "native:agent_settled").length === 2);
 		const branch = harness.session.sessionManager.getBranch();
-		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: WorksetState } };
-		assert.equal(snapshot.data.state.workset.disposition, "paused");
-		assert.equal(snapshot.data.state.workset.review.used, 1);
-		assert.equal(snapshot.data.state.criteria["AC-1"]!.disposition, "unverified", "continuation is not semantic acceptance");
+		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } };
+		assert.equal(snapshot.data.state.fulfillment, "cancelled");
+		assert.equal(snapshot.data.state.continuation.dispatched, 1);
+		assert.deepEqual(snapshot.data.state.acceptance, [], "continuation is not semantic acceptance");
 		assert.equal(harness.faux.state.callCount, 4);
 		const input = trace.entries.filter((entry) => entry.event === "input");
 		assert.equal(input.length, 2);

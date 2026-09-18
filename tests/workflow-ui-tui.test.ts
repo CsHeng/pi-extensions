@@ -16,7 +16,7 @@ interface Proof {
 	rows: number; columns: number; revision: number; generation?: number; review?: number; goal?: string; disposition?: string;
 }
 
-for (const mode of ["on", "compact"]) test(`installed Pi/CC ${mode}: workflow task UI follows tools, inspection, resize and branch lifecycle`, { timeout: 65_000 }, async t => {
+for (const mode of ["on", "compact"]) test(`historical v1 Pi/CC ${mode}: workflow task UI follows tools, inspection, resize and branch lifecycle`, { timeout: 65_000 }, async t => {
 	try { await access(cc); await access("/usr/bin/script"); } catch { t.skip("requires installed CC and util-linux script; UI evidence remains unverified"); return; }
 	if (spawnSync("pi", ["--version"], { timeout: 5_000 }).status !== 0) { t.skip("requires installed Pi; UI evidence remains unverified"); return; }
 	const base = await mkdtemp(join(tmpdir(), "workflow-ui-tui-"));
@@ -27,7 +27,8 @@ for (const mode of ["on", "compact"]) test(`installed Pi/CC ${mode}: workflow ta
 		enableSessionReference: false, enableSubagentAutocomplete: false, enableAgentSummary: false }));
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-approve", "--session", join(base, "session.jsonl"),
 		"-e", join(root, "tests/fixtures/workflow/ui-tui.ts"),
-		...(["workflow", "status-footer", "work-timing", "subagents-ui"].flatMap(name => ["-e", join(root, `extensions/${name}/index.ts`)])),
+		"-e", join(root, "tests/fixtures/workflow/legacy-extension.ts"),
+		...(["status-footer", "work-timing", "subagents-ui"].flatMap(name => ["-e", join(root, `extensions/${name}/index.ts`)])),
 		"-e", cc, "--model", "workflow-ui-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "workflow UI fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
 		cwd: base, detached: true,

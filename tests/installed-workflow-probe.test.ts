@@ -25,7 +25,7 @@ done
 if [[ -n $session_dir ]]; then
 	mkdir -p "$session_dir"
 	cat >"$session_dir/session.jsonl" <<'JSONL'
-{"type":"custom","customType":"csheng-workflow-state","data":{"schemaVersion":1,"revision":1,"transition":"probe","at":"2026-09-17T00:00:00.000Z","state":{"schemaVersion":1,"revision":1,"workset":{"id":"WS-1","goal":"Synthetic workflow probe"},"pastWorksets":{},"criteria":{},"tasks":{},"attempts":{},"evidence":{},"decisions":{},"amendments":{},"appliedCalls":{},"next":{}}}}
+{"type":"custom","customType":"csheng-workflow-state","data":{"schemaVersion":2,"state":{"goal":"Synthetic workflow probe"}}}
 JSONL
 	printf 'PROBE_DONE\\n'
 	exit 0

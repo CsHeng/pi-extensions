@@ -8,7 +8,7 @@ import { WORKFLOW_ENTRY_TYPE, WORKFLOW_LIMITS, type WorkflowOperation, type Work
 import { applyOperation, validateState, type ReduceContext } from "../extensions/workflow/reducer.ts";
 import { createWorkflowStore, type SessionEntryLike } from "../extensions/workflow/store.ts";
 import { reconcileBranch } from "../extensions/workflow/branch.ts";
-import workflowExtension from "../extensions/workflow/index.ts";
+import workflowExtension from "./fixtures/workflow/legacy-extension.ts";
 import {
 	createHostHarness,
 	createTrace,
