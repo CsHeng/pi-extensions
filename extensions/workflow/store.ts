@@ -31,6 +31,8 @@ export interface WorkflowStore {
 	replay(entries: readonly SessionEntryLike[]): void;
 	/** Apply one operation; commits a snapshot before installing the new state. */
 	apply(operation: WorkflowOperation, context: ReduceContext, toolCallId: string): ReduceResult;
+	/** Prepare bounded operations privately, then commit once if the owner/revision is unchanged. */
+	transact(expectedRevision: number, context: ReduceContext, toolCallId: string, run: (draft: WorkflowStore) => Promise<ReduceResult>, signal?: AbortSignal, canCommit?: () => boolean): Promise<ReduceResult>;
 	/** Observe committed changes/replay. A failed observer is removed without changing the commit. */
 	subscribe(onChange: () => void, onError: () => void): () => void;
 }
@@ -59,6 +61,7 @@ function validateSnapshot(data: unknown): { state: WorksetState } | { error: str
 export function createWorkflowStore(sink: { append(customType: string, data: unknown): void }): WorkflowStore {
 	let state: WorksetState | undefined;
 	let recoveryError: string | undefined;
+	let generation = 0;
 	const observers = new Set<{ onChange(): void; onError(): void }>();
 	const notify = (): void => {
 		for (const observer of observers) {
@@ -72,21 +75,22 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 		}
 	};
 
-	const apply = (operation: WorkflowOperation, context: ReduceContext, toolCallId: string): ReduceResult => {
-		if (operation.operation === "inspect") return applyOperation(state, operation, context);
+	const preflight = (toolCallId: string): ReduceResult | undefined => {
 		if (recoveryError) {
 			return {
 				ok: false,
 				code: "state_unavailable",
-				message: `Workflow state is unavailable: ${recoveryError}`,
+				message: `Workflow state is unavailable: ${recoveryError}. Do not retry ledger operations or repair session history. Continue the user's task without workflow bookkeeping; repair the tool only if explicitly requested. Workflow completion cannot be certified.`,
 				...(state === undefined ? {} : { view: buildView(state) }),
 			};
 		}
 		if (state && Object.hasOwn(state.appliedCalls, toolCallId)) {
 			return { ok: true, state, view: buildView(state), notice: `Tool call ${toolCallId} was already applied at revision ${state.appliedCalls[toolCallId]}.` };
 		}
-		const result = applyOperation(state, operation, context);
-		if (!result.ok) return result;
+		return undefined;
+	};
+
+	const commit = (result: Extract<ReduceResult, { ok: true }>, context: ReduceContext, toolCallId: string): ReduceResult => {
 		const next = result.state;
 		const appliedCalls = { ...next.appliedCalls, [toolCallId]: next.revision };
 		const keys = Object.keys(appliedCalls);
@@ -113,6 +117,17 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 				view: buildView(state ?? next),
 			};
 		}
+		// Validate the final snapshot, including the just-added call index, with the same
+		// reader used by replay. Never acknowledge a commit that a restart would reject.
+		const validated = validateSnapshot(snapshot);
+		if ("error" in validated) {
+			return {
+				ok: false,
+				code: "state_unavailable",
+				message: `Workflow snapshot was not appended: ${validated.error}`,
+				...(state === undefined ? {} : { view: buildView(state) }),
+			};
+		}
 		try {
 			sink.append(WORKFLOW_ENTRY_TYPE, snapshot);
 		} catch (error) {
@@ -124,8 +139,17 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 			};
 		}
 		state = next;
+		generation += 1;
 		notify();
 		return result;
+	};
+
+	const apply = (operation: WorkflowOperation, context: ReduceContext, toolCallId: string): ReduceResult => {
+		if (operation.operation === "inspect" && !recoveryError) return applyOperation(state, operation, context);
+		const prior = preflight(toolCallId);
+		if (prior) return prior;
+		const result = applyOperation(state, operation, context);
+		return result.ok ? commit(result, context, toolCallId) : result;
 	};
 
 	return {
@@ -137,6 +161,7 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 			return () => { observers.delete(observer); };
 		},
 		replay(entries) {
+			generation += 1;
 			state = undefined;
 			recoveryError = undefined;
 			const snapshots = entries.filter((entry) => entry.type === "custom" && entry.customType === WORKFLOW_ENTRY_TYPE);
@@ -153,5 +178,29 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 			notify();
 		},
 		apply,
+		async transact(expectedRevision, context, toolCallId, run, signal, canCommit = () => true) {
+			const prior = preflight(toolCallId);
+			if (prior) return prior;
+			if (!state) return { ok: false, code: "no_workset", message: "Open a workset before batching operations." };
+			const failure = (code: "stale_revision" | "state_unavailable", message: string): ReduceResult => ({
+				ok: false, code, message, ...(state ? { view: buildView(state) } : {}),
+			});
+			if (expectedRevision !== state.revision) return failure("stale_revision", `expectedRevision ${expectedRevision} is stale; the current revision is ${state.revision}.`);
+			const owner = generation;
+			const originalCalls = { ...state.appliedCalls };
+			const draft = createWorkflowStore({ append() {} });
+			draft.replay([{ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: {
+				schemaVersion: WORKFLOW_SCHEMA_VERSION, revision: state.revision, state: structuredClone(state),
+			} }]);
+			if (signal?.aborted) return failure("state_unavailable", "Batch cancelled; nothing was committed.");
+			const result = await run(draft);
+			if (signal?.aborted) return failure("state_unavailable", "Batch cancelled; nothing was committed.");
+			if (generation !== owner) return failure("stale_revision", "Workflow changed during batch preparation; nothing from this batch was committed. Inspect before resubmitting.");
+			if (!canCommit()) return failure("state_unavailable", "Input preparation became unrecorded during the batch; nothing was committed. Retry context preparation before advancing workflow.");
+			if (!result.ok) return { ...result, view: buildView(state!), message: `${result.message} Batch rolled back; nothing was committed.` };
+			// Intermediate draft call identities are not durable host calls.
+			result.state.appliedCalls = originalCalls;
+			return commit(result, context, toolCallId);
+		},
 	};
 }

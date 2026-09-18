@@ -293,8 +293,12 @@ export function validateState(state: WorksetState): string | undefined {
 		}
 		if (state.next[name] <= highest) return `invalid ${name} counter below retained identity ${highest}`;
 	}
+	// Host/provider call IDs are opaque, not workflow-authored identifiers. Responses IDs
+	// contain `|`; other providers can supply long IDs with `+`, `/` and `=`. Preserve them
+	// exactly for replay/deduplication; the snapshot byte budget bounds their total size.
+	if (Object.keys(state.appliedCalls).length > WORKFLOW_LIMITS.maxAppliedCalls) return "invalid applied-call index";
 	for (const [id, revision] of Object.entries(state.appliedCalls)) {
-		if (!/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(id) || !Number.isSafeInteger(revision)) return "invalid applied-call index";
+		if (id.length === 0 || !Number.isSafeInteger(revision) || revision < 1 || revision > state.revision) return "invalid applied-call index";
 	}
 	if (Object.keys(state.tasks).length !== currentTasks(state).length && Object.keys(state.tasks).length === 0) return "missing tasks";
 	for (const [id, workset] of Object.entries(state.pastWorksets)) {

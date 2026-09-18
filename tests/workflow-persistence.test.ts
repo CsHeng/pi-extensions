@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { WORKFLOW_ENTRY_TYPE, WORKFLOW_LIMITS, type WorkflowOperation, type WorksetState } from "../extensions/workflow/contracts.ts";
 import { applyOperation, validateState, type ReduceContext } from "../extensions/workflow/reducer.ts";
@@ -71,6 +74,80 @@ test("committed mutations append one bounded snapshot and replay identically", (
 	assert.deepEqual(replayed.current(), store.current());
 	assert.equal(validateState(replayed.current()!), undefined);
 	assert.equal(replayed.current()!.evidence["EV-1"]!.subject.kind, "workset");
+});
+
+test("opaque provider call IDs survive JSON replay and retain exact deduplication", () => {
+	const ids = ["call_example|fc_example", `call_long|${"a+/=".repeat(150)}`, "__proto__", "constructor"];
+	for (const id of ids) {
+		const written: Array<{ customType: string; data: unknown }> = [];
+		const sink = { append: (customType: string, data: unknown) => written.push({ customType, data: JSON.parse(JSON.stringify(data)) }) };
+		const store = createWorkflowStore(sink);
+		assert.equal(store.apply(openOperation(), CLOCK, id).ok, true);
+		const replayed = createWorkflowStore(sink);
+		replayed.replay(snapshotEntries(written));
+		assert.equal(replayed.recovery(), undefined);
+		assert.deepEqual(replayed.current(), store.current());
+		assert.equal(replayed.current()!.appliedCalls[id], 1);
+		const repeated = replayed.apply(openOperation(), CLOCK, id);
+		assert.equal(repeated.ok, true);
+		assert.equal(written.length, 1, "replay preserves deduplication without rewriting old snapshots");
+		assert.equal(replayed.apply({ operation: "start", expectedRevision: 1, taskId: "T-1" }, CLOCK, `${id}:next`).ok, true);
+		replayed.replay(snapshotEntries(written));
+		assert.equal(replayed.recovery(), undefined);
+		assert.equal(replayed.current()!.attempts["AT-1"]?.state, "running");
+	}
+});
+
+test("invalid call indexes are refused before append and on replay", () => {
+	const written: Array<{ customType: string; data: unknown }> = [];
+	const store = createWorkflowStore({ append: (customType, data) => written.push({ customType, data }) });
+	const refused = store.apply(openOperation(), CLOCK, "");
+	assert.equal(refused.ok, false);
+	assert.equal(written.length, 0);
+	assert.equal(store.current(), undefined);
+	assert.equal(store.apply(openOperation(), CLOCK, "valid-call").ok, true);
+	const snapshot = written[0]!.data as { state: WorksetState };
+	for (const appliedCalls of [
+		{ "": 1 }, { call: 0 }, { call: -1 }, { call: 2 }, { call: 1.5 },
+		Object.fromEntries(Array.from({ length: WORKFLOW_LIMITS.maxAppliedCalls + 1 }, (_, i) => [`call-${i}`, 1])),
+	]) {
+		const replayed = createWorkflowStore({ append: () => assert.fail("no append") });
+		replayed.replay([...snapshotEntries(written), { type: "custom", customType: WORKFLOW_ENTRY_TYPE,
+			data: { ...snapshot, state: { ...snapshot.state, appliedCalls } } }]);
+		assert.equal(replayed.current(), undefined, "never fall back to the valid snapshot");
+		assert.match(replayed.recovery() ?? "", /invalid applied-call index/);
+		for (const operation of [{ operation: "inspect" } as const, openOperation()]) {
+			const result = replayed.apply(operation, CLOCK, "later-call");
+			assert.equal(result.ok, false);
+			if (!result.ok) {
+				assert.equal(result.code, "state_unavailable");
+				assert.match(result.message, /Do not retry ledger operations/);
+				assert.match(result.message, /Continue the user's task without workflow bookkeeping/);
+			}
+		}
+	}
+});
+
+test("opaque call IDs remain bounded by the snapshot and call-index budgets", () => {
+	const written: Array<{ customType: string; data: unknown }> = [];
+	const store = createWorkflowStore({ append: (customType, data) => written.push({ customType, data }) });
+	const oversized = store.apply(openOperation(), CLOCK, "x".repeat(WORKFLOW_LIMITS.maxSnapshotBytes));
+	assert.equal(oversized.ok, false);
+	if (!oversized.ok) assert.equal(oversized.code, "snapshot_limit");
+	assert.equal(written.length, 0);
+	assert.equal(store.current(), undefined);
+	assert.equal(store.apply(openOperation(), CLOCK, "call_open|fc_open").ok, true);
+	for (let i = 0; i < WORKFLOW_LIMITS.maxAppliedCalls; i += 1) {
+		assert.equal(store.apply({ operation: "record", expectedRevision: store.current()!.revision,
+			evidence: { provenance: "agent_declared", subject: { kind: "workset", id: "WS-1" }, checkIdentity: "probe", result: "unknown" },
+		}, CLOCK, `call_${i}|fc_${i}`).ok, true);
+	}
+	assert.equal(Object.keys(store.current()!.appliedCalls).length, WORKFLOW_LIMITS.maxAppliedCalls);
+	assert.equal(Object.hasOwn(store.current()!.appliedCalls, "call_open|fc_open"), false);
+	const replayed = createWorkflowStore({ append: () => assert.fail("no append") });
+	replayed.replay(snapshotEntries(written));
+	assert.equal(replayed.recovery(), undefined);
+	assert.deepEqual(replayed.current(), store.current());
 });
 
 test("a repeated host tool call is deduplicated and never appends twice", () => {
@@ -297,6 +374,44 @@ test("the real host executes the workflow tool and persists a replayable branch 
 	forkedStore.replay(forked.getBranch());
 	assert.equal(forkedStore.recovery(), undefined);
 	assert.equal(forkedStore.current()!.workset.goal, "Host-level workflow");
+});
+
+test("the real host resumes a disk session with a Responses call ID and restores its original goal", async (t) => {
+	const harness = await createHostHarness({ mode: "print", extensions: [workflowExtension], realSessionFile: true });
+	t.after(() => harness.dispose());
+	const callId = `call_resume|fc_${"a+/=".repeat(100)}`;
+	harness.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", openOperation() as unknown as Record<string, unknown>, { id: callId })),
+		fauxAssistantMessage("opened"),
+	]);
+	await harness.session.prompt("open the workset");
+	const file = harness.session.sessionFile;
+	assert.ok(file);
+	const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+	const resumeDir = await mkdtemp(join(tmpdir(), "workflow-resume-"));
+	t.after(() => rm(resumeDir, { recursive: true, force: true }));
+	const resumeFile = join(resumeDir, "session.jsonl");
+	await copyFile(file, resumeFile);
+	await harness.dispose();
+	const manager = SessionManager.open(resumeFile, resumeDir, resumeDir);
+	const before = createWorkflowStore({ append: () => assert.fail("no append") });
+	before.replay(manager.getBranch());
+	assert.equal(before.recovery(), undefined);
+	assert.equal(before.current()!.appliedCalls[callId], 1);
+	const resumed = await createHostHarness({ mode: "print", extensions: [workflowExtension], sessionManager: manager, sessionStartReason: "resume" });
+	t.after(() => resumed.dispose());
+	resumed.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "inspect" })),
+		fauxAssistantMessage("continue the original task"),
+	]);
+	await resumed.session.prompt("continue");
+	const result = resumed.session.state.messages.findLast((message) => message.role === "toolResult"
+		&& message.toolName === "csheng_workflow") as { isError?: boolean; details?: { ok?: boolean; workflow?: { workset?: { goal?: string } } } };
+	assert.equal(result.isError, false);
+	assert.equal(result.details?.ok, true);
+	assert.equal(result.details?.workflow?.workset?.goal, "Persist the workflow");
+	assert.deepEqual(harness.errors, []);
+	assert.deepEqual(resumed.errors, []);
 });
 
 test("the real host reports typed workflow failures as tool errors", async (t) => {

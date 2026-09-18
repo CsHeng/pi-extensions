@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { executeBatch } from "./batch.ts";
+import { renderMutationResult } from "./result.ts";
 import { isAbsolute, relative, resolve } from "node:path";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { Type, type Static, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { WORKFLOW_LIMITS, WORKFLOW_TOOL_NAME, type EvidenceBasis, type RecordOperation, type WorkflowErrorCode, type WorkflowOperation, type WorkflowView, type WorksetState } from "./contracts.ts";
+import { WORKFLOW_LIMITS, WORKFLOW_TOOL_NAME, type BatchOperation, type EvidenceBasis, type RecordOperation, type ReduceResult, type WorkflowErrorCode, type WorkflowOperation, type WorkflowView, type WorksetState } from "./contracts.ts";
 import { fingerprintScope } from "./fingerprints.ts";
 import { buildView } from "./reducer.ts";
 import type { HostObservation, ManagedSessionObservation, ObservationIndex } from "./observation.ts";
@@ -48,7 +50,7 @@ const amendmentChange = Type.Union([
 	Type.Object({ kind: Type.Literal("cancel_task"), id: Type.String(), reason: Type.String({ maxLength: WORKFLOW_LIMITS.maxReason }) }, { additionalProperties: false }),
 ]);
 
-const operationParameters = Type.Union([
+const singleOperationParameters = Type.Union([
 	Type.Object({
 		operation: Type.Literal("open"),
 		expectedRevision: Type.Literal(0),
@@ -156,7 +158,19 @@ const operationParameters = Type.Union([
 	}, { additionalProperties: false }),
 ]);
 
-export type WorkflowToolParams = Static<typeof operationParameters>;
+const batchSteps = singleOperationParameters.anyOf
+	.filter((schema) => ["start", "record", "assess", "close"].includes(schema.properties.operation.const))
+	.map((schema) => Type.Omit(schema, ["expectedRevision", "alignInputGeneration"], { additionalProperties: false }));
+const operationParameters = Type.Union([...singleOperationParameters.anyOf, Type.Object({
+	operation: Type.Literal("batch"),
+	expectedRevision: Type.Integer({ minimum: 1 }),
+	steps: Type.Array(Type.Union(batchSteps), {
+		minItems: 1, maxItems: WORKFLOW_LIMITS.maxBatchSteps,
+		description: "Atomic ordered start/record/assess/close operations already decided by the parent. No per-step revision; close last. ID fields attemptId/evidenceIds/deliveryEvidenceIds may reference earlier zero-based $N.attempt or $N.evidence allocations. No nested batch or execution between steps.",
+	}),
+}, { additionalProperties: false })]);
+
+export type WorkflowToolParams = Static<typeof singleOperationParameters> | BatchOperation;
 
 // Providers require an object root, not the discriminated union used for local validation.
 // Derive the flat declaration from the same operation schemas so bounds and fields stay in sync.
@@ -207,13 +221,6 @@ export function renderWorkflowView(view: WorkflowView): string {
 	if (view.records) lines.push(`records: ${truncate(JSON.stringify(view.records), 1200)}`);
 	return lines.join("\n");
 }
-
-function renderMapping(mapping: Record<string, string> | undefined): string | undefined {
-	const entries = Object.entries(mapping ?? {});
-	if (entries.length === 0) return undefined;
-	return `allocated ids: ${entries.map(([key, id]) => `${key}=${id}`).join(", ")}`;
-}
-
 
 // ---------------------------------------------------------------------------
 // Host-observed fact resolution (WF-03)
@@ -513,20 +520,21 @@ export function registerWorkflowTool(pi: ExtensionAPI, store: WorkflowStore, obs
 		name: WORKFLOW_TOOL_NAME,
 		label: "Workflow",
 		description:
-			"Manage the workset for this session's multi-step work: goal, tasks with dependencies, acceptance criteria, attempts, evidence, and acceptance judgments; one active workset per session branch. Actions: open, inspect, start, record, align, amend, assess, pause, resume, close. Use this to plan and manage implementation, research, review, or any task of roughly 3+ steps instead of tracking progress only in conversation.",
+			"Manage the workset for this session's multi-step work: goal, tasks with dependencies, acceptance criteria, attempts, evidence, and acceptance judgments; one active workset per session branch. Actions: open, inspect, start, record, align, amend, assess, pause, resume, close, batch. Use this to plan and manage implementation, research, review, or any task of roughly 3+ steps instead of tracking progress only in conversation.",
 		promptSnippet: "Manage the workset (goal, tasks, criteria, evidence, acceptance) for multi-step work",
 		promptGuidelines: [
 			"Use csheng_workflow immediately when the user requests implementation or any multi-step work (roughly 3+ steps), gives you a list of tasks, or asks for a plan: open a workset with goal, criteria, and tasks before starting (your current best decomposition is enough; refine it through amend as you learn), then keep it current instead of tracking progress only in conversation. Skip it for single trivial tasks and purely conversational requests.",
 			"Keep the goal to one short line and give every task a short imperative title (about 60 characters); outcome text carries the longer detail, and the task view shows the title.",
 			"Start each task's attempt before running its check, then record the attempt outcome and evidence with honest provenance: host observations are not tests, and an agent's reading is not a host exit code.",
-			"Every mutating call echoes expectedRevision from the latest workflow result (inspect returns the current view); a stale call changes nothing.",
+			"Every mutating call echoes expectedRevision from the latest workflow result (open always uses 0); a stale call changes nothing. Mutation receipts are compact; inspect when more state is needed, not after every success.",
+			"Batch already-decided start/record/assess/close bookkeeping in one atomic call (max 16 steps, 64 KiB); omit step revisions, use earlier $N.attempt/$N.evidence IDs, close last. Acceptance remains explicit and subject-bound: task evidence cannot accept a criterion or prove workset delivery. Never batch across a check or decision that still needs a result.",
 			"When user intent changes, align and amend before mutating obligations: confirm, amend, pause, or cancel instead of assuming the old goal still applies.",
 			"close/completed fails with structured deficits until every required criterion is accepted, delivery evidence is current, no attempt is unresolved, and the delivered input is aligned.",
 		],
 		parameters,
-		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			const operation = validateToolArguments(
-				{ name: WORKFLOW_TOOL_NAME, description: "Workflow operation", parameters: operationParameters },
+				{ name: WORKFLOW_TOOL_NAME, description: "Workflow operation", parameters: operationParameters.anyOf.find((schema) => schema.properties.operation.const === params.operation) ?? operationParameters },
 				{ type: "toolCall", id: toolCallId, name: WORKFLOW_TOOL_NAME, arguments: params },
 			) as WorkflowToolParams;
 			const context = {
@@ -534,42 +542,38 @@ export function registerWorkflowTool(pi: ExtensionAPI, store: WorkflowStore, obs
 				cwd: ctx.cwd,
 				sessionId: ctx.sessionManager.getSessionId(),
 			};
-			const prepared = await prepareOperation(operation, { store, observations, cwd: ctx.cwd, now: context.now, sessionId: context.sessionId, deliveryUnavailable: deliveryUnavailable(), unrecordedInput: unrecordedInput() });
-			if (!prepared.ok) {
-				const state = store.current();
-				const view = state === undefined ? undefined : buildView(state);
-				const text = [`workflow ${operation.operation} rejected: ${prepared.code}: ${prepared.message}`, ...(view === undefined ? [] : [renderWorkflowView(view)])].join("\n");
-				return {
-					content: [{ type: "text" as const, text }],
-					details: { ok: false as const, operation: operation.operation, code: prepared.code, message: prepared.message, deficits: [], ...(view === undefined ? {} : { workflow: view }) },
-				};
+			const before = store.current();
+			let result: ReduceResult;
+			const notices: string[] = [];
+			let checks = 0;
+			const prepare = async (step: WorkflowOperation, target: WorkflowStore): Promise<Prepared> => {
+				if (operation.operation === "batch") {
+					const state = target.current();
+					checks += step.operation === "assess" ? step.evidenceIds.length
+						: step.operation === "close" && step.outcome === "completed" && state ? acceptanceEvidenceIds(state, step.deliveryEvidenceIds ?? []).length : 0;
+					if (checks > WORKFLOW_LIMITS.maxCompletionChecks) return { ok: false, code: "evidence_required", message: `Batch exceeds ${WORKFLOW_LIMITS.maxCompletionChecks} total acceptance basis re-checks; split the batch.` };
+				}
+				const prepared = await prepareOperation(step, { store: target, observations, cwd: ctx.cwd, now: context.now, sessionId: context.sessionId, deliveryUnavailable: deliveryUnavailable(), unrecordedInput: unrecordedInput() });
+				if (prepared.ok) notices.push(...prepared.notices);
+				return prepared;
+			};
+			if (operation.operation === "batch") result = await executeBatch(operation, store, context, toolCallId, prepare, signal, () => !unrecordedInput());
+			else {
+				const prepared = await prepare(operation, store);
+				result = prepared.ok ? store.apply(prepared.operation, context, toolCallId) : prepared;
 			}
-			const result = store.apply(prepared.operation, context, toolCallId);
-			if (result.ok) {
-				const mapping = renderMapping(result.mapping);
-				const header = `workflow ${operation.operation} ok at revision ${result.state.revision}`;
-				const text = [header, mapping, ...prepared.notices, result.notice, renderWorkflowView(result.view)].filter((line): line is string => line !== undefined).join("\n");
-				return {
-					content: [{ type: "text" as const, text }],
-					details: { ok: true as const, operation: operation.operation, revision: result.state.revision, workflow: result.view },
-				};
-			}
-			const deficits = result.deficits ?? result.view?.deficits ?? [];
-			const text = [
-				`workflow ${operation.operation} rejected: ${result.code}: ${result.message}`,
-				...(deficits.length === 0 ? [] : [`deficits: ${deficits.map((deficit) => `${deficit.code}(${deficit.ids.join(",")})`).join(", ")}`]),
-				...(result.view === undefined ? [] : [renderWorkflowView(result.view)]),
-			].join("\n");
+			// Host/UI details remain complete; only model content uses the compact receipt.
+			const current = store.current();
+			const view = current ? buildView(current) : undefined;
+			const text = operation.operation === "inspect" && result.ok
+				? `workflow inspect ok at revision ${result.state.revision}\n${renderWorkflowView(result.view)}`
+				: renderMutationResult(operation.operation, result.ok ? before : current, result, notices);
 			return {
 				content: [{ type: "text" as const, text }],
-				details: {
-					ok: false as const,
-					operation: operation.operation,
-					code: result.code,
-					message: result.message,
-					deficits,
-					...(result.view === undefined ? {} : { workflow: result.view }),
-				},
+				details: result.ok
+					? { ok: true as const, operation: operation.operation, revision: result.state.revision, workflow: result.view, ...(result.mapping ? { mapping: result.mapping } : {}) }
+					: { ok: false as const, operation: operation.operation, code: result.code, message: result.message,
+						deficits: result.deficits ?? [], ...(view ? { workflow: view } : {}) },
 			};
 		},
 	});

@@ -18,6 +18,8 @@ export const WORKFLOW_LIMITS = {
 	maxDecisions: 128,
 	maxAmendments: 64,
 	maxAppliedCalls: 64,
+	maxBatchSteps: 16,
+	maxBatchBytes: 64 * 1024,
 	maxListItems: 32,
 	/** Maximum evidence bindings that a completion re-check may scan before refusing to certify. */
 	maxCompletionChecks: 64,
@@ -438,6 +440,19 @@ export interface CloseOperation {
 	outcome: "completed" | "cancelled" | "superseded";
 	reason: string;
 	deliveryEvidenceIds?: string[];
+}
+
+/** Tool-only transaction; never nested or replayed by the reducer. Revisions are host-filled per step. */
+export type BatchStep =
+	| Omit<StartOperation, "expectedRevision" | "alignInputGeneration">
+	| Omit<RecordOperation, "expectedRevision" | "alignInputGeneration">
+	| Omit<AssessOperation, "expectedRevision" | "alignInputGeneration">
+	| Omit<CloseOperation, "expectedRevision">;
+
+export interface BatchOperation {
+	operation: "batch";
+	expectedRevision: number;
+	steps: BatchStep[];
 }
 
 /** Internal operation: mark evidence stale when a recomputed basis no longer matches. */
