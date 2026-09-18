@@ -19,6 +19,7 @@ The package exposes nine maintained extensions: `plan-mode` as a reversible loop
 - `extensions/work-timing/`: live request and reasoning timing with durable TUI-only completion entries
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
 - `.agents/skills/evaluate-subagent-runs/`: maintainer-only read-only evaluator, excluded from the npm package
+- `.agents/skills/evaluate-session-cost/`: maintainer-only read-only session cost and prompt-cache evaluator, excluded from the npm package
 - `tests/`: deterministic, fake-Pi, subprocess, filesystem, evaluator, and disposable-Git tests
 - `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes, plus the local package snapshot publisher
 - `mise.toml`: `publish-local-package` task for the local Pi package snapshot
