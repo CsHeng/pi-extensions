@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { FailureResult, SuccessResult, WorkflowOperation, WorksetState } from "../extensions/workflow/contracts.ts";
-import { applyOperation, computeDeficits, isTaskReady, markInputDelivered, validateState, type ReduceContext } from "../extensions/workflow/reducer.ts";
+import { applyOperation, buildView, computeDeficits, isTaskReady, markInputDelivered, validateState, type ReduceContext } from "../extensions/workflow/reducer.ts";
 
 const CLOCK: ReduceContext = { now: "2026-09-17T00:00:00.000Z", cwd: "/repo", sessionId: "session-1" };
 
@@ -494,4 +494,35 @@ test("replay validation rejects counters that would reallocate a retained identi
 	assert.equal(validateState(bad), "invalid task counter below retained identity 2");
 	bad.next.task = state.next.task;
 	assert.equal(validateState(bad), undefined, "a consistent counter still validates");
+});
+
+test("task titles stay short, ride through amendments, and completion needs a live required criterion", () => {
+	let state = apply(undefined, {
+		operation: "open", expectedRevision: 0, goal: "Titles and guards", deliveryEndpoint: "Reviewed source",
+		criteria: [{ key: "c", outcome: "Works", verification: "Tests" }],
+		tasks: [
+			{ key: "a", title: "Rewrite trigger copy", outcome: "Rewrite the registerTool copy in extensions/workflow/tool.ts", covers: ["c"] },
+			{ key: "b", outcome: "Long outcome without a title", covers: ["c"] },
+		],
+	}).state;
+	assert.equal(state.tasks["T-1"]!.title, "Rewrite trigger copy");
+	assert.equal(state.tasks["T-2"]!.title, undefined);
+	assert.equal(buildView(state).tasks.find((task) => task.id === "T-1")!.title, "Rewrite trigger copy");
+
+	state = apply(state, { operation: "amend", expectedRevision: state.revision, reason: "more work", intentReference: "test", changes: [{ kind: "add_task", key: "c", title: "Guard close", outcome: "Block vacuous completion", covers: ["AC-1"] }] }).state;
+	assert.equal(state.tasks["T-3"]!.title, "Guard close");
+	state = apply(state, { operation: "amend", expectedRevision: state.revision, reason: "scope shift", intentReference: "test", changes: [{ kind: "replace_task", id: "T-2", key: "b2", title: "New task", outcome: "Replacement outcome", covers: ["AC-1"] }] }).state;
+	assert.equal(state.tasks["T-4"]!.title, "New task");
+
+	const retired = apply(state, { operation: "amend", expectedRevision: state.revision, reason: "dropped", intentReference: "test", changes: [
+		{ kind: "retire_criterion", id: "AC-1", reason: "obsolete" },
+		{ kind: "cancel_task", id: "T-1", reason: "obsolete" },
+		{ kind: "cancel_task", id: "T-3", reason: "obsolete" },
+		{ kind: "cancel_task", id: "T-4", reason: "obsolete" },
+	] }).state;
+	assert.ok(computeDeficits(retired).some((deficit) => deficit.code === "no_required_criteria"));
+	const blocked = rejects(retired, { operation: "close", expectedRevision: retired.revision, outcome: "completed", reason: "done" }, "completion_deficit");
+	assert.ok(blocked.deficits?.some((deficit) => deficit.code === "no_required_criteria"));
+	const restored = apply(retired, { operation: "amend", expectedRevision: retired.revision, reason: "replacement contract", intentReference: "test", changes: [{ kind: "add_criterion", key: "c2", outcome: "Replacement met", verification: "Tests" }] }).state;
+	assert.ok(!computeDeficits(restored).some((deficit) => deficit.code === "no_required_criteria"));
 });

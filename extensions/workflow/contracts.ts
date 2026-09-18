@@ -25,6 +25,7 @@ export const WORKFLOW_LIMITS = {
 	maxGoal: 4000,
 	maxEndpoint: 1000,
 	maxOutcome: 1000,
+	maxTitle: 80,
 	maxVerification: 1000,
 	maxReference: 500,
 	maxReason: 2000,
@@ -65,7 +66,8 @@ export interface Deficit {
 		| "missing_delivery_evidence"
 		| "needs_alignment"
 		| "workset_not_active"
-		| "uncovered_criteria";
+		| "uncovered_criteria"
+		| "no_required_criteria";
 	ids: string[];
 	message: string;
 }
@@ -129,6 +131,7 @@ export type TaskDisposition = "pending" | "running" | "awaiting_acceptance" | "a
 export interface Task {
 	id: string;
 	worksetId: string;
+	title?: string;
 	outcome: string;
 	semanticRevision: number;
 	covers: string[];
@@ -248,6 +251,7 @@ export interface WorkflowView {
 	}>;
 	tasks: Array<{
 		id: string;
+		title?: string;
 		outcome: string;
 		covers: string[];
 		dependsOn: string[];
@@ -311,6 +315,8 @@ export interface OpenCriterionInput {
 
 export interface OpenTaskInput {
 	key: string;
+	/** Short imperative subject line rendered in the task view; outcome carries the longer detail. */
+	title?: string;
 	outcome: string;
 	covers?: string[];
 	dependsOn?: string[];
@@ -351,11 +357,11 @@ export type AmendmentChange =
 	| { kind: "add_criterion"; key: string; outcome: string; verification: string; required?: boolean }
 	| { kind: "update_criterion"; id: string; outcome?: string; verification?: string; required?: boolean }
 	| { kind: "retire_criterion"; id: string; replacementId?: string; reason: string }
-	| { kind: "add_task"; key: string; outcome: string; covers?: string[]; dependsOn?: string[]; enablingPurpose?: string; repositoryOwner?: string; writeSurface?: string[]; executionConstraints?: string[] }
+	| { kind: "add_task"; key: string; title?: string; outcome: string; covers?: string[]; dependsOn?: string[]; enablingPurpose?: string; repositoryOwner?: string; writeSurface?: string[]; executionConstraints?: string[] }
 	| { kind: "update_task"; id: string; outcome?: string; covers?: string[]; dependsOn?: string[]; writeSurface?: string[]; executionConstraints?: string[]; enablingPurpose?: string; repositoryOwner?: string }
-	| { kind: "split_task"; id: string; into: Array<{ key: string; outcome: string; covers?: string[]; dependsOn?: string[] }> }
-	| { kind: "merge_tasks"; ids: string[]; key: string; outcome: string; covers?: string[]; dependsOn?: string[] }
-	| { kind: "replace_task"; id: string; key: string; outcome: string; covers?: string[]; dependsOn?: string[] }
+	| { kind: "split_task"; id: string; into: Array<{ key: string; title?: string; outcome: string; covers?: string[]; dependsOn?: string[] }> }
+	| { kind: "merge_tasks"; ids: string[]; key: string; title?: string; outcome: string; covers?: string[]; dependsOn?: string[] }
+	| { kind: "replace_task"; id: string; key: string; title?: string; outcome: string; covers?: string[]; dependsOn?: string[] }
 	| { kind: "update_goal"; goal?: string; deliveryEndpoint?: string; sourceReferences?: string[] }
 	| { kind: "suspend_task"; id: string; reason: string }
 	| { kind: "cancel_task"; id: string; reason: string };

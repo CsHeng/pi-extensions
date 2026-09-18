@@ -107,6 +107,14 @@ export function computeDeficits(state: WorksetState): Deficit[] {
 		});
 	}
 	const requiredCriteria = currentCriteria(state).filter((criterion) => criterion.required);
+	if (requiredCriteria.length === 0) {
+		// Completion must certify a real acceptance contract; retiring every required criterion must not vacuously pass.
+		deficits.push({
+			code: "no_required_criteria",
+			ids: [state.workset.id],
+			message: "No current required criterion exists; add or un-retire a required criterion before completing the workset.",
+		});
+	}
 	const unacceptedCriteria = requiredCriteria.filter((criterion) => criterion.disposition !== "accepted" || !hasCurrentAcceptance(state, criterion));
 	if (unacceptedCriteria.length > 0) {
 		deficits.push({
@@ -173,6 +181,7 @@ export function buildView(state: WorksetState, options: { detail?: ViewDetail } 
 		})),
 		tasks: currentTasks(state).map((task) => ({
 			id: task.id,
+			...(task.title === undefined ? {} : { title: task.title }),
 			outcome: task.outcome,
 			covers: task.covers,
 			dependsOn: task.dependsOn,
@@ -568,6 +577,7 @@ function openOperation(state: WorksetState | undefined, operation: Extract<Workf
 		next.tasks[id] = {
 			id,
 			worksetId,
+			...(input.title === undefined ? {} : { title: bounded(input.title, WORKFLOW_LIMITS.maxTitle, "task title") }),
 			outcome: bounded(input.outcome, WORKFLOW_LIMITS.maxOutcome, "task outcome"),
 			semanticRevision: 1,
 			covers: [],
@@ -625,7 +635,7 @@ function applyAmendmentChanges(next: WorksetState, operation: Extract<WorkflowOp
 		if (task.disposition === "running") reject("invalid_transition", `Task ${task.id} is running; cancel or supersede it before changing its contract.`);
 		if (task.disposition === "superseded") reject("invalid_transition", `Task ${task.id} is superseded.`);
 	};
-	const defineTask = (definition: { key: string; outcome: string; covers?: string[]; dependsOn?: string[]; enablingPurpose?: string; repositoryOwner?: string; writeSurface?: string[]; executionConstraints?: string[] }, lineage?: Task["lineage"]): Task => {
+	const defineTask = (definition: { key: string; title?: string; outcome: string; covers?: string[]; dependsOn?: string[]; enablingPurpose?: string; repositoryOwner?: string; writeSurface?: string[]; executionConstraints?: string[] }, lineage?: Task["lineage"]): Task => {
 		const key = bounded(definition.key, WORKFLOW_LIMITS.maxKey, "task key");
 		if (Object.hasOwn(mapping, key)) reject("duplicate_key", `Duplicate task key ${key}`);
 		const id = nextId(next, "task", "T");
@@ -633,6 +643,7 @@ function applyAmendmentChanges(next: WorksetState, operation: Extract<WorkflowOp
 		const task: Task = {
 			id,
 			worksetId: next.workset.id,
+			...(definition.title === undefined ? {} : { title: bounded(definition.title, WORKFLOW_LIMITS.maxTitle, "task title") }),
 			outcome: bounded(definition.outcome, WORKFLOW_LIMITS.maxOutcome, "task outcome"),
 			semanticRevision: 1,
 			covers: boundedList(definition.covers, WORKFLOW_LIMITS.maxListItems, "covers", WORKFLOW_LIMITS.maxReference),
@@ -763,7 +774,7 @@ function applyAmendmentChanges(next: WorksetState, operation: Extract<WorkflowOp
 						if (index >= 0 && sourceIds.includes(candidate.id)) reject("cycle", `Task ${candidate.id} depends on a task it is replacing.`);
 					}
 				}
-				const definitions = change.kind === "split_task" ? change.into : [{ key: change.key, outcome: change.outcome, covers: change.covers, dependsOn: change.dependsOn }];
+				const definitions = change.kind === "split_task" ? change.into : [{ key: change.key, ...("title" in change && change.title !== undefined ? { title: change.title } : {}), outcome: change.outcome, covers: change.covers, dependsOn: change.dependsOn }];
 				if (definitions.length === 0) reject("invalid_payload", "A split needs at least one replacement task.");
 				const relation = change.kind === "split_task" ? "split" : change.kind === "merge_tasks" ? "merge" : "replacement";
 				const union = [...new Set(sources.flatMap((source) => source.covers))];
@@ -774,6 +785,7 @@ function applyAmendmentChanges(next: WorksetState, operation: Extract<WorkflowOp
 						: definition.covers;
 					const replacement = defineTask({
 						key: definition.key,
+						...(definition.title === undefined ? {} : { title: definition.title }),
 						outcome: definition.outcome,
 						...(covers === undefined ? {} : { covers }),
 						...(definition.dependsOn === undefined ? {} : { dependsOn: definition.dependsOn }),

@@ -31,6 +31,8 @@ export interface WorkflowStore {
 	replay(entries: readonly SessionEntryLike[]): void;
 	/** Apply one operation; commits a snapshot before installing the new state. */
 	apply(operation: WorkflowOperation, context: ReduceContext, toolCallId: string): ReduceResult;
+	/** Observe committed changes/replay. A failed observer is removed without changing the commit. */
+	subscribe(onChange: () => void, onError: () => void): () => void;
 }
 
 function validateSnapshot(data: unknown): { state: WorksetState } | { error: string } {
@@ -57,6 +59,18 @@ function validateSnapshot(data: unknown): { state: WorksetState } | { error: str
 export function createWorkflowStore(sink: { append(customType: string, data: unknown): void }): WorkflowStore {
 	let state: WorksetState | undefined;
 	let recoveryError: string | undefined;
+	const observers = new Set<{ onChange(): void; onError(): void }>();
+	const notify = (): void => {
+		for (const observer of observers) {
+			try {
+				observer.onChange();
+			} catch {
+				observers.delete(observer);
+				// Presentation failure cannot invalidate a snapshot that has already committed.
+				try { observer.onError(); } catch { /* The observer's error surface can also be unavailable. */ }
+			}
+		}
+	};
 
 	const apply = (operation: WorkflowOperation, context: ReduceContext, toolCallId: string): ReduceResult => {
 		if (operation.operation === "inspect") return applyOperation(state, operation, context);
@@ -110,18 +124,24 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 			};
 		}
 		state = next;
+		notify();
 		return result;
 	};
 
 	return {
 		current: () => state,
 		recovery: () => recoveryError,
+		subscribe(onChange, onError) {
+			const observer = { onChange, onError };
+			observers.add(observer);
+			return () => { observers.delete(observer); };
+		},
 		replay(entries) {
 			state = undefined;
 			recoveryError = undefined;
 			const snapshots = entries.filter((entry) => entry.type === "custom" && entry.customType === WORKFLOW_ENTRY_TYPE);
 			const latest = snapshots.at(-1);
-			if (!latest) return;
+			if (!latest) { notify(); return; }
 			let validated: { state: WorksetState } | { error: string };
 			try {
 				validated = validateSnapshot(latest.data);
@@ -130,6 +150,7 @@ export function createWorkflowStore(sink: { append(customType: string, data: unk
 			}
 			if ("error" in validated) recoveryError = validated.error;
 			else state = validated.state;
+			notify();
 		},
 		apply,
 	};
