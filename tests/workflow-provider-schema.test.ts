@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { zstdDecompressSync } from "node:zlib";
-import { validateToolArguments, type Model } from "@earendil-works/pi-ai";
+import { normalizeContext, validateToolArguments, type JsonObject, type Model } from "@earendil-works/pi-ai";
 import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses";
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -20,7 +20,7 @@ function fixture() {
 	return {
 		tool, store, writes: () => writes,
 		execute(args: Record<string, unknown>) {
-			const params = validateToolArguments(tool!, { type: "toolCall", id: "fixture", name: tool!.name, arguments: args });
+			const params = validateToolArguments(tool!, { type: "toolCall", id: "fixture", name: tool!.name, arguments: args as JsonObject });
 			return tool!.execute(`fixture-${++calls}`, params, undefined, undefined, ctx);
 		},
 	};
@@ -48,7 +48,7 @@ for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 		// Synthetic credentials and an injected transport: no settings, auth files or live calls.
 		const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url");
 		const options = { apiKey: `fixture.${claims}.fixture`, fetch, transport: "sse" as const, maxRetries: 0 };
-		const context = { messages: [{ role: "user" as const, content: "fixture", timestamp: 1 }], tools: [tool] };
+		const context = normalizeContext({ messages: [{ role: "user" as const, content: "fixture", timestamp: 1 }], tools: [tool] });
 		const result = await (api === "openai-responses"
 			? responses(model as Model<"openai-responses">, context, options)
 			: codexResponses(model as Model<"openai-codex-responses">, context, options)).result();

@@ -1,4 +1,4 @@
-import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 function explorerReadPath(input: string): string {
@@ -32,7 +32,11 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 				const last = context.messages.filter((item) => !(item.role === "user" && JSON.stringify(item.content).includes("Stored local-task index"))).at(-1);
 				let text = `users=${context.messages.filter((message) => message.role === "user").length}${last?.role === "toolResult" ? `;tool=${JSON.stringify(last.content)}` : ""}`;
 				if (process.env.CSHENG_NATIVE_CONTEXT_MODE) {
-					const initial = { systemPrompt: context.systemPrompt, messages: context.messages, tools: context.tools?.map((tool) => ({ name: tool.name })) ?? [] };
+					const initial = {
+						systemPrompt: getCurrentSystemPrompt(context.messages),
+						messages: context.messages,
+						tools: getCurrentTools(context.messages).map((tool) => ({ name: tool.name })),
+					};
 					const payload = (await options?.onPayload?.(initial, model) ?? initial) as typeof initial;
 					const serialized = JSON.stringify(payload.messages);
 					text = serialized.includes("<conversation>") ? "SYNTHETIC_SUMMARY" : `index=${serialized.split("Stored local-task index").length - 1};managedTool=${payload.tools.some((tool) => tool.name === "csheng_subagent_sessions") ? 1 : 0};private=${serialized.includes("PRIVATE_INDEX_PROSE") ? 1 : 0}`;

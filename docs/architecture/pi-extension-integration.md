@@ -1,6 +1,6 @@
 # Local Pi Extension Integration Map
 
-This is a **behavior and ownership map**, not a package introduction or a recommendation to enable every feature. Its baseline is Pi `0.85.1` and the pinned components in the [offline evidence record](../evaluations/2026-09-18-pi-extension-composition-offline.md). Recheck it when those versions or local feature choices change. Individual extension architecture documents still own their contracts; this page owns only cross-extension integration boundaries.
+This is a **behavior and ownership map**, not a package introduction or a recommendation to enable every feature. Its baseline is Pi `0.86.0` and the pinned components in the [offline evidence record](../evaluations/2026-09-18-pi-extension-composition-offline.md). Recheck it when those versions or local feature choices change. Individual extension architecture documents still own their contracts; this page owns only cross-extension integration boundaries.
 
 ## Read This First
 

@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { validateToolArguments } from "@earendil-works/pi-ai";
+import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import { WORKFLOW_ENTRY_TYPE, WORKFLOW_LIMITS, type BatchOperation, type BatchStep, type RecordOperation } from "../extensions/workflow/contracts.ts";
 import { createWorkflowStore, type SessionEntryLike } from "../extensions/workflow/store.ts";
 import { registerWorkflowTool } from "../extensions/workflow/tool.ts";
@@ -27,7 +27,7 @@ function fixture() {
 	const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => clock.sessionId } } as ExtensionContext;
 	const execute = async (args: Record<string, unknown>, id = `host-${++calls}`, signal?: AbortSignal) => {
 		const tool = definition!;
-		const params = validateToolArguments(tool, { type: "toolCall", id, name: tool.name, arguments: args });
+		const params = validateToolArguments(tool, { type: "toolCall", id, name: tool.name, arguments: args as JsonObject });
 		return tool.execute(id, params, signal, undefined, ctx);
 	};
 	return { store, entries, observations, execute, failAppend() { failAppend = true; }, unrecorded() { unrecorded = true; } };

@@ -144,7 +144,7 @@ const DEFAULT_SETTINGS = {
 };
 
 /**
- * Runs the actual installed dependency host (`@earendil-works/pi-coding-agent` 0.85.1) with the
+ * Runs the actual installed dependency host (`@earendil-works/pi-coding-agent` 0.86.0) with the
  * official faux provider: real lifecycle, real tools, real session manager, no inference.
  */
 export async function createHostHarness(options: HostHarnessOptions = {}): Promise<HostHarness> {

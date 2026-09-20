@@ -3,7 +3,7 @@ import test from "node:test";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type JsonObject } from "@earendil-works/pi-ai";
 import { WORKFLOW_ENTRY_TYPE, WORKFLOW_LIMITS, type WorkflowOperation, type WorksetState } from "../extensions/workflow/contracts.ts";
 import { applyOperation, validateState, type ReduceContext } from "../extensions/workflow/reducer.ts";
 import { createWorkflowStore, type SessionEntryLike } from "../extensions/workflow/store.ts";
@@ -308,8 +308,8 @@ test("a forked session reconciles copied state and requires re-alignment", async
 			deliveryEndpoint: "reconciled branch",
 			criteria: [{ key: "ledger", outcome: "Ledger persists", verification: "replay" }],
 			tasks: [{ key: "store", outcome: "Persist", covers: ["ledger"], writeSurface: ["src"] }],
-		} as unknown as Record<string, unknown>)),
-		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "start", expectedRevision: 1, taskId: "T-1" } as unknown as Record<string, unknown>)),
+		} as unknown as JsonObject)),
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "start", expectedRevision: 1, taskId: "T-1" } as unknown as JsonObject)),
 		fauxAssistantMessage("running"),
 	]);
 	await harness.session.prompt("open and start");
@@ -342,7 +342,7 @@ test("the real host executes the workflow tool and persists a replayable branch 
 			deliveryEndpoint: "tool result and branch entry",
 			criteria: [{ key: "ledger", outcome: "Ledger persists", verification: "branch replay" }],
 			tasks: [{ key: "store", outcome: "Persist the ledger", covers: ["ledger"] }],
-		} as unknown as Record<string, unknown>)),
+		} as unknown as JsonObject)),
 		fauxAssistantMessage("opened"),
 	]);
 	await harness.session.prompt("open the workset");
@@ -381,7 +381,7 @@ test("the real host resumes a disk session with a Responses call ID and restores
 	t.after(() => harness.dispose());
 	const callId = `call_resume|fc_${"a+/=".repeat(100)}`;
 	harness.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("csheng_workflow", openOperation() as unknown as Record<string, unknown>, { id: callId })),
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", openOperation() as unknown as JsonObject, { id: callId })),
 		fauxAssistantMessage("opened"),
 	]);
 	await harness.session.prompt("open the workset");
@@ -419,7 +419,7 @@ test("the real host reports typed workflow failures as tool errors", async (t) =
 	const harness = await createHostHarness({ trace, extensions: [workflowExtension, createTraceObserver(trace)] });
 	t.after(() => harness.dispose());
 	harness.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "inspect" } as unknown as Record<string, unknown>)),
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "inspect" } as unknown as JsonObject)),
 		fauxAssistantMessage("no workset yet"),
 	]);
 	await harness.session.prompt("inspect");

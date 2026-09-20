@@ -38,7 +38,7 @@ const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex")
 const hostEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const hostRequire = createRequire(hostEntry);
 const hostManifest = JSON.parse(await readFile(join(dirname(hostEntry), "../package.json"), "utf8")) as { version: string };
-assert.equal(hostManifest.version, "0.85.1", "re-review oracle on host version drift");
+assert.equal(hostManifest.version, "0.86.0", "re-review oracle on host version drift");
 const ccManifest = JSON.parse(await readFile(join(ccRoot, "package.json"), "utf8")) as { version: string };
 assert.equal(ccManifest.version, "0.8.71", "re-review oracle on CC version drift");
 assert.equal(sha256(await readFile(rtkSource)), RTK_SHA256, "RTK adapter must match the documented public commit");

@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 
 /** Characterization of an UNSATISFIED contract, not evidence that AC-04 is implemented. */
-test("Pi 0.85.1 loses source/receipt identity between mixed queued input and transformed native delivery", async (t) => {
+test("Pi 0.86.0 loses source/receipt identity between mixed queued input and transformed native delivery", async (t) => {
 	const trace = createTrace();
 	const inputs: Array<{ source: string; text: string }> = [];
 	const deliveries: Array<{ keys: string[]; content: unknown }> = [];
