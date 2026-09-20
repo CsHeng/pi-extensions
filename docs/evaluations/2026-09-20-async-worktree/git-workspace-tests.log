@@ -1,0 +1,144 @@
+TAP version 13
+# (node:1770) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: dirty tracked, staged, and untracked source is inherited without changing parent index or HEAD
+ok 1 - dirty tracked, staged, and untracked source is inherited without changing parent index or HEAD
+  ---
+  duration_ms: 140.115175
+  type: 'test'
+  ...
+# Subtest: unborn repository captures visible input without creating a parent branch
+ok 2 - unborn repository captures visible input without creating a parent branch
+  ---
+  duration_ms: 60.350964
+  type: 'test'
+  ...
+# Subtest: staged new file remains tracked input after a later ignore rule
+ok 3 - staged new file remains tracked input after a later ignore rule
+  ---
+  duration_ms: 68.852168
+  type: 'test'
+  ...
+# Subtest: staged removal with a still-visible nonignored file includes its current content
+ok 4 - staged removal with a still-visible nonignored file includes its current content
+  ---
+  duration_ms: 73.806444
+  type: 'test'
+  ...
+# Subtest: file-to-directory input transition is represented by Git
+ok 5 - file-to-directory input transition is represented by Git
+  ---
+  duration_ms: 66.024388
+  type: 'test'
+  ...
+# Subtest: two workspaces are independent and preserve dirty parent source
+ok 6 - two workspaces are independent and preserve dirty parent source
+  ---
+  duration_ms: 82.820021
+  type: 'test'
+  ...
+# Subtest: dynamic added paths are candidate changes, not limited by a predicted write list
+ok 7 - dynamic added paths are candidate changes, not limited by a predicted write list
+  ---
+  duration_ms: 115.187066
+  type: 'test'
+  ...
+# Subtest: apply merges compatible same-file changes and preserves parent staging
+ok 8 - apply merges compatible same-file changes and preserves parent staging
+  ---
+  duration_ms: 184.592167
+  type: 'test'
+  ...
+# Subtest: inherited dirty input is not resurrected after parent later deletes it
+ok 9 - inherited dirty input is not resurrected after parent later deletes it
+  ---
+  duration_ms: 180.525305
+  type: 'test'
+  ...
+# Subtest: conflicting edits preserve both sources and the parent index
+ok 10 - conflicting edits preserve both sources and the parent index
+  ---
+  duration_ms: 169.020695
+  type: 'test'
+  ...
+# Subtest: Git represents rename, deletion, executable mode, binary and internal symlink changes
+ok 11 - Git represents rename, deletion, executable mode, binary and internal symlink changes
+  ---
+  duration_ms: 197.606237
+  type: 'test'
+  ...
+# Subtest: explicit refresh retains worker changes and excludes new parent input from the next candidate
+ok 12 - explicit refresh retains worker changes and excludes new parent input from the next candidate
+  ---
+  duration_ms: 295.953927
+  type: 'test'
+  ...
+# Subtest: refresh conflict retains old basis and preserves B, W, and P
+ok 13 - refresh conflict retains old basis and preserves B, W, and P
+  ---
+  duration_ms: 123.44374
+  type: 'test'
+  ...
+# Subtest: applying an already integrated candidate is a no-op and does not duplicate changes
+ok 14 - applying an already integrated candidate is a no-op and does not duplicate changes
+  ---
+  duration_ms: 214.189564
+  type: 'test'
+  ...
+# Subtest: candidate is immutable even if the idle task worktree changes later
+ok 15 - candidate is immutable even if the idle task worktree changes later
+  ---
+  duration_ms: 182.177836
+  type: 'test'
+  ...
+# Subtest: candidate identity and merge base cannot be substituted
+ok 16 - candidate identity and merge base cannot be substituted
+  ---
+  duration_ms: 126.685008
+  type: 'test'
+  ...
+# Subtest: discard removes only the registered task and its exact refs, preserving siblings and user branches
+ok 17 - discard removes only the registered task and its exact refs, preserving siblings and user branches
+  ---
+  duration_ms: 166.099133
+  type: 'test'
+  ...
+# Subtest: modified owned ref is not deleted as if it still belonged to this result
+ok 18 - modified owned ref is not deleted as if it still belonged to this result
+  ---
+  duration_ms: 63.230699
+  type: 'test'
+  ...
+# Subtest: existing destinations are never replaced
+ok 19 - existing destinations are never replaced
+  ---
+  duration_ms: 43.96907
+  type: 'test'
+  ...
+# Subtest: external symlinks are reported rather than imported into source input
+ok 20 - external symlinks are reported rather than imported into source input
+  ---
+  duration_ms: 23.418675
+  type: 'test'
+  ...
+# Subtest: declared content filters are not silently executed during capture
+ok 21 - declared content filters are not silently executed during capture
+  ---
+  duration_ms: 23.572145
+  type: 'test'
+  ...
+# Subtest: unresolved index conflict is different from ordinary dirty input
+ok 22 - unresolved index conflict is different from ordinary dirty input
+  ---
+  duration_ms: 35.547058
+  type: 'test'
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2756.482923

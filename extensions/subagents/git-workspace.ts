@@ -12,6 +12,7 @@ export interface GitTaskWorkspace {
 	repo: string;
 	path: string;
 	commonDir: string;
+	gitDir: string;
 	inputBase: string;
 	ownedRefs: Record<string, string>;
 }
@@ -78,7 +79,11 @@ async function run(repo: string, args: readonly string[], options: { input?: Buf
 	});
 }
 const text = async (repo: string, args: readonly string[], options: Parameters<typeof run>[2] = {}) => (await run(repo, args, options)).stdout.toString("utf8").trim();
-function paths(buffer: Buffer): string[] { return [...new Set(buffer.toString("utf8").split("\0").filter(Boolean))]; }
+function paths(buffer: Buffer): string[] {
+	const decoded = buffer.toString("utf8");
+	if (!Buffer.from(decoded, "utf8").equals(buffer)) throw new GitWorkspaceError("unsupported_path_encoding");
+	return [...new Set(decoded.split("\0").filter(Boolean))];
+}
 async function root(repo: string): Promise<string> {
 	const canonical = await realpath(repo);
 	if (await realpath(await text(canonical, ["rev-parse", "--show-toplevel"])) !== canonical) throw new GitWorkspaceError("repository_root_required");
@@ -149,9 +154,12 @@ export async function createGitTaskWorkspace(repository: string, destination: st
 	if (path === repo) throw new GitWorkspaceError("workspace_is_parent");
 	if (contained(repo, path) && (await run(repo, ["check-ignore", "--quiet", "--", path], { allowed: [0, 1] })).status !== 0) throw new GitWorkspaceError("nested_workspace_must_be_ignored");
 	try { await lstat(path); throw new GitWorkspaceError("workspace_destination_exists"); } catch (error) { if (!absent(error)) throw error; }
-	const workspace: GitTaskWorkspace = { version: 1, id: randomUUID(), repo, path, commonDir: await common(repo), inputBase: input.commit, ownedRefs: {} };
+	const workspace: GitTaskWorkspace = { version: 1, id: randomUUID(), repo, path, commonDir: await common(repo), gitDir: "", inputBase: input.commit, ownedRefs: {} };
 	await retain(workspace, "input", input.commit);
-	try { await run(repo, ["worktree", "add", "--detach", "--", path, input.commit]); }
+	try {
+		await run(repo, ["worktree", "add", "--detach", "--", path, input.commit]);
+		workspace.gitDir = await realpath(await text(path, ["rev-parse", "--absolute-git-dir"]));
+	}
 	catch (error) {
 		// Only release our ref; Git owns any failed checkout diagnostics at this destination.
 		for (const [ref, value] of Object.entries(workspace.ownedRefs)) await run(repo, ["update-ref", "-d", ref, value]);
@@ -162,6 +170,7 @@ export async function createGitTaskWorkspace(repository: string, destination: st
 export async function inspectGitWorkspace(workspace: GitTaskWorkspace): Promise<void> {
 	if (workspace.version !== 1 || !ID.test(workspace.id) || workspace.path === workspace.repo) throw new GitWorkspaceError("invalid_workspace_identity");
 	await root(workspace.repo);
+	if (await root(workspace.path) !== workspace.path || await realpath(await text(workspace.path, ["rev-parse", "--absolute-git-dir"])) !== workspace.gitDir) throw new GitWorkspaceError("workspace_registration_changed");
 	if (await common(workspace.repo) !== workspace.commonDir || await common(workspace.path) !== workspace.commonDir) throw new GitWorkspaceError("workspace_repository_mismatch");
 	if (!(await lstat(join(workspace.path, ".git"))).isFile()) throw new GitWorkspaceError("workspace_not_linked");
 	const records = (await run(workspace.repo, ["worktree", "list", "--porcelain", "-z"])).stdout.toString("utf8").split("\0\0");

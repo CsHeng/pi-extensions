@@ -133,6 +133,15 @@ test("existing destinations are never replaced", async t => {
 	const f = await fixture(t); const dest = join(f.directory, "existing"); await mkdir(dest); await writeFile(join(dest, "keep"), "keep");
 	await assert.rejects(createGitTaskWorkspace(f.repo, dest, await captureGitInput(f.repo)), { code: "workspace_destination_exists" }); assert.equal(await contents(dest, "keep"), "keep");
 });
+test("a substituted sibling path cannot be discarded with another task registration", async t => {
+	const f = await fixture(t); const a = await f.worker("a"); const b = await f.worker("b");
+	await assert.rejects(discardGitWorkspace({ ...a, path: b.path }), { code: "workspace_registration_changed" });
+	await inspectGitWorkspace(a); await inspectGitWorkspace(b);
+});
+test("non-UTF8 path names fail explicitly instead of being silently reinterpreted", async t => {
+	const f = await fixture(t); const file = Buffer.concat([Buffer.from(`${f.repo}/`), Buffer.from([0xff])]);
+	await writeFile(file, "opaque filename"); await assert.rejects(captureGitInput(f.repo), { code: "unsupported_path_encoding" });
+});
 test("external symlinks are reported rather than imported into source input", async t => {
 	const f = await fixture(t); await symlink("../elsewhere", join(f.repo, "escape")); await assert.rejects(captureGitInput(f.repo), { code: "unsupported_external_symlink" });
 });
