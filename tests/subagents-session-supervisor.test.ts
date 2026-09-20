@@ -147,3 +147,11 @@ test("invalid capacity is rejected instead of queuing work that can never start"
 	assert.throws(() => supervisor({}, { ...defaults, concurrency: 0 }), { code: "invalid_capacity" });
 	assert.throws(() => supervisor({}, { ...defaults, roles: { worker: 0, reviewer: 1, explorer: 1 } }), { code: "invalid_capacity" });
 });
+test("shutdown retains owner-tagged cancellation evidence without waking a parent", async () => {
+	const events: ExecutionEvent[] = []; const started = deferred(); let wakes = 0;
+	const s = supervisor({ onEvent: event => { events.push(event); }, onWake: () => { wakes++; } });
+	await s.submit({ requestId: "one", requestKey: "one", prepare: async () => undefined, execute: async (_, ctx) => { started.resolve(); await cancelled(ctx.signal); } });
+	await started.promise; await s.shutdown();
+	assert.ok(events.some(event => event.run?.phase === "cancelled" && event.owner.sessionId === owner.sessionId));
+	assert.equal(wakes, 0);
+});

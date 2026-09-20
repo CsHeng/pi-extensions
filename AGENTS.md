@@ -74,6 +74,8 @@ This checkout is authored source. Daily Pi must load a copied local Pi package, 
 
 ## Validation
 
+The approved async/worktree implementation currently has component-tested primitives in `extensions/subagents/git-workspace.ts` and `session-supervisor.ts`; these are not yet connected to the default tool. Read `docs/architecture/subagent-execution-primitives.md` and the 2026-09-20 implementation-verification handoff before continuing that migration. Do not describe primitive tests as full host/protocol acceptance, and do not activate an incomplete replacement by only changing guidance.
+
 Run:
 
 ```bash

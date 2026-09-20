@@ -22,6 +22,8 @@ This is only a request payload profile. Its keyed status is a lightning mark con
 
 ## Subagents
 
+The approved asynchronous/Git-worktree migration currently has [tested implementation primitives](docs/architecture/subagent-execution-primitives.md), not an activated replacement tool. The default behavior described below is unchanged. See the linked implementation handoff for completed tests and remaining integration work before using this branch as an async deployment.
+
 `csheng_subagent_sessions` is the registered model-callable foreground delegation tool. It supports explicit `create`, `continue`, `inspect`, `apply`, and `close` for explorer, reviewer, and worker tasks. Ordinary delegation is a flat create batch; optional hard predecessor edges support approved implementation order with no intervening parent decision. Dependency edges pass predecessor reports, not candidate files. File-dependent successors require explicit parent `apply` between dispatches. The parent Pi supplies the tasks and retains synthesis, verification, review adjudication, repair decisions, continuation, candidate application, acceptance, and the final response.
 
 Fixed roles are:

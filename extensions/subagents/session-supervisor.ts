@@ -37,6 +37,7 @@ export interface Submission<P, R> {
 	execute(prepared: P, context: ExecutionContext): Promise<R>;
 }
 export interface SupervisorHooks {
+	/** Persists owner-tagged terminal facts, including cancellation during shutdown. Filter by owner before projecting to a current UI/workflow. */
 	onEvent?(event: ExecutionEvent): void | Promise<void>;
 	onWake?(events: readonly ExecutionEvent[]): void | Promise<void>;
 	onDeliveryError?(error: unknown): void;
@@ -210,7 +211,7 @@ export class SessionExecutionSupervisor {
 	suppressWake(): void { this.wakeEnabled = false; this.notifications.clear(); }
 	allowWake(): void { if (!this.closed) this.wakeEnabled = true; }
 	private async event(entry: Entry, kind: ExecutionEvent["kind"], task?: TaskExecution): Promise<void> {
-		if (this.closed || entry.view.generation !== this.generation) return;
+		// Retention is distinct from re-entry: an old/cancelled owner still has a terminal outcome.
 		const event: ExecutionEvent = { version: 1, eventId: randomUUID(), kind, generation: entry.view.generation,
 			owner: structuredClone(entry.view.owner), runId: entry.view.runId,
 			...(task ? { task: structuredClone(task) } : { run: structuredClone(entry.view) }) };

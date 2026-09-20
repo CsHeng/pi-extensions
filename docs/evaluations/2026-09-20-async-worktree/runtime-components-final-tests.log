@@ -1,0 +1,328 @@
+TAP version 13
+# (node:5972) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: component integration: dirty input, two async writers, early apply, repair reuse, and owned close
+ok 1 - component integration: dirty input, two async writers, early apply, repair reuse, and owned close
+  ---
+  duration_ms: 693.614702
+  type: 'test'
+  ...
+# Subtest: component integration: queued execution keeps its admitted input instead of recapturing later edits
+ok 2 - component integration: queued execution keeps its admitted input instead of recapturing later edits
+  ---
+  duration_ms: 94.99012
+  type: 'test'
+  ...
+# Subtest: component integration: cancellation retains unaccepted work until an explicit discard
+ok 3 - component integration: cancellation retains unaccepted work until an explicit discard
+  ---
+  duration_ms: 81.174752
+  type: 'test'
+  ...
+# (node:5973) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: dirty tracked, staged, and untracked source is inherited without changing parent index or HEAD
+ok 4 - dirty tracked, staged, and untracked source is inherited without changing parent index or HEAD
+  ---
+  duration_ms: 195.500303
+  type: 'test'
+  ...
+# Subtest: unborn repository captures visible input without creating a parent branch
+ok 5 - unborn repository captures visible input without creating a parent branch
+  ---
+  duration_ms: 70.597774
+  type: 'test'
+  ...
+# Subtest: staged new file remains tracked input after a later ignore rule
+ok 6 - staged new file remains tracked input after a later ignore rule
+  ---
+  duration_ms: 69.217628
+  type: 'test'
+  ...
+# Subtest: staged removal with a still-visible nonignored file includes its current content
+ok 7 - staged removal with a still-visible nonignored file includes its current content
+  ---
+  duration_ms: 79.601635
+  type: 'test'
+  ...
+# Subtest: file-to-directory input transition is represented by Git
+ok 8 - file-to-directory input transition is represented by Git
+  ---
+  duration_ms: 71.628568
+  type: 'test'
+  ...
+# Subtest: two workspaces are independent and preserve dirty parent source
+ok 9 - two workspaces are independent and preserve dirty parent source
+  ---
+  duration_ms: 89.782286
+  type: 'test'
+  ...
+# Subtest: dynamic added paths are candidate changes, not limited by a predicted write list
+ok 10 - dynamic added paths are candidate changes, not limited by a predicted write list
+  ---
+  duration_ms: 134.18125
+  type: 'test'
+  ...
+# Subtest: apply merges compatible same-file changes and preserves parent staging
+ok 11 - apply merges compatible same-file changes and preserves parent staging
+  ---
+  duration_ms: 191.465129
+  type: 'test'
+  ...
+# Subtest: inherited dirty input is not resurrected after parent later deletes it
+ok 12 - inherited dirty input is not resurrected after parent later deletes it
+  ---
+  duration_ms: 168.817184
+  type: 'test'
+  ...
+# Subtest: conflicting edits preserve both sources and the parent index
+ok 13 - conflicting edits preserve both sources and the parent index
+  ---
+  duration_ms: 168.151726
+  type: 'test'
+  ...
+# Subtest: Git represents rename, deletion, executable mode, binary and internal symlink changes
+ok 14 - Git represents rename, deletion, executable mode, binary and internal symlink changes
+  ---
+  duration_ms: 177.802402
+  type: 'test'
+  ...
+# Subtest: explicit refresh retains worker changes and excludes new parent input from the next candidate
+ok 15 - explicit refresh retains worker changes and excludes new parent input from the next candidate
+  ---
+  duration_ms: 280.960894
+  type: 'test'
+  ...
+# Subtest: refresh conflict retains old basis and preserves B, W, and P
+ok 16 - refresh conflict retains old basis and preserves B, W, and P
+  ---
+  duration_ms: 152.413511
+  type: 'test'
+  ...
+# Subtest: applying an already integrated candidate is a no-op and does not duplicate changes
+ok 17 - applying an already integrated candidate is a no-op and does not duplicate changes
+  ---
+  duration_ms: 242.496378
+  type: 'test'
+  ...
+# Subtest: candidate is immutable even if the idle task worktree changes later
+ok 18 - candidate is immutable even if the idle task worktree changes later
+  ---
+  duration_ms: 182.290787
+  type: 'test'
+  ...
+# Subtest: candidate identity and merge base cannot be substituted
+ok 19 - candidate identity and merge base cannot be substituted
+  ---
+  duration_ms: 153.269917
+  type: 'test'
+  ...
+# Subtest: discard removes only the registered task and its exact refs, preserving siblings and user branches
+ok 20 - discard removes only the registered task and its exact refs, preserving siblings and user branches
+  ---
+  duration_ms: 210.897667
+  type: 'test'
+  ...
+# Subtest: modified owned ref is not deleted as if it still belonged to this result
+ok 21 - modified owned ref is not deleted as if it still belonged to this result
+  ---
+  duration_ms: 80.693689
+  type: 'test'
+  ...
+# Subtest: existing destinations are never replaced
+ok 22 - existing destinations are never replaced
+  ---
+  duration_ms: 49.134116
+  type: 'test'
+  ...
+# Subtest: a substituted sibling path cannot be discarded with another task registration
+ok 23 - a substituted sibling path cannot be discarded with another task registration
+  ---
+  duration_ms: 153.311488
+  type: 'test'
+  ...
+# Subtest: non-UTF8 path names fail explicitly instead of being silently reinterpreted
+ok 24 - non-UTF8 path names fail explicitly instead of being silently reinterpreted
+  ---
+  duration_ms: 25.31661
+  type: 'test'
+  ...
+# Subtest: external symlinks are reported rather than imported into source input
+ok 25 - external symlinks are reported rather than imported into source input
+  ---
+  duration_ms: 25.940097
+  type: 'test'
+  ...
+# Subtest: declared content filters are not silently executed during capture
+ok 26 - declared content filters are not silently executed during capture
+  ---
+  duration_ms: 29.721289
+  type: 'test'
+  ...
+# Subtest: unresolved index conflict is different from ordinary dirty input
+ok 27 - unresolved index conflict is different from ordinary dirty input
+  ---
+  duration_ms: 40.344866
+  type: 'test'
+  ...
+# (node:5979) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: submission returns an accepted identity while its child remains unresolved
+ok 28 - submission returns an accepted identity while its child remains unresolved
+  ---
+  duration_ms: 2.946723
+  type: 'test'
+  ...
+# Subtest: expensive execution preparation may continue after immutable input admission
+ok 29 - expensive execution preparation may continue after immutable input admission
+  ---
+  duration_ms: 4.750464
+  type: 'test'
+  ...
+# Subtest: original tool signal cannot cancel the child after submission is accepted
+ok 30 - original tool signal cannot cancel the child after submission is accepted
+  ---
+  duration_ms: 1.000484
+  type: 'test'
+  ...
+# Subtest: tool cancellation during preparation rejects admission and never starts execution
+ok 31 - tool cancellation during preparation rejects admission and never starts execution
+  ---
+  duration_ms: 0.789548
+  type: 'test'
+  ...
+# Subtest: different submissions share one concurrency budget
+ok 32 - different submissions share one concurrency budget
+  ---
+  duration_ms: 1.30676
+  type: 'test'
+  ...
+# Subtest: role capacity is shared without blocking an independently eligible role
+ok 33 - role capacity is shared without blocking an independently eligible role
+  ---
+  duration_ms: 0.899558
+  type: 'test'
+  ...
+# Subtest: explicit resource locks span submissions, not predicted filenames
+ok 34 - explicit resource locks span submissions, not predicted filenames
+  ---
+  duration_ms: 1.537595
+  type: 'test'
+  ...
+# Subtest: a completed child is observable and wakes before its slow sibling finishes
+ok 35 - a completed child is observable and wakes before its slow sibling finishes
+  ---
+  duration_ms: 0.648603
+  type: 'test'
+  ...
+# Subtest: identical concurrent submissions share preparation, execution, and run identity
+ok 36 - identical concurrent submissions share preparation, execution, and run identity
+  ---
+  duration_ms: 0.558842
+  type: 'test'
+  ...
+# Subtest: a changed request cannot reuse the same id
+ok 37 - a changed request cannot reuse the same id
+  ---
+  duration_ms: 0.911635
+  type: 'test'
+  ...
+# Subtest: preparation failure stays inspectable and does not silently retry
+ok 38 - preparation failure stays inspectable and does not silently retry
+  ---
+  duration_ms: 0.400943
+  type: 'test'
+  ...
+# Subtest: cancelled queued work never launches and releases its queue entry
+ok 39 - cancelled queued work never launches and releases its queue entry
+  ---
+  duration_ms: 0.799552
+  type: 'test'
+  ...
+# Subtest: running cancellation uses the runner signal, preserves state, and does not wake
+ok 40 - running cancellation uses the runner signal, preserves state, and does not wake
+  ---
+  duration_ms: 2.520282
+  type: 'test'
+  ...
+# Subtest: normal run completion does not cancel another active child
+ok 41 - normal run completion does not cancel another active child
+  ---
+  duration_ms: 0.717333
+  type: 'test'
+  ...
+# Subtest: an explicit wake suppression retains execution facts without reentering the parent
+ok 42 - an explicit wake suppression retains execution facts without reentering the parent
+  ---
+  duration_ms: 0.620071
+  type: 'test'
+  ...
+# Subtest: owner replacement fences delayed completion and permits the new owner
+ok 43 - owner replacement fences delayed completion and permits the new owner
+  ---
+  duration_ms: 9.827754
+  type: 'test'
+  ...
+# Subtest: persist/event processing finishes before the associated wake
+ok 44 - persist/event processing finishes before the associated wake
+  ---
+  duration_ms: 0.504634
+  type: 'test'
+  ...
+# Subtest: owner replacement during asynchronous event processing cannot leak a stale wake
+ok 45 - owner replacement during asynchronous event processing cannot leak a stale wake
+  ---
+  duration_ms: 0.604318
+  type: 'test'
+  ...
+# Subtest: event delivery errors do not erase execution results or generate a false wake
+ok 46 - event delivery errors do not erase execution results or generate a false wake
+  ---
+  duration_ms: 0.341216
+  type: 'test'
+  ...
+# Subtest: one child completion does not also wake again for its successful run summary
+ok 47 - one child completion does not also wake again for its successful run summary
+  ---
+  duration_ms: 0.961938
+  type: 'test'
+  ...
+# Subtest: run settlement waits for tasks even if its callback forgot to await them
+ok 48 - run settlement waits for tasks even if its callback forgot to await them
+  ---
+  duration_ms: 0.58513
+  type: 'test'
+  ...
+# Subtest: shutdown cancels current work, waits for cleanup, and closes admission
+ok 49 - shutdown cancels current work, waits for cleanup, and closes admission
+  ---
+  duration_ms: 0.400092
+  type: 'test'
+  ...
+# Subtest: inspect returns defensive copies and run retention has an explicit finite bound
+ok 50 - inspect returns defensive copies and run retention has an explicit finite bound
+  ---
+  duration_ms: 0.363989
+  type: 'test'
+  ...
+# Subtest: invalid capacity is rejected instead of queuing work that can never start
+ok 51 - invalid capacity is rejected instead of queuing work that can never start
+  ---
+  duration_ms: 0.16547
+  type: 'test'
+  ...
+# Subtest: shutdown retains owner-tagged cancellation evidence without waking a parent
+ok 52 - shutdown retains owner-tagged cancellation evidence without waking a parent
+  ---
+  duration_ms: 0.306285
+  type: 'test'
+  ...
+1..52
+# tests 52
+# suites 0
+# pass 52
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3193.057241

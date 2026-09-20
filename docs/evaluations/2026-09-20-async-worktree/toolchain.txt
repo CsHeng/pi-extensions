@@ -2,3 +2,4 @@ v22.16.0
 git version 2.47.3
 Version 5.8.3
 Python 3.13.5
+Standalone TypeScript check used the installed ts-node @types/node declarations; this is not the package-locked dependency set.
