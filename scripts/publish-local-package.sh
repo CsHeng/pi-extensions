@@ -117,7 +117,7 @@ fi
 
 if [[ ${dry_run} -eq 1 ]]; then
 	log_info "dry-run destination=${destination}"
-	rsync -a -n --delete -- "${staging}/" "${destination}/"
+	rsync -a -n --checksum --delete -- "${staging}/" "${destination}/"
 	jq -cn --arg destination "${destination}" '{result:"dry-run",destination:$destination}'
 	exit 0
 fi
@@ -125,7 +125,7 @@ fi
 mkdir -p -- "$(dirname -- "${destination}")"
 mkdir -p -- "${destination}"
 chmod 700 -- "${destination}"
-rsync -a --delete -- "${staging}/" "${destination}/"
+rsync -a --checksum --delete -- "${staging}/" "${destination}/"
 
 [[ -f "${destination}/package.json" ]] || die "published package.json is missing"
 [[ -f "${destination}/config/csheng-subagents.json" ]] || die "published route baseline is missing"
