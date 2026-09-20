@@ -2,9 +2,9 @@
 
 ## Availability
 
-`git-workspace.ts` and `session-supervisor.ts` are implemented and component-tested building blocks for the approved asynchronous/worktree change. They are not registered as a second tool and are not yet connected to `ContinuationService`. The installed/default managed tool therefore still has its existing foreground, exact-write, private-source behavior. Installing this checkout does not enable the new asynchronous contract or migrate old sessions.
+`git-workspace.ts` and `session-supervisor.ts` are the integrated primitives behind `ContinuationService` v3, not a second tool. The [managed execution contract](subagent-execution.md) owns default runtime behavior and legacy inspect/close-only compatibility. This document owns the lower-level Git/supervisor boundaries.
 
-The implementation and remaining integration work are recorded in [the verification handoff](../plans/changes/2026-09-20-implementation-verification.md). The existing architecture documents remain authoritative for the default runtime. This boundary is deliberate: dependency acquisition and the declared host/toolchain could not be established in the implementation environment, so unverified store/protocol/host changes were not made active.
+The [verification handoff](../plans/changes/2026-09-20-implementation-verification.md) distinguishes the imported component checkpoint from subsequent full runtime integration. Authored source changes do not update an installed local package snapshot automatically.
 
 ## Git boundary
 
@@ -30,4 +30,4 @@ Use `suppressWake` for a real parent abort/provider error, not ordinary `agent_e
 
 ## Validation boundary
 
-The three component test files use Node's test runner, controlled promises, and disposable Git repositories, without Pi packages or provider calls. They prove local library behavior and composition, not TUI/RPC re-entry, native history reuse, workflow enrollment/acceptance, package co-load, macOS behavior, or wall-clock economic gains. Run the existing full package checks after the declared dependency/toolchain environment is available, and complete the approved integration before enabling the new default.
+The three component test files use Node's test runner, controlled promises, and disposable Git repositories, without Pi packages or provider calls. They prove local library behavior and composition, not TUI/RPC re-entry, native history reuse, workflow enrollment/acceptance, package co-load, macOS behavior, or wall-clock economic gains. The integrated runtime has separate full-package, offline host/native-child and workflow tests; see the verification handoff for their actual results. Neither component nor offline host results establish live-provider effectiveness, macOS coverage or wall-clock economic gains.

@@ -125,7 +125,7 @@ export const SubagentTaskSchema = Type.Object(
 		})),
 		writePaths: Type.Optional(Type.Array(Type.String(), {
 			maxItems: 32,
-			description: "Exact repository-relative files this task may write. Every worker must declare its exact write files; directories, absolute paths, and parent traversal are rejected.",
+			description: "Optional initial repository-relative write regions, advisory for managed v3 workers. Actual in-scope additions, deletions, renames and mode changes are discovered from Git; absolute paths and parent traversal remain invalid.",
 		})),
 		externalReadRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
 			maxItems: HARD_LIMITS.maxExternalReadRoots,
@@ -340,6 +340,8 @@ export interface ChildCapabilityManifestV2 {
 	readRoots: string[];
 	writePaths: string[];
 	externalReadRoots: string[];
+	/** Managed v3 source-root writes; initial writePaths are advisory. */
+	writeRoot?: boolean;
 }
 
 /** Normalized runtime capability after exact v1 or v2 parse. */

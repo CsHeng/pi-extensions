@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFile, lstat, mkdir, mkdtemp, readlink, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readlink, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -15,6 +15,7 @@ export interface GitTaskWorkspace {
 	gitDir: string;
 	inputBase: string;
 	ownedRefs: Record<string, string>;
+	dependencyRoots?: Array<"node_modules">;
 }
 export interface GitCandidate {
 	id: string;
@@ -93,14 +94,16 @@ async function common(repo: string): Promise<string> { return realpath(resolve(r
 async function commitTree(repo: string, tree: string, parent?: string): Promise<string> {
 	return oid(await text(repo, ["commit-tree", oid(tree), ...(parent ? ["-p", oid(parent)] : [])], { input: "Managed execution checkpoint\n" }));
 }
-async function supportedInput(repo: string): Promise<string[]> {
+const excludedPath = (path: string, roots: readonly string[]) => roots.some(root => path === root || path.startsWith(`${root}/`));
+async function supportedInput(repo: string, excluded: readonly string[] = []): Promise<string[]> {
 	if ((await run(repo, ["ls-files", "--unmerged", "-z"])).stdout.length) throw new GitWorkspaceError("unresolved_index_conflict");
 	if (await text(repo, ["config", "--get", "core.sparseCheckout"], { allowed: [0, 1] }) === "true") throw new GitWorkspaceError("unsupported_sparse_checkout");
 	const stages = (await run(repo, ["ls-files", "--stage", "-z"])).stdout.toString("utf8");
 	if (stages.split("\0").some(line => line.startsWith("160000 "))) throw new GitWorkspaceError("unsupported_submodule_input");
-	const files = paths((await run(repo, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])).stdout);
+	const files = paths((await run(repo, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])).stdout).filter(path => !excludedPath(path, excluded));
 	if (files.length > 100_000) throw new GitWorkspaceError("source_entry_limit");
 	let bytes = 0;
+	const visible: string[] = [];
 	for (const file of files) {
 		if (!contained(repo, resolve(repo, file))) throw new GitWorkspaceError("source_path_escape");
 		let info; try { info = await lstat(join(repo, file)); } catch (error) { if (absent(error)) continue; throw error; }
@@ -111,6 +114,7 @@ async function supportedInput(repo: string): Promise<string[]> {
 			try { if (!contained(repo, await realpath(join(repo, file)))) throw new GitWorkspaceError("unsupported_external_symlink"); }
 			catch (error) { if (!absent(error)) throw error; }
 		} else if (!info.isFile() && !info.isDirectory()) throw new GitWorkspaceError("unsupported_source_entry");
+		if (!info.isDirectory()) visible.push(file);
 	}
 	if (files.length) {
 		const attributes = (await run(repo, ["check-attr", "-z", "--stdin", "filter", "working-tree-encoding"], { input: `${files.join("\0")}\0` })).stdout.toString("utf8").split("\0");
@@ -118,19 +122,21 @@ async function supportedInput(repo: string): Promise<string[]> {
 			if (attributes[i] && !["unspecified", "unset"].includes(attributes[i]!)) throw new GitWorkspaceError("unsupported_content_filter");
 		}
 	}
-	return files;
+	return visible;
 }
 
 /** Captures visible tracked/non-ignored source, not staging categories or ignored dependencies. */
-export async function captureGitInput(repository: string, parent?: string): Promise<GitInput> {
+export async function captureGitInput(repository: string, parent?: string, excluded: readonly "node_modules"[] = []): Promise<GitInput> {
 	const repo = await root(repository);
-	await supportedInput(repo);
+	const files = await supportedInput(repo, excluded);
 	const directory = await mkdtemp(join(tmpdir(), "csheng-git-index-"));
 	const index = join(directory, "index");
 	try {
-		const currentIndex = resolve(repo, await text(repo, ["rev-parse", "--git-path", "index"]));
-		try { await copyFile(currentIndex, index); } catch (error) { if (!absent(error)) throw error; await run(repo, ["read-tree", "--empty"], { index }); }
-		await run(repo, ["add", "--all", "--", "."], { index });
+		// A fresh index has no stat-cache false positives and no stale deleted
+		// entries. Git's inventory supplies tracked (even ignored) and visible
+		// nonignored paths; literal NUL pathspecs never import ignored siblings.
+		await run(repo, ["read-tree", "--empty"], { index });
+		if (files.length) await run(repo, ["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], { index, input: `${files.join("\0")}\0` });
 		if ((await run(repo, ["ls-files", "--stage", "-z"], { index })).stdout.toString("utf8").split("\0").some(line => line.startsWith("160000 "))) throw new GitWorkspaceError("unsupported_submodule_input");
 		const tree = oid(await text(repo, ["write-tree"], { index }));
 		const head = parent ?? await text(repo, ["rev-parse", "--verify", "HEAD"], { allowed: [0, 128] });
@@ -145,6 +151,25 @@ async function retain(workspace: GitTaskWorkspace, suffix: string, commit: strin
 	workspace.ownedRefs[ref] = commit;
 	return ref;
 }
+/** Pin a prepared input while its task waits for a worktree/capacity lease. */
+export async function retainGitInput(repository: string, id: string, input: GitInput): Promise<string> {
+	if (!/^session_[a-f0-9-]{36}$/.test(id)) throw new GitWorkspaceError("invalid_workspace_identity");
+	const repo = await root(repository);
+	const ref = `refs/csheng/subagents/inputs/${id}`;
+	await run(repo, ["update-ref", ref, oid(input.commit), ""]);
+	return ref;
+}
+export async function inspectGitInput(repository: string, ref: string, input: GitInput): Promise<void> {
+	if (!/^refs\/csheng\/subagents\/inputs\/session_[a-f0-9-]{36}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
+	const repo = await root(repository);
+	if (await text(repo, ["rev-parse", "--verify", ref]) !== oid(input.commit)) throw new GitWorkspaceError("owned_ref_changed");
+	if (await text(repo, ["rev-parse", `${input.commit}^{tree}`]) !== oid(input.tree)) throw new GitWorkspaceError("input_tree_mismatch");
+}
+export async function discardGitInput(repository: string, ref: string, input: GitInput): Promise<void> {
+	if (!/^refs\/csheng\/subagents\/inputs\/session_[a-f0-9-]{36}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
+	await run(await root(repository), ["update-ref", "-d", ref, oid(input.commit)]);
+}
+
 /** The returned ownership record must be persisted by the managed-session owner. */
 export async function createGitTaskWorkspace(repository: string, destination: string, input: GitInput): Promise<GitTaskWorkspace> {
 	const repo = await root(repository); oid(input.commit); oid(input.tree);
@@ -185,9 +210,17 @@ async function changed(repo: string, before: string, after: string): Promise<str
 }
 export async function freezeGitCandidate(workspace: GitTaskWorkspace): Promise<GitCandidate> {
 	await inspectGitWorkspace(workspace);
-	const input = await captureGitInput(workspace.path, workspace.inputBase);
+	const input = await captureGitInput(workspace.path, workspace.inputBase, workspace.dependencyRoots);
+	const changedPaths = await changed(workspace.repo, workspace.inputBase, input.commit);
+	const selected = new Set(changedPaths); let bytes = 0;
+	for (const entry of (await run(workspace.repo, ["ls-tree", "-rlz", input.commit])).stdout.toString("utf8").split("\0")) {
+		const tab = entry.indexOf("\t"); if (tab < 0 || !selected.has(entry.slice(tab + 1))) continue;
+		const size = Number(entry.slice(0, tab).trim().split(/\s+/).at(-1));
+		if (!Number.isSafeInteger(size) || size < 0) throw new GitWorkspaceError("unsupported_candidate_entry");
+		bytes += size; if (bytes > MAX_OUTPUT) throw new GitWorkspaceError("candidate_limit");
+	}
 	const id = randomUUID(); await retain(workspace, `candidate/${id}`, input.commit);
-	return { id, workspaceId: workspace.id, inputBase: workspace.inputBase, ...input, changedPaths: await changed(workspace.repo, workspace.inputBase, input.commit) };
+	return { id, workspaceId: workspace.id, inputBase: workspace.inputBase, ...input, changedPaths };
 }
 function candidateOwner(workspace: GitTaskWorkspace, candidate: GitCandidate): void {
 	if (candidate.workspaceId !== workspace.id || !ID.test(candidate.id) || workspace.ownedRefs[`refs/csheng/subagents/${workspace.id}/candidate/${candidate.id}`] !== candidate.commit) throw new GitWorkspaceError("candidate_owner_mismatch");
@@ -204,6 +237,7 @@ export async function applyGitCandidate(workspace: GitTaskWorkspace, candidate: 
 	await inspectGitWorkspace(workspace); candidateOwner(workspace, candidate);
 	if (await text(workspace.repo, ["rev-parse", `${candidate.commit}^{tree}`]) !== candidate.tree) throw new GitWorkspaceError("candidate_tree_mismatch");
 	if (await text(workspace.repo, ["rev-parse", `${candidate.commit}^`]) !== candidate.inputBase) throw new GitWorkspaceError("candidate_base_mismatch");
+	if (JSON.stringify(await changed(workspace.repo, candidate.inputBase, candidate.commit)) !== JSON.stringify(candidate.changedPaths)) throw new GitWorkspaceError("candidate_paths_mismatch");
 	const parent = await captureGitInput(workspace.repo);
 	await retain(workspace, `integration/${randomUUID()}`, parent.commit);
 	const result = await mergeGitCandidate(workspace.repo, candidate.inputBase, parent.commit, candidate.commit);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncDispatchCollector, type AsyncDispatchMetrics } from "./async-dispatch.ts";
 import { nativeLeaf } from "../../../../extensions/subagents/observability.ts";
 import type { ManagedRequestTelemetry } from "../../../../extensions/subagents/session-contracts.ts";
 
@@ -10,9 +11,10 @@ export interface ManagedDispatchMetrics {
 	actions: Group[]; legacyActions: Group[]; errors: Array<{ code: string; count: number }>;
 	launchedChildren: { known: number; unavailableRequests: number };
 	replayedEpisodes: { known: number; unavailableRequests: number };
+	async?: AsyncDispatchMetrics;
 }
-const actions = new Set(["create", "continue", "inspect", "apply", "close"]);
-const statuses = new Set(["succeeded", "partial", "failed", "aborted"]);
+const actions = new Set(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"]);
+const statuses = new Set(["accepted", "succeeded", "partial", "failed", "aborted"]);
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value);
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -41,9 +43,10 @@ function group(rows: Array<{ action: string; status: string }>): Group[] {
 	for (const row of rows) { const key = `${row.action}:${row.status}`; const prior = groups.get(key); if (prior) prior.count++; else groups.set(key, { action: row.action, status: row.status, count: 1 }); }
 	return [...groups.values()].sort((a, b) => `${a.action}:${a.status}`.localeCompare(`${b.action}:${b.status}`));
 }
-type Request = { action: string; status: string; telemetry: ManagedRequestTelemetry; code?: string; signature: string; conflict: boolean };
+type Request = { action: string; status: string; v3: boolean; telemetry: ManagedRequestTelemetry; code?: string; signature: string; conflict: boolean };
 /** Counts transport evidence only; never parses prompts or grants billing/acceptance. */
 export class ManagedDispatchCollector {
+	private asynchronous = new AsyncDispatchCollector();
 	private records = 0;
 	private invalid = 0;
 	private duplicates = 0;
@@ -61,6 +64,10 @@ export class ManagedDispatchCollector {
 			let row: Record<string, unknown> | undefined;
 			try { row = object(JSON.parse(line)); } catch { continue; }
 			if (index === 0 && row?.type === "session") owner = row.id;
+			if (row?.type === "custom" && row.customType === "csheng.subagents.execution.v3") {
+				if (physical) this.asynchronous.event(row.data, owner); else this.invalid++;
+				continue;
+			}
 			const message = object(row?.message), details = object(message?.details);
 			if (row?.type !== "message" || message?.role !== "toolResult" || message.toolName !== "csheng_subagent_sessions") continue;
 			if (++this.records > 100000) throw new Error("too_many_runs");
@@ -69,7 +76,7 @@ export class ManagedDispatchCollector {
 			if (typeof action !== "string" || (action !== "invalid-request" && !actions.has(action)) || typeof status !== "string" || !statuses.has(status)) { this.invalid++; continue; }
 			if (details?.schemaVersion === 1) { this.legacy.push({ action, status }); continue; }
 			const telemetry = details?.requestTelemetry;
-			if (details?.schemaVersion !== 2 || !physical || !Array.isArray(details.sessions) || details.sessions.length > 10 || !valid(telemetry)) { this.invalid++; continue; }
+			if (!details || ![2, 3].includes(Number(details.schemaVersion)) || !physical || !Array.isArray(details.sessions) || details.sessions.length > 10 || !valid(telemetry)) { this.invalid++; continue; }
 			if (telemetry.ownerSessionId !== owner) { this.copied++; continue; }
 			if (!actions.has(action) && (status !== "failed" || telemetry.launchedChildren !== 0)) { this.invalid++; continue; }
 			if (!["create", "continue"].includes(action) && (telemetry.launchedChildren !== 0 || telemetry.replayedEpisodes !== 0)) { this.invalid++; continue; }
@@ -79,7 +86,11 @@ export class ManagedDispatchCollector {
 			if (prior) { if (prior.signature !== signature) prior.conflict = true; else this.duplicates++; continue; }
 			const rawCode = object(details?.error)?.code;
 			const code = typeof rawCode === "string" && /^[a-z][a-z0-9_]{0,80}$/.test(rawCode) ? rawCode : undefined;
-			this.requests.set(key, { action, status, telemetry, signature, conflict: false, ...(code ? { code } : {}) });
+			if (details!.schemaVersion === 3) {
+				if (details!.kind === "submission" && telemetry.launchedChildren !== 0) { this.invalid++; continue; }
+				this.asynchronous.receipt(details!);
+			}
+			this.requests.set(key, { action, status, v3: details!.schemaVersion === 3, telemetry, signature, conflict: false, ...(code ? { code } : {}) });
 		}
 	}
 	result(): ManagedDispatchMetrics {
@@ -95,10 +106,11 @@ export class ManagedDispatchCollector {
 		}
 		const errors = new Map<string, number>();
 		for (const row of selected) if (row.code) { const code = errors.size < 1000 || errors.has(row.code) ? row.code : "other"; errors.set(code, (errors.get(code) ?? 0) + 1); }
-		return { recordedResults: this.records, ownedRequests: this.requests.size - conflicts, selectedRequests: selected.length, excludedRequests: excluded, unassignedRequests: unassigned,
+		const async = this.asynchronous.result(this.epoch);
+		return { ...(async ? { async } : {}), recordedResults: this.records, ownedRequests: this.requests.size - conflicts, selectedRequests: selected.length, excludedRequests: excluded, unassignedRequests: unassigned,
 			legacyResults: this.legacy.length, invalidRecords: this.invalid, conflictingRequests: conflicts, duplicateRecords: this.duplicates, copiedRecords: this.copied,
 			actions: group(selected), legacyActions: group(this.legacy), errors: [...errors].map(([code, count]) => ({ code, count })).sort((a,b) => a.code.localeCompare(b.code)),
-			launchedChildren: { known: selected.reduce((sum, row) => sum + row.telemetry.launchedChildren, 0), unavailableRequests: this.legacy.length + this.invalid + conflicts },
+			launchedChildren: { known: selected.reduce((sum, row) => sum + (row.v3 ? 0 : row.telemetry.launchedChildren), 0) + (async?.launchedChildren.known ?? 0), unavailableRequests: this.legacy.length + this.invalid + conflicts },
 			replayedEpisodes: { known: selected.reduce((sum, row) => sum + row.telemetry.replayedEpisodes, 0), unavailableRequests: this.legacy.length + this.invalid + conflicts },
 		};
 	}

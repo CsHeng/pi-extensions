@@ -139,7 +139,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
       const observation = input.observationId ? checks.get(input.observationId) : input.kind === "host" ? [...checks.values()].reverse().find(check => check.bases[attempt.id] && check.host.sessionId === ctx.sessionId && check.generation === attempt.generation && check.host.at >= attempt.started) : undefined;
       if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", "Host evidence requires an actual non-workflow observation in this session.");
       const basis = input.kind === "host" ? observation?.bases[attempt.id] : attempt.basis;
-      const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.host.toolCallId, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: next.input.generation, basis: basis ?? { scope: attempt.basis.scope, fingerprint: "unavailable", state: "unavailable" }, usable: !!basis && basis.state === "current" };
+      const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.host.toolCallId, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, basis: basis ?? { scope: attempt.basis.scope, fingerprint: "unavailable", state: "unavailable" }, usable: !!basis && basis.state === "current" };
       if (input.kind === "host" && (observation!.generation !== attempt.generation || observation!.host.at < attempt.started)) { fact.usable = false; fact.note = "Observation belongs to another input or predates this attempt."; }
       if (input.kind === "host" && input.result === "pass" && (observation!.host.isError || (observation!.host.exitCode != null && observation!.host.exitCode !== 0) || (observation!.host.managed && observation!.host.managed.status !== "succeeded"))) { fact.usable = false; fact.note = "Host reported failure; cannot certify a passing check."; }
       const old = next.facts.find(f => f.id === id);
@@ -216,6 +216,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   recover(reason: string) {
    if (!state || state.fulfillment !== "pending") return;
    const next = structuredClone(state); for (const a of next.attempts) if (a.status === "running") a.status = "interrupted";
+   delete next.continuation.waitingFor; delete next.executionPending;
    next.input.aligned = false; next.continuation.state = "suspended"; next.continuation.reason = reason; next.continuation.unblock = "Reconcile branch/input and explicitly resume under existing authority.";
    try { commit(next, `recover:${owner}`); } catch (error) { unavailable = String(error); notify(); }
   },
@@ -230,6 +231,28 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    return { bases: lease === owner ? bases : {}, owner: lease, generation: current?.input.generation ?? -1 };
   },
   observe(observation: CheckObservation) { checks.set(observation.host.toolCallId, observation); while (checks.size > 256) checks.delete(checks.keys().next().value!); },
+  pendingExecutions(runIds: string[]) {
+   if (!state || state.fulfillment !== "pending") return;
+   const values = [...new Set(runIds)].slice(0, 256);
+   if (digest(values) === digest(state.executionPending ?? [])) return;
+   const next = structuredClone(state); next.executionPending = values;
+   commit(next, `execution-pending:${owner}`);
+  },
+  waitForExecutions(runIds: string[]) {
+   if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active" || !runIds.length) return;
+   const next = structuredClone(state);
+   next.continuation.state = "waiting"; next.continuation.waitingFor = [...new Set(runIds)].slice(0, 256);
+   next.continuation.reason = "Awaiting accepted subagent execution; receipts are not completion.";
+   next.continuation.unblock = "A current-owner terminal event makes evidence available; the executor owns the wake.";
+   commit(next, `execution-wait:${owner}`);
+  },
+  executionReady(runId: string) {
+   if (!state || state.continuation.state !== "waiting" || !state.continuation.waitingFor?.includes(runId)) return;
+   const next = structuredClone(state);
+   next.continuation.state = "active"; delete next.continuation.waitingFor;
+   delete next.continuation.reason; delete next.continuation.unblock;
+   commit(next, `execution-ready:${owner}:${runId}`);
+  },
   async settle(ctx: GoalContext, dispatch: () => void): Promise<void> {
    if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active" || !state.input.aligned || unavailable || ctx.signal?.aborted || ctx.fenced?.()) return;
    const lease = owner; const next = structuredClone(state); await refresh(next, ctx.cwd);

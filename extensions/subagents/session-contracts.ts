@@ -5,7 +5,7 @@ import { validateGraphStructure } from "./graph.ts";
 import { HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
 export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
-export const MANAGED_SESSION_VERSION = 2;
+export const MANAGED_SESSION_VERSION = 3;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
 	maxWorkspaceBytes: 8 * 1024 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
@@ -27,12 +27,15 @@ const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
 export const SubagentSessionToolSchema = Type.Object({
-	action: StringEnum(["create", "continue", "inspect", "apply", "close"] as const, { description: "create requires requestId and tasks; continue requires episodes (handle, requestId, expectedEpisode, message); inspect accepts an optional handle; apply requires handle, expectedEpisode and candidateId; close requires handle and expectedEpisode." }),
+	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create requires requestId/tasks; continue requires episodes. Interactive/RPC submissions default async; mode=foreground joins explicitly. inspect accepts handle or runId; join/cancel require runId (cancel may name taskId); apply requires handle/expectedEpisode/candidateId; refresh/close require handle/expectedEpisode." }),
 	requestId: Type.Optional(Type.String({ ...opaque, description: "Required for create. Stable caller-selected identity for replay; reuse only for the same request." })),
-	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Full workers require scope [\".\"] for one coherent source/tool view; writePaths remain exact. Read-only roles may use narrower scopes." })),
+	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Full workers require scope [\".\"] for one coherent Git worktree; writePaths are optional advisory regions. Read-only roles may use narrower scopes." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks })),
-	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
+	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply, refresh and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
+	runId: Type.Optional(opaque),
+	mode: Type.Optional(StringEnum(["async", "foreground"] as const)),
+	taskId: Type.Optional(opaque),
 }, { additionalProperties: false });
 export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
 
@@ -45,9 +48,10 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(SubagentSessionToolSchema, raw)) throw new ManagedError("invalid_session_request");
 	const input = raw as SessionRequest;
 	const fields: Record<SessionRequest["action"], readonly string[]> = {
-		create: ["action", "requestId", "tasks"], continue: ["action", "episodes"],
-		inspect: ["action", "handle"], apply: ["action", "handle", "expectedEpisode", "candidateId"],
-		close: ["action", "handle", "expectedEpisode", "disposition"],
+		create: ["action", "requestId", "tasks", "mode"], continue: ["action", "episodes", "mode"],
+		inspect: ["action", "handle", "runId"], apply: ["action", "handle", "expectedEpisode", "candidateId"],
+		close: ["action", "handle", "expectedEpisode", "disposition"], refresh: ["action", "handle", "expectedEpisode"],
+		join: ["action", "runId"], cancel: ["action", "runId", "taskId"],
 	};
 	if (Object.keys(input).some((key) => !fields[input.action].includes(key))) throw new ManagedError("invalid_action_fields");
 	if (input.action === "create") {
@@ -59,8 +63,9 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 		if (!input.episodes || new Set(input.episodes.map((item) => item.handle)).size !== input.episodes.length) throw new ManagedError("invalid_episodes");
 		if (input.episodes.some((item) => Buffer.byteLength(item.message) > HARD_LIMITS.maxInputBytes)) throw new ManagedError("message_too_large");
 	}
-	if ((input.action === "apply" || input.action === "close") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value));
+	if ((input.action === "apply" || input.action === "close" || input.action === "refresh") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value));
 	if (input.action === "apply" && !input.candidateId) throw new ManagedError("missing_candidate");
+	if ((input.action === "join" || input.action === "cancel") && !input.runId) throw new ManagedError("missing_run_id");
 	return input;
 }
 
@@ -71,7 +76,7 @@ export interface SessionOwner {
 	anchor: string | null;
 }
 export interface CurrentOwner extends SessionOwner { branch: readonly string[] }
-export type ManagedState = "idle" | "running" | "interrupted" | "closed";
+export type ManagedState = "idle" | "queued" | "running" | "interrupted" | "closed";
 export type ApplyStatus = "not-applied" | "applying" | "applied" | "partial" | "conflict" | "unknown";
 export interface CandidateRef {
 	id: string;
@@ -79,6 +84,7 @@ export interface CandidateRef {
 	status: ApplyStatus;
 	changedPaths: string[];
 	appliedPaths: string[];
+	git?: import("./git-workspace.ts").GitCandidate;
 }
 export interface EpisodeExecution {
 	startedAtMs: number;
@@ -112,12 +118,16 @@ export interface SessionView {
 	requestError?: { code: string; detail?: string };
 }
 export interface SessionActionResult {
-	schemaVersion: 1 | 2;
+	schemaVersion: 1 | 2 | 3;
 	action: SessionRequest["action"] | null;
 	requestTelemetry?: ManagedRequestTelemetry;
 	/** Current best-effort storage advice, not persisted replay state or an execution outcome. */
 	warnings?: ManagedStorageWarning[];
-	status: "succeeded" | "partial" | "failed" | "aborted";
+	status: "accepted" | "succeeded" | "partial" | "failed" | "aborted";
+	kind?: "submission" | "execution";
+	runId?: string;
+	generation?: string;
+	cancelOutcome?: string;
 	sessions: SessionView[];
 	error?: { code: string; missingFields?: string[]; detail?: string };
 }

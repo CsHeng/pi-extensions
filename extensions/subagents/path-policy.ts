@@ -93,7 +93,7 @@ function normalizedCapability(manifest: ChildCapabilityManifest): NormalizedChil
 }
 
 const MANIFEST_V1_KEYS = new Set(["version", "root", "role", "readRoots", "writePaths"]);
-const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots"]);
+const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "writeRoot"]);
 
 function assertExactManifestKeys(value: Record<string, unknown>, version: unknown): void {
 	const allowed = version === CHILD_CAPABILITY_MANIFEST_V1 ? MANIFEST_V1_KEYS : MANIFEST_V2_KEYS;
@@ -130,6 +130,7 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	if (!isStringArray(value.writePaths)) {
 		throw new Error("capability manifest writePaths must be strings");
 	}
+	if (value.writeRoot !== undefined && (value.writeRoot !== true || value.version !== 2 || value.role !== "worker")) throw new Error("invalid source-root write capability");
 	const externalReadRoots = parseExternalReadRoots(value, value.version);
 	assertExactManifestKeys(value, value.version);
 	if (!isAbsolute(value.root) || value.readRoots.some((entry) => !isAbsolute(entry)) || value.writePaths.some((entry) => !isAbsolute(entry))) {
@@ -147,7 +148,7 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	if (value.role === "worker" && externalReadRoots.length > 0) {
 		throw new Error("worker capability cannot contain external read roots");
 	}
-	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots };
+	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(value.writeRoot === true ? { writeRoot: true } : {}) };
 }
 
 export async function assertCanonicalExternalRoots(manifest: NormalizedChildCapability): Promise<void> {
@@ -260,7 +261,9 @@ export async function authorizePath(
 	if (write) {
 		const target = resolve(capability.root, requestedPath);
 		if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
-		if (!capability.writePaths.includes(target)) return { allowed: false, reason: "Path is not an exact declared write file." };
+		if (capability.writeRoot) {
+			if ([".git", "node_modules"].includes(relative(capability.root, target).split(sep)[0]!)) return { allowed: false, reason: "Managed metadata and dependencies are not source writes." };
+		} else if (!capability.writePaths.includes(target)) return { allowed: false, reason: "Path is not an exact declared write file." };
 		try {
 			const physicalRoot = await realpath(capability.root);
 			const existing = await nearestExisting(target);

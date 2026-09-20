@@ -6,6 +6,7 @@ function explorerReadPath(input: string): string {
 }
 
 function workerCommand(input: string, count: number): string {
+	if (process.env.CSHENG_ASYNC_GATES) return `node -e 'const fs=require("node:fs"), root=process.env.CSHENG_ASYNC_GATES, id=process.env.CSHENG_ASYNC_TASK; if(!["fast","slow"].includes(id))process.exit(8); fs.writeFileSync(root+"/started-"+id,"ready"); const timer=setInterval(()=>{if(!fs.existsSync(root+"/release-"+id))return;clearInterval(timer);if(${count}===1&&fs.existsSync("parent-progress"))process.exit(9);fs.writeFileSync(id+".txt","candidate-${count}");},10);setTimeout(()=>process.exit(10),20000).unref();'`;
 	if (input.includes("host-inputs-fixture")) return `node -e 'require("node:fs").writeFileSync("candidate.txt", require("pkg"))' && git add -- candidate.txt && git diff --cached --name-only -- candidate.txt`;
 	if (input.includes("after-child-compaction-fixture")) return `node -e 'const fs=require("node:fs"); if(fs.readFileSync("candidate.txt","utf8")!=="candidate-1" || fs.readFileSync("node_modules/fixture-state","utf8")!=="retained-local")process.exit(3); fs.appendFileSync("candidate.txt","|continued")'`;
 	if (input.includes("private-continuity-fixture")) return "mkdir -p node_modules && printf retained-local > node_modules/fixture-state && printf candidate-1 > candidate.txt";

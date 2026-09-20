@@ -6,7 +6,15 @@ import { promisify } from "node:util";
 import { MANAGED_LIMITS, ManagedError } from "./session-contracts.ts";
 import { assertNoSymlinkComponent, type FileState } from "./workspace.ts";
 
-export interface WorkerInputState { version: 1; dependencyRoots: Array<"node_modules">; parentDependencyKey: string; dependencyKey: string }
+import { inspectGitWorkspace, type GitTaskWorkspace } from "./git-workspace.ts";
+
+export interface WorkerInputState { version: 1; dependencyRoots: Array<"node_modules">; parentDependencyKey: string; dependencyKey: string; gitWorkspace?: GitTaskWorkspace }
+async function inputGitKey(source: string, state: WorkerInputState, budget: InventoryBudget): Promise<string> {
+	if (!state.gitWorkspace) return validateGit(source, budget);
+	if (state.gitWorkspace.path !== source) throw new ManagedError("worker_input_git_identity");
+	await inspectGitWorkspace(state.gitWorkspace);
+	return hash([state.gitWorkspace.id, state.gitWorkspace.gitDir, state.gitWorkspace.inputBase]);
+}
 const exec = promisify(execFile);
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const absentKey = hash({ present: false });
@@ -141,14 +149,17 @@ async function replaceDependencies(repo: string, source: string, expected: strin
 	}
 }
 
-export async function prepareWorkerInputs(repo: string, source: string): Promise<WorkerInputState> {
+export function initialWorkerInputs(gitWorkspace: GitTaskWorkspace): WorkerInputState {
+	return { version: 1, dependencyRoots: ["node_modules"], parentDependencyKey: absentKey, dependencyKey: absentKey, gitWorkspace };
+}
+export async function prepareWorkerInputs(repo: string, source: string, gitWorkspace?: GitTaskWorkspace, copyDependencies = true): Promise<WorkerInputState> {
 	await root(repo); await root(source);
 	let existing = false;
 	try { await lstat(join(source, "node_modules")); existing = true; } catch (error) { if (!missing(error)) throw error; }
 	// A dependency directory already copied as ordinary source remains ordinary source.
 	const budget = { bytes: 0, count: 0 };
-	await inventory(source, [], source, source, budget, undefined, true);
-	const parentDependencyKey = existing ? absentKey : await parentDependencies(repo, budget);
+	await inventory(source, gitWorkspace ? [".git"] : [], source, source, budget, undefined, true);
+	const parentDependencyKey = existing || !copyDependencies ? absentKey : await parentDependencies(repo, budget);
 	const dependencyRoots: WorkerInputState["dependencyRoots"] = existing ? [] : ["node_modules"];
 	if (parentDependencyKey !== absentKey) {
 		// Match the parent's already-authoritative ignore policy; never import it.
@@ -156,6 +167,12 @@ export async function prepareWorkerInputs(repo: string, source: string): Promise
 		check.child.stdin?.end();
 		try { await check; } catch { throw new ManagedError("worker_input_dependency_undeclared"); }
 		await replaceDependencies(repo, source, parentDependencyKey);
+	}
+	if (gitWorkspace) {
+		gitWorkspace.dependencyRoots = dependencyRoots;
+		const state: WorkerInputState = { version: 1, dependencyRoots, parentDependencyKey, dependencyKey: parentDependencyKey, gitWorkspace };
+		await inspectWorkerInputs(source, state);
+		return state;
 	}
 	try { await lstat(join(source, ".git")); throw new ManagedError("worker_input_git_exists"); } catch (error) { if (!missing(error)) throw error; }
 	await git(source, ["init", "--quiet", "--template="]);
@@ -174,16 +191,16 @@ export async function refreshWorkerInputs(repo: string, source: string, previous
 	if (!previous.dependencyRoots.length) return previous;
 	const budget = { bytes: 0, count: 0 };
 	await inventory(source, [".git", ...previous.dependencyRoots], source, source, budget, undefined, true);
-	await validateGit(source, budget);
+	await inputGitKey(source, previous, budget);
 	const parentDependencyKey = await parentDependencies(repo, budget);
 	if (parentDependencyKey !== previous.parentDependencyKey) await replaceDependencies(repo, source, parentDependencyKey);
-	const state: WorkerInputState = { version: 1, dependencyRoots: ["node_modules"], parentDependencyKey, dependencyKey: absentKey };
+	const state: WorkerInputState = { version: 1, dependencyRoots: ["node_modules"], parentDependencyKey, dependencyKey: absentKey, ...(previous.gitWorkspace ? { gitWorkspace: previous.gitWorkspace } : {}) };
 	state.dependencyKey = await privateDependencies(source, state);
 	return state;
 }
 async function inspectInputs(source: string, state: WorkerInputState, budget: InventoryBudget): Promise<{ dependencyKey: string; gitKey: string; environmentKey: string }> {
 	if (state.version !== 1 || state.dependencyRoots.length > 1 || state.dependencyRoots.some((name) => name !== "node_modules")) throw new ManagedError("worker_input_state_invalid");
-	const gitKey = await validateGit(source, budget); const dependencyKey = await privateDependencies(source, state, budget);
+	const gitKey = await inputGitKey(source, state, budget); const dependencyKey = await privateDependencies(source, state, budget);
 	return { dependencyKey, gitKey, environmentKey: hash([gitKey, dependencyKey]) };
 }
 export async function inspectWorkerInputs(source: string, state: WorkerInputState) {

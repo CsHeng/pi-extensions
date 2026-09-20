@@ -160,6 +160,36 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 	const sessions = new Set<string>(); const episodes = new Map<string, { succeeded: boolean; complete: boolean }>(); const applied = new Set<string>();
 	let validTiming = true; let validWall = true; let validWorkers = true; let invalidEvidence = false;
 	const totals = { workerEffortMs: 0, workerOccupiedMs: 0, parentWallMs: 0, parentActiveMs: 0, parentLocalToolMs: 0, parentDelegationWaitMs: 0, parentReasoningMs: 0, parentCompactionMs: 0, unattributedMs: 0 };
+	// Async completions may arrive outside every parent interaction range. Their
+	// owner-tagged native observations remain owned usage, not receipt usage.
+	const eventIds = new Map<string, string>();
+	for (const entry of parsed.body) {
+		if (entry.type !== "custom" || entry.customType !== "csheng.subagents.execution.v3") continue;
+		const event = object(entry.data);
+		if (object(event?.owner)?.sessionId !== parsed.header.id) continue;
+		if (!event || event.version !== 3 || !id(event.eventId) || !Array.isArray(event.sessions) || event.sessions.length > 10) { invalidEvidence = true; continue; }
+		const serialized = canonical(event); const priorEvent = eventIds.get(event.eventId);
+		if (priorEvent) { if (priorEvent !== serialized) invalidEvidence = true; continue; }
+		eventIds.set(event.eventId, serialized);
+		for (const raw of event.sessions) {
+			const view = object(raw), task = object(view?.result);
+			if (!view || !id(view.handle) || !Number.isSafeInteger(view.episode) || !task) { invalidEvidence = true; continue; }
+			sessions.add(view.handle);
+			const key = JSON.stringify([view.handle, view.episode]);
+			const outcome = { succeeded: task.status === "succeeded", complete: view.reportComplete === true };
+			if (episodes.has(key) && canonical(episodes.get(key)) !== canonical(outcome)) invalidEvidence = true;
+			episodes.set(key, outcome);
+			if (object(task.telemetry)?.childStarted !== false && view.execution) {
+				const observation = isNativeObservation(task.observation) && task.observation.ownerSessionId !== parsed.header.id ? task.observation : unavailableObservation();
+				const prior = episodeObservations.get(key);
+				if (prior?.available && observation.available && observationSignature(prior) !== observationSignature(observation)) invalidEvidence = true;
+				if (!prior?.available) episodeObservations.set(key, observation);
+				// Legacy interaction-local occupancy cannot describe cross-turn jobs.
+				// V3 queue/workspace/child/lifecycle timings are reported separately.
+				if (event.foreground !== true) validWorkers = false;
+			}
+		}
+	}
 	for (const [position, entry] of parsed.body.entries()) {
 		if (entry.type !== "custom" || entry.customType !== "csheng-parent-observation") continue;
 		const data = object(entry.data); const native = data?.native;
@@ -188,8 +218,9 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 		for (const item of scope) {
 			const message = object(item.message); const details = object(message?.details);
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
-			if (message.toolName === "csheng_subagent_sessions" && (details.schemaVersion === 1 || details.schemaVersion === 2) && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
+			if (message.toolName === "csheng_subagent_sessions" && (details.schemaVersion === 1 || details.schemaVersion === 2 || details.schemaVersion === 3) && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
+				if (details.schemaVersion === 3 && details.kind === "submission") continue;
 				for (const raw of details.sessions) {
 					const view = object(raw); if (!view || !id(view.handle) || !Number.isSafeInteger(view.episode) || (view.episode as number) < 0) { invalidEvidence = true; continue; }
 					sessions.add(view.handle);

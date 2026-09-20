@@ -88,7 +88,7 @@ test("v4 marks unclosed child endpoints and backward clocks unavailable", async 
 	}
 });
 
-test("canonical repository-relative writes stay contained and still conflict when overlapping", () => {
+test("canonical repository-relative hints stay contained but do not serialize isolated workers", () => {
 	const outsideScope = validateGraphRelationships(graph([
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["lib/a.ts"] },
 	]));
@@ -98,7 +98,7 @@ test("canonical repository-relative writes stay contained and still conflict whe
 	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
 		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
-	] }).ok, false);
+	] }).ok, true);
 	assert.equal(validateGraphRelationships(graph([
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
 	])).ok, true);
@@ -107,7 +107,7 @@ test("canonical repository-relative writes stay contained and still conflict whe
 	])).ok, true);
 });
 
-test("graph admission rejects cycles, unknown dependencies, role writes, and concurrent write overlap", () => {
+test("graph admission rejects cycles, unknown dependencies and read-only writes; overlapping hints are allowed", () => {
 	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
 		{ id: "b", role: "explorer", objective: "b", scope: ["."], dependsOn: ["a"] },
@@ -121,7 +121,7 @@ test("graph admission rejects cycles, unknown dependencies, role writes, and con
 	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
 		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
-	] }).ok, false);
+	] }).ok, true);
 });
 
 test("graph admission rejects unknown semantic profiles before scheduling", () => {

@@ -21,7 +21,7 @@ test("managed refusals keep action and missing fields without launching or readi
 		[{ action: "untrusted arbitrary action" }, null, undefined],
 	] as const) {
 		const result = await service.execute(request, ctx);
-		assert.equal(result.schemaVersion, 2);
+		assert.equal(result.schemaVersion, 3);
 		assert.equal(result.action, action);
 		assert.equal(result.status, "failed");
 		assert.deepEqual(result.error?.missingFields, fields);

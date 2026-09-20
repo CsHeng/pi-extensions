@@ -55,7 +55,7 @@ for (const installed of [false, true]) test(`native ${installed ? "installed" : 
 	assert.equal(measured.usage.parent.input, 6); assert.equal(measured.usage.children.input, 4);
 	assert.equal(measured.observedSessions, 1); assert.equal(measured.observedEpisodes, 2);
 	assert.equal(measured.outcomes.reportComplete, 2); assert.equal(measured.outcomes.parentAccepted, null);
-	assert.ok(measured.timing.workerOccupiedMs !== null && measured.timing.workerOccupiedMs > 0);
+	assert.ok(measured.timing.workerOccupiedMs !== null && measured.timing.workerOccupiedMs > 0, JSON.stringify(parents.map(parent => ({ boundary: parent.timing.boundary, complete: parent.timing.complete, runs: parent.runs.map(run => ({ sameClock: run.clockKey === parent.timing.clockKey, originDelta: run.originMs! - parent.timing.originMs!, duration: run.telemetry.runDurationMs, complete: run.telemetry.timing?.complete, children: run.telemetry.timing?.children.map(child => ({ role: child.role, startMs: child.startMs, endMs: child.endMs })) })) }))));
 	assert.ok(measured.timing.parentReasoningMs !== null);
 	assert.ok(measured.childTiming.episodeWallMs !== null && measured.childTiming.episodeWallMs > 0);
 	assert.equal(measured.commands.coverage, "complete"); assert.equal(measured.commands.observed, 2);

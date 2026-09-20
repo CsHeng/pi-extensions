@@ -49,10 +49,11 @@ export interface GoalState {
  version: 2; revision: number; id: string;
  goal: string; delivery: string; authority: string; goalRevision: number;
  fulfillment: "pending" | "complete" | "cancelled" | "superseded";
- continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number };
+ continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number; waitingFor?: string[] };
  input: { generation: number; aligned: boolean; unknown: boolean };
  requirements: GoalRequirement[]; tasks: GoalTask[]; attempts: GoalAttempt[]; facts: GoalFact[]; acceptance: GoalAcceptance[];
  legacy?: { revision: number; id: string; goal: string };
+ executionPending?: string[];
  calls: string[]; serial: number;
 }
 const integer = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
@@ -60,14 +61,14 @@ const basis = Type.Object({ scope: list(text(500)), fingerprint: text(256), stat
 export const goalStateSchema = Type.Object({
  version: Type.Literal(2), revision: Type.Integer({ minimum: 1 }), id: text(128), goal: text(), delivery: text(), authority: text(), goalRevision: Type.Integer({ minimum: 1 }),
  fulfillment: enums("pending", "complete", "cancelled", "superseded"),
- continuation: Type.Object({ state: enums("active", "waiting", "suspended"), reason: Type.Optional(text()), unblock: Type.Optional(text()), lastProgress: Type.Optional(text(128)), repeat: integer, dispatched: integer }, { additionalProperties: false }),
+ continuation: Type.Object({ state: enums("active", "waiting", "suspended"), reason: Type.Optional(text()), unblock: Type.Optional(text()), lastProgress: Type.Optional(text(128)), repeat: integer, dispatched: integer, waitingFor: Type.Optional(list(text(128), 256)) }, { additionalProperties: false }),
  input: Type.Object({ generation: integer, aligned: Type.Boolean(), unknown: Type.Boolean() }, { additionalProperties: false }),
  requirements: Type.Array(Type.Object({ ...requirement.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
  tasks: Type.Array(Type.Object({ ...task.properties, revision: Type.Integer({ minimum: 1 }), blocker: Type.Optional(blocker) }, { additionalProperties: false }), { maxItems: 64 }),
  attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), basis, writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false }), { maxItems: 256 }),
  facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), basis, at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false }), { maxItems: 256 }),
  acceptance: Type.Array(Type.Object({ ...judgment.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { maxItems: 97 }),
- legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), calls: Type.Array(text(256), { maxItems: 128 }), serial: integer,
+ legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), executionPending: Type.Optional(list(text(128), 256)), calls: Type.Array(text(256), { maxItems: 128 }), serial: integer,
 }, { additionalProperties: false });
 export interface GoalSnapshot { schemaVersion: 2; state: GoalState }
 export interface GoalView { state?: GoalState; legacy?: WorksetState; unavailable?: string; deficits: string[] }

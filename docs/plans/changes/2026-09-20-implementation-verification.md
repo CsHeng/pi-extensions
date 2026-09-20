@@ -1,46 +1,71 @@
-# Best-effort implementation verification
+# Implementation verification: asynchronous subagents and Git worktrees
 
-Status: partial implementation. This document distinguishes tested primitives from default runtime integration. Do not treat the approved design as shipped behavior.
+Status: runtime integration complete in authored source; offline verification passed. No installation, local snapshot publication, remote push, live-provider probe, or deployment is claimed.
 
-Base: `12db1ed489cc825b6ae91cf7224e9c80f2f9bdfd`. The user authorized implementation, offline validation, local commits and full Git ZIP delivery, and allowed blocked work to be recorded. No remote push, installation, provider call, publication, or production access was performed.
+## Provenance and delivery
 
-## Git backend checkpoint
+The supplied successor branch `implement/approved-2026-09-20` was fetched from the extracted Git archive and fast-forwarded into this checkout, from `12db1ed489cc825b6ae91cf7224e9c80f2f9bdfd` to `16ce69cdf1f487a2e5492766378ba8531d7253bf`. The two pre-existing local plan documents were preserved separately before import. The successor's approved design and plan supersede the former foreground/private-source/exact-write design for this change.
 
-`extensions/subagents/git-workspace.ts` implements native Git input capture with an independent index, detached linked workspaces, immutable input-relative candidates, three-way integration, parent worktree-only apply, explicit idle-writer input refresh, and exact-owned resource discard. It does not introduce custom content hashes or a merge implementation. The caller still owns episode state, single-writer exclusion, environment preparation, persistence, and acceptance.
+The archive delivered tested Git/supervisor primitives, not an integrated replacement. Its retained component logs remain historical evidence. This continuation delivers the integrated source, tests and documentation in the current working tree; it does not create a new implementation commit or publish an installation. Daily Pi still uses its existing package snapshot until separately authorized publication/restart.
 
-Twenty-two disposable-Git tests passed. They exercise dirty/staged/untracked input, unborn repositories, staged-new ignored files, staged deletion with visible content, file/directory transitions, independent workspaces, dynamic additions, compatible and conflicting merges, inherited-input deletion, rename/delete/mode/binary/internal symlink changes, refresh and conflict preservation, immutable candidates, repeated apply, candidate identity, owned cleanup and ref changes, existing destinations, unsupported external symlinks/filters, and unresolved index conflicts. The standalone strict TypeScript result is in the matching log.
+## Environment and baseline
 
-These are library tests, not proof that the installed tool has migrated. The existing `ContinuationService`, persisted schema, native capability guards, workflow observation, UI, telemetry, and default source backend have not yet been switched in this checkpoint. No second writable backend is enabled in production.
+Dependencies were restored with `npm ci --ignore-scripts` on Node 26.9.0 and Git 2.47.3. The imported full baseline passed 675 of 680 tests. Its five failures were the collection-specific documentation token scan, two Git input-capture cases, and two historical Pi/CC TUI footer/timing checks.
 
-## Environment blockers
+The Git failures exposed inherited index stat-cache behavior and staged-new ignored input. Capture now constructs a fresh independent index from the actual tracked/nonignored inventory. The documentation scan was fixed without introducing a runtime dependency. The TUI fixture now disables the competing CC footer in disposable settings and loads the selected footer owner after CC's startup reset; no user settings or foreign extension runtime were changed and no test was skipped.
 
-`npm ci --ignore-scripts` failed because the configured npm mirror could not resolve (`EAI_AGAIN`). Available Node is 22.16.0, below the dependency-declared minimum 22.19.0 for Pi 0.86.0. Full package typecheck, Pi-backed tests, TUI/RPC probes, and installed/live combination validation are not reported passed. Dependency retries and live provider calls were not used to bypass this blocker.
+## Implemented contract
 
-Raw logs are retained under `docs/evaluations/2026-09-20-async-worktree/`. Further implementation checkpoints update this record rather than replacing unverified outcomes with a success claim.
+- Public managed v3 supports create, continue, inspect, join, cancel, refresh, apply and close. TUI/RPC admission returns accepted receipts; one-shot modes remain foreground by default. Explicit foreground mode and join remain available.
+- Input is captured and pinned before admission. Checkout/dependency preparation follows admission. Session-wide global/role capacity and explicit locks span independent submissions; task mutations and parent apply retain separate serialization.
+- All roles use owned detached Git worktrees. Workers keep native history and private dependencies. Initial write regions are advisory; actual Git changes define immutable input-relative candidates. Continue does not recapture input, including queued cancellation; refresh is explicit and idle-only.
+- Apply uses Git three-way integration, preserves parent staging and compatible edits, and never refreshes task input. Actual applied paths can differ after parent rename or be empty after a no-op integration. Unknown apply state blocks another episode.
+- Task/run terminal evidence persists before publication and coalesced current-owner wake. Early task repair does not replace an original run's episode view. Shutdown cancels and drains known executions; reload/recovery does not resume them.
+- V1/v2 records remain inspect/close-only. No second writable backend remains.
+- Workflow binds execution evidence to the original contract, attempt and input. It handles terminal-before-receipt, duplicates, intervening input, historical queries and re-enrollment without rebinding old proof. Pending execution waits on events without polling or duplicate workflow wake; transport never implies acceptance.
+- Observer snapshots cover concurrent runs. Async evaluators distinguish admission from execution and deduplicate native usage, terminal summaries, replay and query results; conflicts and unavailable timing stay explicit.
 
-## Final delivered checkpoint
+## Verification
 
-The final component run passed **52 tests: 24 Git workspace tests, 25 supervisor tests, and 3 combined Git/async tests**. Standalone strict TypeScript checking passed for both new modules and all three new suites. It used the available global TypeScript and ts-node Node declarations, not the unavailable package-locked dependency set. Existing shell scripts passed `bash -n`. Exact tool versions and raw final logs are retained alongside the earlier checkpoint logs.
+The final code check passed **695/695 tests, zero failures and zero skips**, with strict package TypeScript checking. All eight required offline probes passed:
 
-`session-supervisor.ts` implements accepted-versus-completed receipts, shared cross-submission role/global capacity, explicit locks, request deduplication, owner generations, preparation-only tool cancellation, independent task terminal events, persistence-before-wake callbacks, cancellation, explicit join, wake suppression and shutdown. No live agent loop is created. The combined tests exercise dirty parent input, two independently writing tasks, parent progress, an early result applied before a sibling finishes, explicit refresh and same-workspace repair, subsequent integration, fixed queued inputs, cancellation retention, and owned cleanup. They do not exercise the existing Pi/native runner or native conversation history.
+```bash
+npm run check
+bash scripts/run-temporary-plan-mode-probe.sh
+bash scripts/run-installed-plan-mode-probe.sh
+bash scripts/run-temporary-subagents-probe.sh
+bash scripts/run-installed-subagents-probe.sh
+bash scripts/run-temporary-herdr-handoff-probe.sh
+bash scripts/run-installed-herdr-handoff-probe.sh
+bash scripts/run-temporary-workflow-probe.sh
+bash scripts/run-installed-workflow-probe.sh
+```
+
+`tests/subagents-async-host.test.ts` runs a real RPC-mode Pi SDK parent and real native child processes with synthetic providers. Two workers overlap while the parent performs independent work; the early candidate is explicitly applied before its sibling completes; explicit refresh and repair reuse its worktree/native history; the original run still returns the original episode. Workflow waits without acceptance, and exact-owned worktrees/refs are removed. A second actual-host case proves a completion queued behind a tool does not restart an aborted parent. These are offline protocol/host checks, not live-model effectiveness claims.
+
+Other focused suites cover immutable candidates, parent staging, dynamic paths, modes/binary/symlinks, compatible/conflicting integration, queued cancellation, shared capacity, concurrent refresh and uncertain apply, in-process root writer serialization, legacy refusal, dispatch-bound evidence and evaluator conflict/epoch handling.
+
+## Independent review and adjudication
+
+Two independent read-only reviewers assessed runtime/Git/lifecycle and workflow/accounting boundaries. The parent accepted nine initial causal findings, repaired them and requested one bounded targeted re-review. Two follow-up boundary findings were also accepted and repaired: locked recovery checks after a concurrent uncertain apply, and historical query evidence crossing a new enrollment. Regression tests cover these cases. The parent additionally prevented failed admission from republishing a preceding episode and verified real-host abort/wake behavior.
+
+Reviewers performed static review, not the parent test runs. Their reports were treated as candidates, not acceptance. The parent owns the final evidence judgment. Details and coverage limits are recorded in [the bounded integration record](../../evaluations/2026-09-20-async-worktree/integration-verification.md).
 
 ## Plan accounting
 
-| Plan work | Delivered | Still required |
-| --- | --- | --- |
-| X01 | Internal typed receipt, task/run result, event, owner and workspace interfaces. | Version the public tool/store envelope and implement v1/v2 legacy read-only handling. |
-| X02 / X04 | Tested Git capture, detached worktree, candidate, merge, refresh and apply primitives. | Wire them into allocation/episodes; replace private-Git assumptions in environment and file guards; make initial write regions advisory. |
-| X03 / X05 | Tested session supervisor, shared capacity, task events and wake/cancellation controls. | Replace the existing global foreground gate; use the native runner and real Pi lifecycle/message hooks; preserve host mode and task-local mutation semantics. |
-| X06 | No production workflow changes. | Persist dispatch-time attempt/basis association, reconcile early/late terminal events, distinguish waiting from no progress, and prevent duplicate continuation. |
-| X07 | Exact-owned worktree/ref discard primitive with tests. | Integrate retain/discard, native evidence retention and legacy record close into the persistent store. |
-| X08 | Internal task preparation/queue/start/end facts only. | Adapt observer/UI and cost/telemetry consumers without counting receipts as child execution. |
-| X09 | 52 deterministic/component tests, standalone typecheck, shell syntax, targeted author review. | Full package checks, real Pi offline probes and independent integration review. No paid model lane is required merely to prove the local protocol. |
-| X10 | Complete original Git ancestry plus committed code, tests, records and standalone repository ZIP. | User installation/publication is outside this delivery. |
+| Plan work | Current disposition |
+| --- | --- |
+| X01 | Public v3 receipt/result/control protocol and versioned store; legacy read-only compatibility. |
+| X02 / X04 | Git input capture, owned linked worktrees, dynamic candidates, explicit refresh and parent worktree integration are the sole writable backend. |
+| X03 / X05 | Native runner integrated with session capacity, task-local controls, owner fencing, terminal publication and wake; foreground compatibility retained. |
+| X06 | Original dispatch association, event-driven waiting, early/late reconciliation and no automatic acceptance. |
+| X07 | Explicit retain/discard with exact Git ownership; native/registry evidence retained. |
+| X08 | Concurrent observer projection and receipt-versus-terminal/native accounting. |
+| X09 | Full package check, eight offline probes, real-host/native-child scenario, independent review and regression repair completed. |
+| X10 | Current-repository source/tests/stable truth delivered. No new commit, installation, publication, remote push or new ZIP was requested for this continuation. |
 
-## Direct continuation path
+## Cleanup and remaining limits
 
-Do not redesign the approved goals or repeat completed Git mechanism experiments. First restore the package-declared Node and dev dependencies and run baseline checks. Then use the internal types to make the public v3 store/tool change in one coherent integration: allocate and persist source/basis before receipt, hand the existing runner to the supervisor, use Git workspace/candidate records instead of fixed-file manifests, and update file/environment guards together. Keep the old default operational until the replacement path is coherent; do not silently accept new writes through old exact-write validation.
+The authored repository has one registered worktree and zero `refs/csheng/subagents` refs after verification. Disposable tests/probes close their native processes and remove owned worktrees, refs, private dependencies and temporary directories. No persistent service, port, container or builder was started. Review handles were explicitly closed; their bounded native/registry review history is retained, not silently pruned. The extracted archive, original local-document backups and local verification logs remain preserved import/evidence artifacts, not running environments.
 
-Wire terminal facts to the workflow using the original dispatch association, not the latest attempt. Handle a fast terminal arriving before the submission tool-result observation. Only after persistence should the Pi adapter request a current-owner turn; ordinary waiting must not create a follow-up polling loop. Update observer and accounting at the execution event boundary, not when the submission tool returns. Finally connect close/legacy handling and run the actual host probes.
-
-This is a substantive but **partial runtime implementation**, not a completed asynchronous tool migration. The unchanged production `ContinuationService` still waits for its batch and still uses the existing private-source backend. No README statement or approved plan should be interpreted as changing that fact.
+Live-provider effectiveness, performance/economic gains, macOS coverage, and hostile-shell isolation are not established. Trusted host bash is deliberately not sandboxed. Git publication is not a whole-tree filesystem transaction; uncertain failures remain explicit recovery states. The independent final follow-up fixes were locally regression-verified rather than subjected to an unbounded third review round.

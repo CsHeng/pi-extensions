@@ -186,7 +186,7 @@ test("an untyped failure keeps its managed code and a bounded, path-free cause",
 	}
 });
 
-test("managed service keeps B0 through C1/C2, replays inertly, restores on a new service and continues a reviewer on actual new bytes", async (t) => {
+test("managed service keeps fixed inputs, replays inertly, restores history and explicitly refreshes before repair/review", async (t) => {
 	const f = await serviceFixture(t);
 	const first = await f.service.execute(createWorker, f.ctx);
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
@@ -217,10 +217,12 @@ test("managed service keeps B0 through C1/C2, replays inertly, restores on a new
 	assert.equal(reviewer.status, "succeeded", JSON.stringify(reviewer));
 	assert.match(reviewer.sessions[0]!.result!.output, /candidate-2/);
 	const restored = new ContinuationService(f.dependencies);
+	assert.equal((await restored.execute({ action: "refresh", handle, expectedEpisode: 2 }, f.ctx)).status, "succeeded");
 	const third = await restored.execute({ action: "continue", episodes: [{ handle, requestId: "again", expectedEpisode: 2, message: "host-worker-fixture" }] }, f.ctx);
 	assert.equal(third.status, "succeeded", JSON.stringify(third));
 	assert.match(third.sessions[0]!.result!.output, /users=3/);
 	assert.equal((await restored.execute({ action: "apply", handle, expectedEpisode: 3, candidateId: third.sessions[0]!.candidate!.id }, f.ctx)).status, "succeeded");
+	assert.equal((await restored.execute({ action: "refresh", handle: reviewer.sessions[0]!.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
 	const reviewAgain = await restored.execute({ action: "continue", episodes: [{ handle: reviewer.sessions[0]!.handle, requestId: "rereview", expectedEpisode: 1, message: "host-reviewer-fixture" }] }, f.ctx);
 	assert.equal(reviewAgain.status, "succeeded", JSON.stringify(reviewAgain));
 	assert.match(reviewAgain.sessions[0]!.result!.output, /users=2.*candidate-3/);
@@ -259,6 +261,7 @@ test("native worker commands reuse private dependencies and Git despite inherite
 	assert.equal(bash.length, 1); assert.equal(bash[0].message.isError, false);
 	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "dependency-1");
 	await writeFile(join(f.repo, "node_modules/pkg/index.js"), 'module.exports = "dependency-2"');
+	assert.equal((await service.execute({ action: "refresh", handle: first.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
 	const next = await service.execute({ action: "continue", episodes: [{ handle: first.handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture host-inputs-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded"); assert.ok(next.sessions[0]!.candidate);
 	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "dependency-2");
@@ -411,7 +414,7 @@ test("cold running state, revoked trust and a changed native leaf never replay o
 	record.state = "idle"; await f.store.save(record);
 	const changed = `${before}${JSON.stringify({ type: "custom", id: "extra", parentId: record.nativeLeaf, customType: "fixture", data: {} })}\n`;
 	await writeFile(native, changed);
-	const mismatched = await restored.execute(request, f.ctx);
+	const mismatched = await restored.execute({ ...request, episodes: request.episodes.map(episode => ({ ...episode, requestId: "changed-native" })) }, f.ctx);
 	assert.equal(mismatched.sessions[0]!.requestError?.code, "native_leaf_mismatch");
 	assert.equal(await readFile(native, "utf8"), changed);
 	assert.equal(f.launches(), 1);

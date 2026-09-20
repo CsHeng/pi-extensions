@@ -93,16 +93,16 @@ Direct assistant, compaction, and branch-summary rows contribute once; nested to
 
 `childCapabilities` reports the count of known manifest identities, distinct configured context windows, and configured tool sets. Missing configurations remain null. These are host-state observations, not final provider payload, stronger sandbox permissions, token utilization, or provider quotas. No manifest paths or hashes are emitted.
 
-Current-epoch mode retains the historical source counters/provenance selector and its unassigned create/continue accounting for backward compatibility. The separate `managedDispatch` selector consumes v2 invocation telemetry with its own explicit denominator. Neither selector infers a missing pair from current settings, file time, or prose. Native `observations` remain unavailable for the epoch-filtered projection; select an exact session to inspect them.
+Current-epoch mode retains the historical source counters/provenance selector and its unassigned create/continue accounting for backward compatibility. The separate `managedDispatch` selector consumes v2/v3 invocation telemetry with its own explicit denominator. Neither selector infers a missing pair from current settings, file time, or prose. Native `observations` remain unavailable for the epoch-filtered projection; select an exact session to inspect them.
 
 Missing native timing does not erase otherwise validated owned rows, command records, or capabilities. Each plane retains its own completeness. Usage is still scoped to committed recorded rows and does not assert a complete bill for a killed in-flight request. New command projections declare `commandCorrelationVersion: 2`; legacy raw-ID and current hashed-key representations normalize before comparison/deduplication. Unknown keys/versions and conflicting evidence remain conservative.
 
 ## Managed dispatch
 
-This section counts transport evidence, not missions, acceptance, fresh work on replay, or cost. It reads only structured managed tool results; it never reconstructs historical actions from assistant arguments or error prose. Result v2 contains `requestTelemetry` version one with native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A queued task with no committed episode does not become a replayed episode.
+This section counts transport evidence, not missions, acceptance, fresh work on replay, or cost. It reads structured managed tool results and owner-tagged v3 terminal custom entries; it never reconstructs historical actions from assistant arguments or error prose. Results v2/v3 contain `requestTelemetry` version one with native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A queued task with no committed episode does not become a replayed episode.
 
 - `recordedResults`: all encountered managed tool-result records within bounds, including invalid and copied records.
-- `ownedRequests`: distinct valid v2 owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records do not gain ownership.
+- `ownedRequests`: distinct valid v2/v3 owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records do not gain ownership.
 - `selectedRequests`, `excludedRequests`, `unassignedRequests`: partition valid owned requests. Exact-session mode selects all valid owned requests. Current-epoch mode selects only matching extension/configuration pairs with an eligible start; missing pairs are unassigned. Returned session/episode provenance never substitutes for invocation provenance.
 - `legacyResults` and `legacyActions`: v1 recorded-result counts by recorded action/status, without claiming unique ownership, correcting historically mislabeled inspect, or inventing launch evidence.
 - `invalidRecords`, `conflictingRequests`, `duplicateRecords`, `copiedRecords`: independently named exclusions/duplicate evidence; a conflict removes that invocation from authoritative counts.
@@ -110,6 +110,12 @@ This section counts transport evidence, not missions, acceptance, fresh work on 
 - `launchedChildren` and `replayedEpisodes`: `{ known, unavailableRequests }`. Known sums cover selected valid requests; unavailable requests count legacy records, invalid records, and conflicting identities. Excluded and unassigned valid requests are reported through their selection buckets rather than silently merged into the known sums.
 
 All fields preserve the historical `csheng_subagents-only` meaning of the pre-existing aggregate sections. No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output. Static parent-acceptance ownership remains documentation; missing disposition remains an offline nullable metric, not a routine runtime warning.
+
+### Asynchronous v3 evidence
+
+`managedDispatch.async` is additive and absent when no v3 receipt/event evidence exists. `receipts` counts accepted admission, `runs` distinct referenced runs, and `terminalRuns`/`terminalTasks` selected terminal evidence. `duplicateEvents`, `conflictingEvents`, `copiedEvents`, `invalidEvents` and `excludedTasks` expose evidence quality, not semantic outcome.
+
+`launchedChildren` comes from terminal episode `childStarted` evidence, never a receipt or repeated inspect/join. `timing` contains nullable `preparationMs`, `queueMs`, `workspaceMs`, `childEffortMs` and `submissionToTerminalMs`. Task/run facts deduplicate by owner and episode; conflicting results cannot be replaced merely to enrich timing. The epoch activation predicate applies equally to selected task facts and run latency. Missing phase timing is unavailable, not a fabricated zero. Native observation entry ownership prevents receipt/event/replay double billing, and cross-turn async worker occupancy is not assigned to an unrelated parent window.
 
 ## Explicit parent disposition
 

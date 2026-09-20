@@ -22,6 +22,7 @@ export function deficits(state: GoalState): string[] {
   if (t.blocker) result.push(`blocked:${t.key}:${t.blocker.kind}`);
  }
  for (const a of state.attempts) if (a.status === "running") result.push(`running:${a.id}`);
+ for (const runId of state.executionPending ?? []) result.push(`execution:${runId}`);
  if (!accepted(state, "delivery")) result.push("delivery");
  return result;
 }

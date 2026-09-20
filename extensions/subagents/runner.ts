@@ -107,11 +107,11 @@ function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, man
 	return managedWorkerScratch ? workerGitEnvironment(env) : env;
 }
 
-export function buildChildPrompt(task: NormalizedTask, prompt: string): string {
+export function buildChildPrompt(task: NormalizedTask, prompt: string, advisoryWrites = false): string {
 	const verification = task.verification.length > 0 ? `\nExpected parent evidence:\n- ${task.verification.join("\n- ")}` : "";
 	const externalRoots = task.externalReadRoots ?? [];
 	const external = externalRoots.length > 0 ? externalRoots.join("\n- ") : "none";
-	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nRead scope:\n- ${task.scope.join("\n- ")}\nExternal read roots:\n- ${external}\nWrite paths:\n- ${task.writePaths.length > 0 ? task.writePaths.join("\n- ") : "none"}${verification}\n\nInputs:\n${prompt}`;
+	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nRead scope:\n- ${task.scope.join("\n- ")}\nExternal read roots:\n- ${external}\n${advisoryWrites ? "Initial write regions (advisory)" : "Write paths"}:\n- ${task.writePaths.length > 0 ? task.writePaths.join("\n- ") : advisoryWrites ? "not predicted; stay within the task root and objective" : "none"}${verification}\n\nInputs:\n${prompt}`;
 }
 
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
@@ -141,7 +141,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const observationBefore = await readObservationNative(options.diagnosticSession.path);
 		const observationStart = observationBefore === undefined ? undefined : nativeLeaf(observationBefore);
 		const nativeStartBytes = options.managedWorkerScratch ? (await lstat(options.diagnosticSession.path)).size : 0;
-		const completePrompt = buildChildPrompt(options.task, options.prompt);
+		const completePrompt = buildChildPrompt(options.task, options.prompt, "writeRoot" in options.capability && options.capability.writeRoot === true);
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}

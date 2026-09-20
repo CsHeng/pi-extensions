@@ -24,12 +24,15 @@ for (const mode of ["on", "compact"]) test(`historical v1 Pi/CC ${mode}: workflo
 	await writeFile(join(base, "basis"), "stable synthetic basis");
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
 	await writeFile(join(agent, "claude-code-style.json"), JSON.stringify({ mode, showStartupHeader: false, enableWorkingMessage: false,
-		enableSessionReference: false, enableSubagentAutocomplete: false, enableAgentSummary: false }));
+		enableSessionReference: false, enableSubagentAutocomplete: false, enableAgentSummary: false, enableCustomFooter: false }));
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-approve", "--session", join(base, "session.jsonl"),
 		"-e", join(root, "tests/fixtures/workflow/ui-tui.ts"),
 		"-e", join(root, "tests/fixtures/workflow/legacy-extension.ts"),
+		// CC's disabled footer resets to the host default at session_start.
+		// Load it before the selected footer owner; never patch another writer.
+		"-e", cc,
 		...(["status-footer", "work-timing", "subagents-ui"].flatMap(name => ["-e", join(root, `extensions/${name}/index.ts`)])),
-		"-e", cc, "--model", "workflow-ui-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "workflow UI fixture"];
+		"--model", "workflow-ui-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "workflow UI fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
 		cwd: base, detached: true,
 		env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color" },

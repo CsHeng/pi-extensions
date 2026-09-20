@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
-import test from "node:test";
+import test, { after } from "node:test";
 import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/subagents/config.ts";
 import { emptyUsage, HARD_LIMITS, type TaskResult } from "../extensions/subagents/contracts.ts";
 import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
@@ -12,6 +12,9 @@ import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts
 import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
 
 const exec = promisify(execFile);
+const fixtureRepo = await mkdtemp(join(tmpdir(), "subagent-adapter-repo-"));
+await exec("git", ["init", "-q", fixtureRepo]);
+after(() => rm(fixtureRepo, { recursive: true, force: true }));
 
 /*
  * Old one-shot entry tests → managed-only owners
@@ -69,7 +72,7 @@ function harness(): Harness {
 
 const parentModel = { provider: "synthetic", id: "parent", reasoning: true };
 
-function context(trusted = true, models = [parentModel], cwd = process.cwd()) {
+function context(trusted = true, models = [parentModel], cwd = fixtureRepo) {
 	const notifications: Array<{ message: string; level: string }> = [];
 	return {
 		cwd,
@@ -114,7 +117,6 @@ function detailsOf(result: { details: SessionActionResult }): SessionActionResul
 
 async function registered(t: test.TestContext, overrides: Partial<SubagentDependencies> = {}) {
 	const base = await mkdtemp(join(tmpdir(), "subagent-extension-"));
-	t.after(async () => rm(base, { recursive: true, force: true }));
 	const store = new ManagedSessionStore(base);
 	const state = harness();
 	createSubagentsExtension({
@@ -131,6 +133,18 @@ async function registered(t: test.TestContext, overrides: Partial<SubagentDepend
 		},
 		...overrides,
 	})(state.pi);
+	t.after(async () => {
+		for (const handler of state.handlers.get("session_shutdown") ?? []) await handler({});
+		for (const entry of await readdir(store.root).catch(() => [])) {
+			if (!entry.startsWith("session_")) continue;
+			const record = JSON.parse(await readFile(join(store.path(entry), "registry.json"), "utf8"));
+			if (record.state === "closed") continue;
+			try { await realpath(record.owner.repo); } catch { continue; } // A disposable parent already removed owns no remaining Git metadata.
+			const closed = await state.tool.execute("cleanup", { action: "close", handle: entry, expectedEpisode: record.episode, disposition: "discard" }, undefined, undefined, context(true, [parentModel], record.owner.repo));
+			assert.equal(closed.details.status, "succeeded", JSON.stringify(closed.details));
+		}
+		await rm(base, { recursive: true, force: true });
+	});
 	return { base, store, state };
 }
 
@@ -145,6 +159,25 @@ async function emitBeforeAgentStart(state: Harness, event = { systemPrompt: "bas
 	}
 	return result as { systemPrompt?: string } | undefined;
 }
+
+test("async terminal wakes coalesce until the public context consumes them and never reuse a settled tool progress callback", async t => {
+	let releaseFast!: () => void, releaseSlow!: () => void, fastTerminal!: () => void;
+	const fast = new Promise<void>(resolve => { releaseFast = resolve; }), slow = new Promise<void>(resolve => { releaseSlow = resolve; });
+	const terminal = new Promise<void>(resolve => { fastTerminal = resolve; });
+	t.after(() => { releaseFast(); releaseSlow(); });
+	const { state } = await registered(t, { onExecution: event => { if (event.kind === "task-terminal" && event.sessions[0]?.result?.id === "fast") fastTerminal(); }, runChild: async options => { options.onChildStarted?.(); await (options.task.id === "fast" ? fast : slow); options.onChildSettled?.(); return successful(options.task); } });
+	const sent: any[] = []; state.pi.sendMessage = (message: unknown) => { sent.push(message); };
+	const ctx = { ...context(), mode: "rpc" }; let updates = 0;
+	const receipt = await state.tool.execute("dispatch", createInput("wake", ["fast", "slow"].map(id => ({ id, role: "explorer", objective: "inspect", scope: ["."] }))), undefined, () => { updates++; }, ctx);
+	assert.equal(receipt.details.status, "accepted"); releaseFast(); await terminal; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 1);
+	releaseSlow(); await state.tool.execute("join", { action: "join", runId: receipt.details.runId }, undefined, undefined, ctx); await new Promise(resolve => setImmediate(resolve));
+	assert.equal(sent.length, 1); assert.equal(updates, 0);
+	let messages = [{ ...sent[0], role: "custom", timestamp: Date.now() }];
+	for (const handler of state.handlers.get("context") ?? []) messages = (await handler({ messages }, ctx))?.messages ?? messages;
+	for (const view of receipt.details.sessions) assert.ok(messages[0].content.includes(view.handle), "consumption includes both independently persisted terminal facts");
+	const next = await state.tool.execute("next", createInput("next-wake", [{ id: "next", role: "explorer", objective: "inspect", scope: ["."] }]), undefined, undefined, ctx);
+	await state.tool.execute("join-next", { action: "join", runId: next.details.runId }, undefined, undefined, ctx); await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 2);
+});
 
 test("extension registers only the managed tool and a redacted status command", async () => {
 	const state = harness();
@@ -392,11 +425,12 @@ test("rejected graphs fail before configuration or child launch", async (t) => {
 	assert.equal(childCalls, 0);
 });
 
-test("a concurrent create is rejected before it can exceed session caps", async (t) => {
+test("a concurrent duplicate submission returns its receipt without launching another child", async (t) => {
 	let releaseChild: (() => void) | undefined;
 	let markStarted: (() => void) | undefined;
 	const childStarted = new Promise<void>((resolve) => { markStarted = resolve; });
 	const childReleased = new Promise<void>((resolve) => { releaseChild = resolve; });
+	t.after(() => releaseChild?.());
 	const { state } = await registered(t, {
 		runChild: async (options) => {
 			options.onChildStarted?.();
@@ -410,7 +444,8 @@ test("a concurrent create is rejected before it can exceed session caps", async 
 	const first = state.tool.execute("first", input, undefined, undefined, context());
 	await childStarted;
 	const second = detailsOf(await state.tool.execute("second", input, undefined, undefined, context()));
-	assert.match(second.error?.code ?? "", /managed_batch_active/);
+	assert.equal(second.status, "accepted");
+	assert.equal(second.kind, "submission");
 	releaseChild?.();
 	assert.equal(detailsOf(await first).status, "succeeded");
 });
@@ -471,6 +506,9 @@ test("session shutdown waits for the aborted run before a later create", async (
 	assert.equal(shutdownSettled, true);
 	assert.equal(result.status, "aborted");
 
+	const closed = detailsOf(await state.tool.execute("closed", createInput("closed", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	assert.equal(closed.error?.code, "supervisor_closed");
+	for (const handler of state.handlers.get("session_start") ?? []) await handler({}, context());
 	const next = detailsOf(await state.tool.execute("next", createInput("next", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
 	assert.equal(next.status, "succeeded");
 	assert.equal(childRuns, 2);
@@ -511,7 +549,9 @@ test("current-repository absolute and returning-parent scope reach children in c
 	}]), undefined, undefined, context(true, [parentModel], current)));
 	assert.equal(details.status, "succeeded");
 	assert.deepEqual(seen[0]?.task.scope, [".", "src", "src/tracked.ts"]);
-	assert.equal(seen[0]?.cwd, gitRoot);
+	assert.notEqual(seen[0]?.cwd, gitRoot);
+	assert.equal(seen[0]?.capability.root, seen[0]?.cwd);
+	assert.equal(await readFile(join(seen[0]!.cwd, "src/tracked.ts"), "utf8"), "tracked\n");
 	assert.equal(seen[0]?.capability.version, 2);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, []);
 });
@@ -620,7 +660,8 @@ test("explorer and reviewer external roots reach only task and capability fields
 	assert.equal(details.status, "succeeded", JSON.stringify(details.sessions.map(view => ({ error: view.requestError, resultError: view.result?.error }))));
 	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
 	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
-	assert.equal(seen[0]?.cwd, await realpath(current));
+	assert.notEqual(seen[0]?.cwd, await realpath(current));
+	assert.equal(seen[0]?.capability.root, seen[0]?.cwd);
 	assert.deepEqual(seen[0]?.capability.writePaths, []);
 	assert.deepEqual(seen[1]?.task.externalReadRoots, [siblingFile]);
 	assert.ok(updates.every((message) => !message.includes(siblingFile)));
@@ -635,7 +676,7 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 		return { ...successful(options.task), route: options.route };
 	} });
 	const ctx = { ...context(), mode: "tui" };
-	const input = createInput("observer", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]);
+	const input = { ...createInput("observer", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), mode: "foreground" };
 	const first = await state.tool.execute("call", input, undefined, undefined, ctx);
 	assert.equal(first.details.status, "succeeded");
 	assert.ok(snapshots.some(value => value.activeChildren === 1));
@@ -648,23 +689,24 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	const replay = await state.tool.execute("replay", input, undefined, undefined, ctx);
 	assert.equal(replay.details.requestTelemetry.launchedChildren, 0);
 	assert.equal(snapshots.length, length);
-	const second = await state.tool.execute("second", createInput("second", [{ id: "other", role: "reviewer", objective: "other", scope: ["."] }]), undefined, undefined, ctx);
+	const second = await state.tool.execute("second", { ...createInput("second", [{ id: "other", role: "reviewer", objective: "other", scope: ["."] }]), mode: "foreground" }, undefined, undefined, ctx);
 	assert.equal(second.details.status, "succeeded");
 	assert.ok(snapshots[length]!.revision > snapshots[length - 1]!.revision, "revisions must increase across runs in one generation");
 	assert.equal(snapshots[length]!.generation, snapshots[0]!.generation);
 	const handle = first.details.sessions[0]!.handle;
 	const episode = { handle, requestId: "episode-two", expectedEpisode: 1, message: "second scan" };
-	const two = await state.tool.execute("two", { action: "continue", episodes: [episode] }, undefined, undefined, ctx);
+	const two = await state.tool.execute("two", { action: "continue", mode: "foreground", episodes: [episode] }, undefined, undefined, ctx);
 	assert.equal(two.details.status, "succeeded");
-	const three = await state.tool.execute("three", { action: "continue", episodes: [{ handle, requestId: "episode-three", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
+	const three = await state.tool.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, requestId: "episode-three", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
 	assert.equal(three.details.status, "succeeded");
 	const mixedStart = snapshots.length;
-	const mixed = await state.tool.execute("mixed", { action: "continue", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "other-two", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
+	const mixed = await state.tool.execute("mixed", { action: "continue", mode: "foreground", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "other-two", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
 	assert.equal(mixed.details.status, "succeeded");
 	assert.equal(mixed.details.requestTelemetry.launchedChildren, 1);
 	for (const snapshot of snapshots.slice(mixedStart)) {
-		assert.equal(snapshot.tasks[0]!.episode, 2, "cached evidence retains its historical episode, not current ep3");
-		assert.equal(snapshot.tasks[0]!.replayed, true);
+		const cached = snapshot.tasks.find(row => row.id === handle)!;
+		assert.equal(cached.episode, 2, "cached evidence retains its historical episode, not current ep3");
+		assert.equal(cached.replayed, true);
 	}
 });
 

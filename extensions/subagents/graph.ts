@@ -111,9 +111,6 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 			return fail("invalid_write_path", `Task ${task.id} has an unsafe write path.`);
 		}
 		const safeWrites = writePaths as string[];
-		if (task.role === "worker" && safeWrites.length < 1) {
-			return fail("worker_write_paths_required", `Worker task ${task.id} must declare its exact repository-relative files in writePaths; write paths are not inferred.`);
-		}
 		if (task.role !== "worker" && safeWrites.length > 0) {
 			return fail("read_only_write_paths", `Read-only task ${task.id} cannot declare write paths.`);
 		}
@@ -156,19 +153,8 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		}
 	}
 
-	for (let leftIndex = 0; leftIndex < normalized.length; leftIndex += 1) {
-		const left = normalized[leftIndex];
-		if (!left) continue;
-		for (let rightIndex = leftIndex + 1; rightIndex < normalized.length; rightIndex += 1) {
-			const right = normalized[rightIndex];
-			if (!right) continue;
-			const ordered = hasDependencyPath(left.id, right.id, dependencies) || hasDependencyPath(right.id, left.id, dependencies);
-			if (ordered) continue;
-			if (left.writePaths.some((leftPath) => right.writePaths.some((rightPath) => pathsOverlap(leftPath, rightPath)))) {
-				return fail("concurrent_write_conflict", `Potentially concurrent tasks ${left.id} and ${right.id} have overlapping write paths.`);
-			}
-		}
-	}
+	// Initial write regions are planning hints. Each managed task owns an
+	// independent Git worktree; only explicit resourceLocks serialize execution.
 
 	return { ok: true, tasks: normalized };
 }

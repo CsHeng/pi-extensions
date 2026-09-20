@@ -185,6 +185,7 @@ export function formatManagedContent(details: SessionActionResult): string {
 function stateMeaning(state: SessionView["state"]): string {
 	switch (state) {
 		case "idle": return "idle (no running process)";
+		case "queued": return "queued (accepted, not completed)";
 		case "running": return "running";
 		case "interrupted": return "interrupted";
 		case "closed": return "closed";
@@ -193,7 +194,7 @@ function stateMeaning(state: SessionView["state"]): string {
 
 export function formatManagedResult(details: SessionActionResult, expanded = false): string {
 	const lines = [
-		`Managed session ${details.action ?? "request"}: ${details.status}`,
+		`Managed session ${details.action ?? "request"}: ${details.status}${details.runId ? ` run=${boundScalar(details.runId)}` : ""}${details.kind === "submission" ? " (receipt, not completion)" : ""}`,
 	];
 	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
 	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);

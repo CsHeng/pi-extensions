@@ -27,13 +27,13 @@ export interface ExecutionContext {
 	runId: string;
 	signal: AbortSignal;
 	/** Dependencies remain with the existing graph scheduler; this only leases shared capacity. */
-	runTask<T>(task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[] }, execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
+	runTask<T>(task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[]; signal?: AbortSignal },  execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 export interface Submission<P, R> {
 	requestId: string;
 	/** The caller's existing canonical request identity; no new content-hash protocol is introduced. */
 	requestKey: string;
-	prepare(signal: AbortSignal): Promise<P>;
+	prepare(signal: AbortSignal, identity: { runId: string; generation: string }): Promise<P>;
 	execute(prepared: P, context: ExecutionContext): Promise<R>;
 }
 export interface SupervisorHooks {
@@ -142,7 +142,7 @@ export class SessionExecutionSupervisor {
 		let prepared!: P;
 		const preparation = (async () => {
 			try {
-				controller.signal.throwIfAborted(); prepared = await submission.prepare(controller.signal); controller.signal.throwIfAborted();
+				controller.signal.throwIfAborted(); prepared = await submission.prepare(controller.signal, { runId: entry.view.runId, generation: entry.view.generation }); controller.signal.throwIfAborted();
 				entry.view.preparedAt = this.now(); entry.view.phase = "queued"; readyResolve();
 			} catch (error) {
 				entry.view.phase = controller.signal.aborted ? "cancelled" : "failed"; entry.view.error = errorFact(error); entry.view.finishedAt = this.now();
@@ -174,20 +174,21 @@ export class SessionExecutionSupervisor {
 			entry.view.finishedAt = this.now(); await this.event(entry, "run-terminal");
 		}
 	}
-	private task<T>(entry: Entry, task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[] }, execute: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	private task<T>(entry: Entry, task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[]; signal?: AbortSignal }, execute: (signal: AbortSignal) => Promise<T>): Promise<T> {
 		if (entry.view.phase !== "running") return Promise.reject(new SupervisorError("run_not_active"));
 		if (!task.id || task.id.length > 128 || !["worker", "reviewer", "explorer"].includes(task.role) || entry.view.tasks.some(item => item.taskId === task.id) || (task.resourceLocks ?? []).some(lock => !lock || lock.length > 256)) return Promise.reject(new SupervisorError("invalid_task_identity"));
 		const view: TaskExecution = { taskId: task.id, role: task.role, phase: "queued", queuedAt: this.now(), startedAt: null, finishedAt: null };
 		entry.view.tasks.push(view);
+		const signal = task.signal ? AbortSignal.any([entry.controller.signal, task.signal]) : entry.controller.signal;
 		const job = (async () => {
 			let release: (() => void) | undefined;
 			try {
-				release = await this.capacity.acquire(task.role, task.resourceLocks ?? [], entry.controller.signal);
-				entry.controller.signal.throwIfAborted(); view.phase = "running"; view.startedAt = this.now();
-				const result = await execute(entry.controller.signal); view.result = result;
-				view.phase = entry.controller.signal.aborted ? "cancelled" : "completed";
+				release = await this.capacity.acquire(task.role, task.resourceLocks ?? [], signal);
+				signal.throwIfAborted(); view.phase = "running"; view.startedAt = this.now();
+				const result = await execute(signal); view.result = result;
+				view.phase = signal.aborted ? "cancelled" : "completed";
 				return result;
-			} catch (error) { view.error = errorFact(error); view.phase = entry.controller.signal.aborted ? "cancelled" : "failed"; throw error; }
+			} catch (error) { view.error = errorFact(error); view.phase = signal.aborted ? "cancelled" : "failed"; throw error; }
 			finally { release?.(); view.finishedAt = this.now(); await this.event(entry, "task-terminal", view); }
 		})();
 		entry.jobs.add(job);
@@ -196,9 +197,17 @@ export class SessionExecutionSupervisor {
 		return job;
 	}
 	/** Join is explicit and can be used by one-shot/foreground hosts without a second executor. */
-	async join(runId: string): Promise<RunExecution> {
+	async join(runId: string, signal?: AbortSignal): Promise<RunExecution> {
 		const entry = this.entries.get(runId); if (!entry) throw new SupervisorError("unknown_run");
-		await entry.completion; return structuredClone(entry.view);
+		signal?.throwIfAborted();
+		let abort: (() => void) | undefined;
+		try {
+			await Promise.race([entry.completion, new Promise<never>((_resolve, reject) => {
+				abort = () => reject(new SupervisorError("join_cancelled"));
+				signal?.addEventListener("abort", abort, { once: true });
+			})]);
+		} finally { if (abort) signal?.removeEventListener("abort", abort); }
+		return structuredClone(entry.view);
 	}
 	cancel(runId: string): boolean {
 		const entry = this.entries.get(runId); if (!entry) throw new SupervisorError("unknown_run");

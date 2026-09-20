@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,177 +9,96 @@ import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
-import { WorkspaceError } from "../extensions/subagents/workspace.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "../extensions/subagents/candidates.ts";
-
-async function setup(t: test.TestContext, files = ["file"]) {
-	const base = await mkdtemp(join(tmpdir(), "managed-candidates-"));
-	t.after(() => rm(base, { recursive: true, force: true }));
-	const repo = join(base, "repo"); await mkdir(repo);
-	await promisify(execFile)("git", ["init", "-q", repo]);
-	const owner = { repo, parentSessionId: "parent", anchor: "entry", branch: ["entry"] };
-	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: files }] });
-	if (!graph.ok) throw new Error("fixture");
-	const store = new ManagedSessionStore(base);
-	const record = (await store.allocate(owner, "create", graph.tasks)).records[0]!;
-	await prepareManagedWorkspace(store, record);
-	record.episode = 1;
-	record.result = { id: "worker", role: "worker", status: "succeeded", reportComplete: true, output: "done", stderr: "", durationMs: 1, usage: emptyUsage(), changedPaths: [], convergence: "not-applicable" };
-	return { repo, owner, store, record, source: join(store.path(record.handle), "source") };
+import { discardGitWorkspace, discardGitInput } from "../extensions/subagents/git-workspace.ts";
+const exec = promisify(execFile);
+async function setup(t: test.TestContext, initial?: (repo: string) => Promise<void>) {
+ const base = await mkdtemp(join(tmpdir(), "managed-candidates-v3-")); const repo = join(base, "repo"); await mkdir(repo);
+ await exec("git", ["init", "-q", repo]); await initial?.(repo);
+ const owner = { repo, parentSessionId: "parent", anchor: "entry", branch: ["entry"] };
+ const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: ["hint.txt"] }] }); if (!graph.ok) throw new Error("fixture");
+ const store = new ManagedSessionStore(base); const record = (await store.allocate(owner, "create", graph.tasks)).records[0]!;
+ t.after(async () => { if (record.workspace?.inputs.gitWorkspace) await discardGitWorkspace(record.workspace.inputs.gitWorkspace); if (record.inputRef && record.input) await discardGitInput(repo, record.inputRef, record.input); await rm(base, { recursive: true, force: true }); });
+ await prepareManagedWorkspace(store, record); record.episode = 1;
+ record.result = { id: "worker", role: "worker", status: "succeeded", reportComplete: true, output: "done", stderr: "", durationMs: 1, usage: emptyUsage(), changedPaths: [], convergence: "not-applicable" };
+ return { repo, owner, store, record, source: join(store.path(record.handle), "source") };
 }
 
-test("unapplied continuation stays against B0; full apply advances baseline and repeated apply is inert", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	await writeFile(join(source, "file"), "C1");
-	const first = await freezeCandidate(store, record); assert.ok(first);
-	await syncManagedInputs(store, record);
-	record.episode = 2; await writeFile(join(source, "file"), "C2");
-	const second = await freezeCandidate(store, record); assert.ok(second);
-	assert.equal(record.workspace?.parentBaseline.file?.kind, "absent");
-	assert.equal((await applyCandidate(store, record, second.id)).status, "applied");
-	assert.equal(await readFile(join(repo, "file"), "utf8"), "C2");
-	assert.equal((await applyCandidate(store, record, second.id)).status, "applied");
-	await syncManagedInputs(store, record);
-	record.episode = 3; await writeFile(join(source, "file"), "C3");
-	const third = await freezeCandidate(store, record); assert.ok(third);
-	assert.equal((await applyCandidate(store, record, third.id)).status, "applied");
-	assert.equal(await readFile(join(repo, "file"), "utf8"), "C3");
+test("apply receipts preserve actual parent rename integration paths and allow a no-op apply", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "a.txt"), "base\n"));
+ await writeFile(join(f.source, "a.txt"), "worker\n"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ await rename(join(f.repo, "a.txt"), join(f.repo, "b.txt"));
+ const applied = await applyCandidate(f.store, f.record, candidate.id); assert.equal(applied.status, "applied"); assert.deepEqual(applied.changedPaths, ["a.txt"]); assert.deepEqual(applied.appliedPaths, ["b.txt"]);
+ assert.deepEqual((await f.store.load(f.record.handle, f.owner)).candidate?.appliedPaths, ["b.txt"]);
+ const g = await setup(t, repo => writeFile(join(repo, "a.txt"), "base\n"));
+ await writeFile(join(g.source, "a.txt"), "same\n"); const identical = await freezeCandidate(g.store, g.record); assert.ok(identical); await writeFile(join(g.repo, "a.txt"), "same\n");
+ assert.deepEqual((await applyCandidate(g.store, g.record, identical.id)).appliedPaths, []);
+ assert.equal((await g.store.load(g.record.handle, g.owner)).candidate?.status, "applied");
 });
 
-test("explicit apply creates nested files only on request and preserves mode on later modification", async (t) => {
-	const { source, repo, store, record } = await setup(t, ["new/nested/file"]);
-	await writeFile(join(source, "new/nested/file"), "first", { mode: 0o640 });
-	const first = await freezeCandidate(store, record); assert.ok(first);
-	await assert.rejects(lstat(join(repo, "new")), { code: "ENOENT" });
-	assert.equal((await applyCandidate(store, record, first.id)).status, "applied");
-	assert.equal((await lstat(join(repo, "new/nested/file"))).mode & 0o777, 0o640);
-	record.episode++;
-	await writeFile(join(source, "new/nested/file"), "second");
-	const next = await freezeCandidate(store, record); assert.ok(next);
-	assert.equal((await applyCandidate(store, record, next.id)).status, "applied");
-	assert.equal(await readFile(join(repo, "new/nested/file"), "utf8"), "second");
-	assert.equal((await lstat(join(repo, "new/nested/file"))).mode & 0o777, 0o640);
-	await chmod(join(source, "new/nested/file"), 0o600);
-	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
+test("v3 candidates are immutable input-relative Git objects; apply never refreshes the task basis", async t => {
+ const f = await setup(t); const basis = f.record.workspace!.inputs.gitWorkspace!.inputBase;
+ await writeFile(join(f.source, "new.txt"), "one"); const first = await freezeCandidate(f.store, f.record); assert.ok(first);
+ await writeFile(join(f.source, "new.txt"), "unfrozen");
+ assert.equal((await applyCandidate(f.store, f.record, first.id)).status, "applied"); assert.equal(await readFile(join(f.repo, "new.txt"), "utf8"), "one");
+ assert.equal(f.record.workspace!.inputs.gitWorkspace!.inputBase, basis);
+ assert.equal((await applyCandidate(f.store, f.record, first.id)).status, "applied");
+ f.record.episode++; const second = await freezeCandidate(f.store, f.record); assert.ok(second);
+ assert.equal((await applyCandidate(f.store, f.record, second.id)).status, "conflict", "both parent and worker changed an initially absent path differently");
 });
 
-for (const ancestor of [false, true]) test(`explicit candidate apply refuses ${ancestor ? "repository ancestor" : "new directory"} symlink replacement`, async (t) => {
-	const { source, repo, store, record } = await setup(t, ["new/file"]);
-	await writeFile(join(source, "new/file"), "candidate");
-	const candidate = await freezeCandidate(store, record); assert.ok(candidate);
-	const outside = await mkdtemp(join(tmpdir(), "managed-apply-outside-"));
-	t.after(() => rm(outside, { recursive: true, force: true }));
-	if (ancestor) { await rename(repo, `${repo}-preserved`); await symlink(outside, repo); }
-	else await symlink(outside, join(repo, "new"));
-	await assert.rejects(applyCandidate(store, record, candidate.id), (error: unknown) => error instanceof WorkspaceError && error.code === "write_symlink");
-	await assert.rejects(lstat(join(outside, "file")), { code: "ENOENT" });
-	await assert.rejects(lstat(join(outside, "new")), { code: "ENOENT" });
+test("refresh explicitly incorporates applied input while preserving the worker repair and native record", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "file"), "base\n"));
+ await writeFile(join(f.source, "file"), "one\n"); const first = await freezeCandidate(f.store, f.record); assert.ok(first);
+ await applyCandidate(f.store, f.record, first.id); const prior = f.record.workspace!.inputs.gitWorkspace!.inputBase;
+ await syncManagedInputs(f.store, f.record); assert.notEqual(f.record.workspace!.inputs.gitWorkspace!.inputBase, prior);
+ f.record.episode++; await writeFile(join(f.source, "file"), "two\n"); const second = await freezeCandidate(f.store, f.record); assert.ok(second);
+ assert.equal((await applyCandidate(f.store, f.record, second.id)).status, "applied"); assert.equal(await readFile(join(f.repo, "file"), "utf8"), "two\n");
 });
 
-test("an unchanged managed source has no candidate; undeclared changes still fail", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	assert.equal(await freezeCandidate(store, record), undefined);
-	await assert.rejects(lstat(join(repo, "file")), { code: "ENOENT" });
-	await writeFile(join(source, "undeclared"), "bad");
-	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
+test("actual additions, deletion, executable mode, binary data and contained symlink exceed advisory write hints", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "delete.txt"), "inherited"));
+ await rm(join(f.source, "delete.txt")); await mkdir(join(f.source, "nested")); await writeFile(join(f.source, "nested/run"), "#!/bin/sh\n", { mode: 0o755 });
+ await writeFile(join(f.source, "data.bin"), Buffer.from([0, 255, 7])); await symlink("data.bin", join(f.source, "link"));
+ const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate); assert.deepEqual(candidate.changedPaths, ["data.bin", "delete.txt", "link", "nested/run"]);
+ assert.equal((await applyCandidate(f.store, f.record, candidate.id)).status, "applied");
+ assert.equal((await lstat(join(f.repo, "nested/run"))).mode & 0o111, 0o111); assert.ok((await lstat(join(f.repo, "link"))).isSymbolicLink()); await assert.rejects(lstat(join(f.repo, "delete.txt")), { code: "ENOENT" });
 });
 
-test("unknown source changes, stale frozen bytes and parent drift cannot apply", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	await writeFile(join(source, "unknown"), "no");
-	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
-	await rm(join(source, "unknown")); await writeFile(join(source, "file"), "candidate");
-	const candidate = await freezeCandidate(store, record); assert.ok(candidate);
-	await writeFile(join(source, "file"), "later");
-	await assert.rejects(applyCandidate(store, record, candidate.id), /candidate_changed/);
-	await writeFile(join(source, "file"), "candidate"); await writeFile(join(repo, "file"), "parent");
-	assert.equal((await applyCandidate(store, record, candidate.id)).status, "conflict");
-	assert.equal(await readFile(join(repo, "file"), "utf8"), "parent");
+test("compatible parent dirty content and staged input survive Git integration", async t => {
+ const lines = Array.from({ length: 40 }, (_, i) => `${i}\n`); const f = await setup(t, async repo => { await writeFile(join(repo, "file"), lines.join("")); await exec("git", ["-C", repo, "add", "file"]); });
+ const before = (await exec("git", ["-C", f.repo, "ls-files", "--stage"])).stdout;
+ const worker = [...lines]; worker[2] = "worker\n"; await writeFile(join(f.source, "file"), worker.join("")); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ const parent = [...lines]; parent[35] = "parent\n"; await writeFile(join(f.repo, "file"), parent.join(""));
+ assert.equal((await applyCandidate(f.store, f.record, candidate.id)).status, "applied"); worker[35] = "parent\n";
+ assert.equal(await readFile(join(f.repo, "file"), "utf8"), worker.join("")); assert.equal((await exec("git", ["-C", f.repo, "ls-files", "--stage"])).stdout, before);
 });
 
-test("frozen content cannot be swapped after validation and manifest state must match source", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	await writeFile(join(source, "file"), "verified");
-	const candidate = await freezeCandidate(store, record); assert.ok(candidate);
-	const directory = join(store.path(record.handle), candidate.id);
-	const manifestPath = join(directory, "manifest.json");
-	const original = await readFile(manifestPath, "utf8");
-	const manifest = JSON.parse(original);
-	manifest.files[0].state.mode = 0o777;
-	await writeFile(manifestPath, JSON.stringify(manifest));
-	await assert.rejects(applyCandidate(store, record, candidate.id), /candidate_invalid/);
-	await writeFile(manifestPath, original);
-	const save = store.save.bind(store);
-	store.save = async (value) => {
-		await save(value);
-		if (value.candidate?.status === "applying") await writeFile(join(directory, "0"), "unchecked replacement");
-	};
-	assert.equal((await applyCandidate(store, record, candidate.id)).status, "applied");
-	assert.equal(await readFile(join(repo, "file"), "utf8"), "verified");
+test("same-line conflicts retain both source versions and report conflict without forced overwrite", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "file"), "base\n")); await writeFile(join(f.source, "file"), "worker\n"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ await writeFile(join(f.repo, "file"), "parent\n"); assert.equal((await applyCandidate(f.store, f.record, candidate.id)).status, "conflict");
+ await assert.rejects(syncManagedInputs(f.store, f.record), /convergence_conflict/); assert.equal(await readFile(join(f.source, "file"), "utf8"), "worker\n"); assert.equal(await readFile(join(f.repo, "file"), "utf8"), "parent\n");
 });
 
-test("runtime dependencies stay private, refresh preserves owned edits and frozen environment drift cannot apply", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	await writeFile(join(source, "file"), "candidate");
-	await mkdir(join(source, "node_modules/pkg"), { recursive: true }); await writeFile(join(source, "node_modules/pkg/index.js"), "local dependency");
-	const candidate = await freezeCandidate(store, record); assert.ok(candidate); assert.deepEqual(candidate.changedPaths, ["file"]);
-	await writeFile(join(source, "node_modules/pkg/index.js"), "changed environment");
-	await assert.rejects(applyCandidate(store, record, candidate.id), /candidate_changed/);
-	await writeFile(join(repo, ".gitignore"), "node_modules/\n");
-	await mkdir(join(repo, "node_modules/pkg"), { recursive: true }); await writeFile(join(repo, "node_modules/pkg/index.js"), "parent dependency");
-	await syncManagedInputs(store, record);
-	assert.equal(await readFile(join(source, "file"), "utf8"), "candidate");
-	assert.equal(await readFile(join(source, "node_modules/pkg/index.js"), "utf8"), "parent dependency");
-	const refreshed = await freezeCandidate(store, record); assert.ok(refreshed);
-	assert.equal((await applyCandidate(store, record, refreshed.id)).status, "applied");
-	assert.equal(await readFile(join(repo, "node_modules/pkg/index.js"), "utf8"), "parent dependency");
+test("private dependency mutations remain local runtime state and explicit refresh updates parent dependency input", async t => {
+ const f = await setup(t, async repo => { await writeFile(join(repo, ".gitignore"), "node_modules/\n"); await mkdir(join(repo, "node_modules")); await writeFile(join(repo, "node_modules/pkg"), "one"); });
+ await writeFile(join(f.source, "node_modules/pkg"), "local"); await writeFile(join(f.source, "new.txt"), "source"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate); assert.deepEqual(candidate.changedPaths, ["new.txt"]);
+ await applyCandidate(f.store, f.record, candidate.id); assert.equal(await readFile(join(f.repo, "node_modules/pkg"), "utf8"), "one");
+ await writeFile(join(f.repo, "node_modules/pkg"), "two"); await syncManagedInputs(f.store, f.record); assert.equal(await readFile(join(f.source, "node_modules/pkg"), "utf8"), "two");
 });
 
-test("non-owned file/directory/link input transitions preserve owned edits and directory mode mutations are rejected", async (t) => {
-	const { source, repo, store, record } = await setup(t);
-	await writeFile(join(source, "file"), "owned"); await writeFile(join(repo, "input"), "first");
-	await syncManagedInputs(store, record);
-	await rm(join(repo, "input")); await mkdir(join(repo, "input")); await writeFile(join(repo, "input/nested"), "second");
-	await syncManagedInputs(store, record);
-	assert.equal(await readFile(join(source, "input/nested"), "utf8"), "second");
-	await chmod(join(source, "input"), 0o755);
-	await assert.rejects(freezeCandidate(store, record), /unexpected_worker_change/);
-	await chmod(join(source, "input"), record.workspace!.baseline.input!.mode!);
-	await rm(join(repo, "input"), { recursive: true }); await writeFile(join(repo, "target"), "third"); await symlink("target", join(repo, "input"));
-	await syncManagedInputs(store, record);
-	assert.equal(await readFile(join(source, "input"), "utf8"), "third");
-	await rm(join(repo, "input")); await writeFile(join(repo, "input"), "fourth"); await syncManagedInputs(store, record);
-	assert.equal(await readFile(join(source, "input"), "utf8"), "fourth"); assert.equal(await readFile(join(source, "file"), "utf8"), "owned");
+test("no source change produces no candidate; new ignored runtime dependency is excluded even without parent ignore rule", async t => {
+ const f = await setup(t); await mkdir(join(f.source, "node_modules")); await writeFile(join(f.source, "node_modules/state"), "local"); assert.equal(await freezeCandidate(f.store, f.record), undefined);
 });
 
-test("candidate byte admission happens before creating an oversized frozen artifact", async (t) => {
-	const { source, store, record } = await setup(t);
-	await writeFile(join(source, "file"), ""); await truncate(join(source, "file"), MANAGED_LIMITS.maxCandidateBytes + 1);
-	await assert.rejects(freezeCandidate(store, record), /candidate_limit/);
-	assert.equal((await readdir(store.path(record.handle))).some((name) => name.startsWith("candidate_")), false);
+test("candidate byte cap, incomplete reports, unknown apply state and forged candidate metadata fail closed", async t => {
+ const f = await setup(t); await writeFile(join(f.source, "large"), ""); await truncate(join(f.source, "large"), MANAGED_LIMITS.maxCandidateBytes + 1);
+ await assert.rejects(freezeCandidate(f.store, f.record), /candidate_limit/); await rm(join(f.source, "large")); await writeFile(join(f.source, "file"), "source");
+ f.record.result!.reportComplete = false; await assert.rejects(freezeCandidate(f.store, f.record), /candidate_report_incomplete/); f.record.result!.reportComplete = true;
+ const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate); candidate.status = "unknown"; await assert.rejects(applyCandidate(f.store, f.record, candidate.id), /candidate_recovery_required/);
+ candidate.status = "not-applied"; candidate.git!.changedPaths = ["forged"]; await assert.rejects(applyCandidate(f.store, f.record, candidate.id), /candidate_paths_mismatch/); await assert.rejects(lstat(join(f.repo, "file")), { code: "ENOENT" });
 });
 
-test("managed source rejects an undeclared FIFO rather than treating it as absent", async (t) => {
-	const { source, store, record } = await setup(t);
-	await writeFile(join(source, "file"), "candidate");
-	await promisify(execFile)("mkfifo", [join(source, "unknown-pipe")]);
-	await assert.rejects(freezeCandidate(store, record), /unsupported filesystem/);
-});
-
-test("interrupted multi-file apply retains exact prefix and does not advance the complete baseline", async (t) => {
-	const { source, repo, store, record, owner } = await setup(t, ["a", "b"]);
-	await writeFile(join(source, "a"), "A"); await writeFile(join(source, "b"), "B");
-	const candidate = await freezeCandidate(store, record); assert.ok(candidate);
-	const save = store.save.bind(store);
-	store.save = async (value) => {
-		await save(value);
-		if (value.candidate?.status === "applying" && value.candidate.appliedPaths.length === 1) await mkdir(join(repo, "b"));
-	};
-	await assert.rejects(applyCandidate(store, record, candidate.id));
-	const persisted = await store.load(record.handle, owner);
-	assert.equal(persisted.candidate?.status, "partial");
-	assert.deepEqual(persisted.candidate?.appliedPaths, ["a"]);
-	assert.equal(persisted.workspace?.parentBaseline.a?.kind, "absent");
-	assert.equal(await readFile(join(repo, "a"), "utf8"), "A");
-	await assert.rejects(applyCandidate(store, persisted, candidate.id), /recovery_required/);
+test("v1 and v2 source/candidate helpers are read-only, not a second writable backend", async t => {
+ const f = await setup(t); for (const version of [1, 2] as const) { f.record.version = version; await assert.rejects(prepareManagedWorkspace(f.store, f.record), /legacy_session_read_only/); await assert.rejects(syncManagedInputs(f.store, f.record), /legacy_session_read_only/); await assert.rejects(freezeCandidate(f.store, f.record), /legacy_session_read_only/); await assert.rejects(applyCandidate(f.store, f.record, "candidate"), /legacy_session_read_only/); }
 });

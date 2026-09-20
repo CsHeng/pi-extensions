@@ -16,7 +16,7 @@ Evaluate one explicitly named Pi session without changing Pi state, runtime rout
 - Treat runtime telemetry schema two through four as authoritative for the fields they declare. Treat schema one as authoritative only for its available launch, admission, duration, and concurrency fields. Label legacy launch, width, and timing derivation as inference.
 - Never reconstruct topology, explicit model or thinking requests, or other new metrics from assistant tool arguments, prompts, or legacy prose. Report unavailable evidence as `null` per run and through `unavailableRuns` totals.
 - Report legacy mechanical dispatch-correction candidates separately. Semantic repair, takeover, and acceptance stay unavailable unless an explicit scoped parent disposition supplies them; report or apply status never implies acceptance.
-- Existing totals/roles/routes/runs remain historical `csheng_subagents-only` one-shot counters. They do not describe the registered managed tool. Use `managedDispatch` for v2 invocation counts/selection independent of settled windows, with owner/invocation deduplication and explicit legacy/invalid/unassigned coverage. Use `observations` for native/managed evidence, with owner/entry and episode deduplication. Never add its usage to a referenced legacy aggregate or charge replay as new model work.
+- Existing totals/roles/routes/runs remain historical `csheng_subagents-only` one-shot counters. They do not describe the registered managed tool. Use `managedDispatch` for v2/v3 invocation counts/selection independent of settled windows, with owner/invocation deduplication and explicit legacy/invalid/unassigned coverage. Use `observations` for native/managed evidence, with owner/entry and episode deduplication. Never add its usage to a referenced legacy aggregate or charge replay as new model work.
 - Do not invoke subagents, change routing, retry provider calls, or mutate a report unless an explicit new output path is provided.
 
 ## Run
@@ -39,7 +39,7 @@ node --experimental-strip-types \
 
 For a parent-owned acceptance declaration, exact-session mode optionally accepts `--disposition <json-file>`. Follow the strict shape, owner/entry-range association, explicit-null handling, and 4 KiB bound in `references/metric-schema.md`. This is evaluation input, not a runtime approval or a whole-report acceptance claim.
 
-Current-epoch `managedDispatch` selects only v2 invocations with their own matching revision pair; missing pairs remain unassigned, and legacy records retain unavailable ownership/launch evidence. Returned old episode provenance is not current-invocation provenance. Native observations still require exact-session input.
+Current-epoch `managedDispatch` selects v2/v3 invocations with their own matching revision pair; missing pairs remain unassigned, and legacy records retain unavailable ownership/launch evidence. Returned old episode provenance is not current-invocation provenance. Native observations still require exact-session input. V3 `managedDispatch.async` separates accepted receipts from owned persisted terminal events. Only terminal episode facts count child launches and preparation/queue/workspace/child/lifecycle timing. Deduplicate task/run terminals, foreground returns and later inspect/join; conflicting facts must fence metrics even when a later event enriches timing. Apply the same provenance and activation cutoff to task and run timing. Do not force asynchronous intervals into a parent interaction window; missing or cross-clock timing stays unavailable.
 
 Use `--sessions-root <dir>` only for a bounded fixture or explicitly selected alternate session root. Use `--output <new-file>` to create a report; the extractor refuses to overwrite an existing path.
 
@@ -57,6 +57,6 @@ Use `--sessions-root <dir>` only for a bounded fixture or explicitly selected al
 ## Verify
 
 ```bash
-node --experimental-strip-types --test tests/subagents-evaluator.test.ts tests/subagents-observation-metrics.test.ts
+node --experimental-strip-types --test tests/subagents-evaluator.test.ts tests/subagents-observation-metrics.test.ts tests/subagents-async-evaluator.test.ts
 npm run typecheck
 ```

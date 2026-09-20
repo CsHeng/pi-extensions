@@ -59,18 +59,15 @@ test("snapshot permits repository components beginning with two dots", async (t)
 	assert.equal(await readFile(join(workspace.root, "..state", "tracked.ts"), "utf8"), "state\n");
 });
 
-test("graph path diagnostics keep write paths exact and repository-relative", () => {
+test("graph write hints are optional but remain safe and repository-relative", () => {
 	const absoluteWrite = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."], writePaths: ["/tmp/file.ts"] }] });
 	assert.equal(absoluteWrite.ok, false);
 	if (absoluteWrite.ok) return;
 	assert.equal(absoluteWrite.error.code, "invalid_write_path");
 	assert.match(absoluteWrite.error.message, /unsafe write path/);
 	const missingWrites = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "edit", scope: ["."] }] });
-	assert.equal(missingWrites.ok, false);
-	if (missingWrites.ok) return;
-	assert.equal(missingWrites.error.code, "worker_write_paths_required");
-	assert.match(missingWrites.error.message, /exact repository-relative files in writePaths/);
-	assert.match(missingWrites.error.message, /not inferred/);
+	assert.equal(missingWrites.ok, true);
+	if (missingWrites.ok) assert.deepEqual(missingWrites.tasks[0]!.writePaths, []);
 });
 
 test("snapshot rejects escaping write symlinks and non-Git workspaces", async (t) => {

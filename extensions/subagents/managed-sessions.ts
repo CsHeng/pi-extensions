@@ -16,7 +16,7 @@ function withoutObservation(result: TaskResult): TaskResult {
 }
 
 export interface ManagedRecord {
-	version: 1 | 2;
+	version: 1 | 2 | 3;
 	execution?: EpisodeExecution;
 	handle: string;
 	owner: SessionOwner;
@@ -29,10 +29,13 @@ export interface ManagedRecord {
 	candidate?: CandidateRef;
 	retained?: boolean;
 	workspace?: SavedWorkspace;
+	input?: import("./git-workspace.ts").GitInput;
+	inputRef?: string;
+	dispatch?: { runId: string; generation: string; toolCallId: string; taskId: string };
 	/** Only bounded request identities/digests, not a business task ledger. */
-	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution }>;
+	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution; error?: { code: string; detail?: string }; runId?: string; generation?: string }>;
 }
-interface BatchRecord { version: 1 | 2; fingerprint: string; handles: string[]; complete: boolean; requestFingerprint?: string; response?: SessionActionResult }
+interface BatchRecord { version: 1 | 2 | 3; fingerprint: string; handles: string[]; complete: boolean; requestFingerprint?: string; response?: SessionActionResult }
 
 export function fingerprint(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value, (_key, item: unknown) =>
@@ -54,29 +57,36 @@ const fileStateSchema = Type.Union([
 const resultSchema = Type.Object({ id: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }), role: Type.Union([Type.Literal("worker"), Type.Literal("reviewer"), Type.Literal("explorer")]),
 	status: Type.String({ pattern: "^(pending|running|succeeded|failed|blocked|aborted)$" }),
 	output: Type.String(), stderr: Type.String(), usage: Type.Object({ input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number(), cost: Type.Number(), turns: Type.Number() }),
-	durationMs: Type.Number(), changedPaths: Type.Array(Type.String(), { maxItems: 32 }), convergence: Type.String({ pattern: "^(not-applicable|applied|not-applied|conflict)$" }), reportComplete: Type.Optional(Type.Boolean()),
+	durationMs: Type.Number(), changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), convergence: Type.String({ pattern: "^(not-applicable|applied|not-applied|conflict)$" }), reportComplete: Type.Optional(Type.Boolean()),
 });
+const gitOid = Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" });
+const gitWorkspaceSchema = Type.Object({ version: Type.Literal(1), id: Type.String({ pattern: "^[a-f0-9-]{36}$" }), repo: Type.String(), path: Type.String(), commonDir: Type.String(), gitDir: Type.String(), inputBase: gitOid, dependencyRoots: Type.Optional(Type.Array(Type.Literal("node_modules"), { maxItems: 1, uniqueItems: true })), ownedRefs: Type.Record(Type.String({ pattern: "^refs/csheng/subagents/" }), gitOid) }, { additionalProperties: false });
+const gitCandidateSchema = Type.Object({ id: Type.String(), workspaceId: Type.String(), inputBase: gitOid, commit: gitOid, tree: gitOid, changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }) }, { additionalProperties: false });
 const candidateSchema = Type.Object({ id: identity, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }),
 	status: Type.String({ pattern: "^(not-applied|applying|applied|partial|conflict|unknown)$" }),
-	changedPaths: Type.Array(Type.String(), { minItems: 1, maxItems: 32, uniqueItems: true }),
-	appliedPaths: Type.Array(Type.String(), { maxItems: 32, uniqueItems: true }),
+	changedPaths: Type.Array(Type.String(), { minItems: 1, maxItems: MANAGED_LIMITS.maxEntries, uniqueItems: true }),
+	appliedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries, uniqueItems: true }),
+	git: Type.Optional(gitCandidateSchema),
 }, { additionalProperties: false });
-const storageVersion = Type.Union([Type.Literal(1), Type.Literal(2)]);
+const storageVersion = Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)]);
 const executionSchema = Type.Object({ startedAtMs: Type.Number({ minimum: 0 }), provenance: Type.Union([
 	Type.Object({ available: Type.Literal(false) }, { additionalProperties: false }),
 	Type.Object({ available: Type.Literal(true), extensionEpoch: identity, configurationEpoch: identity }, { additionalProperties: false }),
 ]) }, { additionalProperties: false });
-const viewSchema = Type.Object({ handle: identity, role: Type.String({ pattern: "^(worker|reviewer|explorer)$" }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), requestError: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false });
-const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSchema, handles: Type.Array(identity, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions, uniqueItems: true }), complete: Type.Boolean(), requestFingerprint: Type.Optional(digestSchema), response: Type.Optional(Type.Object({ schemaVersion: storageVersion, action: Type.Literal("create"), status: Type.String({ pattern: "^(succeeded|partial|failed|aborted)$" }), sessions: Type.Array(viewSchema, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions }), error: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false })) }, { additionalProperties: false });
+const viewSchema = Type.Object({ handle: identity, role: Type.String({ pattern: "^(worker|reviewer|explorer)$" }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), requestError: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false });
+const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSchema, handles: Type.Array(identity, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions, uniqueItems: true }), complete: Type.Boolean(), requestFingerprint: Type.Optional(digestSchema), response: Type.Optional(Type.Object({ schemaVersion: storageVersion, action: Type.Literal("create"), status: Type.String({ pattern: "^(accepted|succeeded|partial|failed|aborted)$" }), kind: Type.Optional(Type.String()), runId: Type.Optional(identity), generation: Type.Optional(identity), sessions: Type.Array(viewSchema, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions }), error: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false })) }, { additionalProperties: false });
 const recordSchema = Type.Object({
 	version: storageVersion, handle: identity, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: identity, anchor: Type.Union([identity, Type.Null()]) }, { additionalProperties: false }),
-	task: SubagentTaskSchema, state: Type.String({ pattern: "^(idle|running|interrupted|closed)$" }),
+	task: SubagentTaskSchema, state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
+	dispatch: Type.Optional(Type.Object({ runId: identity, generation: identity, toolCallId: Type.String({ maxLength: 256 }), taskId: Type.String({ maxLength: 128 }) }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([identity, Type.Null()]),
 	route: Type.Optional(Type.Object({})), result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()),
 	candidate: Type.Optional(candidateSchema),
-	workspace: Type.Optional(Type.Object({ baseline: Type.Record(Type.String(), fileStateSchema), parentBaseline: Type.Record(Type.String(), fileStateSchema), inputs: Type.Object({ version: Type.Literal(1), dependencyRoots: Type.Array(Type.Literal("node_modules"), { maxItems: 1, uniqueItems: true }), parentDependencyKey: digestSchema, dependencyKey: digestSchema }, { additionalProperties: false }) }, { additionalProperties: false })),
-	requests: Type.Array(Type.Object({ id: identity, fingerprint: digestSchema, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(running|complete|unknown)$" }), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), execution: Type.Optional(executionSchema) }, { additionalProperties: false }), { maxItems: MANAGED_LIMITS.maxEpisodes }),
+	input: Type.Optional(Type.Object({ commit: gitOid, tree: gitOid }, { additionalProperties: false })),
+	inputRef: Type.Optional(Type.String({ pattern: "^refs/csheng/subagents/inputs/session_[a-f0-9-]{36}$" })),
+	workspace: Type.Optional(Type.Object({ baseline: Type.Record(Type.String(), fileStateSchema), parentBaseline: Type.Record(Type.String(), fileStateSchema), inputs: Type.Object({ version: Type.Literal(1), dependencyRoots: Type.Array(Type.Literal("node_modules"), { maxItems: 1, uniqueItems: true }), parentDependencyKey: digestSchema, dependencyKey: digestSchema, gitWorkspace: Type.Optional(gitWorkspaceSchema) }, { additionalProperties: false }) }, { additionalProperties: false })),
+	requests: Type.Array(Type.Object({ id: identity, fingerprint: digestSchema, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(running|complete|unknown)$" }), error: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })), runId: Type.Optional(identity), generation: Type.Optional(identity), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), execution: Type.Optional(executionSchema) }, { additionalProperties: false }), { maxItems: MANAGED_LIMITS.maxEpisodes }),
 }, { additionalProperties: false });
 
 const safeHandle = (value: string) => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value);
@@ -104,6 +114,8 @@ export function exceedsManagedStorageThreshold(bytes: number, entries: number): 
 	return bytes > MANAGED_STORAGE_THRESHOLDS.bytes || entries > MANAGED_STORAGE_THRESHOLDS.entries;
 }
 
+// Serialize only known in-process root mutations. Disk locks still reject foreign/unknown writers.
+const rootWriters = new Map<string, Promise<void>>();
 export class ManagedSessionStore {
 	readonly root: string;
 	constructor(agentDirectory: string) { this.root = join(agentDirectory, "subagent-managed-sessions"); }
@@ -125,6 +137,15 @@ export class ManagedSessionStore {
 		} finally { await handle.close(); await rm(temporary, { force: true }); }
 	}
 	private async lock<T>(directory: string, action: () => Promise<T>): Promise<T> {
+		if (directory !== this.root) return this.diskLock(directory, action);
+		const predecessor = rootWriters.get(directory);
+		let release!: () => void;
+		const pending = new Promise<void>(resolve => { release = resolve; });
+		rootWriters.set(directory, pending);
+		try { await predecessor; return await this.diskLock(directory, action); }
+		finally { if (rootWriters.get(directory) === pending) rootWriters.delete(directory); release(); }
+	}
+	private async diskLock<T>(directory: string, action: () => Promise<T>): Promise<T> {
 		const marker = join(directory, ".writer-lock");
 		let handle: FileHandle;
 		try { handle = await open(marker, "wx", 0o600); }
@@ -143,11 +164,18 @@ export class ManagedSessionStore {
 		const directory = this.path(handle);
 		await privateDirectory(directory, false);
 		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
-		if (!Check(recordSchema, record) || ![1, MANAGED_SESSION_VERSION].includes(record.version) || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
+		if (!Check(recordSchema, record) || ![1, 2, MANAGED_SESSION_VERSION].includes(record.version) || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
 		if (![record.task.writePaths, record.task.inputs, record.task.dependsOn, record.task.resourceLocks, record.task.externalReadRoots].every(Array.isArray) || !validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] }).ok) throw new ManagedError("managed_registry_invalid");
 		if (new Set(record.requests.map((request) => request.id)).size !== record.requests.length || record.requests.some((request) => request.episode > record.episode)) throw new ManagedError("managed_registry_invalid");
-		if (record.workspace && record.task.writePaths.some((file) => !Object.hasOwn(record.workspace!.parentBaseline, file))) throw new ManagedError("managed_registry_invalid");
-		if (record.candidate && (record.candidate.episode !== record.episode || record.candidate.changedPaths.some((file) => !record.task.writePaths.includes(file)) || record.candidate.appliedPaths.some((file, index) => record.candidate!.changedPaths[index] !== file) || (record.candidate.status === "applied" && record.candidate.appliedPaths.length !== record.candidate.changedPaths.length))) throw new ManagedError("managed_registry_invalid");
+		if (record.version < 3 && record.workspace && record.task.writePaths.some((file) => !Object.hasOwn(record.workspace!.parentBaseline, file))) throw new ManagedError("managed_registry_invalid");
+		if (record.candidate && (record.candidate.episode !== record.episode || (record.version < 3 && (record.candidate.changedPaths.some((file) => !record.task.writePaths.includes(file)) || record.candidate.appliedPaths.some((file, index) => record.candidate!.changedPaths[index] !== file) || (record.candidate.status === "applied" && record.candidate.appliedPaths.length !== record.candidate.changedPaths.length))))) throw new ManagedError("managed_registry_invalid");
+		if (record.version < 3 && (record.input || record.inputRef || record.dispatch || record.workspace?.inputs.gitWorkspace || record.candidate?.git)) throw new ManagedError("managed_registry_invalid");
+		if (record.version === 3) {
+			if (record.inputRef && (!record.input || record.inputRef !== `refs/csheng/subagents/inputs/${handle}`)) throw new ManagedError("managed_registry_invalid");
+			const workspace = record.workspace?.inputs.gitWorkspace;
+			if (record.workspace && (!workspace || workspace.repo !== record.owner.repo || workspace.path !== join(directory, "source"))) throw new ManagedError("managed_registry_invalid");
+			if (record.candidate && (!record.candidate.git || JSON.stringify(record.candidate.changedPaths) !== JSON.stringify(record.candidate.git.changedPaths) || (workspace && record.candidate.git.workspaceId !== workspace.id))) throw new ManagedError("managed_registry_invalid");
+		}
 		if (!this.matches(record, owner)) throw new ManagedError("managed_owner_mismatch");
 		if (record.result) record.result = await this.withObservation(handle, record.episode, record.result);
 		for (const request of record.requests) if (request.result) request.result = withoutObservation(request.result);
@@ -155,7 +183,7 @@ export class ManagedSessionStore {
 	}
 	async save(record: ManagedRecord): Promise<void> {
 		await privateDirectory(this.path(record.handle), false);
-		await this.write(join(this.path(record.handle), "registry.json"), { ...record, version: MANAGED_SESSION_VERSION,
+		await this.write(join(this.path(record.handle), "registry.json"), { ...record,
 			...(record.result ? { result: withoutObservation(record.result) } : {}),
 			requests: record.requests.map((request) => ({ ...request, ...(request.result ? { result: withoutObservation(request.result) } : {}) })),
 		});
@@ -254,7 +282,7 @@ export class ManagedSessionStore {
 	async completeBatch(owner: CurrentOwner, requestId: string, response: SessionActionResult): Promise<void> {
 		await this.lock(this.root, async () => {
 			const batch = await this.readBatch(owner, requestId);
-			if (!batch || batch.response) throw new ManagedError("request_outcome_unknown");
+			if (!batch || (batch.response && batch.response.kind !== "submission")) throw new ManagedError("request_outcome_unknown");
 			const terminal = { ...batch, version: MANAGED_SESSION_VERSION, response: { ...response,
 				sessions: response.sessions.map((view) => ({ ...view, ...(view.result ? { result: withoutObservation(view.result) } : {}) })),
 			} };
@@ -273,7 +301,7 @@ export class ManagedSessionStore {
 			let prior: BatchRecord | undefined;
 			try { prior = await readJson<BatchRecord>(requestPath); } catch (error) { if (!missing(error)) throw error; }
 			if (prior !== undefined) {
-				if (!prior || typeof prior !== "object" || ![1, MANAGED_SESSION_VERSION].includes(prior.version) || typeof prior.complete !== "boolean" || typeof prior.fingerprint !== "string" || !Array.isArray(prior.handles) || prior.handles.length !== tasks.length || new Set(prior.handles).size !== prior.handles.length || prior.handles.some((handle) => typeof handle !== "string" || !safeHandle(handle))) throw new ManagedError("managed_registry_invalid");
+				if (!prior || typeof prior !== "object" || ![1, 2, MANAGED_SESSION_VERSION].includes(prior.version) || typeof prior.complete !== "boolean" || typeof prior.fingerprint !== "string" || !Array.isArray(prior.handles) || prior.handles.length !== tasks.length || new Set(prior.handles).size !== prior.handles.length || prior.handles.some((handle) => typeof handle !== "string" || !safeHandle(handle))) throw new ManagedError("managed_registry_invalid");
 				if (prior.fingerprint !== digest) throw new ManagedError("request_id_conflict");
 				if (!prior.complete) throw new ManagedError("request_outcome_unknown");
 				const records = await Promise.all(prior.handles.map((handle) => this.load(handle, owner)));
@@ -342,6 +370,7 @@ export class ManagedSessionStore {
 	view(record: ManagedRecord): SessionView {
 		return { handle: record.handle, role: record.task.role, episode: record.episode, state: record.state,
 			reportComplete: record.result?.reportComplete === true,
+			...(record.requests.at(-1)?.error ? { requestError: record.requests.at(-1)!.error! } : {}),
 			...(record.execution ? { execution: record.execution } : {}), ...(record.result?.route ?? record.route ? { route: record.result?.route ?? record.route } : {}),
 			...(record.result ? { result: record.result } : {}), ...(record.candidate ? { candidate: record.candidate } : {}),
 			...(record.retained === undefined ? {} : { retained: record.retained }),
