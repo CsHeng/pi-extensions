@@ -28,7 +28,7 @@ test("todo heading and tree show progress, running work and dependencies, never 
  state.attempts.push({ id: "A2", task: "ui", revision: 1, generation: 0, started: "fixture", status: "running", basis: { scope: ["."], fingerprint: "fixture", state: "current" }, writes: [] });
  const before = structuredClone(state);
  assert.deepEqual(goalRows(view(state), 120), [
-  "● Tasks · 恢复任务列表 (1/3)",
+  "● Tasks · 恢复任务列表 (1/3 accepted) · 1 running",
   "├─ ✓ read 梳理展示样式",
   "├─ ◐ ui 实现任务列表",
   "└─ ○ test 补充回归测试 · waits for ui",
@@ -42,17 +42,17 @@ test("done rows use success color and strikethrough; stale proof is not shown as
  const calls: string[] = [];
  const theme: GoalUiTheme = { fg(color, text) { calls.push(`${color}:${text}`); return text; }, strikethrough(text) { calls.push(`strike:${text}`); return text; } };
  goalRows(view(state), 120, 12, theme);
- assert.ok(calls.includes("accent:● Tasks · 恢复任务列表 (1/3)"));
+ assert.ok(calls.includes("accent:● Tasks · 恢复任务列表 (1/3 accepted)"));
  assert.ok(calls.includes("success:✓")); assert.ok(calls.includes("strike:梳理展示样式"));
  state.facts[0]!.usable = false;
- assert.match(goalRows(view(state), 120).join("\n"), /\(0\/3\)\n├─ ○ read/);
+ assert.match(goalRows(view(state), 120).join("\n"), /\(0\/3 accepted\)\n├─ ↻ read/);
 });
 
 test("completed contract keeps a human-facing task summary instead of active continuation status", async () => {
  const state = await fixture(); for (const task of state.tasks) markDone(state, task.key);
  state.fulfillment = "complete";
  const rows = goalRows(view(state), 120);
- assert.equal(rows[0], "● Tasks · 恢复任务列表 (3/3) · completed");
+ assert.equal(rows[0], "● Tasks · 恢复任务列表 (3/3 accepted) · completed");
  assert.equal(rows.filter(row => row.includes("✓")).length, 3);
  assert.doesNotMatch(rows.join("\n"), /Contract|continuation|input/);
 });

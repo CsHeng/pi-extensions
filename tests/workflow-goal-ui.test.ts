@@ -13,13 +13,13 @@ test("v2 view appears on enrollment by default and show/hide/list cannot mutate 
  const ctx = { mode: "tui", hasUI: true, ui: {
   theme: { fg(color: string, text: string) { colors.push(color); return text; }, strikethrough(text: string) { return text; } },
   setWidget(_key: string, value: unknown, options?: { placement: string }) { widget = value; if (value) assert.equal(options?.placement, "aboveEditor"); },
-  async select(title: string, rows: string[]) { selected = true; assert.equal(title, "Tasks · workflow"); assert.match(rows.join("\n"), /● Tasks.*\(0\/1\)/); assert.doesNotMatch(rows.join("\n"), /Contract|continuation|input aligned/); },
+  async select(title: string, rows: string[]) { selected = true; assert.equal(title, "Tasks · workflow"); assert.match(rows.join("\n"), /● Tasks.*\(0\/1 accepted\)/); assert.doesNotMatch(rows.join("\n"), /Contract|continuation|input aligned/); },
  } } as unknown as ExtensionContext;
  const ui = registerGoalUi(pi, store); ui.attach(ctx); assert.equal(widget, undefined);
  const result = await store.mutate({ operation: "enroll", goal: "fixture", delivery: "source", authority: "explicit fixture", requirements: [{ key: "r", outcome: "result", verification: "check" }] }, { cwd: process.cwd(), sessionId: "fixture", now: new Date().toISOString() }, "enroll");
  assert.equal(result.ok, true); assert.equal(typeof widget, "function");
  const rendered = (widget as unknown as () => { render(width: number): string[] })().render(120);
- assert.deepEqual(rendered, ["● Tasks · fixture (0/1)", "└─ ○ r result", ""]);
+ assert.deepEqual(rendered, ["● Tasks · fixture (0/1 accepted)", "└─ ○ r result", ""]);
  assert.ok(colors.includes("accent"));
  const before = store.current(); await command.handler("show", ctx); assert.equal(typeof widget, "function");
  const lines = (widget as unknown as () => { render(width: number): string[] })().render(8); assert.ok(lines.every(line => visibleWidth(line) <= 8));

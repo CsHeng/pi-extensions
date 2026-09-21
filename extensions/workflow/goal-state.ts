@@ -63,8 +63,10 @@ export function invalidate(state: GoalState, subjects: Set<string>, obsoleteExec
   }
  }
  if (subjects.size) subjects.add("delivery");
+ const revoked = new Set(state.acceptance.filter(j => j.accepted && subjects.has(j.subject)).map(j => j.subject));
  state.acceptance = state.acceptance.filter(j => !subjects.has(j.subject));
- for (const attempt of state.attempts) if (subjects.has(`task:${attempt.task}`) && (obsoleteExecution || attempt.status === "running")) attempt.status = "interrupted";
+ // Retain lost acceptance in existing attempt state, even after a predecessor is reaccepted.
+ for (const attempt of state.attempts) if (subjects.has(`task:${attempt.task}`) && (obsoleteExecution || attempt.status === "running" || revoked.has(`task:${attempt.task}`))) attempt.status = "interrupted";
  for (const fact of state.facts) if (state.attempts.some(a => a.id === fact.attempt && a.status === "interrupted")) { fact.usable = false; fact.note = "Attempt invalidated."; }
  if (subjects.size && state.fulfillment === "complete") state.fulfillment = "pending";
 }

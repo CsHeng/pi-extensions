@@ -23,7 +23,7 @@ export function registerGoalUi(pi: ExtensionAPI, store: GoalStore) {
   async handler(args, commandCtx) {
    ctx = commandCtx;
    if (ctx.mode !== "tui" || !ctx.hasUI) return;
-   if (args.trim() === "list") { await ctx.ui.select("Tasks · workflow", goalRows(store.view(), 120, 66)); return; }
+   if (args.trim() === "list") { await ctx.ui.select("Tasks · workflow", goalRows(store.view(), 120, 66, ctx.ui.theme)); return; }
    if (args.trim() === "show") visible = true;
    else if (args.trim() === "hide") visible = false;
    else visible = !visible;
