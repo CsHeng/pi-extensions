@@ -24,7 +24,7 @@ The package exposes eight maintained extensions: `multi-skill-mentions` as an ex
 - `mise.toml`: `publish-local-package` task for the local Pi package snapshot
 - `docs/architecture/`: stable product and maintenance truth
 - `$AGENT_ARCHITECTURE_DIR/docs/`: shared boundaries, new designs/plans (including single-product changes), retained evaluation results and integration observations; never runtime input
-- `mise.toml`: source roots `AGENT_ARCHITECTURE_DIR`, `AGENT_SKILLS_DIR`, `PI_EXTENSIONS_DIR`; consumers use these resolved values without guessing checkout layout
+- `mise.toml`: source roots `AGENT_ARCHITECTURE_DIR`, `AGENT_SKILLS_DIR`, `PI_EXTENSIONS_DIR` plus `AGENT_TMP_ROOT`; consumers use these resolved values without guessing checkout layout. Retained runtime and temporary artifacts belong under `$AGENT_TMP_ROOT/extensions/`.
 - Product protocols and independent check/install behavior remain here; no architecture checkout is required at runtime
 
 ## Local Package Snapshot

@@ -2,6 +2,7 @@
 AGENT_ARCHITECTURE_DIR = "{{ config_root | dirname }}/agent-architecture"
 AGENT_SKILLS_DIR = "{{ config_root | dirname }}/agent-skills"
 PI_EXTENSIONS_DIR = "{{ config_root | dirname }}/pi-extensions"
+AGENT_TMP_ROOT = "{{ env.HOME }}/tmp/agent-arch"
 
 [tasks.publish-local-package]
 description = "Sync package.json, config/, and extensions/ into the local Pi package snapshot"
