@@ -117,9 +117,9 @@ test("overlapping writer including canonical aliases prevents acceptance", async
  await f.run({ operation: "start", task: "two", scope: ["two"], writes: [join(f.cwd, "one")] });
  const result = await f.run({ ...f.report("one"), attempt: "A1" });
  assert.ok(result.diagnostics.some(d => d.includes("overlapping writer"))); assert.equal(accepted(f.store.current()!, "task:one"), false);
- assert.deepEqual(await canonicalScope(["./one", join(f.cwd, "one")], f.cwd), ["one"]);
+ assert.deepEqual(await canonicalScope(["./one", join(f.cwd, "one")], f.cwd), [join(f.cwd, "one")]);
  await symlink(tmpdir(), join(f.cwd, "escape"));
- await assert.rejects(canonicalScope(["escape/outside"], f.cwd), /outside/);
+ assert.deepEqual(await canonicalScope(["escape/outside"], f.cwd), [join(tmpdir(), "outside")]);
 });
 
 test("amended meaning invalidates dependent attempts, not independent work", async t => {

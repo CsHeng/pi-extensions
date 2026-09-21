@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import workflow from "../extensions/workflow/index.ts";
@@ -82,6 +85,46 @@ for (const commandWait of [false, true]) test(`v2 unavailable continuation is su
  const h = await createHostHarness({ mode: commandWait ? "print" : "rpc", commandWait, extensions: [workflow] }); t.after(() => h.dispose());
  h.faux.setResponses([enroll(), fauxAssistantMessage("unfinished")]); await h.session.prompt("implement");
  assert.equal(state(h).fulfillment, "pending"); assert.equal(state(h).continuation.state, "suspended"); assert.equal(state(h).continuation.dispatched, 0);
+});
+
+test("real host recovery revalidates a completed snapshot before mounting its projection in a new root", async t => {
+ const first = await createHostHarness({ mode: "print", extensions: [workflow] }); t.after(() => first.dispose());
+ first.faux.setResponses([enroll(), call({ operation: "start", task: "t", scope: ["result"], writes: ["result"] }),
+  fauxAssistantMessage(fauxToolCall("write", { path: "result", content: "verified" } as never)),
+  fauxAssistantMessage(fauxToolCall("read", { path: "result" } as never)),
+  call({ operation: "report", summary: "verified", facts: [{ key: "c", kind: "host", check: "read", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, facts: ["c"], accepted: true, rationale: "verified" })), complete: true }), fauxAssistantMessage("complete")]);
+ await first.session.prompt("implement"); assert.equal(state(first).fulfillment, "complete");
+ const restored = await createHostHarness({ mode: "print", sessionManager: first.session.sessionManager, extensions: [workflow], sessionStartReason: "resume" }); t.after(() => restored.dispose());
+ assert.notEqual(restored.workDir, first.workDir);
+ assert.equal(state(restored).fulfillment, "pending"); assert.equal(state(restored).continuation.state, "suspended");
+ assert.deepEqual(restored.errors, []);
+});
+
+test("real host writes two external non-Git roots and binds host evidence to their declared scope", async t => {
+ const outside = await mkdtemp(join(tmpdir(), "workflow-external-host-"));
+ t.after(() => rm(outside, { recursive: true, force: true }));
+ const skills = join(outside, "skills", "result"), installation = join(outside, "installation", "result");
+ const packageRoot = process.env.CSHENG_WORKFLOW_PROBE_PACKAGE_ROOT;
+ let sourcePath: string | undefined;
+ const observer = (pi: ExtensionAPI) => { pi.on("session_start", () => { sourcePath = pi.getAllTools().find(tool => tool.name === "csheng_workflow")?.sourceInfo?.path; }); };
+ const h = await createHostHarness({ mode: "print", extensions: packageRoot ? [observer] : [workflow, observer], ...(packageRoot ? { extensionPaths: [join(packageRoot, "extensions/workflow/index.ts")] } : {}) }); t.after(() => h.dispose());
+ if (packageRoot) assert.ok(sourcePath?.startsWith(`${packageRoot}/`), "actual tool must load from the selected snapshot");
+ h.faux.setResponses([enroll(), call({ operation: "start", task: "t", scope: [skills, installation], writes: [skills, installation] }),
+  fauxAssistantMessage(fauxToolCall("write", { path: skills, content: "source" } as never)),
+  fauxAssistantMessage(fauxToolCall("write", { path: installation, content: "installed" } as never)),
+  fauxAssistantMessage(fauxToolCall("read", { path: installation } as never)),
+  call({ operation: "report", summary: "Read explicit external installation", facts: [{ key: "check", kind: "host", check: "fixture output", result: "pass" }], judgments: ["task:t", "requirement:r"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "verified fixture" })) }),
+  call({ operation: "suspend", reason: "fixture will test source drift", condition: "source changed" }), fauxAssistantMessage("verified")]);
+ await h.session.prompt("implement across explicitly authorized external roots");
+ assert.equal(await readFile(skills, "utf8"), "source"); assert.equal(await readFile(installation, "utf8"), "installed");
+ assert.equal(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true);
+ assert.equal(state(h).facts[0]?.kind, "host");
+ await writeFile(skills, "changed source");
+ h.faux.setResponses([call({ operation: "amend", reason: "inspect existing authority", authority: "original fixture", alignment: "same scope" }), call({ operation: "close", outcome: "completed", reason: "recheck changed root" }), fauxAssistantMessage("not complete")]);
+ await h.session.prompt("recheck");
+ assert.equal(state(h).fulfillment, "pending");
+ assert.notEqual(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true);
+ assert.deepEqual(h.errors, []);
 });
 
 test("real tool observation captures check-time basis after write; report accepts only explicit subjects", async t => {

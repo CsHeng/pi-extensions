@@ -113,6 +113,8 @@ export interface HostHarnessOptions {
 	trace?: Trace;
 	/** Extension factories in load order; settlement handlers run in this order. */
 	extensions?: ExtensionFactory[];
+	/** Explicit package files, including a real installed snapshot, loaded by the public host loader. */
+	extensionPaths?: string[];
 	/** Prompt template name -> body, loaded as `/name`. */
 	templates?: Record<string, string>;
 	/** Use a real session file in a disposable directory instead of an in-memory session. */
@@ -180,6 +182,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 		noContextFiles: true,
 		additionalPromptTemplatePaths: templatePaths,
 		extensionFactories: options.extensions ?? [],
+		additionalExtensionPaths: options.extensionPaths ?? [],
 	});
 	await loader.reload();
 

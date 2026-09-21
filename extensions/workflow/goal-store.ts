@@ -1,8 +1,8 @@
-import { dirname, isAbsolute, relative, resolve, basename } from "node:path";
-import { realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { absolutePath, containsPath, pathIdentity } from "./paths.ts";
 import { Check } from "typebox/value";
 import { randomUUID } from "node:crypto";
-import { fingerprintScope, type BasisFingerprint } from "./fingerprints.ts";
+import { fingerprintScope, type BasisFingerprint, type SourceDependencies } from "./fingerprints.ts";
 import type { HostObservation } from "./observation.ts";
 import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
 import { accepted, amend, complete, deficits, digest, invalidate, judge, progressKey, validateGoalState, validateGraph } from "./goal-state.ts";
@@ -14,38 +14,38 @@ export interface GoalResult { ok: boolean; code?: string; message?: string; diag
 function declaredScope(paths: string[] | undefined, cwd: string): string[] {
  const root = resolve(cwd);
  const result = (paths?.length ? paths : ["."]).map(path => {
-  const rel = relative(root, resolve(root, path));
-  requireGoal(rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel), "invalid_scope", "Scope must be inside the current workspace.");
-  return rel || ".";
+  requireGoal(path.trim().length > 0 && !path.includes("\0"), "invalid_scope", "Scope requires a nonempty filesystem path.");
+  const absolute = absolutePath(path, root);
+  // Parent components after a symlink have filesystem, not lexical, meaning.
+  if (path.split(sep).includes("..")) return absolute;
+  const rel = relative(root, absolute);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? absolute : rel || ".";
  });
  return [...new Set(result)].sort();
 }
 export async function canonicalScope(paths: string[] | undefined, cwd: string): Promise<string[]> {
- const root = resolve(cwd);
- const result = declaredScope(paths, cwd);
- const physicalRoot = await realpath(root);
  const canonical: string[] = [];
- for (const entry of result) {
-  let probe = resolve(root, entry); const tail: string[] = [];
-  while (true) {
-   try { probe = await realpath(probe); break; }
-   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; tail.unshift(basename(probe)); const parent = dirname(probe); if (parent === probe) throw error; probe = parent; }
-  }
-  const rel = relative(physicalRoot, resolve(probe, ...tail));
-  requireGoal(rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel), "invalid_scope", "Scope resolves outside the current workspace.");
-  canonical.push(rel || ".");
+ for (const entry of declaredScope(paths, cwd)) {
+  const declared = absolutePath(entry, cwd);
+  const identity = await pathIdentity(declared);
+  const leaf = await pathIdentity(declared, false);
+  // Bind the actual replaceable leaf and target, never a fictitious lexical '..' endpoint.
+  canonical.push(leaf.physical, identity.physical);
  }
  return [...new Set(canonical)].sort();
 }
-/** Preserve declared alias identity as well as its current contained physical target. */
-async function goalFingerprint(scope: string[], cwd: string): Promise<BasisFingerprint> {
+/** Bind declared aliases and their physical targets across explicit source/installation roots. */
+async function goalFingerprint(scope: string[], cwd: string, dependencies?: SourceDependencies): Promise<BasisFingerprint> {
  try {
   const physical = await canonicalScope(scope, cwd);
-  const basis = await fingerprintScope(scope, cwd);
+  for (const path of physical) dependencies?.paths.add(path);
+  const basis = await fingerprintScope(scope, cwd, dependencies);
   return basis.state === "current" ? { ...basis, fingerprint: digest([basis.fingerprint, physical]) } : basis;
- } catch { return { scope, fingerprint: "unavailable", state: "unavailable", note: "Declared scope is unreadable or no longer physically contained." }; }
+ } catch { return { scope, fingerprint: "unavailable", state: "unavailable", note: "Declared scope or its physical identity is unavailable." }; }
 }
-export const overlaps = (a: string[], b: string[]): boolean => a.some(x => b.some(y => x === "." || y === "." || x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`)));
+/** Compare declared and physical identities, never global '.' sentinels. */
+export const overlaps = (writes: string[], sources: string[], sourceLinks: string[] = []): boolean =>
+ writes.some(x => sources.some(y => containsPath(x, y) || containsPath(y, x)) || sourceLinks.some(link => containsPath(x, link)));
 
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
@@ -63,19 +63,38 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   state = next; owner++; notify();
  }
  const writable = () => requireGoal(!unavailable, "state_unavailable", `Workflow unavailable: ${unavailable}. Continue authorized work without claiming contract certification; do not repair history.`);
- async function refresh(next: GoalState, cwd: string): Promise<void> {
-  const cache = new Map<string, BasisFingerprint>(); const lost = new Set<string>();
+ async function refresh(next: GoalState, cwd: string): Promise<Map<string, { basis: BasisFingerprint; dependencies: SourceDependencies }>> {
+  const cache = new Map<string, { basis: BasisFingerprint; dependencies: SourceDependencies }>(); const lost = new Set<string>();
   for (const fact of next.facts) {
    if (!fact.usable) continue;
    const key = JSON.stringify(fact.basis.scope);
    let current = cache.get(key);
-   if (!current) { current = await goalFingerprint(fact.basis.scope, cwd); cache.set(key, current); }
-   if (current.state !== "current" || current.fingerprint !== fact.basis.fingerprint) {
-    fact.usable = false; fact.note = current.state === "current" ? "Declared source changed; reverify affected evidence." : "Current basis unavailable.";
+   if (!current) {
+    const dependencies: SourceDependencies = { paths: new Set(), links: new Set() };
+    current = { basis: await goalFingerprint(fact.basis.scope, cwd, dependencies), dependencies }; cache.set(key, current);
+   }
+   if (current.basis.state !== "current" || current.basis.fingerprint !== fact.basis.fingerprint) {
+    fact.usable = false; fact.note = current.basis.state === "current" ? "Declared source changed; reverify affected evidence." : "Current basis unavailable.";
     for (const j of next.acceptance) if (j.facts.includes(fact.id)) lost.add(j.subject);
    }
   }
   invalidate(next, lost);
+  return cache;
+ }
+ async function revalidate(cwd: string): Promise<void> {
+  if (!state || unavailable || !["pending", "complete"].includes(state.fulfillment)) return;
+  const lease = owner; const next = structuredClone(state);
+  try {
+   await refresh(next, cwd);
+   if (lease !== owner) return;
+   if (state.fulfillment === "complete" && next.fulfillment !== "complete") {
+    next.input.aligned = false;
+    next.continuation.state = "suspended";
+    next.continuation.reason = "Completed evidence no longer matches the current source roots.";
+    next.continuation.unblock = "Reconcile and reverify affected evidence under existing authority.";
+   }
+   if (digest(next) !== digest(state)) commit(next, `revalidate:${owner}`);
+  } catch (error) { if (lease === owner) { unavailable = String(error); notify(); } }
  }
  function align(next: GoalState, op: GoalOperation) {
   if (op.alignment) { next.input.aligned = true; }
@@ -85,7 +104,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   const diagnostics: string[] = [];
   try {
    requireGoal(Check(goalParameters, op), "invalid_request", "Malformed semantic operation.");
-   if (op.operation === "inspect") return { ok: true, diagnostics, view: view() };
+   if (op.operation === "inspect") { await revalidate(ctx.cwd); return { ok: true, diagnostics, view: view() }; }
    writable();
    if (state?.calls.includes(digest(call))) return { ok: true, diagnostics: ["Already recorded."], view: view() };
    const lease = owner;
@@ -142,13 +161,13 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
       next.tasks.find(t => t.key === attempt.task)!.blocker = op.blocker;
       invalidate(next, new Set([`task:${attempt.task}`]));
      }
-     await refresh(next, ctx.cwd);
+     const sourceBases = await refresh(next, ctx.cwd);
      for (const judgment of op.judgments ?? []) {
       const resolved = { ...judgment, facts: judgment.facts.map(id => next.facts.some(f => f.id === id) ? id : `${attempt.id}:${id}`) };
       const used = next.facts.filter(f => resolved.facts.includes(f.id));
-      const sources = await Promise.all(used.filter(f => f.usable).map(f => canonicalScope(f.basis.scope, ctx.cwd)));
+      const sources = used.filter(f => f.usable).map(f => sourceBases.get(JSON.stringify(f.basis.scope))!.dependencies);
       const writers = await Promise.all(next.attempts.filter(a => a.status === "running" && a.writes.length).map(a => canonicalScope(a.writes, ctx.cwd)));
-      const overlap = writers.some(writes => sources.some(scope => overlaps(writes, scope)));
+      const overlap = writers.some(writes => sources.some(scope => overlaps(writes, [...scope.paths], [...scope.links])));
       if (!next.input.aligned || overlap) { diagnostics.push(`${judgment.subject}: ${overlap ? "overlapping writer is running" : "input alignment required"}.`); continue; }
       judge(next, resolved, diagnostics);
      }
@@ -184,7 +203,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   }
  }
  return {
-  view, mutate, owner: () => owner,
+  view, mutate, revalidate, owner: () => owner,
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   current: () => state ? structuredClone(state) : undefined,
   replay(entries: readonly SessionEntryLike[]) {

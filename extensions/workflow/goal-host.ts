@@ -48,8 +48,8 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  const terminalTasks = new Set<string>(); const terminalRuns = new Set<string>(); const seenEvents = new Set<string>();
  registerGoalTool(pi, store, () => fenced);
  const reset = () => { epoch++; captures.clear(); executionCaptures.clear(); dispatches.clear(); pending.clear(); terminalTasks.clear(); terminalRuns.clear(); seenEvents.clear(); tracker.reset(); fenced = false; projected = undefined; };
- pi.on("session_start", (_event, ctx) => { ui.detach(); reset(); store.replay(ctx.sessionManager.getBranch()); store.recover("Session recovery requires explicit reconciliation/resume."); ui.attach(ctx); });
- pi.on("session_tree", (_event, ctx) => { ui.detach(); reset(); store.replay(ctx.sessionManager.getBranch()); store.recover("Branch replacement requires explicit reconciliation/resume."); ui.attach(ctx); });
+ pi.on("session_start", async (_event, ctx) => { ui.detach(); reset(); const lease = epoch; store.replay(ctx.sessionManager.getBranch()); await store.revalidate(ctx.cwd); if (lease !== epoch) return; store.recover("Session recovery requires explicit reconciliation/resume."); ui.attach(ctx); });
+ pi.on("session_tree", async (_event, ctx) => { ui.detach(); reset(); const lease = epoch; store.replay(ctx.sessionManager.getBranch()); await store.revalidate(ctx.cwd); if (lease !== epoch) return; store.recover("Branch replacement requires explicit reconciliation/resume."); ui.attach(ctx); });
  pi.on("session_shutdown", () => { reset(); ui.detach(); });
  pi.on("input", event => { tracker.received(event); if (event.source === "interactive" || event.source === "rpc") epoch++; });
  pi.on("before_agent_start", () => { tracker.prepare(); stopped = false; });

@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-repo_root=$(realpath "${script_dir}/..")
+[[ $# -le 1 ]] || { printf 'Usage: %s [PACKAGE_ROOT]\n' "$0" >&2; exit 2; }
+# Default preserves the source-package probe; pass the actual snapshot for installation acceptance.
+repo_root=$(realpath -- "${1:-${script_dir}/..}")
 agent_root=$(mktemp -d)
 work_root=$(mktemp -d)
 session_root=$(mktemp -d)

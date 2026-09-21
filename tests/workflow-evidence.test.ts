@@ -83,7 +83,7 @@ test("host observations retain bounded public facts without raw reports or file 
 	assert.equal(unparsed.exitCode, undefined);
 });
 
-test("fingerprints follow a declared symlink target and refuse links outside the workspace", async (t) => {
+test("explicit external links bind identity but do not certify undeclared target content", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "workflow-link-"));
 	const outside = await mkdtemp(join(tmpdir(), "workflow-link-outside-"));
 	t.after(async () => { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
@@ -101,6 +101,10 @@ test("fingerprints follow a declared symlink target and refuse links outside the
 	await rm(join(root, "link"));
 	await symlink(join(outside, "target"), join(root, "link"));
 	const escaping = await fingerprintScope(["link"], root);
-	assert.equal(escaping.state, "unavailable", "a link outside the workspace cannot certify content");
-	assert.match(escaping.note ?? "", /symlink outside/);
+	assert.equal(escaping.state, "current", "an explicitly declared link can certify its identity");
+	await writeFile(join(outside, "target"), "changed undeclared content");
+	assert.equal((await fingerprintScope(["link"], root)).fingerprint, escaping.fingerprint);
+	const recursive = await fingerprintScope(["."], root);
+	assert.equal(recursive.state, "unavailable", "a recursive scan cannot follow an undeclared external link");
+	assert.match(recursive.note ?? "", /symlink outside/);
 });
