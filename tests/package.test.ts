@@ -46,5 +46,5 @@ test("package exposes the eight maintained extensions and their Pi peers", async
 	assert.equal(manifest.devDependencies?.["@earendil-works/pi-tui"], "0.86.0");
 	assert.equal(manifest.devDependencies?.typebox, "1.3.7");
 	assert.equal(manifest.dependencies, undefined);
-	assert.equal(manifest.scripts?.["e2e:subagents"], "node --experimental-strip-types scripts/run-live-subagents-e2e.ts");
+	assert.equal(manifest.scripts?.["e2e:subagents"], "bun scripts/run-live-subagents-e2e.ts");
 });

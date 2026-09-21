@@ -16,18 +16,33 @@ export interface PathIdentity {
  missing?: string;
 }
 
+/** A trailing separator requires a directory, just like a final '/.'. */
+function components(path: string): string[] {
+ const parts = path.split(sep === "\\" ? /[\\/]/ : sep).filter(Boolean);
+ if (path.endsWith(sep) || (sep === "\\" && path.endsWith("/"))) parts.push(".");
+ return parts;
+}
+
 /** Resolve link components before parent traversal; missing tails retain a bounded future identity. */
 export async function pathIdentity(input: string, followLeaf = true): Promise<PathIdentity> {
  const absolute = absolutePath(input, process.cwd());
  let current = parse(absolute).root;
- let remaining = absolute.slice(current.length).split(sep).filter(Boolean);
+ let remaining = components(absolute.slice(current.length));
  const links: PathIdentity["links"] = [];
  while (remaining.length) {
   const component = remaining.shift()!;
-  if (component === ".") continue;
-  if (component === "..") { current = dirname(current); continue; }
+  if (component === "." || component === "..") {
+   // lstat(dir) alone does not require search permission inside dir. Do not let
+   // lexical dot traversal bypass the filesystem's EACCES/ENOTDIR checks.
+   await lstat(`${current}${sep}.`);
+   if (component === "..") current = dirname(current);
+   continue;
+  }
   const candidate = join(current, component);
-  if (!followLeaf && remaining.length === 0) return { physical: join(await realpath(current), component), links };
+  if (!followLeaf && remaining.length === 0) {
+   await lstat(`${current}${sep}.`);
+   return { physical: join(await realpath(current), component), links };
+  }
   let info;
   try { info = await lstat(candidate); }
   catch (error) {
@@ -41,15 +56,20 @@ export async function pathIdentity(input: string, followLeaf = true): Promise<Pa
    links.push({ path: candidate, target });
    if (isAbsolute(target)) {
     current = parse(target).root;
-    remaining = [...target.slice(current.length).split(sep).filter(Boolean), ...remaining];
+    remaining = [...components(target.slice(current.length)), ...remaining];
    } else {
     current = dirname(candidate);
-    remaining = [...target.split(sep).filter(Boolean), ...remaining];
+    remaining = [...components(target), ...remaining];
    }
   } else {
+   // Even '.' and '..' require the preceding component to be a directory.
+   if (remaining.length && !info.isDirectory()) {
+    throw Object.assign(new Error(`Not a directory: ${candidate}`), { code: "ENOTDIR" });
+   }
    current = candidate;
   }
  }
- // Existing targets use the platform's physical-path oracle, not a lexical projection.
- return { physical: await realpath(absolute), links };
+ // Normalize only the walked physical path. Re-resolving the original spelling lets
+ // runtimes that collapse '..' before following links undo filesystem-order traversal.
+ return { physical: await realpath(current), links };
 }

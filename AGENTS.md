@@ -73,12 +73,12 @@ This checkout is authored source. Daily Pi must load a copied local Pi package, 
 
 The default managed v3 runtime integrates `git-workspace.ts` and `session-supervisor.ts`. Stable contracts live in `docs/architecture/subagent-execution.md`; bounded implementation/verification evidence lives in the 2026-09-20 handoff. Offline synthetic host/native-child validation is not live-provider effectiveness or deployment evidence. Workflow associates execution evidence with the original contract/attempt/input, waits without polling, and never accepts transport success. Historical inspect/join results cannot acquire a newer attempt or contract basis.
 
-Dependencies install with bun from the tracked `bun.lock`; `bun run` keeps the node runtime for `typecheck`, `test`, and the e2e scripts, so the deterministic lane still exercises node semantics.
+Use Bun 1.4.2, declared in `packageManager`, for dependency installation, TypeScript checking, tests, repository-owned e2e/probe scripts, and maintainer evaluators. Install from the tracked `bun.lock` with lifecycle scripts disabled by `bunfig.toml` and the explicit command below. The deterministic test glob excludes deliberate e2e entrypoints and uses a 120-second default per-test timeout. Keep actual installed `pi` invocations and its runtime unchanged; do not replace Pi-owned `npm:` sources or `~/.pi/agent/npm/` paths with Bun-specific names. Preserve filesystem-order path regression coverage with independent fixture targets rather than deriving expected identities from raw-path `realpath`.
 
 Run:
 
 ```bash
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 bun run check
 bash scripts/run-temporary-subagents-probe.sh
 bash scripts/run-installed-subagents-probe.sh
@@ -99,7 +99,7 @@ The live subagent provider lane is separately authorized and never belongs to `b
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents
-CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents -- --installed
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents --installed
 ```
 
 The installed-host observer click check is also deliberate and never belongs to `bun run test`; it resolves the installed `pi` binary and skips when that binary or util-linux `script` is unavailable:

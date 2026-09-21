@@ -36,7 +36,7 @@ rpc_output=$(
 		'{"type":"get_commands"}' \
 		'{"type":"prompt","message":"/herdr-handoff-probe"}' \
 		'{"type":"get_entries"}' |
-		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
+		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV='' \
 			pi \
 			--mode rpc \
 			--no-session \
@@ -58,7 +58,7 @@ off_output=$(
 	printf '%s\n' \
 		'{"type":"prompt","message":"/herdr-handoff-probe"}' \
 		'{"type":"get_entries"}' |
-		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV= \
+		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 HERDR_ENV='' \
 			pi \
 			--mode rpc \
 			--no-session \
@@ -71,6 +71,6 @@ off_output=$(
 off_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "csheng-herdr-handoff-probe" and .data.present == false)] | length' <<<"${off_output}")
 [[ ${off_count} -ge 1 ]]
 
-node --experimental-strip-types --test --test-name-pattern 'offline fake-herdr delegate-return fixture' "${repo_root}/tests/installed-herdr-handoff-probe.test.ts" >/dev/null
+bun test --test-name-pattern 'offline fake-herdr delegate-return fixture' "${repo_root}/tests/installed-herdr-handoff-probe.test.ts" >/dev/null
 
 jq -cn '{result:"pass",source:"temporary",tool:1,command:1,extension_off_tool:0,fixture:1}'

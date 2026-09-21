@@ -24,7 +24,7 @@ Evaluate one explicitly named Pi session without changing Pi state, runtime rout
 From the `pi-extensions` repository:
 
 ```bash
-node --experimental-strip-types \
+bun \
   .agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts \
   --session <path-or-id>
 ```
@@ -32,7 +32,7 @@ node --experimental-strip-types \
 For current installed/configured health, require explicit inputs:
 
 ```bash
-node --experimental-strip-types \
+bun \
   .agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts \
   --epoch current --sessions-root <dir> --manifest <file>
 ```
@@ -57,6 +57,6 @@ Use `--sessions-root <dir>` only for a bounded fixture or explicitly selected al
 ## Verify
 
 ```bash
-node --experimental-strip-types --test tests/subagents-evaluator.test.ts tests/subagents-observation-metrics.test.ts tests/subagents-async-evaluator.test.ts
-npm run typecheck
+bun test tests/subagents-evaluator.test.ts tests/subagents-observation-metrics.test.ts tests/subagents-async-evaluator.test.ts
+bun run typecheck
 ```

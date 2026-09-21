@@ -1,0 +1,3 @@
+# Preserve the no-lifecycle-scripts boundary even for a plain bun install.
+[install]
+ignoreScripts = true

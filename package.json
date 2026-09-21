@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.2",
   "description": "Small locally maintained Pi extensions that preserve the host agent loop",
   "files": [
     "config/",
@@ -20,10 +21,10 @@
   ],
   "scripts": {
     "check": "bun run typecheck && bun run test && bash -n scripts/*.sh",
-    "e2e:subagents": "node --experimental-strip-types scripts/run-live-subagents-e2e.ts",
-    "e2e:subagents-ui": "node --experimental-strip-types --test tests/subagents-ui-tui.e2e.ts",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "e2e:subagents": "bun scripts/run-live-subagents-e2e.ts",
+    "e2e:subagents-ui": "bun test ./tests/subagents-ui-tui.e2e.ts",
+    "test": "bun test --timeout 120000 ./tests/*.test.ts",
+    "typecheck": "bun run --bun tsc --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

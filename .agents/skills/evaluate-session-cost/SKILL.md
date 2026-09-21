@@ -23,14 +23,14 @@ Measure what a set of Pi sessions actually cost, how much context was re-billed 
 From the `pi-extensions` repository:
 
 ```bash
-node --experimental-strip-types \
+bun \
   .agents/skills/evaluate-session-cost/scripts/session-cost-report.ts --window-hours 72
 ```
 
 Explicit sessions bypass the window and may span projects:
 
 ```bash
-node --experimental-strip-types \
+bun \
   .agents/skills/evaluate-session-cost/scripts/session-cost-report.ts \
   --session <session-id-or-jsonl-path> --session <session-id-or-jsonl-path>
 ```
@@ -52,8 +52,8 @@ Useful options: `--agent-dir <dir>` (default `$PI_CODING_AGENT_DIR` or `~/.pi/ag
 ## Verify
 
 ```bash
-node --experimental-strip-types --test tests/session-cost-report.test.ts
-npm run typecheck
+bun test tests/session-cost-report.test.ts
+bun run typecheck
 ```
 
 Metric definitions, the worked example, and the known limits are in `references/metrics.md`.

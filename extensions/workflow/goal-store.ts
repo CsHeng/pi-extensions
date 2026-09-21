@@ -17,7 +17,7 @@ function declaredScope(paths: string[] | undefined, cwd: string): string[] {
   requireGoal(path.trim().length > 0 && !path.includes("\0"), "invalid_scope", "Scope requires a nonempty filesystem path.");
   const absolute = absolutePath(path, root);
   // Parent components after a symlink have filesystem, not lexical, meaning.
-  if (path.split(sep).includes("..")) return absolute;
+  if (path.split(sep === "\\" ? /[\\/]/ : sep).includes("..")) return absolute;
   const rel = relative(root, absolute);
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? absolute : rel || ".";
  });

@@ -35,7 +35,7 @@ Unknown correlations fail closed by preserving the original request. Removing th
 The payload boundary is covered by deterministic unit tests; this extension intentionally adds no temporary-load, installed-package, or live provider probe.
 
 ```bash
-node --experimental-strip-types --test tests/fast-gpt.test.ts
-node --experimental-strip-types --test tests/package.test.ts
+bun test tests/fast-gpt.test.ts
+bun test tests/package.test.ts
 bun run typecheck
 ```

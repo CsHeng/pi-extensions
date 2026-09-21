@@ -95,10 +95,10 @@ Each extension keeps independent behavior, state, tests, and removal semantics w
 
 ## Local Development
 
-Dependencies install with bun from the tracked `bun.lock`; the package scripts keep the node runtime for `typecheck`, `test`, and the e2e lanes.
+Bun 1.4.2 (declared in `packageManager`) runs dependency installation, TypeScript checking, tests, and repository-owned e2e/probe scripts. The tracked `bun.lock` fixes dependency resolution; `bunfig.toml` disables install lifecycle scripts. `bun run test` selects only `tests/*.test.ts` with a 120-second default per-test timeout; deliberate e2e entrypoints stay separate. Installed-host checks still invoke the actual `pi` executable: its runtime, registry package names, and `~/.pi/agent/npm/` layout remain host-owned. Workflow path identity resolves symlinks before parent traversal and is covered by independent fixture expectations, not the runtime's treatment of raw `link/../file` paths.
 
 ```bash
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 bun run check
 ```
 
@@ -112,7 +112,7 @@ The opt-in live subagent E2E uses Pi's ambient authentication and is separately 
 
 ```bash
 CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents
-CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents -- --installed
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents --installed
 ```
 
 The first command temporary-loads the complete package with ordinary global extensions disabled. The second uses the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `bun run test`.

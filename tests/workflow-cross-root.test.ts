@@ -9,7 +9,7 @@ import type { GoalOperation } from "../extensions/workflow/goal-contracts.ts";
 import { accepted } from "../extensions/workflow/goal-state.ts";
 
 async function fixture(t: test.TestContext) {
- const root = await mkdtemp(join(tmpdir(), "workflow-cross-root-"));
+ const root = await realpath(await mkdtemp(join(tmpdir(), "workflow-cross-root-")));
  t.after(() => rm(root, { recursive: true, force: true }));
  const cwd = join(root, "architecture"), skills = join(root, "skills"), extensions = join(root, "extensions"), installed = join(root, "installation");
  for (const dir of [cwd, skills, extensions, installed]) { await mkdir(dir); await writeFile(join(dir, "same"), "same bytes"); }
@@ -159,9 +159,9 @@ test("link target parent traversal follows filesystem order, not lexical normali
  const bridge = join(f.installed, "bridge"), entry = join(f.installed, "entry");
  await symlink(join(f.skills, "sub"), bridge); await symlink("bridge/../same", entry);
  assert.equal(await realpath(entry), join(f.skills, "same"));
- assert.ok((await canonicalScope([entry], f.cwd)).includes(await realpath(entry)));
+ assert.ok((await canonicalScope([entry], f.cwd)).includes(join(f.skills, "same")));
  const direct = `${bridge}/../same`;
- assert.ok((await canonicalScope([direct], f.cwd)).includes(await realpath(direct)));
+ assert.deepEqual(await canonicalScope([direct], f.cwd), [join(f.skills, "same")]);
  const first = await fingerprintScope([entry], f.cwd), directFirst = await fingerprintScope([direct], f.cwd);
  await f.run({ operation: "start", task: "a", scope: [entry, direct] }); await f.run(f.report("a"));
  await unlink(bridge); await symlink(join(f.extensions, "sub"), bridge);
@@ -197,7 +197,7 @@ test("parent traversal has no fictitious lexical endpoint that blocks an unrelat
  const f = await fixture(t); await mkdir(join(f.skills, "sub"));
  const bridge = join(f.installed, "bridge"); await symlink(join(f.skills, "sub"), bridge);
  const source = `${bridge}/../same`;
- assert.deepEqual(await canonicalScope([source], f.cwd), [await realpath(source)]);
+ assert.deepEqual(await canonicalScope([source], f.cwd), [join(f.skills, "same")]);
  await f.run({ operation: "start", task: "b", scope: [join(f.extensions, "same")], writes: [join(f.installed, "same")] });
  await f.run({ operation: "start", task: "a", scope: [source] }); await f.run(f.report("a"));
  assert.equal(accepted(f.store.current()!, "task:a"), true);
