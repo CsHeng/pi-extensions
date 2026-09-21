@@ -3,6 +3,7 @@ import { registerObservationHooks } from "./observation-hooks.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
+import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
 
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
 
@@ -20,11 +21,14 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	const loaded = await loadCapability();
 	let fatalReason = loaded.error;
 	registerObservationHooks(pi, { child: true, capabilityKey: loaded.manifest ? createHash("sha256").update(JSON.stringify(loaded.manifest)).digest("hex") : null });
+	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
 
 	pi.on("tool_call", async (event) => {
 		if (!loaded.manifest || fatalReason) {
 			return { block: true, terminate: true, reason: fatalReason ?? "Child capability is unavailable." };
 		}
+		// The typed tool checks all repository/path/revision inputs itself on every execution.
+		if (event.toolName === GIT_READ_TOOL && loaded.manifest.role !== "worker") return undefined;
 		if (!PATH_TOOLS.has(event.toolName)) {
 			return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the child capability.` };
 		}

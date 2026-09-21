@@ -54,23 +54,34 @@ function environment(index?: string): NodeJS.ProcessEnv {
 		...(index ? { GIT_INDEX_FILE: index } : {}) };
 }
 interface Result { status: number; stdout: Buffer; stderr: Buffer }
-async function run(repo: string, args: readonly string[], options: { input?: Buffer | string; index?: string; allowed?: readonly number[] } = {}): Promise<Result> {
+interface RunOptions { input?: Buffer | string; index?: string; allowed?: readonly number[]; readOnly?: boolean; signal?: AbortSignal | undefined; timeoutMs?: number }
+/** Typed callers own argv policy. Read queries share process limits, never checkpoint/apply operations. */
+export function runReadGit(repo: string, args: readonly string[], options: Pick<RunOptions, "input" | "allowed" | "signal" | "timeoutMs"> = {}): Promise<Result> {
+ return run(repo, args, { ...options, readOnly: true });
+}
+async function run(repo: string, args: readonly string[], options: RunOptions = {}): Promise<Result> {
 	return new Promise((fulfill, reject) => {
-		const child = spawn("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", repo, ...args], {
-			env: environment(options.index), stdio: ["pipe", "pipe", "pipe"],
+		if (options.signal?.aborted) { reject(new GitWorkspaceError("git_aborted")); return; }
+		const readOptions = options.readOnly ? ["--no-pager", "--no-replace-objects", "-c", "core.attributesFile=/dev/null", "-c", "core.untrackedCache=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "protocol.allow=never"] : [];
+		const child = spawn("git", [...readOptions, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", repo, ...args], {
+			env: { ...environment(options.index), ...(options.readOnly ? { GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_ATTR_NOSYSTEM: "1", GIT_PAGER: "cat", GIT_CONFIG_COUNT: "0" } : {}) },
+			stdio: ["pipe", "pipe", "pipe"], // Stay in the managed child's process group for owner shutdown.
 		});
 		const output: Buffer[] = []; const errors: Buffer[] = [];
 		let size = 0; let failure: string | undefined;
-		const timer = setTimeout(() => { failure = "git_timeout"; child.kill("SIGKILL"); }, 30_000);
+		const kill = () => { try { child.kill("SIGKILL"); } catch { /* already exited */ } };
+		const abort = () => { failure = "git_aborted"; kill(); };
+		options.signal?.addEventListener("abort", abort, { once: true });
+		const timer = setTimeout(() => { failure = "git_timeout"; kill(); }, Math.min(options.timeoutMs ?? 30_000, 30_000));
 		const collect = (parts: Buffer[]) => (chunk: Buffer) => {
 			size += chunk.length;
-			if (size > MAX_OUTPUT) { failure = "git_output_limit"; child.kill("SIGKILL"); }
+			if (size > (options.readOnly ? 1024 * 1024 : MAX_OUTPUT)) { failure = "git_output_limit"; kill(); }
 			else parts.push(chunk);
 		};
 		child.stdout.on("data", collect(output)); child.stderr.on("data", collect(errors));
-		child.once("error", error => { clearTimeout(timer); reject(new GitWorkspaceError("git_unavailable", error.message)); });
+		child.once("error", error => { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); reject(new GitWorkspaceError("git_unavailable", error.message)); });
 		child.once("close", status => {
-			clearTimeout(timer);
+			clearTimeout(timer); options.signal?.removeEventListener("abort", abort);
 			const result = { status: status ?? -1, stdout: Buffer.concat(output), stderr: Buffer.concat(errors) };
 			if (failure || !(options.allowed ?? [0]).includes(result.status)) reject(new GitWorkspaceError(failure ?? "git_command_failed", result.stderr.toString("utf8").slice(0, 4096)));
 			else fulfill(result);

@@ -120,7 +120,7 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	assert.ok(recorded.args.includes("--approve"));
 	assert.ok(recorded.args.includes("synthetic/child"));
 	assert.ok(recorded.args.includes("low"));
-	assert.ok(recorded.args.includes("read,grep,find,ls"));
+	assert.ok(recorded.args.includes("read,grep,find,ls,git_read"));
 	await assert.rejects(readFile(recorded.capability, "utf8"), /ENOENT/);
 
 	const withExternal = await runChild(options("normal", {
@@ -131,7 +131,7 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	}));
 	assert.equal(withExternal.status, "succeeded");
 	const recordedExternal = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; sessionPath: string };
-	assert.ok(recordedExternal.args.includes("read,grep,find,ls"));
+	assert.ok(recordedExternal.args.includes("read,grep,find,ls,git_read"));
 	assert.ok(recordedExternal.args.includes("--approve"));
 	assert.ok(recordedExternal.args.includes("synthetic/child"));
 	assert.ok(recordedExternal.args.includes("low"));

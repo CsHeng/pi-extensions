@@ -51,8 +51,8 @@ Admission is split by authority. Schema and structural graph validation check ta
 
 | Role | Tools | Authority |
 | --- | --- | --- |
-| `explorer` | `read`, `grep`, `find`, `ls` | Collect bounded factual evidence; no mutation or design synthesis |
-| `reviewer` | `read`, `grep`, `find`, `ls` | Return bounded candidate findings; no repair or adjudication |
+| `explorer` | `read`, `grep`, `find`, `ls`, `git_read` | Collect bounded factual evidence; no mutation or design synthesis |
+| `reviewer` | `read`, `grep`, `find`, `ls`, `git_read` | Return bounded candidate findings; no repair or adjudication |
 | `worker` (managed) | The same native tools plus `bash` | Trusted host local implementation/test/repair; explicit Git candidate integration and parent acceptance remain separate |
 
 The managed worker is the same fixed worker role with its explicit transport's tool set, not a dynamic role. Bash is not capability-sandboxed; file guards and candidate checks do not create OS authority boundaries. Roles and prompts are code-owned. The fixed role map owns only exact tools and prompts; write authority remains enforced by the task role, graph admission, child path guard, worker workspace, and candidate checks rather than a duplicate metadata boolean. The package does not discover role files. No child loads this tool, so recursive delegation is unavailable.

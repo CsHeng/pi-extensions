@@ -50,7 +50,7 @@ export interface NativeObservation {
 
 const OPAQUE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const SHA256_KEY = /^[a-f0-9]{64}$/;
-const TOOL_NAMES = new Set(["read", "grep", "find", "ls", "edit", "write", "bash"]);
+const TOOL_NAMES = new Set(["read", "grep", "find", "ls", "edit", "write", "bash", "git_read"]);
 const NATIVE_ENTRY_TYPES = new Set([
 	"message", "thinking_level_change", "model_change", "compaction",
 	"branch_summary", "custom", "label", "session_info", "custom_message",

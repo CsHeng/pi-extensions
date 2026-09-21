@@ -32,8 +32,8 @@ import { SubagentSessionToolSchema } from "../extensions/subagents/session-contr
 
 test("subagent roles have fixed least-authority tool sets", () => {
 	assert.deepEqual(ROLE_NAMES, ["explorer", "reviewer", "worker"]);
-	assert.deepEqual(ROLES.explorer.tools, ["read", "grep", "find", "ls"]);
-	assert.deepEqual(ROLES.reviewer.tools, ["read", "grep", "find", "ls"]);
+	assert.deepEqual(ROLES.explorer.tools, ["read", "grep", "find", "ls", "git_read"]);
+	assert.deepEqual(ROLES.reviewer.tools, ["read", "grep", "find", "ls", "git_read"]);
 	assert.deepEqual(ROLES.worker.tools, ["read", "grep", "find", "ls", "edit", "write"]);
 	for (const role of Object.values(ROLES)) {
 		assert.equal("name" in role, false);

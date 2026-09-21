@@ -22,7 +22,7 @@ The current v3 runtime uses [Git worktrees and session-scoped asynchronous execu
 
 Fixed roles are:
 
-- `explorer`: read-only factual search with `read`, `grep`, `find`, and `ls`
+- `explorer`: read-only factual search with `read`, `grep`, `find`, `ls`, and bounded typed `git_read`
 - `reviewer`: read-only candidate findings with the same tools
 - `worker`: trusted-host implementation with native `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`
 

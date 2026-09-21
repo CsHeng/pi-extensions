@@ -475,7 +475,7 @@ test("native explorer create/continue reads an explicit external Git file withou
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
 	assert.equal(first.sessions[0]!.result!.observation?.available, true);
 	assert.match(first.sessions[0]!.result!.output, /external-bytes/);
-	assert.deepEqual(new Set(first.sessions[0]!.result!.observation!.toolNames), new Set(["read", "grep", "find", "ls"]));
+	assert.deepEqual(new Set(first.sessions[0]!.result!.observation!.toolNames), new Set(["read", "grep", "find", "ls", "git_read"]));
 	const handle = first.sessions[0]!.handle;
 	const native = join(f.store.path(handle), "native.jsonl");
 	assert.equal((await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message?.role === "user").length, 1);
