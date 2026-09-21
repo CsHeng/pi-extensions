@@ -12,8 +12,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Deliberate installed-host check (`npm run e2e:subagents-ui`). It spawns the real Pi fullscreen TUI,
-// so it stays outside the deterministic `npm test` lane, which owns marker geometry and close
+// Deliberate installed-host check (`bun run e2e:subagents-ui`). It spawns the real Pi fullscreen TUI,
+// so it stays outside the deterministic `bun run test` lane, which owns marker geometry and close
 // handling through the offline unit tests.
 test("installed Pi fullscreen: clicking the observer close marker dismisses the overlay", { timeout: 40_000 }, async t => {
 	try { await access("/usr/bin/script"); } catch { t.skip("requires util-linux script; no package installation performed"); return; }

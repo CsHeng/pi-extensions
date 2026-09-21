@@ -1,5 +1,5 @@
 /**
- * Opt-in local-source probe, NOT part of npm test and NOT an installed-session audit.
+ * Opt-in local-source probe, NOT part of `bun run test` and NOT an installed-session audit.
  * Uses the real dependency host and its faux provider. Loads only CC's write leaf,
  * SoL's fusion/pack leaves, and a hash-pinned RTK adapter with pi.exec stubbed.
  * Arguments: --sol-root PATH --cc-root PATH --rtk-source PATH

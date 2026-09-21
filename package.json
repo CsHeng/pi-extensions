@@ -19,7 +19,7 @@
     "subagents-ui"
   ],
   "scripts": {
-    "check": "npm run typecheck && npm test && bash -n scripts/*.sh",
+    "check": "bun run typecheck && bun run test && bash -n scripts/*.sh",
     "e2e:subagents": "node --experimental-strip-types scripts/run-live-subagents-e2e.ts",
     "e2e:subagents-ui": "node --experimental-strip-types --test tests/subagents-ui-tui.e2e.ts",
     "test": "node --experimental-strip-types --test tests/*.test.ts",

@@ -116,7 +116,7 @@ The extension has no background execution, durable orchestration graph, semantic
 ## Verification and removal
 
 ```bash
-npm run check
+bun run check
 bash scripts/run-temporary-herdr-handoff-probe.sh
 bash scripts/run-installed-herdr-handoff-probe.sh
 bash scripts/run-temporary-subagents-probe.sh
@@ -125,17 +125,17 @@ bash scripts/run-installed-subagents-probe.sh
 
 Multi-skill mention probes cross provider preflight and require separate provider-call authority; they are not in this deterministic lane. Managed execution and observation tests are described in [Managed Subagent Execution](subagent-execution.md).
 
-Unit and component tests own provider-compatible schema shape, routing, graph, private diagnostic allocation and retention, JSON event projection, process settlement, heartbeat progress, guard, snapshot, candidate export, telemetry, evaluator redaction, managed envelope bounds, elapsed output, official host result interception, awaited shutdown cleanup, package peer ownership, extension behavior, cancellation, and regression behavior. Pi core packages imported by extension source are peer dependencies and exact development dependencies; clean `npm ci --ignore-scripts` plus typecheck proves local resolution without bundling another host copy. The subagent probes are offline and report fixed counts only; they do not start a model child.
+Unit and component tests own provider-compatible schema shape, routing, graph, private diagnostic allocation and retention, JSON event projection, process settlement, heartbeat progress, guard, snapshot, candidate export, telemetry, evaluator redaction, managed envelope bounds, elapsed output, official host result interception, awaited shutdown cleanup, package peer ownership, extension behavior, cancellation, and regression behavior. Pi core packages imported by extension source are peer dependencies and exact development dependencies; clean `bun install --frozen-lockfile` plus typecheck proves local resolution without bundling another host copy. The subagent probes are offline and report fixed counts only; they do not start a model child.
 
 The project-local `.agents/skills/evaluate-subagent-runs/` Skill reads one explicitly selected Pi session JSONL or an explicitly authorized current-epoch scan and emits metric schema version four. It aggregates requested/admitted/launched tasks, singletons, hard edges, explicit-route attribution, and historical zero-change workers for the retired one-shot tool. Runtime telemetry versions one through three remain readable with their original meanings and authoritative only for fields they declare; unavailable old-session evidence stays nullable and is never reconstructed from assistant arguments. The evaluator never reads Pi SQLite, settings, credentials, logs, or unrelated sessions; never copies raw selectors, prompts, task IDs, child output, stderr, paths, environment values, or external content. Reports are written only to an explicit new output path. The first redacted production baseline is retained under `$AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/subagents/`.
 
-The manual release/runtime lane is separately authorized and never part of `npm test`:
+The manual release/runtime lane is separately authorized and never part of `bun run test`:
 
 ```bash
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents -- --installed
 ```
 
-Parent owns acceptance of that lane. This document does not treat it as verified package co-load or as a current one-shot runtime proof. It is never part of `npm test` because it consumes provider capacity and ambient authentication.
+Parent owns acceptance of that lane. This document does not treat it as verified package co-load or as a current one-shot runtime proof. It is never part of `bun run test` because it consumes provider capacity and ambient authentication.
 
 Removing only `./extensions/subagents/index.ts` from the package extension list and reloading Pi removes the managed tool, `/subagents`, guidance, managed context/observation hooks, observer publication, and new managed dispatch. It does not delete existing user-owned files beneath `<agent-dir>/subagent-sessions/` or `<agent-dir>/subagent-managed-sessions/`; the user may explicitly remove those roots. Shutdown first drains this instance's known work. The other extensions, parent sessions, repository files, and any user-owned route file remain unchanged. Removing only `subagents-ui` leaves the core tool unchanged.

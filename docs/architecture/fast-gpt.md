@@ -37,5 +37,5 @@ The payload boundary is covered by deterministic unit tests; this extension inte
 ```bash
 node --experimental-strip-types --test tests/fast-gpt.test.ts
 node --experimental-strip-types --test tests/package.test.ts
-npm run typecheck
+bun run typecheck
 ```

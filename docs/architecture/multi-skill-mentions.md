@@ -19,7 +19,7 @@ Input injected by another extension is never transformed, which prevents extensi
 ## Verification
 
 ```bash
-npm run check
+bun run check
 bash scripts/run-temporary-multi-skill-mentions-probe.sh
 bash scripts/run-installed-multi-skill-mentions-probe.sh
 ```

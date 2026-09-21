@@ -95,25 +95,27 @@ Each extension keeps independent behavior, state, tests, and removal semantics w
 
 ## Local Development
 
+Dependencies install with bun from the tracked `bun.lock`; the package scripts keep the node runtime for `typecheck`, `test`, and the e2e lanes.
+
 ```bash
-npm ci --ignore-scripts
-npm run check
+bun install --frozen-lockfile
+bun run check
 ```
 
 Daily Pi should load the local package snapshot at `~/.pi/agent/packages/csheng-pi-extensions`, not this checkout and not `~/.pi/agent/extensions/`. Publish with `mise run publish-local-package`. First-time install is `pi install` of that snapshot after removing the checkout path from user packages. Restart Pi after publishing; `pi update --extensions` does not refresh local-path packages.
 
 Temporary-load and installed-package probes live under `scripts/`. Subagent, herdr-handoff, and workflow probes use RPC or print fixtures without model calls. The small fast-gpt, status-footer, and work-timing boundaries are owned by deterministic unit tests and add no probe commands. The multi-skill mention probes use Pi print mode, cross model/provider preflight, and may make a model call when authentication is available; `PI_OFFLINE=1` disables update traffic but does not disable inference. Run those probes only with explicit provider-call authority.
 
-The six offline probes bind temporary loading or installed-host package discovery to this checkout; installed-host success does not mean the real installed package was updated. `tests/subagents-cc-tui.test.ts` separately exercises the real installed Pi/CC on and compact TUI through a PTY with a synthetic provider and disposable settings, and `npm run e2e:subagents-ui` runs the deliberate installed-Pi fullscreen close-marker click check from `tests/subagents-ui-tui.e2e.ts`. They explicitly skip when their local PTY prerequisites are absent; see [`docs/architecture/subagents-ui.md`](docs/architecture/subagents-ui.md) for the evidence boundary.
+The six offline probes bind temporary loading or installed-host package discovery to this checkout; installed-host success does not mean the real installed package was updated. `tests/subagents-cc-tui.test.ts` separately exercises the real installed Pi/CC on and compact TUI through a PTY with a synthetic provider and disposable settings, and `bun run e2e:subagents-ui` runs the deliberate installed-Pi fullscreen close-marker click check from `tests/subagents-ui-tui.e2e.ts`. They explicitly skip when their local PTY prerequisites are absent; see [`docs/architecture/subagents-ui.md`](docs/architecture/subagents-ui.md) for the evidence boundary.
 
 The opt-in live subagent E2E uses Pi's ambient authentication and is separately authorized. Parent owns acceptance of that lane. This document does not treat it as verified package co-load or as a current one-shot runtime proof:
 
 ```bash
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents -- --installed
 ```
 
-The first command temporary-loads the complete package with ordinary global extensions disabled. The second uses the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `npm test`.
+The first command temporary-loads the complete package with ordinary global extensions disabled. The second uses the globally installed package. Both make real model calls and emit only a bounded summary. Global installation, user route creation, provider calls, and settings changes remain explicit gates and are never performed by `bun run test`.
 
 Maintainers can evaluate an explicitly selected persisted run or an explicit current-epoch scan with `.agents/skills/evaluate-subagent-runs/`. Metric schema version four distinguishes tool wall time, scheduler span, worker effort, occupied interval wall, and overlapping wait reasons while preserving older telemetry meanings and explicit unavailable evidence. Current-epoch filtering accepts schema-three and schema-four one-shot provenance. Legacy counters remain historical `csheng_subagents-only` one-shot totals; they do not describe the registered managed tool. The separate `managedDispatch` section counts v2 owned invocations, refusals, launches, and replay, with explicit excluded/unassigned provenance; historical v1 results never gain inferred ownership or missing revision pairs. The `observations` section consumes owned native ranges, deduplicates replay/inspection and parent/child usage, and reports independently nullable command, capability, reasoning, and compaction evidence. Child costs are not currently forwarded through Pi's top-level tool-result `usage`, so the main footer and `/session` total do not include these child charges; evaluator totals have a separate recorded-evidence scope. Explicit parent disposition can be supplied for one entry range; report/apply never implies acceptance. The extractor remains redacted and does not retain raw model selectors, prompts, task IDs, child output, paths, credentials, epoch identifiers, or external content.
 

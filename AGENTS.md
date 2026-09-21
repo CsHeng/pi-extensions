@@ -73,11 +73,13 @@ This checkout is authored source. Daily Pi must load a copied local Pi package, 
 
 The default managed v3 runtime integrates `git-workspace.ts` and `session-supervisor.ts`. Stable contracts live in `docs/architecture/subagent-execution.md`; bounded implementation/verification evidence lives in the 2026-09-20 handoff. Offline synthetic host/native-child validation is not live-provider effectiveness or deployment evidence. Workflow associates execution evidence with the original contract/attempt/input, waits without polling, and never accepts transport success. Historical inspect/join results cannot acquire a newer attempt or contract basis.
 
+Dependencies install with bun from the tracked `bun.lock`; `bun run` keeps the node runtime for `typecheck`, `test`, and the e2e scripts, so the deterministic lane still exercises node semantics.
+
 Run:
 
 ```bash
-npm ci --ignore-scripts
-npm run check
+bun install --frozen-lockfile
+bun run check
 bash scripts/run-temporary-subagents-probe.sh
 bash scripts/run-installed-subagents-probe.sh
 bash scripts/run-temporary-herdr-handoff-probe.sh
@@ -93,15 +95,15 @@ bash scripts/run-temporary-multi-skill-mentions-probe.sh
 bash scripts/run-installed-multi-skill-mentions-probe.sh
 ```
 
-The live subagent provider lane is separately authorized and never belongs to `npm test`. Parent owns acceptance of that lane; these instructions do not treat it as verified package co-load:
+The live subagent provider lane is separately authorized and never belongs to `bun run test`. Parent owns acceptance of that lane; these instructions do not treat it as verified package co-load:
 
 ```bash
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents
-CSHENG_SUBAGENTS_LIVE_E2E=1 npm run e2e:subagents -- --installed
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents
+CSHENG_SUBAGENTS_LIVE_E2E=1 bun run e2e:subagents -- --installed
 ```
 
-The installed-host observer click check is also deliberate and never belongs to `npm test`; it resolves the installed `pi` binary and skips when that binary or util-linux `script` is unavailable:
+The installed-host observer click check is also deliberate and never belongs to `bun run test`; it resolves the installed `pi` binary and skips when that binary or util-linux `script` is unavailable:
 
 ```bash
-npm run e2e:subagents-ui
+bun run e2e:subagents-ui
 ```
