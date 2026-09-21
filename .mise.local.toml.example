@@ -1,0 +1,5 @@
+# Copy to ignored .mise.local.toml only for a different local layout.
+[env]
+AGENT_ARCHITECTURE_DIR = "/path/to/agent-architecture"
+AGENT_SKILLS_DIR = "/path/to/agent-skills"
+PI_EXTENSIONS_DIR = "/path/to/pi-extensions"

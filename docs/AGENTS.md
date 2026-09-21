@@ -1,16 +1,7 @@
-# Docs Agent Notes
+# Product Documentation
 
-## Truth Boundary
+`docs/architecture/` owns verified extension protocols, product usage and maintenance truth. Keep necessary contracts self-contained with this package.
 
-- `docs/architecture/` contains long-lived product and maintenance truth.
-- `docs/evaluations/` contains bounded retained evidence, not a second architecture owner.
-- `docs/plans/` contains stage artifacts and migration history, not default current truth or runtime input.
-- Historical stage files listed in `contracts/markdown-prose.toml` are immutable prose-format exceptions; preserve their exact bytes unless a separately authorized historical migration supersedes them.
+Shared architecture, integration explanations, designs/plans, deferred questions and evaluation results belong to `$AGENT_ARCHITECTURE_DIR/docs/`. Use `plans/pi-integration/` and `evaluations/pi-integration/` there for this product. Product checks must not require historical files, local stage directories or pinned historical prose.
 
-## Search Policy
-
-- Default stable search: `rg -n "pattern" docs`
-- Explicit stage-history search: `rg --no-ignore -n "pattern" docs/plans`
-- `docs/.ignore` affects search tools, not Git tracking. Keep valuable stage artifacts in Git.
-
-Write stable truth from verified repository behavior. Preserve durable ownership, contracts, failure modes, and operational conditions while leaving approval choreography and one-time migration narration in stage history.
+Honor the external owner's stage/history search policy; search explicitly with `rg --no-ignore` when those records are needed. Search exclusion is not Git exclusion. Retained evidence does not establish runtime behavior beyond its observed source/package and host boundary. Do not copy shared explanation or approval choreography back into product docs.

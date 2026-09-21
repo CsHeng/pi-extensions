@@ -4,7 +4,7 @@
 
 `git-workspace.ts` and `session-supervisor.ts` are the integrated primitives behind `ContinuationService` v3, not a second tool. The [managed execution contract](subagent-execution.md) owns default runtime behavior and legacy inspect/close-only compatibility. This document owns the lower-level Git/supervisor boundaries.
 
-The [verification handoff](../plans/changes/2026-09-20-implementation-verification.md) distinguishes the imported component checkpoint from subsequent full runtime integration. Authored source changes do not update an installed local package snapshot automatically.
+The verification handoff (`$AGENT_ARCHITECTURE_DIR/docs/plans/pi-integration/changes/2026-09-20-implementation-verification.md`) distinguishes the imported component checkpoint from subsequent full runtime integration. Authored source changes do not update an installed local package snapshot automatically.
 
 ## Git boundary
 

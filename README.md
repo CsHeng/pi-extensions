@@ -91,7 +91,7 @@ Each extension keeps independent behavior, state, tests, and removal semantics w
 
 ## Documentation
 
-`docs/architecture/` owns stable extension truth, `docs/evaluations/` retains bounded redacted evidence, and `docs/plans/` retains stage history outside default documentation search. See [`docs/README.md`](docs/README.md) for the search boundary.
+`docs/architecture/` owns self-contained product truth. Shared integration boundaries live at `$AGENT_ARCHITECTURE_DIR/docs/architecture/`; designs/plans and evaluations belong to that owner's `docs/plans/pi-integration/` and `docs/evaluations/pi-integration/`. The local `mise.toml` declares all three source roots; `.mise.local.toml.example` documents overrides. Product checks, loading and publication remain independent of the architecture checkout. See [`docs/README.md`](docs/README.md).
 
 ## Local Development
 

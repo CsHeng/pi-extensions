@@ -23,10 +23,9 @@ The package exposes eight maintained extensions: `multi-skill-mentions` as an ex
 - `scripts/`: redacted temporary-load, installed-package, and explicitly gated live E2E probes, plus the local package snapshot publisher
 - `mise.toml`: `publish-local-package` task for the local Pi package snapshot
 - `docs/architecture/`: stable product and maintenance truth
-- `docs/evaluations/`: bounded retained evidence, not a second truth owner
-- `docs/plans/`: stage artifacts and migration history, not runtime input
-- `docs/.ignore`: default search boundary that excludes stage history without affecting Git tracking
-- `contracts/markdown-prose.toml`: exact immutable prose-format exceptions for retained historical artifacts
+- `$AGENT_ARCHITECTURE_DIR/docs/`: shared boundaries, new designs/plans (including single-product changes), retained evaluation results and integration observations; never runtime input
+- `mise.toml`: source roots `AGENT_ARCHITECTURE_DIR`, `AGENT_SKILLS_DIR`, `PI_EXTENSIONS_DIR`; consumers use these resolved values without guessing checkout layout
+- Product protocols and independent check/install behavior remain here; no architecture checkout is required at runtime
 
 ## Local Package Snapshot
 

@@ -1,3 +1,8 @@
+[env]
+AGENT_ARCHITECTURE_DIR = "{{ config_root | dirname }}/agent-architecture"
+AGENT_SKILLS_DIR = "{{ config_root | dirname }}/agent-skills"
+PI_EXTENSIONS_DIR = "{{ config_root | dirname }}/pi-extensions"
+
 [tasks.publish-local-package]
 description = "Sync package.json, config/, and extensions/ into the local Pi package snapshot"
 run = "bash scripts/publish-local-package.sh"
