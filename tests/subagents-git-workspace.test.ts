@@ -30,6 +30,15 @@ test("dirty tracked, staged, and untracked source is inherited without changing 
 	await assert.rejects(stat(join(w.path, "cache")), { code: "ENOENT" }); await assertParentState(f.repo, before);
 	assert.deepEqual((await freezeGitCandidate(w)).changedPaths, []);
 });
+test("input preserves unstaged deletions and repository components beginning with two dots", async t => {
+	const f = await fixture(t, { "deleted.txt": "old\n", "..state/tracked.ts": "state\n" });
+	await rm(join(f.repo, "deleted.txt")); const before = await parentState(f.repo);
+	const w = await f.worker();
+	await assert.rejects(stat(join(w.path, "deleted.txt")), { code: "ENOENT" });
+	assert.equal(await contents(w.path, "..state/tracked.ts"), "state\n");
+	await assertParentState(f.repo, before);
+	assert.deepEqual((await freezeGitCandidate(w)).changedPaths, []);
+});
 test("unborn repository captures visible input without creating a parent branch", async t => {
 	const f = await fixture(t, { "first.txt": "new\n" }, false); const w = await f.worker();
 	assert.equal(await contents(w.path, "first.txt"), "new\n"); await assert.rejects(git(f.repo, "rev-parse", "--verify", "HEAD"));

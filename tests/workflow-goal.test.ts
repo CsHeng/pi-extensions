@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createGoalStore, canonicalScope, type GoalContext } from "../extensions/workflow/goal-store.ts";
 import { accepted, progressKey } from "../extensions/workflow/goal-state.ts";
 import type { GoalOperation } from "../extensions/workflow/goal-contracts.ts";
-import { createWorkflowStore } from "../extensions/workflow/store.ts";
+import { goalReceipt } from "../extensions/workflow/goal-tool.ts";
 import { goalRows } from "../extensions/workflow/goal-ui.ts";
 
 const enroll: GoalOperation = { operation: "enroll", goal: "Implement goal", delivery: "source only", authority: "explicit user request", requirements: [{ key: "one", outcome: "first", verification: "check" }, { key: "two", outcome: "second", verification: "check" }], tasks: [{ key: "one", title: "First", covers: ["one"] }, { key: "two", title: "Second", covers: ["two"] }] };
@@ -164,31 +164,39 @@ test("persistence is append-before-install, newest corruption fails closed, reco
  replay.replay([...f.snapshots, corrupt]); assert.ok(replay.view().unavailable); assert.equal(replay.current(), undefined);
  const broken = createGoalStore(() => { throw new Error("disk failed"); });
  assert.equal((await broken.mutate(enroll, f.ctx, "enroll")).ok, false); assert.equal(broken.current(), undefined);
- const oldReader = createWorkflowStore({ append() {} }); oldReader.replay(f.snapshots); assert.match(oldReader.recovery()!, /unsupported workflow schema/);
 });
 
-test("legacy fixtures are readable only and migrate preserving requirements without fresh permission", async t => {
- const f = await fixture(t); const snapshots: any[] = [];
- const old = createWorkflowStore({ append(customType, data) { snapshots.push({ type: "custom", customType, data }); } });
- const result = old.apply({ operation: "open", expectedRevision: 0, goal: "Implement goal", deliveryEndpoint: "source only", criteria: [{ key: "a", outcome: "first", verification: "check" }], tasks: [{ key: "t", outcome: "first", covers: ["a"] }] }, f.ctx, "old");
- assert.equal(result.ok, true);
- const verifyLegacy = () => {
-  const reader = createGoalStore(() => {}); reader.replay(snapshots);
-  assert.equal(reader.view().unavailable, undefined); assert.equal(reader.current(), undefined); assert.ok(reader.view().legacy);
- };
- verifyLegacy();
- assert.equal(old.apply({ operation: "start", expectedRevision: old.current()!.revision, taskId: "T-1", basis: { scope: ["one"], fingerprint: "basis", fingerprintState: "current" } }, f.ctx, "old-start").ok, true);
- assert.equal(old.apply({ operation: "record", expectedRevision: old.current()!.revision, attemptId: "AT-1", attempt: { state: "failed", outcome: "missing prerequisite" }, taskDisposition: { disposition: "blocked", reason: "missing", blockClass: "missing_capability", nextUnblockCondition: "restore" } }, f.ctx, "old-blocked").ok, true);
- verifyLegacy(); assert.equal(old.current()!.tasks["T-1"]!.disposition, "blocked");
- assert.equal(old.apply({ operation: "record", expectedRevision: old.current()!.revision, evidence: { provenance: "agent_declared", subject: { kind: "task", id: "T-1" }, checkIdentity: "declared legacy check", fingerprint: "basis", fingerprintState: "current", result: "pass" } }, f.ctx, "old-proof").ok, true);
- assert.equal(old.apply({ operation: "assess", expectedRevision: old.current()!.revision, subject: { kind: "task", id: "T-1" }, verdict: "accepted", evidenceIds: ["EV-1"], rationale: "legacy judgment" }, f.ctx, "old-accepted").ok, true);
- verifyLegacy(); assert.equal(old.current()!.tasks["T-1"]!.disposition, "accepted");
- assert.equal(old.apply({ operation: "close", expectedRevision: old.current()!.revision, outcome: "cancelled", reason: "legacy cancelled" }, f.ctx, "old-close").ok, true);
- verifyLegacy();
- f.store.replay(snapshots); assert.ok(f.store.view().legacy);
- assert.equal((await f.store.mutate(enroll, f.ctx, "implicit")).code, "migration_required");
- assert.equal((await f.store.mutate({ ...enroll, requirements: [enroll.requirements![1]!], migrateLegacy: true }, f.ctx, "dropped")).code, "migration_required");
- await f.run({ ...enroll, migrateLegacy: true }); assert.equal(f.store.current()!.acceptance.length, 0); assert.ok(f.store.current()!.legacy);
+test("unsupported v1 snapshots fail closed without migration, fallback or history writes", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ const before = structuredClone(f.snapshots);
+ // Version rejection precedes payload parsing; neither readable nor corrupt v1 history is upgraded.
+ for (const data of [{ schemaVersion: 1, state: { revision: 1, workset: { goal: "Old goal" } } }, { schemaVersion: 1 }]) {
+  const old = { type: "custom", customType: "csheng-workflow-state", data };
+  const history = [...before, old]; const unchanged = structuredClone(history);
+  f.store.replay(history); f.store.recover("restart");
+  assert.equal(f.store.current(), undefined);
+  assert.match(f.store.view().unavailable!, /only v2 is supported/);
+  assert.match(goalReceipt(f.store.view()), /unavailable/);
+  assert.doesNotMatch(goalReceipt(f.store.view()), /migrateLegacy/);
+  assert.match(goalRows(f.store.view(), 120).join("\n"), /state unavailable/);
+  assert.equal((await f.store.mutate({ operation: "inspect" }, f.ctx, "inspect")).ok, true);
+  assert.equal((await f.store.mutate(enroll, f.ctx, "enroll")).code, "state_unavailable");
+  assert.equal((await f.store.mutate({ operation: "resume", reason: "continue", authority: "existing" }, f.ctx, "resume")).code, "state_unavailable");
+  assert.deepEqual(history, unchanged); assert.deepEqual(f.snapshots, before);
+ }
+ // Navigating to a v2 or empty branch is not an automatic history repair.
+ f.store.replay(before); assert.equal(f.store.current()?.version, 2);
+ f.store.replay([]); await f.run(enroll); assert.equal(f.store.current()?.version, 2);
+});
+
+test("v2 snapshots keep inert historical migration provenance without loading a v1 reader", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ const state = f.store.current()!;
+ state.legacy = { revision: 4, id: "old-workset", goal: "Previous goal" };
+ f.store.replay([{ type: "custom", customType: "csheng-workflow-state", data: { schemaVersion: 2, state } }]);
+ assert.equal(f.store.view().unavailable, undefined); assert.deepEqual(f.store.current()!.legacy, state.legacy);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ assert.deepEqual(f.store.current()!.legacy, state.legacy);
 });
 
 test("async cancellation/input fences and read-only optional UI preserve committed state", async t => {

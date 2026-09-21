@@ -15,7 +15,7 @@ This is a **behavior and ownership map**, not a package introduction or a recomm
 
 | Component | Selected baseline / gate | Evidence boundary |
 | --- | --- | --- |
-| First-party package, nine extensions | `plan-mode` excluded; the other eight not excluded by this package selection | C/S; feature gates and mode still apply |
+| First-party package, eight maintained extensions | None of the maintained extensions excluded by the captured package selection | C/S; feature gates and mode still apply |
 | SoL-Pi | `actionFusion=true`, `observationPack=true`; reducer and online compact false; no project SoL file | C; these are local choices, **all four upstream code defaults are false** |
 | pi-cc-extensions | Selected; `enableWorkingMessage=false` | C/S; other feature gates and TUI mode must be checked individually |
 | pi-mcp-adapter | Selected; package `skills: []` | C; does not disable the extension, servers, or every possible independent Skill source |
@@ -46,8 +46,6 @@ Each row identifies an intervention, its shared target, its activation/side-effe
 
 | ID / owner | Entry point | Changed or observed target | Gate, side effect and composition boundary | Source anchor |
 | --- | --- | --- | --- | --- |
-| F01 plan-mode: tool profile | `/plan`, `/default`, flag, session restoration; `setActiveTools` | Active tool set | Off by package selection. Read-only profile is not an OS sandbox; multiple active-tool writers would compete | `P/plan-mode/index.ts`: `applyPlanTools` |
-| F02 plan-mode: prompt | `before_agent_start` | System-prompt guidance | Only selected plan profile; prose guidance is not mechanical enforcement | `P/plan-mode/index.ts` |
 | F03 multi-skill-mentions: editor | `session_start`, `addAutocompleteProvider` | `$skill` completion chain | TUI only; uses Pi's loaded Skill registry, not independent discovery | `P/multi-skill-mentions/index.ts` |
 | F04 multi-skill-mentions: input | `input` | Expanded input with explicit Skill content | Transformer ordering matters; skips extension-origin input; no separate Skill executor | `P/multi-skill-mentions/index.ts`: `getMentionedSkills` |
 | F05 fast-gpt | command/branch state; `before_provider_request` | Top-level `service_tier` | Changes only supported official Responses correlations after explicit selection; no parent model switch or billing authority | `P/fast-gpt/index.ts` |
@@ -65,7 +63,7 @@ Each row identifies an intervention, its shared target, its activation/side-effe
 | F17 workflow: continuation | `agent_settled`, early-armed public waiter | Conditional follow-up or suspension | Only eligible enrolled work; rechecks idle, queue, trust, alignment and progress after consumers settle; Pi remains loop owner | `P/workflow/{goal-host,settlement}.ts` |
 | F18 workflow: view | `/workflow-ui`, store subscription | Optional read-only TUI projection | No semantic state ownership, no headless UI, no footer/working-message writer | `P/workflow/goal-ui.ts` |
 
-Current v2 workflow behavior comes from `goal-host.ts`; historical v1 modules and stage documents are not the runtime authority. See [workflow](workflow.md), [subagent execution](subagent-execution.md), [subagents UI](subagents-ui.md) and [Herdr handoff](herdr-handoff.md) for their independent contracts.
+Current v2 workflow behavior comes from `goal-host.ts`; v1 runtime modules and migration have been removed, and historical stage documents are not the runtime authority. The former plan-mode extension (F01/F02) is also removed from authored source; the captured configuration's exclusion for it is inert. These source changes do not update a loaded process or installed snapshot. See [workflow](workflow.md), [subagent execution](subagent-execution.md), [subagents UI](subagents-ui.md) and [Herdr handoff](herdr-handoff.md) for their independent contracts.
 
 ### Third-Party and Loose Integrations
 
@@ -111,7 +109,7 @@ sequenceDiagram
     participant D as UI / Status
     U->>P: startup or reload
     P->>P: resolve packages, filters and project trust
-    Note over P,H: Baseline excludes plan-mode and rpiv-todo extensions
+    Note over P,H: Baseline excludes rpiv-todo; plan-mode is retired from source
     P->>H: load extensions, bind mode/UI, session_start
     H->>T: SoL fusion and CC write registrations [H1]
     H->>P: own tools, MCP dynamic registry, web tools, obs_recall

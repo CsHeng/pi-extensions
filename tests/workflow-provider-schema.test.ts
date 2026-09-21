@@ -5,16 +5,15 @@ import { normalizeContext, validateToolArguments, type JsonObject, type Model } 
 import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses";
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createObservationIndex } from "../extensions/workflow/observation.ts";
-import { createWorkflowStore } from "../extensions/workflow/store.ts";
-import { registerWorkflowTool } from "../extensions/workflow/tool.ts";
+import { createGoalStore } from "../extensions/workflow/goal-store.ts";
+import { registerGoalTool } from "../extensions/workflow/goal-tool.ts";
 
 function fixture() {
 	let tool: ToolDefinition | undefined;
 	let writes = 0;
 	let calls = 0;
-	const store = createWorkflowStore({ append() { writes += 1; } });
-	registerWorkflowTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store, createObservationIndex());
+	const store = createGoalStore(() => { writes += 1; });
+	registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store, () => false);
 	assert.ok(tool);
 	const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" } } as ExtensionContext;
 	return {
@@ -62,23 +61,25 @@ for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 	});
 }
 
-test("workflow retains per-operation required fields and rejects mixed fields before mutation", async () => {
+test("workflow rejects retired v1 operations and migration fields before mutation", async () => {
 	const harness = fixture();
-	const open = { operation: "open", expectedRevision: 0, goal: "Fixture", deliveryEndpoint: "source", criteria: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", outcome: "Task", covers: ["c"] }] };
-	await harness.execute(open);
-	assert.equal(harness.store.current()?.revision, 1);
+	const enroll = { operation: "enroll", goal: "Fixture", delivery: "source", authority: "user request", requirements: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }] };
 	for (const args of [
+		{ operation: "open", expectedRevision: 0 },
 		{ operation: "pause", expectedRevision: 1 },
-		{ operation: "resume", expectedRevision: 1, goal: "not a goal amendment" },
 		{ operation: "inspect", expectedRevision: 1 },
-		{ ...open, expectedRevision: 1 },
-		{ operation: "close", expectedRevision: 1, outcome: "cancelled" },
-		{ operation: "start", expectedRevision: 1, taskId: "T-1", reason: "wrong operation field" },
+		{ ...enroll, migrateLegacy: true },
+		{ operation: "start", taskId: "T-1" },
 	]) {
 		await assert.rejects(async () => harness.execute(args), /Validation failed/);
-		assert.equal(harness.store.current()?.revision, 1);
-		assert.equal(harness.writes(), 1);
+		assert.equal(harness.store.current(), undefined);
+		assert.equal(harness.writes(), 0);
 	}
-	await harness.execute({ operation: "pause", expectedRevision: 1, reason: "fixture complete" });
-	assert.equal(harness.store.current()?.workset.disposition, "paused");
+	const missing = await harness.execute({ operation: "enroll", goal: "Incomplete" });
+	assert.equal((missing.details as { ok: boolean }).ok, false);
+	assert.equal(harness.writes(), 0);
+	await harness.execute(enroll);
+	assert.equal(harness.store.current()?.revision, 1);
+	await harness.execute({ operation: "suspend", reason: "fixture complete", condition: "explicit resume" });
+	assert.equal(harness.store.current()?.continuation.state, "suspended");
 });

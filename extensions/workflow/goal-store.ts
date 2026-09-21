@@ -2,13 +2,12 @@ import { dirname, isAbsolute, relative, resolve, basename } from "node:path";
 import { realpath } from "node:fs/promises";
 import { Check } from "typebox/value";
 import { randomUUID } from "node:crypto";
-import { WORKFLOW_ENTRY_TYPE } from "./contracts.ts";
-import { createWorkflowStore, type SessionEntryLike } from "./store.ts";
 import { fingerprintScope, type BasisFingerprint } from "./fingerprints.ts";
 import type { HostObservation } from "./observation.ts";
-import { GoalError, GOAL_LIMITS, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
+import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
 import { accepted, amend, complete, deficits, digest, invalidate, judge, progressKey, validateGoalState, validateGraph } from "./goal-state.ts";
 
+export interface SessionEntryLike { type: string; customType?: string; data?: unknown }
 export interface CheckObservation { host: HostObservation; bases: Record<string, BasisFingerprint>; generation: number; owner: number; checkIdentity?: string }
 export interface GoalContext { cwd: string; now: string; signal?: AbortSignal; sessionId: string; fenced?: () => boolean }
 export interface GoalResult { ok: boolean; code?: string; message?: string; diagnostics: string[]; view: GoalView }
@@ -50,19 +49,18 @@ export const overlaps = (a: string[], b: string[]): boolean => a.some(x => b.som
 
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
- let legacy: GoalView["legacy"];
  let unavailable: string | undefined;
  let owner = 0;
  const listeners = new Set<() => void>();
  const checks = new Map<string, CheckObservation>();
  const notify = () => { for (const listener of listeners) try { listener(); } catch { listeners.delete(listener); } };
- const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(legacy ? { legacy: structuredClone(legacy) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
+ const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
  function commit(next: GoalState, call: string): void {
   next.revision++;
   next.calls = [...next.calls, digest(call)].slice(-GOAL_LIMITS.calls);
   validateGoalState(next);
   append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 2, state: next });
-  state = next; legacy = undefined; owner++; notify();
+  state = next; owner++; notify();
  }
  const writable = () => requireGoal(!unavailable, "state_unavailable", `Workflow unavailable: ${unavailable}. Continue authorized work without claiming contract certification; do not repair history.`);
  async function refresh(next: GoalState, cwd: string): Promise<void> {
@@ -95,17 +93,9 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    if (op.operation === "enroll") {
     requireGoal(!state || state.fulfillment !== "pending", "already_enrolled", "An implementation contract is already enrolled; amend or close it explicitly.");
     requireGoal(op.goal && op.delivery && op.authority && op.requirements?.length, "invalid_contract", "Explicit implementation enrollment requires goal, delivery, existing authority and requirements.");
-    if (legacy) {
-     requireGoal(op.migrateLegacy === true, "migration_required", "Legacy workset is readable only. Explicitly re-enroll the same goal with remaining requirements; old acceptance is not fresh proof.");
-     requireGoal(op.goal === legacy.workset.goal, "migration_required", "Migrate the existing goal before a semantic goal amendment.");
-     for (const c of Object.values(legacy.criteria)) if (c.disposition !== "retired" && c.required) {
-      requireGoal(op.requirements.some(r => r.outcome === c.outcome && r.verification === c.verification && r.required !== false), "migration_required", "Migration must preserve every legacy required criterion; acceptance is reverified.");
-     }
-    }
     next = { version: 2, revision: state?.revision ?? 0, id: randomUUID(), goal: op.goal, delivery: op.delivery, authority: op.authority,
      goalRevision: 1, fulfillment: "pending", continuation: { state: "active", repeat: 0, dispatched: 0 }, input: { generation: 0, aligned: true, unknown: false },
-     requirements: op.requirements.map(r => ({ ...r, revision: 1 })), tasks: (op.tasks ?? op.requirements.map(r => ({ key: r.key, title: r.outcome.slice(0, 80), covers: [r.key] }))).map(t => ({ ...t, revision: 1 })), attempts: [], facts: [], acceptance: [], calls: [], serial: 0,
-     ...(legacy ? { legacy: { id: legacy.workset.id, revision: legacy.revision, goal: legacy.workset.goal } } : {}) };
+     requirements: op.requirements.map(r => ({ ...r, revision: 1 })), tasks: (op.tasks ?? op.requirements.map(r => ({ key: r.key, title: r.outcome.slice(0, 80), covers: [r.key] }))).map(t => ({ ...t, revision: 1 })), attempts: [], facts: [], acceptance: [], calls: [], serial: 0 };
     validateGraph(next);
    } else {
     requireGoal(state, "no_contract", "Enroll an authorized implementation contract first. Ordinary work needs no workflow enrollment.");
@@ -198,17 +188,12 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   current: () => state ? structuredClone(state) : undefined,
   replay(entries: readonly SessionEntryLike[]) {
-   owner++; state = undefined; legacy = undefined; unavailable = undefined; checks.clear();
+   owner++; state = undefined; unavailable = undefined; checks.clear();
    const last = entries.findLast(e => e.type === "custom" && e.customType === WORKFLOW_ENTRY_TYPE);
    if (last) try {
     const snapshot = last.data as { schemaVersion?: number; state?: GoalState };
-    if (snapshot?.schemaVersion === 1) {
-     const reader = createWorkflowStore({ append() { throw new Error("Read-only legacy reader"); } }); reader.replay([last]);
-     requireGoal(!reader.recovery() && reader.current(), "state_unavailable", reader.recovery() ?? "Invalid legacy snapshot."); legacy = structuredClone(reader.current()!);
-    } else {
-     requireGoal(snapshot?.schemaVersion === 2 && snapshot.state, "state_unavailable", "Unsupported latest workflow snapshot; no fallback.");
-     validateGoalState(snapshot.state); state = structuredClone(snapshot.state);
-    }
+    requireGoal(snapshot?.schemaVersion === 2 && snapshot.state, "state_unavailable", "Unsupported latest workflow snapshot; only v2 is supported, with no migration or fallback.");
+    validateGoalState(snapshot.state); state = structuredClone(snapshot.state);
    } catch (error) { unavailable = error instanceof Error ? error.message : String(error); }
    notify();
   },

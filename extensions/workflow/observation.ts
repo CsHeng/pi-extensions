@@ -1,16 +1,9 @@
-/**
- * Host-observed execution facts for workflow evidence (WF-03).
- *
- * The index only ever contains facts that a real tool result reported in this extension
- * instance. It keeps bounded structured summaries, never raw reports, prompts, or file bodies.
- * A referenced handle or observation that is not present here cannot be fabricated by the model.
- */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+/** Bounded host-observed execution summaries; never raw reports, prompts, or file bodies. */
 
 /** Managed executor tool name; kept local so the workflow extension stays independently removable. */
 export const MANAGED_SESSION_TOOL_NAME = "csheng_subagent_sessions";
 
-export const OBSERVATION_LIMITS = Object.freeze({ maxEntries: 256, maxSessions: 10, maxScalar: 128 });
+export const OBSERVATION_LIMITS = Object.freeze({ maxSessions: 10, maxScalar: 128 });
 
 export interface ManagedSessionObservation {
 	handle: string;
@@ -38,22 +31,6 @@ export interface HostObservation {
 	isError: boolean;
 	exitCode?: number | null;
 	managed?: ManagedResultObservation;
-}
-
-export interface ManagedQuery {
-	handle: string;
-	episode: number;
-	action?: string;
-	candidateId?: string;
-}
-
-export interface ObservationIndex {
-	record(observation: HostObservation): void;
-	get(toolCallId: string): HostObservation | undefined;
-	findManaged(query: ManagedQuery): { observation: HostObservation; session: ManagedSessionObservation } | undefined;
-	/** Drop every observation, for example when tree navigation abandons the branch that produced them. */
-	reset(): void;
-	size(): number;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
@@ -109,46 +86,4 @@ export function summarizeHostObservation(event: { toolCallId: string; toolName: 
 		if (managed) observation.managed = managed;
 	}
 	return observation;
-}
-
-export function createObservationIndex(): ObservationIndex {
-	const observations = new Map<string, HostObservation>();
-	return {
-		record(observation) {
-			observations.set(observation.toolCallId, observation);
-			while (observations.size > OBSERVATION_LIMITS.maxEntries) {
-				const oldest = observations.keys().next().value;
-				if (oldest === undefined) break;
-				observations.delete(oldest);
-			}
-		},
-		get: (toolCallId) => observations.get(toolCallId),
-		reset: () => observations.clear(),
-		findManaged(query) {
-			const entries = [...observations.values()].reverse();
-			for (const observation of entries) {
-				if (!observation.managed) continue;
-				if (query.action !== undefined && observation.managed.action !== query.action) continue;
-				for (const session of observation.managed.sessions) {
-					if (session.handle !== query.handle || session.episode !== query.episode) continue;
-					if (query.candidateId !== undefined && session.candidate?.id !== query.candidateId) continue;
-					return { observation, session };
-				}
-			}
-			return undefined;
-		},
-		size: () => observations.size,
-	};
-}
-
-export function registerObservationHooks(pi: ExtensionAPI, index: ObservationIndex): void {
-	pi.on("tool_execution_end", (event, ctx) => {
-		index.record(summarizeHostObservation({
-			toolCallId: event.toolCallId,
-			toolName: event.toolName,
-			isError: event.isError,
-			result: event.result,
-			sessionId: ctx.sessionManager.getSessionId(),
-		}));
-	});
 }

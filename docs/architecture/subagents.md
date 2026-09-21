@@ -22,8 +22,6 @@ Runtime telemetry schema four retains schema-three wall start time, opaque exten
 
 The default guidance is `aggressive`: prefer one flat `csheng_subagent_sessions` create batch when at least two independent bounded repository slices can run concurrently. A singleton remains valid for a required isolated worker or one independent reviewer, not ordinary parent-work offload. A single episode may complete the task; continuation is explicit. Parent owns synthesis, verification, acceptance, apply, and close. File-dependent successors require explicit parent apply between dispatches; dependency edges pass reports, not candidate files. Guidance does not delegate trivial work or parent-owned synthesis, verification, authority, adjudication, repair decisions, continuation, or the final response. A batch must stop before any such parent decision point; later work uses another parent tool call.
 
-`plan-mode` remains independent. Its exact `read`, `grep`, `find`, and `ls` profile excludes the managed subagent tool while plan mode is active.
-
 ## Managed create task contract
 
 `csheng_subagent_sessions` `create` accepts `requestId` and one `tasks` array. A task contains:
@@ -119,8 +117,6 @@ The extension has no background execution, durable orchestration graph, semantic
 
 ```bash
 npm run check
-bash scripts/run-temporary-plan-mode-probe.sh
-bash scripts/run-installed-plan-mode-probe.sh
 bash scripts/run-temporary-herdr-handoff-probe.sh
 bash scripts/run-installed-herdr-handoff-probe.sh
 bash scripts/run-temporary-subagents-probe.sh

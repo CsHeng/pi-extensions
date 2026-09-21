@@ -1,7 +1,9 @@
 /** Version two is a semantic completion contract, not an ordinary todo ledger. */
 import { Type, type Static } from "typebox";
 import type { BasisFingerprint } from "./fingerprints.ts";
-import type { WorksetState } from "./contracts.ts";
+
+export const WORKFLOW_ENTRY_TYPE = "csheng-workflow-state";
+export const WORKFLOW_TOOL_NAME = "csheng_workflow";
 
 const text = (maxLength = 2000) => Type.String({ minLength: 1, maxLength });
 const key = Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });
@@ -22,7 +24,6 @@ export const goalParameters = Type.Object({
  goal: Type.Optional(text()), delivery: Type.Optional(text()), authority: Type.Optional(text()),
  requirements: Type.Optional(Type.Array(requirement, { minItems: 1, maxItems: 32 })),
  tasks: Type.Optional(Type.Array(task, { maxItems: 64 })),
- migrateLegacy: Type.Optional(Type.Boolean()),
  subject: Type.Optional(text(128)), task: Type.Optional(key), scope: Type.Optional(list(text(500))), writes: Type.Optional(list(text(500))),
  attempt: Type.Optional(text(64)), summary: Type.Optional(text()),
  facts: Type.Optional(Type.Array(fact, { maxItems: 32 })), judgments: Type.Optional(Type.Array(judgment, { maxItems: 64 })),
@@ -52,6 +53,7 @@ export interface GoalState {
  continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number; waitingFor?: string[] };
  input: { generation: number; aligned: boolean; unknown: boolean };
  requirements: GoalRequirement[]; tasks: GoalTask[]; attempts: GoalAttempt[]; facts: GoalFact[]; acceptance: GoalAcceptance[];
+ /** Inert provenance retained when reading v2 snapshots created by the retired v1 migrator. */
  legacy?: { revision: number; id: string; goal: string };
  executionPending?: string[];
  calls: string[]; serial: number;
@@ -71,7 +73,7 @@ export const goalStateSchema = Type.Object({
  legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), executionPending: Type.Optional(list(text(128), 256)), calls: Type.Array(text(256), { maxItems: 128 }), serial: integer,
 }, { additionalProperties: false });
 export interface GoalSnapshot { schemaVersion: 2; state: GoalState }
-export interface GoalView { state?: GoalState; legacy?: WorksetState; unavailable?: string; deficits: string[] }
+export interface GoalView { state?: GoalState; unavailable?: string; deficits: string[] }
 export const GOAL_LIMITS = { bytes: 512 * 1024, attempts: 256, facts: 256, calls: 128, noProgress: 2 } as const;
 export class GoalError extends Error {
  readonly code: string;

@@ -63,7 +63,7 @@ test("publisher refuses the source checkout and agent extensions directory", asy
 
 	const agentDir = await makeTempDir(t, "pi-extensions-agent-ext-");
 	const extensionsDir = join(agentDir, "extensions");
-	const nested = runPublisher(["--destination", join(extensionsDir, "plan-mode")], {
+	const nested = runPublisher(["--destination", join(extensionsDir, "nested-package")], {
 		PI_CODING_AGENT_DIR: agentDir,
 	});
 	assert.equal(nested.status, 1, nested.stderr);

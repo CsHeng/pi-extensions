@@ -5,7 +5,6 @@ import { type GoalContext, type GoalStore } from "./goal-store.ts";
 
 export function goalReceipt(view: GoalView): string {
  if (view.unavailable) return `Workflow unavailable: ${view.unavailable.slice(0, 500)}. Continue the authorized task without certifying workflow completion; do not repair session history.`;
- if (view.legacy) return `Legacy v1 workset: ${view.legacy.workset.goal.slice(0, 300)}. Readable only; explicitly enroll with migrateLegacy and preserve remaining requirements. Old acceptance is not fresh proof.`;
  const s = view.state;
  if (!s) return "No implementation contract enrolled. Ordinary work needs no enrollment.";
  const active = s.attempts.filter(a => a.status === "running").map(a => `${a.task}=${a.id}`).join(", ");
@@ -32,7 +31,7 @@ export function registerGoalTool(pi: ExtensionAPI, store: GoalStore, fenced: () 
    const inspection = params.operation === "inspect" ? JSON.stringify(selected ?? (state ? {
     goal: state.goal, delivery: state.delivery, authority: state.authority, requirements: state.requirements, tasks: state.tasks,
     attempts: state.attempts.slice(-8), facts: state.facts.slice(-16), acceptance: state.acceptance,
-   } : result.view.legacy ? { goal: result.view.legacy.workset.goal, criteria: result.view.legacy.criteria, tasks: result.view.legacy.tasks } : {})) : "";
+   } : {})) : "";
    const text = [result.message, goalReceipt(result.view), ...result.diagnostics.slice(0, 16), inspection].filter(Boolean).join("\n");
    return { content: [{ type: "text", text: text.length > 30000 ? `${text.slice(0, 30000)}\n[Inspection bounded; inspect with subject requirement:<key>, task:<key>, attempt ID or fact ID for the omitted record.]` : text }], details: {
     ok: result.ok, ...(result.code ? { code: result.code } : {}), diagnostics: result.diagnostics,

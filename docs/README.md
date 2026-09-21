@@ -4,7 +4,6 @@ This directory contains stable project truth, retained evaluation evidence, and 
 
 ## Stable Truth
 
-- `architecture/plan-mode.md` defines the reversible read-only loop profile and branch-local state contract.
 - `architecture/multi-skill-mentions.md` defines loaded-Skill mention completion and expansion.
 - `architecture/fast-gpt.md` defines the branch-local OpenAI Responses service-tier request profile.
 - `architecture/subagents.md` defines managed-only delegation ownership/routing and the historical one-shot boundary.

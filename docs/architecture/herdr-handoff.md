@@ -16,8 +16,6 @@
 
 Loading the extension registers the tool, `/herdr-handoff` status command, and compact parent guidance. It starts no agent and changes no topology until the parent calls the tool. Dispatch requires `ctx.isProjectTrusted()`, `HERDR_ENV=1`, caller pane/workspace context, and a compatible `herdr` executable. There is no fallback to subagents, another pane manager, or a default agent.
 
-`plan-mode` remains independent and continues to expose only its exact read-only tool set, so `herdr_handoff` is inactive while that profile is selected.
-
 The official `herdr` Skill is optional manual guidance and is not a runtime dependency. Managed Herdr integration hooks remain telemetry-only and outside this repository.
 
 ## Modes and actions

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { WORKFLOW_TOOL_NAME } from "./contracts.ts";
+import { WORKFLOW_TOOL_NAME } from "./goal-contracts.ts";
 import { isUserInputSource } from "./host-adapter.ts";
 
 const WAIT_COMMAND = "csheng-workflow-wait";
