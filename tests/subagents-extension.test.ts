@@ -450,22 +450,39 @@ test("a concurrent duplicate submission returns its receipt without launching an
 	assert.equal(detailsOf(await first).status, "succeeded");
 });
 
-test("managed guidance appears only while the tool is active and guidance is on", async () => {
+test("managed guidance appears only while the tool is active and follows the configured level", async () => {
+	const options = () => ({ systemPromptOptions: { promptGuidelines: [] as string[] } });
 	const state = harness();
 	createSubagentsExtension({
 		loadConfig: async () => ({ config: defaultConfig() }),
 	})(state.pi);
-	const modified = await emitBeforeAgentStart(state);
-	assert.match(modified?.systemPrompt ?? "", /flat csheng_subagent_sessions create batch/);
-	assert.match(modified?.systemPrompt ?? "", /explicit parent apply/);
-	assert.doesNotMatch(modified?.systemPrompt ?? "", /csheng_subagents/);
+	const aggressiveEvent = { systemPrompt: "base", ...options() };
+	assert.equal(await emitBeforeAgentStart(state, aggressiveEvent), undefined);
+	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
+	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("three or more independent files")));
+	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.every((line) => !line.includes("csheng_subagents")));
+	await emitBeforeAgentStart(state, aggressiveEvent);
+	assert.equal(aggressiveEvent.systemPromptOptions.promptGuidelines.length, 2);
+	const balancedState = harness();
+	createSubagentsExtension({
+		loadConfig: async () => ({ config: { ...defaultConfig(), guidance: "balanced" } }),
+	})(balancedState.pi);
+	const balancedEvent = { systemPrompt: "base", ...options() };
+	await emitBeforeAgentStart(balancedState, balancedEvent);
+	assert.ok(balancedEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
+	assert.ok(balancedEvent.systemPromptOptions.promptGuidelines.every((line) => !line.includes("three or more independent files")));
+	const fallback = await emitBeforeAgentStart(state);
+	assert.match(fallback?.systemPrompt ?? "", /flat csheng_subagent_sessions create batch/);
+	assert.match(fallback?.systemPrompt ?? "", /explicit parent apply/);
+	assert.match(fallback?.systemPrompt ?? "", /three or more independent files/);
+	assert.doesNotMatch(fallback?.systemPrompt ?? "", /csheng_subagents/);
 	state.pi.getActiveTools = () => [];
-	assert.equal(await emitBeforeAgentStart(state), undefined);
+	assert.equal(await emitBeforeAgentStart(state, { systemPrompt: "base", ...options() }), undefined);
 	const off = harness();
 	createSubagentsExtension({
 		loadConfig: async () => ({ config: { ...defaultConfig(), guidance: "off" } }),
 	})(off.pi);
-	assert.equal(await emitBeforeAgentStart(off), undefined);
+	assert.equal(await emitBeforeAgentStart(off, { systemPrompt: "base", ...options() }), undefined);
 });
 
 test("session shutdown waits for the aborted run before a later create", async (t) => {

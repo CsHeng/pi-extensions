@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
+import { delegationGuidanceLines } from "./guidance.ts";
 import { SUBAGENT_STATUS_COMMAND } from "./contracts.ts";
 import { createProvenance, type ProvenanceCore } from "./provenance.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
@@ -45,8 +46,16 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 		pi.on("before_agent_start", async (event) => {
 			if (!pi.getActiveTools().includes(SUBAGENT_SESSION_TOOL_NAME)) return;
 			const loaded = await config();
-			if (!loaded.config || loaded.config.guidance === "off") return;
-			return { systemPrompt: `${event.systemPrompt}\n\nUse a flat csheng_subagent_sessions create batch for independent bounded work. A single episode may complete the task; continuation is explicit. Parent owns synthesis, verification, acceptance, apply and close. File-dependent successors require explicit parent apply between dispatches; dependency edges pass reports, not candidate files.` };
+			if (!loaded.config) return;
+			const lines = delegationGuidanceLines(loaded.config.guidance);
+			if (!lines) return;
+			const guidelines = event.systemPromptOptions?.promptGuidelines;
+			if (Array.isArray(guidelines)) {
+				for (const line of lines) if (!guidelines.includes(line)) guidelines.push(line);
+				return;
+			}
+			// Hosts without structured prompt options still receive the same text as one appended block.
+			return { systemPrompt: `${event.systemPrompt}\n\n${lines.join("\n")}` };
 		});
 	};
 }
