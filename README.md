@@ -108,6 +108,13 @@ Temporary-load and installed-package probes live under `scripts/`. Subagent, her
 
 The six offline probes bind temporary loading or installed-host package discovery to this checkout; installed-host success does not mean the real installed package was updated. `tests/subagents-cc-tui.test.ts` separately exercises the real installed Pi/CC on and compact TUI through a PTY with a synthetic provider and disposable settings, and `bun run e2e:subagents-ui` runs the deliberate installed-Pi fullscreen close-marker click check from `tests/subagents-ui-tui.e2e.ts`. They explicitly skip when their local PTY prerequisites are absent; see [`docs/architecture/subagents-ui.md`](docs/architecture/subagents-ui.md) for the evidence boundary.
 
+The delegation probe lane measures whether a parent model calls the subagent tool at all for a frozen prompt set, across the production schema, a derived flat schema, and one external reference shape, at `off`, `balanced`, or `aggressive` guidance. It uses a mock executor in a throwaway project, so it reports a call decision and never child quality, and it is a measurement lane rather than a pass/fail gate. Run it only with explicit provider-call authority; results stay as dated evaluation evidence in `$AGENT_ARCHITECTURE_DIR`:
+
+```bash
+CSHENG_SUBAGENTS_DELEGATION_PROBE=1 bun scripts/run-delegation-probe.ts --dry-run
+CSHENG_SUBAGENTS_DELEGATION_PROBE=1 bun scripts/run-delegation-probe.ts --guidance aggressive,off --trials 6
+```
+
 The opt-in live subagent E2E uses Pi's ambient authentication and is separately authorized. Parent owns acceptance of that lane. This document does not treat it as verified package co-load or as a current one-shot runtime proof:
 
 ```bash

@@ -18,6 +18,7 @@ import { captureGitInput, discardGitWorkspace, retainGitInput, discardGitInput, 
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
 import { MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
+import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
 import type { ProvenanceCore } from "./provenance.ts";
@@ -465,9 +466,9 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	pi.on("agent_end", (event) => { if (event.messages.some(message => message.role === "assistant" && ["aborted", "error"].includes(message.stopReason))) { pendingWake = undefined; service.suppressWake(); } });
 	pi.registerTool({
 		name: SUBAGENT_SESSION_TOOL_NAME, label: "Subagent sessions",
-		description: "Submit bounded session-owned asynchronous tasks; accepted receipts are not completed work. Workers inherit a fixed Git input in an owned linked worktree; initial write regions are advisory. Inspect/join terminal evidence, explicitly apply Git candidates, refresh idle input, cancel, continue or close. Trusted host tools are not an OS sandbox.",
-		promptSnippet: "Submit async explorer/reviewer/worker tasks; join/inspect, refresh, cancel, apply and close explicitly; parent owns acceptance.",
-		promptGuidelines: ["Use a flat batch for independent tasks. A submission receipt means accepted, not completed. Continue useful parent work; join only at a real dependency. No polling loop. Print mode is foreground; mode=foreground is available in interactive/RPC hosts.", "Workers require scope [\".\"]. Git candidates contain actual changes, not only initial writePaths. Refresh input explicitly while idle; continue retains the same input, worktree and native history. No automatic apply, acceptance, retry or recovery.", "Use the exact returned handle/episode/candidateId. Close unneeded records with explicit retain/discard. Legacy records are inspect/close-only. Task cancellation uses runId and taskId; freeze-critical cancellation is too late."],
+		description: SUBAGENT_TOOL_DESCRIPTION,
+		promptSnippet: SUBAGENT_TOOL_PROMPT_SNIPPET,
+		promptGuidelines: [...SUBAGENT_TOOL_PROMPT_GUIDELINES],
 		parameters: SubagentSessionToolSchema,
 		async execute(id, input, signal, onUpdate, ctx) {
 			context = ctx;
