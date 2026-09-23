@@ -88,6 +88,10 @@ bash scripts/run-temporary-workflow-probe.sh
 bash scripts/run-installed-workflow-probe.sh
 ```
 
+`bun run check` now runs `test:fast`, `test:isolated` and `test:host-optional` after typecheck, covering the same source test files as the original glob; `bun run test` remains the full-glob entry. Inventory drift fails the split lanes rather than silently omitting a new test. The optional host group may skip when Pi, CC or PTY support is absent; it does not satisfy required host acceptance. Run `bun run e2e:host-offline` for affected installed-Pi behavior and `bun run e2e:ui-offline` for affected fullscreen/PTY behavior; these require their host prerequisites and reject skipped required tests. See `docs/test-suite-evidence-lanes.md` for costs, boundaries and failure owners. The `installed-*-probe.test.ts` suites use shim Pi and only prove runner behavior.
+
+For changes to installed workflow/co-load behavior, `bun run e2e:installed-offline` is the explicit acceptance lane: it invokes the real installed Pi with a disposable agent directory and synthetic provider, checks tool registration, extension-off behavior, co-load, and a persisted workflow snapshot, then emits a bounded JSON result with fixture identity. It fails rather than skipping when Pi or another prerequisite is absent; run it only in an environment that provides them. The normal `bun run check` does not require installed Pi. This lane does not prove live-model instruction following. Keep focused rule/contract tests for independently specified behavior, not prompt-wording snapshots or version strings copied from docs.
+
 The multi-skill mention probes use Pi print mode and cross model/provider preflight. `PI_OFFLINE=1` does not disable inference, so these probes require explicit provider-call authority and do not belong to the deterministic offline lane:
 
 ```bash

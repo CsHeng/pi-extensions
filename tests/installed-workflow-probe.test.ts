@@ -63,6 +63,7 @@ async function runProbe(t: test.TestContext, script: string, source: string): Pr
 	assert.deepEqual(JSON.parse(result.stdout), {
 		result: "pass",
 		source,
+		...(source === "installed" ? { fixture: "synthetic-workflow" } : {}),
 		tool: 1,
 		source_identity: 1,
 		extension_off_tool: 0,
@@ -71,10 +72,10 @@ async function runProbe(t: test.TestContext, script: string, source: string): Pr
 	});
 }
 
-test("temporary workflow probe validates registration, co-load, and the synthetic snapshot", async (t) => {
+test("temporary workflow runner accepts shim registration and synthetic snapshot responses", async (t) => {
 	await runProbe(t, "run-temporary-workflow-probe.sh", "temporary");
 });
 
-test("installed workflow probe validates the package surface and the synthetic snapshot", async (t) => {
+test("installed workflow runner accepts shim package and synthetic snapshot responses", async (t) => {
 	await runProbe(t, "run-installed-workflow-probe.sh", "installed");
 });

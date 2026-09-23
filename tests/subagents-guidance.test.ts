@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { afterEach, describe, it } from "node:test";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
@@ -45,7 +45,6 @@ describe("child native guidance bridge", () => {
 		assert.ok(guidance.skillPaths.includes(join(agentDir, "skills", "global-guide")));
 		assert.ok(guidance.skillPaths.includes(installed));
 		assert.ok(!guidance.skillPaths.includes(join(agentDir, "skills", "installed-guide")));
-		assert.match(await readFile(join(installed, "SKILL.md"), "utf8"), /installed/);
 		assert.ok(!guidance.readRoots.includes(join(original, ".agents")));
 	});
 	it("snapshot membership survives a mutable parent Skill and missing package never provisions", async () => {

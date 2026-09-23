@@ -183,4 +183,4 @@ snapshot_count=$(jq -s '[.[] | select(.type == "custom" and .customType == "cshe
 goal=$(jq -sr '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | last | .data.state.goal' "${session_file}")
 [[ ${goal} == "Synthetic workflow probe" ]]
 
-jq -cn '{result:"pass",source:"installed",tool:1,source_identity:1,extension_off_tool:0,coload:1,synthetic_snapshots:1}'
+jq -cn '{result:"pass",source:"installed",fixture:"synthetic-workflow",tool:1,source_identity:1,extension_off_tool:0,coload:1,synthetic_snapshots:1}'
