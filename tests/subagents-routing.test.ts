@@ -86,24 +86,25 @@ test("neutral configuration inherits the exact parent route when overrides are o
 	}
 });
 
-test("ordered user candidates preserve authentication, scope, and thinking pins by default", () => {
+test("ordered user candidates skip missing and unauthenticated models without consulting the cycling subset", () => {
 	const config = parseConfig({
 		maxConcurrency: 2,
 		routes: {
 			explorer: {
 				candidates: [
 					{ model: "synthetic/unavailable", thinking: "low" },
+					{ model: "synthetic/deep", thinking: "low" },
 					{ model: "synthetic/fast", thinking: "low" },
 				],
 				maxConcurrency: 2,
 			},
 		},
 	});
-	const result = resolveRoute("explorer", config, context([parent, fast], [{ model: fast, thinkingLevel: "low" }]));
+	const result = resolveRoute("explorer", config, context([parent, fast, deep], [{ model: parent }], new Set([canonical(parent), canonical(fast)])));
 	assert.equal(result.ok, true);
 	if (result.ok) {
 		assert.equal(result.route.model, "fast");
-		assert.equal(result.route.candidateIndex, 1);
+		assert.equal(result.route.candidateIndex, 2);
 		assert.equal(result.route.source, "user-config");
 		assert.equal(result.route.selectionSource, "role-default");
 	}
@@ -413,7 +414,6 @@ test("explicit routing takes one getAll and getAvailable snapshot and never muta
 	const result = resolveRoute("worker", config, {
 		parentModel: parent,
 		parentThinking: "high",
-		scopedModels: [],
 		modelRegistry,
 	}, { model: "synthetic/selected" });
 	assert.equal(result.ok, false);
@@ -443,18 +443,56 @@ test("user overlay owns concurrency without replacing unmentioned packaged route
 	assert.equal(loaded.config?.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
 });
 
-test("omitted overrides retain stable default scope and thinking failure", () => {
+test("all default role routes ignore cycling membership and thinking pins", () => {
+	const config = configuredRoutes([fast, fast, fast]);
+	for (const role of ["explorer", "reviewer", "worker"] as const) {
+		for (const subset of [[{ model: parent }], [{ model: fast, thinkingLevel: "high" }]]) {
+			const result = resolveRoute(role, config, context([parent, fast], subset));
+			assert.equal(result.ok, true);
+			if (result.ok) {
+				assert.equal(result.route.model, "fast");
+				assert.equal(result.route.thinking, "low");
+			}
+		}
+	}
+});
+
+test("parent and semantic-profile routes use all accessible models", () => {
+	const inherited = resolveRoute("worker", defaultConfig(), context([parent, fast], [{ model: fast }]));
+	assert.equal(inherited.ok, true);
+	if (inherited.ok) assert.equal(inherited.route.model, "parent");
 	const config = parseConfig({
-		routes: { reviewer: { candidates: [{ model: "synthetic/fast", thinking: "high" }] } },
+		reasoningProfiles: { deep: "high" },
+		routes: { explorer: {
+			candidates: [{ model: "synthetic/fast", thinking: "low" }],
+			executionProfiles: { deep: { candidates: [{ model: "synthetic/deep", thinking: "medium" }] } },
+		} },
 	});
-	const result = resolveRoute("reviewer", config, context([fast], [{ model: fast, thinkingLevel: "low" }]));
-	assert.deepEqual(result, {
-		ok: false,
-		error: {
-			code: "route_unavailable",
-			message: "No configured reviewer route is available inside the active model scope.",
-		},
+	const profiled = resolveRoute("explorer", config, context([parent, fast, deep], [{ model: parent }]), {
+		executionProfile: "deep", reasoningProfile: "deep",
 	});
+	assert.equal(profiled.ok, true);
+	if (profiled.ok) {
+		assert.equal(profiled.route.model, "deep");
+		assert.equal(profiled.route.thinking, "high");
+	}
+});
+
+test("default routes still reject inaccessible models and unsupported thinking", () => {
+	const config = configuredRoutes([fast, fast, fast]);
+	const unavailable = context([fast], [], new Set<string>());
+	const unsupported = context([{ ...fast, thinkingLevelMap: { low: null } }]);
+	const noReasoning = context([{ ...fast, reasoning: false }]);
+	for (const ctx of [unavailable, unsupported, noReasoning]) {
+		const result = resolveRoute("reviewer", config, ctx);
+		assert.deepEqual(result, {
+			ok: false,
+			error: {
+				code: "route_unavailable",
+				message: "No configured reviewer route has an available model and supported thinking level.",
+			},
+		});
+	}
 });
 
 test("configuration accepts user concurrency and rejects invalid values or unknown fields", () => {

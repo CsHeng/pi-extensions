@@ -16,7 +16,7 @@ export interface RouteModel {
 	thinkingLevelMap?: Partial<Record<string, string | null>>;
 }
 
-/** The public model-registry surface used by routing. */
+/** Full public catalogue and authenticated availability, independent of the UI cycling subset. */
 export interface RouteRegistry {
 	getAll(): readonly RouteModel[];
 	getAvailable(): readonly RouteModel[];
@@ -25,7 +25,6 @@ export interface RouteRegistry {
 export interface RouteContext {
 	parentModel?: RouteModel;
 	parentThinking?: string;
-	scopedModels: readonly { model: RouteModel; thinkingLevel?: string }[];
 	modelRegistry: RouteRegistry;
 }
 
@@ -231,15 +230,9 @@ export function resolveRoute(
 		const model = availableByCanonical.get(canonical);
 		if (!model) continue;
 
-		const scoped = context.scopedModels.length === 0
-			? undefined
-			: context.scopedModels.find((item) => item.model.provider === model.provider && item.model.id === model.id);
-		if (context.scopedModels.length > 0 && !scoped) continue;
-
 		const thinking = profiles.thinking ?? resolveConfiguredThinking(candidate, reasoningThinking, context);
 		if (profiles.thinking !== undefined) exactThinkingCandidateSeen = true;
 		if (!thinking || !supportsThinking(model, thinking)) continue;
-		if (scoped?.thinkingLevel !== undefined && scoped.thinkingLevel !== thinking) continue;
 
 		const reasoningApplied = profiles.thinking === undefined && mappedReasoning !== undefined;
 		const reasoningSource = reasoningApplied && profiles.reasoningProfile !== undefined
@@ -272,7 +265,7 @@ export function resolveRoute(
 		ok: false,
 		error: {
 			code: "route_unavailable",
-			message: `No configured ${role} route is available inside the active model scope.`,
+			message: `No configured ${role} route has an available model and supported thinking level.`,
 		},
 	};
 }

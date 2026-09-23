@@ -15,7 +15,6 @@ function routeContext(ctx: ExtensionContext): RouteContext {
 	return {
 		...(ctx.model === undefined ? {} : { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> }),
 		...(ctx.thinkingLevel === undefined ? {} : { parentThinking: ctx.thinkingLevel }),
-		scopedModels: ctx.scopedModels as RouteContext["scopedModels"],
 		modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"],
 	};
 }

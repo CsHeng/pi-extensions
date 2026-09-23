@@ -196,6 +196,33 @@ test("extension registers only the managed tool and a redacted status command", 
 	assert.doesNotMatch(ctx.notifications[0]?.message ?? "", /\/tmp\/agent/);
 });
 
+test("status and managed create route across all accessible models without reading the cycling subset", async (t) => {
+	const selected = { provider: "synthetic", id: "outside-cycle", reasoning: true };
+	const config = parseConfig({ routes: {
+		explorer: { candidates: [{ model: "synthetic/outside-cycle", thinking: "low" }] },
+	} });
+	let launchedModel: string | undefined;
+	const { state } = await registered(t, {
+		loadConfig: async () => ({ config }),
+		runChild: async (options) => {
+			launchedModel = options.route.model;
+			options.onChildStarted?.();
+			options.onChildSettled?.();
+			return successful(options.task);
+		},
+	});
+	const ctx = context(true, [parentModel, selected]);
+	Object.defineProperty(ctx, "scopedModels", { get() { throw new Error("Cycling models are not a routing boundary"); } });
+	await state.commands.get("subagents").handler("", ctx);
+	assert.match(ctx.notifications[0]?.message ?? "", /explorer=synthetic\/outside-cycle:low/);
+	const result = await state.tool.execute("all-models", {
+		...createInput("all-models", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]),
+		mode: "foreground",
+	}, undefined, undefined, ctx);
+	assert.equal(result.details.status, "succeeded", JSON.stringify(result.details));
+	assert.equal(launchedModel, "outside-cycle");
+});
+
 test("invalid route configuration is reported by status without launching work", async () => {
 	const state = harness();
 	createSubagentsExtension({

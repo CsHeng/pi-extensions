@@ -387,7 +387,7 @@ export class ContinuationService {
 		} finally { if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
 	}
 	private route(task: NormalizedTask, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
-		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), scopedModels: ctx.scopedModels as RouteContext["scopedModels"], modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
+		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
 		const result = resolveRoute(task.role, config, context, task); if (!result.ok) throw new ManagedError(result.error.code); return result.route;
 	}
 	private async episode(handle: string, owner: CurrentOwner, message: string, signal: AbortSignal, lifecycle: ChildLifecycle, telemetry: ManagedRequestTelemetry, observer: ManagedObserver | undefined, enterConvergence: () => boolean): Promise<TaskResult> {
