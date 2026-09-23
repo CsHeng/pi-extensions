@@ -3,7 +3,7 @@ import { lstat, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Text } from "@earendil-works/pi-tui";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
 import { HARD_LIMITS, emptyUsage, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
@@ -11,6 +11,7 @@ import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, Repo
 import { getManagedRole } from "./roles.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
 import { runChild, type ChildRunOptions } from "./runner.ts";
+import { selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, type ManagedRecord } from "./managed-sessions.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
@@ -31,6 +32,7 @@ export interface ContinuationDependencies {
 	store: ManagedSessionStore;
 	loadConfig(): Promise<ConfigLoadResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
+	getParentSkills?(sourceRoot: string): readonly Skill[] | undefined;
 	repositoryHost: RepositoryHost;
 	now(): number;
 	onRun?: (run: ObservedRun) => void;
@@ -154,7 +156,7 @@ export class ContinuationService {
 					if (request.action === "apply" || request.action === "refresh") {
 						if (record.state !== "idle") throw new ManagedError("session_not_idle");
 						if (request.action === "apply") await applyCandidate(store, record, request.candidateId!);
-						else await syncManagedInputs(store, record);
+						else { await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
 					} else {
 						if (record.state === "closed" && record.retained !== (request.disposition !== "discard")) throw new ManagedError("close_disposition_conflict");
 						if (request.disposition === "discard" && record.state !== "closed") {
@@ -271,6 +273,11 @@ export class ContinuationService {
 							}
 							current.episode++; current.state = "queued"; delete current.result; delete current.candidate;
 							current.route = routes[index]!;
+							current.inheritSkills = config.roles[current.task.role].inheritSkills;
+							if (current.projectSkills === undefined) {
+								const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
+								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(owner.repo, parentSkills);
+							}
 							current.dispatch = { ...identity, toolCallId, taskId: tasks[index]!.id };
 							current.requests.push({ id: request.episodes?.[index]?.requestId ?? fingerprint([requestId, current.task.id]), fingerprint: request.episodes?.[index] ? fingerprint([request.episodes[index]!.expectedEpisode, request.episodes[index]!.message]) : digest, episode: current.episode, state: "running", runId: identity.runId, generation: identity.generation });
 							await store.save(current);
@@ -402,11 +409,12 @@ export class ContinuationService {
 				await prepareManagedWorkspace(store, record);
 				const workspaceMs = Math.max(0, this.dependencies.now() - preparationStarted);
 				record.state = "running";
-				record.execution = { startedAtMs: Date.now(), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
+				record.execution = { startedAtMs: Date.now(), ...(record.inheritSkills === undefined ? {} : { inheritSkills: record.inheritSkills }), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
 				operation.execution = record.execution; await store.save(record);
 				const worker = record.task.role === "worker";
+				const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
 				const cwd = join(store.path(handle), "source"); const native = join(store.path(handle), "native.jsonl");
-				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, prompt: message, approveProject: true, signal, managedProcessGroup: true,
+				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, sourceRoot: owner.repo, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL(worker ? "./worker-tools.ts" : "./child-capability-guard.ts", import.meta.url)),
 					...(worker ? { managedWorkerScratch: join(store.path(handle), "scratch"), managedWorkerInputs: record.workspace!.inputs } : {}),
 					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], ...(worker ? { writeRoot: true } : {}) },

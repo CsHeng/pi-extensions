@@ -508,6 +508,13 @@ test("configuration accepts user concurrency and rejects invalid values or unkno
 	assert.equal(config.routes.explorer.maxConcurrency, 5);
 	assert.equal(config.routes.reviewer.maxConcurrency, 3);
 	assert.equal(config.routes.worker.maxConcurrency, 4);
+	assert.deepEqual(Object.values(config.roles).map(role => role.inheritSkills), [true, true, true]);
+	const overlay = parseConfig({ roles: { reviewer: { inheritSkills: false } } }, { base: config });
+	assert.deepEqual(Object.values(overlay.roles).map(role => role.inheritSkills), [true, false, true]);
+	assert.deepEqual(Object.values(config.roles).map(role => role.inheritSkills), [true, true, true]);
+	assert.throws(() => parseConfig({ roles: { reviewer: { inheritSkills: "false" } } }), /must be a boolean/);
+	assert.throws(() => parseConfig({ roles: { observer: { inheritSkills: false } } }), /unsupported fields/);
+	assert.throws(() => parseConfig({ roles: { reviewer: { context: false } } }), /unsupported fields/);
 	assert.throws(() => parseConfig({ maxConcurrency: 0 }), /positive safe integer/);
 	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 1.5 } } }), /positive safe integer/);
 	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: Number.MAX_SAFE_INTEGER + 1 } } }), /positive safe integer/);

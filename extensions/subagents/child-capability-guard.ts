@@ -22,6 +22,11 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	let fatalReason = loaded.error;
 	registerObservationHooks(pi, { child: true, capabilityKey: loaded.manifest ? createHash("sha256").update(JSON.stringify(loaded.manifest)).digest("hex") : null });
 	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
+	if (loaded.manifest?.guidance) pi.on("before_agent_start", event => {
+		// The original project's ancestor chain replaces managed-storage ancestors; the
+		// snapshot file is already selected by the native loader's override precedence.
+		event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
+	});
 
 	pi.on("tool_call", async (event) => {
 		if (!loaded.manifest || fatalReason) {

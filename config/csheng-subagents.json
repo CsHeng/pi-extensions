@@ -1,6 +1,11 @@
 {
   "guidance": "aggressive",
   "maxConcurrency": 10,
+  "roles": {
+    "explorer": { "inheritSkills": true },
+    "reviewer": { "inheritSkills": true },
+    "worker": { "inheritSkills": true }
+  },
   "reasoningProfiles": {
     "light": "low",
     "standard": "medium",

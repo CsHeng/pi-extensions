@@ -59,7 +59,22 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					}
 				}
 				const input = last?.role === "user" ? JSON.stringify(last.content) : "";
-				if (text !== "SYNTHETIC_SUMMARY" && input.includes("parent-observation-fixture")) {
+				if (JSON.stringify(context.messages).includes("guidance-worker-fixture") || JSON.stringify(context.messages).includes("guidance-fixture")) {
+					const worker = JSON.stringify(context.messages).includes("guidance-worker-fixture");
+					const system = getCurrentSystemPrompt(context.messages);
+					const guide = process.env.CSHENG_GUIDANCE_EXPECT_PATH ?? "";
+					const results = context.messages.filter(item => item.role === "toolResult");
+					if (guide && system.includes(guide) && results.length < 2) {
+						message.content = [{ type: "toolCall", id: `guidance-${results.length}`, name: "read", arguments: { path: results.length === 0 ? guide : guide.replace(/SKILL\.md$/, "references/rule.md") } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					if (worker && results.length === 2 && JSON.stringify(results).includes("export const answer = 42;")) {
+						message.content = [{ type: "toolCall", id: "guidance-candidate", name: "bash", arguments: { command: "printf 'export const answer = 42;\\n' > candidate.ts" } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					message.content = [{ type: "text", text: `catalog=${guide && system.includes(guide) ? 1 : 0};ancestor=${system.includes("ancestor context") ? 1 : 0};snapshot=${system.includes("snapshot override") ? 1 : 0};managed=${system.includes("unrelated managed context") ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes("reference marker") ? 1 : 0};forbidden=${system.includes(process.env.CSHENG_GUIDANCE_FORBIDDEN_PATH ?? "<no-forbidden-path>") ? 1 : 0}` }];
+				}
+				else if (text !== "SYNTHETIC_SUMMARY" && input.includes("parent-observation-fixture")) {
 					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "csheng_subagent_sessions").at(-1);
 					const priorText = prior?.role === "toolResult" ? prior.content.find((part) => part.type === "text") : undefined;
 					const view = priorText?.type === "text" ? JSON.parse(priorText.text).sessions[0] : undefined;

@@ -5,7 +5,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadSkills, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
+import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
 import { ContinuationService } from "../extensions/subagents/continuation.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { validateGraphStructure } from "../extensions/subagents/graph.ts";
@@ -16,20 +17,20 @@ import type { ChildRunOptions } from "../extensions/subagents/runner.ts";
 import type { SubagentExecutionEvent } from "../extensions/shared/subagent-execution.ts";
 const git = promisify(execFile);
 function gate() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
-async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) => Promise<void>, concurrency = 2) {
+async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) => Promise<void>, concurrency = 2, getParentSkills?: (sourceRoot: string) => readonly Skill[] | undefined) {
 	const base = await mkdtemp(join(tmpdir(), "subagent-v3-")); const repo = join(base, "repo"); await mkdir(repo);
 	await git("git", ["init", "-q", repo]); await writeFile(join(repo, "base.txt"), "dirty parent\n");
 	const model = { provider: "fixture", id: "fixture", reasoning: false };
 	const ctx = { mode: "tui", cwd: repo, isProjectTrusted: () => true, model, thinkingLevel: "off", scopedModels: [], modelRegistry: { getAll: () => [model], getAvailable: () => [model] }, sessionManager: { getSessionId: () => "parent", getLeafId: () => "anchor", getBranch: () => [{ id: "anchor" }] } } as unknown as ExtensionContext;
 	const store = new ManagedSessionStore(base); const events: SubagentExecutionEvent[] = []; const wakes: SubagentExecutionEvent[] = [];
 	const config = defaultConfig(); config.maxConcurrency = concurrency;
-	const service = new ContinuationService({ store, loadConfig: async () => ({ config }), onExecution: event => { events.push(event); }, onWake: values => { wakes.push(...values); }, runChild: async options => {
+	const service = new ContinuationService({ store, loadConfig: async () => ({ config }), ...(getParentSkills ? { getParentSkills } : {}), onExecution: event => { events.push(event); }, onWake: values => { wakes.push(...values); }, runChild: async options => {
 		options.onChildStarted?.();
 		try { await runner(options); } finally { options.onChildSettled?.(); }
 		return { id: options.task.id, role: options.task.role, status: "succeeded", output: "report", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applied", reportComplete: true, workerToolsSettled: true } satisfies TaskResult;
 	} });
 	t.after(async () => { await service.shutdown(); for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await rm(base, { recursive: true, force: true }); });
-	return { repo, ctx, store, service, events, wakes };
+	return { repo, ctx, store, service, events, wakes, config };
 }
 const task = (id: string) => ({ id, role: "worker" as const, objective: "change source", scope: ["."], writePaths: [] });
 
@@ -75,6 +76,69 @@ test("shared capacity fixes queued input before receipt and cancellation of a qu
 	await writeFile(join(f.repo, "base.txt"), "changed after cancelled admission\n");
 	const resumed = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "resume", message: "continue pinned input" }] }, f.ctx);
 	assert.equal(resumed.status, "succeeded", JSON.stringify(resumed)); assert.equal(launched, 2);
+});
+
+test("queued episodes keep the accepted role Skill setting despite a later config edit", async t => {
+	const hold = gate(); const started = gate(); const settings: Array<{ id: string; inheritSkills: boolean | undefined }> = [];
+	t.after(() => hold.release());
+	const f = await fixture(t, async options => {
+		settings.push({ id: options.task.id, inheritSkills: options.inheritSkills });
+		if (options.task.id === "one") { started.release(); await hold.promise; }
+	}, 1);
+	const first = await f.service.execute({ action: "create", requestId: "skills-one", tasks: [task("one")] }, f.ctx);
+	await started.promise;
+	const second = await f.service.execute({ action: "create", requestId: "skills-two", tasks: [task("two")] }, f.ctx);
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	assert.equal((await f.store.load(second.sessions[0]!.handle, owner)).inheritSkills, true);
+	f.config.roles.worker.inheritSkills = false;
+	hold.release();
+	const joined = await f.service.execute({ action: "join", runId: second.runId }, f.ctx);
+	assert.equal(joined.status, "succeeded", JSON.stringify(joined));
+	assert.deepEqual(settings, [{ id: "one", inheritSkills: true }, { id: "two", inheritSkills: true }]);
+	assert.equal(joined.sessions[0]?.execution?.inheritSkills, true);
+	await f.service.execute({ action: "join", runId: first.runId }, f.ctx);
+	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "skills-next", message: "next" }] }, f.ctx);
+	assert.equal(continued.status, "succeeded", JSON.stringify(continued));
+	assert.equal(settings.at(-1)?.inheritSkills, false);
+	assert.equal(continued.sessions[0]?.execution?.inheritSkills, false);
+});
+
+test("parent catalog reload cannot remove a Skill from fixed child input before refresh", async t => {
+	let f!: Awaited<ReturnType<typeof fixture>>;
+	let parent: Skill[] = [];
+	const selected: string[][] = [];
+	f = await fixture(t, async options => {
+		const guidance = await prepareChildGuidance(f.repo, options.cwd, true, join(f.repo, "empty-agent"), join(f.repo, "empty-home"), options.parentSkills, options.projectSkills);
+		selected.push(guidance.skillPaths);
+	}, 2, () => parent);
+	const skill = join(f.repo, ".agents", "skills", "guide"); await mkdir(skill, { recursive: true });
+	await writeFile(join(skill, "SKILL.md"), "---\nname: guide\ndescription: Captured project guide.\n---\n# Guide\n");
+	await writeFile(join(f.repo, ".gitignore"), ".agents/skills/private-*/\n");
+	const privateSkill = join(f.repo, ".agents", "skills", "private-old"); await mkdir(privateSkill);
+	await writeFile(join(privateSkill, "SKILL.md"), "---\nname: private-old\ndescription: Ignored private guidance.\n---\n# Private\n");
+	const readParent = () => loadSkills({ cwd: f.repo, agentDir: join(f.repo, "empty-agent"), includeDefaults: false, skillPaths: [join(f.repo, ".agents", "skills")] }).skills.map(value => ({ ...value, sourceInfo: { ...value.sourceInfo, scope: "project" as const } }));
+	parent = readParent();
+	const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "fixed-guide", tasks: [task("one")] }, f.ctx);
+	assert.equal(first.status, "succeeded", JSON.stringify(first));
+	const handle = first.sessions[0]!.handle;
+	const captured = join(f.store.path(handle), "source", ".agents", "skills", "guide");
+	assert.deepEqual(selected[0], [captured, privateSkill]);
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	assert.deepEqual((await f.store.load(handle, owner)).projectSkills?.map(value => value.name), ["guide"]);
+	await rm(join(skill, "SKILL.md")); await rm(privateSkill, { recursive: true }); parent = readParent();
+	const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, requestId: "without-refresh", message: "same input" }] }, f.ctx);
+	assert.equal(second.status, "succeeded", JSON.stringify(second));
+	assert.deepEqual(selected[1], [captured], "current parent catalog must not erase the fixed snapshot Skill or retain removed private guidance");
+	const privateNew = join(f.repo, ".agents", "skills", "private-new"); await mkdir(privateNew);
+	await writeFile(join(privateNew, "SKILL.md"), "---\nname: private-new\ndescription: New ignored private guidance.\n---\n# Private\n");
+	parent = readParent();
+	const third = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, requestId: "private-added", message: "same input" }] }, f.ctx);
+	assert.equal(third.status, "succeeded", JSON.stringify(third));
+	assert.deepEqual(selected[2], [captured, privateNew], "new private guidance follows the current parent catalog without refresh");
+	assert.equal((await f.service.execute({ action: "refresh", handle, expectedEpisode: 3 }, f.ctx)).status, "succeeded");
+	const fourth = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 3, requestId: "after-refresh", message: "new input" }] }, f.ctx);
+	assert.equal(fourth.status, "succeeded", JSON.stringify(fourth));
+	assert.deepEqual(selected[3], [privateNew]);
 });
 
 test("continuation reserves the freshly locked record after a concurrent explicit refresh", async t => {

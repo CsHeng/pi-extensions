@@ -48,6 +48,7 @@ export interface EffectiveSubagentConfig {
 	guidance: DelegationGuidance;
 	maxConcurrency: number;
 	routes: Record<RoleName, RoleRouteConfig>;
+	roles: Record<RoleName, { inheritSkills: boolean }>;
 	reasoningProfiles: Partial<Record<ReasoningProfile, ConfiguredThinking>>;
 	reasoningProfileSources: Partial<Record<ReasoningProfile, RouteSource>>;
 }
@@ -81,6 +82,7 @@ export function defaultConfig(): EffectiveSubagentConfig {
 	return {
 		guidance: "aggressive",
 		maxConcurrency: DEFAULT_GLOBAL_CONCURRENCY,
+		roles: { explorer: { inheritSkills: true }, reviewer: { inheritSkills: true }, worker: { inheritSkills: true } },
 		routes: {
 			explorer: neutralRoute("explorer"),
 			reviewer: neutralRoute("reviewer"),
@@ -95,6 +97,7 @@ function cloneConfig(config: EffectiveSubagentConfig): EffectiveSubagentConfig {
 	return {
 		guidance: config.guidance,
 		maxConcurrency: config.maxConcurrency,
+		roles: Object.fromEntries(ROLE_NAMES.map(role => [role, { ...config.roles[role] }])) as EffectiveSubagentConfig["roles"],
 		routes: Object.fromEntries(ROLE_NAMES.map((role) => [role, {
 			...config.routes[role],
 			candidates: config.routes[role].candidates.map((candidate) => ({ ...candidate })),
@@ -191,7 +194,7 @@ function parseRoute(value: unknown, role: RoleName, source: RouteSource, base: R
 
 export function parseConfig(value: unknown, options: ParseOptions = {}): EffectiveSubagentConfig {
 	if (!isRecord(value)) throw new Error("route configuration must be an object");
-	assertKnownKeys(value, ["guidance", "maxConcurrency", "routes", "reasoningProfiles"], "configuration");
+	assertKnownKeys(value, ["guidance", "maxConcurrency", "routes", "roles", "reasoningProfiles"], "configuration");
 	const source = options.source ?? "user-config";
 	const base = cloneConfig(options.base ?? defaultConfig());
 	if (value.guidance !== undefined) {
@@ -210,6 +213,18 @@ export function parseConfig(value: unknown, options: ParseOptions = {}): Effecti
 			if (value.reasoningProfiles[profile] === undefined) continue;
 			base.reasoningProfiles[profile] = parseThinking(value.reasoningProfiles[profile], `reasoningProfiles.${profile}`);
 			base.reasoningProfileSources[profile] = source;
+		}
+	}
+	if (value.roles !== undefined) {
+		if (!isRecord(value.roles)) throw new Error("roles must be an object");
+		assertKnownKeys(value.roles, ROLE_NAMES, "roles");
+		for (const role of ROLE_NAMES) {
+			const entry = value.roles[role];
+			if (entry === undefined) continue;
+			if (!isRecord(entry)) throw new Error(`roles.${role} must be an object`);
+			assertKnownKeys(entry, ["inheritSkills"], `roles.${role}`);
+			if (typeof entry.inheritSkills !== "boolean") throw new Error(`roles.${role}.inheritSkills must be a boolean`);
+			base.roles[role] = { inheritSkills: entry.inheritSkills };
 		}
 	}
 	if (value.routes !== undefined) {

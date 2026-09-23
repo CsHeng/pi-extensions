@@ -93,7 +93,7 @@ function normalizedCapability(manifest: ChildCapabilityManifest): NormalizedChil
 }
 
 const MANIFEST_V1_KEYS = new Set(["version", "root", "role", "readRoots", "writePaths"]);
-const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "writeRoot"]);
+const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "writeRoot", "guidance"]);
 
 function assertExactManifestKeys(value: Record<string, unknown>, version: unknown): void {
 	const allowed = version === CHILD_CAPABILITY_MANIFEST_V1 ? MANIFEST_V1_KEYS : MANIFEST_V2_KEYS;
@@ -133,6 +133,15 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	if (value.writeRoot !== undefined && (value.writeRoot !== true || value.version !== 2 || value.role !== "worker")) throw new Error("invalid source-root write capability");
 	const externalReadRoots = parseExternalReadRoots(value, value.version);
 	assertExactManifestKeys(value, value.version);
+	let guidance: NormalizedChildCapability["guidance"];
+	if (value.guidance !== undefined) {
+		if (value.version !== 2 || !isRecord(value.guidance) || Object.keys(value.guidance).some(key => !["contextFiles", "readRoots", "physicalRoots"].includes(key)) || !isStringArray(value.guidance.readRoots) || !isStringArray(value.guidance.physicalRoots) || !Array.isArray(value.guidance.contextFiles) || !value.guidance.contextFiles.every(file => isRecord(file) && Object.keys(file).every(key => ["path", "content"].includes(key)) && typeof file.path === "string" && typeof file.content === "string")) throw new Error("invalid guidance capability");
+		const roots = value.guidance.readRoots as string[];
+		const physical = value.guidance.physicalRoots as string[];
+		const files = value.guidance.contextFiles as Array<{ path: string; content: string }>;
+		if (roots.length !== physical.length || roots.some(path => !isAbsolute(path) || resolve(path) !== path) || physical.some(path => !isAbsolute(path) || resolve(path) !== path) || files.some(file => !isAbsolute(file.path) || resolve(file.path) !== file.path || !roots.includes(file.path))) throw new Error("invalid guidance paths");
+		guidance = { readRoots: roots, physicalRoots: physical, contextFiles: files };
+	}
 	if (!isAbsolute(value.root) || value.readRoots.some((entry) => !isAbsolute(entry)) || value.writePaths.some((entry) => !isAbsolute(entry))) {
 		throw new Error("capability manifest paths must be absolute");
 	}
@@ -148,7 +157,7 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	if (value.role === "worker" && externalReadRoots.length > 0) {
 		throw new Error("worker capability cannot contain external read roots");
 	}
-	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(value.writeRoot === true ? { writeRoot: true } : {}) };
+	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(guidance ? { guidance } : {}), ...(value.writeRoot === true ? { writeRoot: true } : {}) };
 }
 
 export async function assertCanonicalExternalRoots(manifest: NormalizedChildCapability): Promise<void> {
@@ -215,10 +224,11 @@ async function authorizeRead(
 	target: string,
 	lexicalRoots: readonly string[],
 	confineToChildRoot: boolean,
+	pinnedPhysical?: readonly string[],
 ): Promise<PathDecision> {
 	const existing = await nearestExisting(target);
 	const physicalExisting = await realpath(existing);
-	const allowedPhysical = await physicalRoots(lexicalRoots);
+	const allowedPhysical = pinnedPhysical ?? await physicalRoots(lexicalRoots);
 	if (confineToChildRoot) {
 		const physicalRoot = await realpath(capability.root);
 		if (!contains(physicalRoot, physicalExisting)) return { allowed: false, reason: "Path resolves outside the child root." };
@@ -238,6 +248,20 @@ async function authorizeRead(
 		return { allowed: false, reason: "Path resolves outside the declared read scope." };
 	}
 	return { allowed: true, resolvedPath: target };
+}
+
+async function selectedGuidanceRoots(capability: NormalizedChildCapability, target: string): Promise<{ paths: string[]; physical: string[] } | undefined> {
+	const guidance = capability.guidance;
+	if (!guidance) return undefined;
+	const paths: string[] = [], physical: string[] = [];
+	for (let index = 0; index < guidance.readRoots.length; index++) {
+		const root = guidance.readRoots[index]!;
+		if (!contains(root, target)) continue;
+		const pinned = guidance.physicalRoots[index]!;
+		if (await realpath(root) !== pinned) throw new Error("guidance owner changed");
+		paths.push(root); physical.push(pinned);
+	}
+	return paths.length ? { paths, physical } : undefined;
 }
 
 export async function authorizePath(
@@ -282,10 +306,10 @@ export async function authorizePath(
 		if (!isAbsolute(requestedPath)) {
 			const target = resolve(capability.root, requestedPath);
 			if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
-			if (!capability.readRoots.some((root) => contains(root, target))) {
-				return { allowed: false, reason: "Path is outside the declared read scope." };
-			}
-			return await authorizeRead(capability, toolName, target, capability.readRoots, true);
+			if (capability.readRoots.some((root) => contains(root, target))) return await authorizeRead(capability, toolName, target, capability.readRoots, true);
+			const guidanceRoots = await selectedGuidanceRoots(capability, target);
+			if (guidanceRoots) return await authorizeRead(capability, toolName, target, guidanceRoots.paths, false, guidanceRoots.physical);
+			return { allowed: false, reason: "Path is outside the declared read scope." };
 		}
 
 		const target = resolve(requestedPath);
@@ -294,6 +318,8 @@ export async function authorizePath(
 			if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
 			return await authorizeRead(capability, toolName, target, internalRoots, true);
 		}
+		const guidanceRoots = await selectedGuidanceRoots(capability, target);
+		if (guidanceRoots) return await authorizeRead(capability, toolName, target, guidanceRoots.paths, false, guidanceRoots.physical);
 		const externalRoots = capability.externalReadRoots.filter((root) => contains(root, target));
 		if (externalRoots.length === 0) return { allowed: false, reason: "Path is outside the declared read scope." };
 		return await authorizeRead(capability, toolName, target, externalRoots, false);

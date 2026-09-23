@@ -437,9 +437,9 @@ test("create cancellation with queued tasks has an exact inert terminal replay",
 
 test("episode provenance and actual route survive config changes and fresh replay envelopes", async (t) => {
 	const f = await serviceFixture(t);
-	let epoch = "config-one", reads = 0;
+	let epoch = "config-one", reads = 0, inheritSkills = true;
 	const service = new ContinuationService({ ...f.dependencies,
-		loadConfig: async () => { reads++; return { config: defaultConfig(), source: { packageBytes: Buffer.from("fixture") } }; },
+		loadConfig: async () => { reads++; const config = defaultConfig(); config.roles.worker.inheritSkills = inheritSkills; return { config, source: { packageBytes: Buffer.from("fixture") } }; },
 		provenance: {
 			observeExtension: async () => ({ available: true, extensionEpoch: "extension", configurationEpoch: epoch }),
 			observeConfiguration: async () => ({ available: true, extensionEpoch: "extension", configurationEpoch: epoch }),
@@ -450,8 +450,9 @@ test("episode provenance and actual route survive config changes and fresh repla
 	assert.equal(first.requestTelemetry?.configurationEpoch, "config-one");
 	assert.equal(first.requestTelemetry?.launchedChildren, 1);
 	assert.deepEqual(first.sessions[0]?.execution?.provenance, { available: true, extensionEpoch: "extension", configurationEpoch: "config-one" });
+	assert.equal(first.sessions[0]?.execution?.inheritSkills, true);
 	assert.ok(first.sessions[0]?.route?.model);
-	epoch = "config-two";
+	epoch = "config-two"; inheritSkills = false;
 	const replay = await service.execute(createWorker, f.ctx);
 	assertReplay(replay, first);
 	assert.equal(reads, 1);
@@ -460,6 +461,7 @@ test("episode provenance and actual route survive config changes and fresh repla
 	assert.equal(next.status, "succeeded");
 	assert.equal(next.requestTelemetry?.configurationEpoch, "config-two");
 	assert.deepEqual(next.sessions[0]?.execution?.provenance, { available: true, extensionEpoch: "extension", configurationEpoch: "config-two" });
+	assert.equal(next.sessions[0]?.execution?.inheritSkills, false);
 	const historical = await service.execute(createWorker, f.ctx);
 	assertReplay(historical, first);
 	assert.equal(reads, 2);

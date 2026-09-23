@@ -88,6 +88,7 @@ export interface CandidateRef {
 }
 export interface EpisodeExecution {
 	startedAtMs: number;
+	inheritSkills?: boolean;
 	provenance: ProvenanceTelemetry;
 }
 export interface ManagedRequestTelemetry {

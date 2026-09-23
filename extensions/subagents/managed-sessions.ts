@@ -9,6 +9,7 @@ import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
 import { boundNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
 import type { SavedWorkspace } from "./candidates.ts";
+import type { CapturedProjectSkill } from "./guidance-resources.ts";
 import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS, type ManagedStorageWarning, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
 function withoutObservation(result: TaskResult): TaskResult {
@@ -25,6 +26,10 @@ export interface ManagedRecord {
 	episode: number;
 	nativeLeaf: string | null;
 	route?: EffectiveRoute;
+	/** Captured at episode acceptance; absent on older v3 records. */
+	inheritSkills?: boolean;
+	/** Effective project catalog captured with the fixed source input; absent on old v3 records. */
+	projectSkills?: CapturedProjectSkill[];
 	result?: TaskResult;
 	candidate?: CandidateRef;
 	retained?: boolean;
@@ -69,7 +74,7 @@ const candidateSchema = Type.Object({ id: identity, episode: Type.Integer({ mini
 	git: Type.Optional(gitCandidateSchema),
 }, { additionalProperties: false });
 const storageVersion = Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)]);
-const executionSchema = Type.Object({ startedAtMs: Type.Number({ minimum: 0 }), provenance: Type.Union([
+const executionSchema = Type.Object({ startedAtMs: Type.Number({ minimum: 0 }), inheritSkills: Type.Optional(Type.Boolean()), provenance: Type.Union([
 	Type.Object({ available: Type.Literal(false) }, { additionalProperties: false }),
 	Type.Object({ available: Type.Literal(true), extensionEpoch: identity, configurationEpoch: identity }, { additionalProperties: false }),
 ]) }, { additionalProperties: false });
@@ -81,7 +86,9 @@ const recordSchema = Type.Object({
 	task: SubagentTaskSchema, state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
 	dispatch: Type.Optional(Type.Object({ runId: identity, generation: identity, toolCallId: Type.String({ maxLength: 256 }), taskId: Type.String({ maxLength: 128 }) }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([identity, Type.Null()]),
-	route: Type.Optional(Type.Object({})), result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()),
+	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
+	projectSkills: Type.Optional(Type.Array(Type.Object({ path: Type.String({ maxLength: 4096 }), name: Type.String({ maxLength: 128 }) }, { additionalProperties: false }), { maxItems: 1024 })),
+	result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()),
 	candidate: Type.Optional(candidateSchema),
 	input: Type.Optional(Type.Object({ commit: gitOid, tree: gitOid }, { additionalProperties: false })),
 	inputRef: Type.Optional(Type.String({ pattern: "^refs/csheng/subagents/inputs/session_[a-f0-9-]{36}$" })),

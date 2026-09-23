@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import type { Skill } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
 import { existsSync } from "node:fs";
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
 	CHILD_CAPABILITY_ENV,
@@ -33,6 +34,7 @@ import type { RoleDefinition } from "./roles.ts";
 import { workerGitEnvironment, type WorkerInputState } from "./worker-inputs.ts";
 import { boundNativeObservation, collectNativeObservation, nativeLeaf, unavailableObservation } from "./observability.ts";
 import { MANAGED_LIMITS } from "./session-contracts.ts";
+import { prepareChildGuidance, type CapturedProjectSkill } from "./guidance-resources.ts";
 
 async function readObservationNative(file: string): Promise<string | undefined> {
 	try {
@@ -53,6 +55,11 @@ type StopCause = "aborted" | "timeout" | "diagnostic_session_limit" | "child_exi
 export interface ChildRunOptions {
 	managedWorkerScratch?: string;
 	managedWorkerInputs?: WorkerInputState;
+	/** Original project root, distinct from the isolated child source cwd. */
+	sourceRoot?: string;
+	inheritSkills?: boolean;
+	parentSkills?: readonly Skill[];
+	projectSkills?: readonly CapturedProjectSkill[];
 	managedProcessGroup?: boolean;
 	task: NormalizedTask;
 	role: RoleDefinition;
@@ -145,16 +152,20 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}
+		const guidance = options.sourceRoot ? await prepareChildGuidance(options.sourceRoot, options.cwd, options.inheritSkills ?? true, options.env?.PI_CODING_AGENT_DIR, options.env?.HOME ?? homedir(), options.parentSkills, options.projectSkills) : undefined;
+		const capability = guidance && options.capability.version === 2
+			? { ...options.capability, guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } }
+			: options.capability;
 		await Promise.all([
 			writeFile(systemPromptPath, options.role.systemPrompt, { encoding: "utf8", mode: 0o600 }),
 			writeFile(taskPromptPath, completePrompt, { encoding: "utf8", mode: 0o600 }),
-			writeFile(capabilityPath, JSON.stringify(options.capability), { encoding: "utf8", mode: 0o600 }),
+			writeFile(capabilityPath, JSON.stringify(capability), { encoding: "utf8", mode: 0o600 }),
 		]);
 
 		const args = [
 			"--mode", "json", "-p", "--session", options.diagnosticSession.path,
 			"--no-extensions", "-e", options.guardExtensionPath,
-			"--no-skills", "--no-prompt-templates",
+			"--no-skills", ...(guidance?.skillPaths.flatMap(path => ["--skill", path]) ?? []), "--no-prompt-templates",
 			"--tools", options.role.tools.join(","),
 			"--model", `${options.route.provider}/${options.route.model}`,
 			"--thinking", options.route.thinking,

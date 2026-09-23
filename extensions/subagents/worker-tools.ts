@@ -229,6 +229,9 @@ export type WorkerTools = Awaited<ReturnType<typeof createWorkerTools>>;
 export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
+	if (loaded.manifest?.guidance) pi.on("before_agent_start", event => {
+		event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
+	});
 	let worker: WorkerTools | undefined;
 	let fatal = true;
 	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("csheng-worker-lifecycle", { phase, ok });

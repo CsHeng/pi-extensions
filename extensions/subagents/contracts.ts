@@ -340,6 +340,8 @@ export interface ChildCapabilityManifestV2 {
 	readRoots: string[];
 	writePaths: string[];
 	externalReadRoots: string[];
+	/** Runtime-derived native guidance, never supplied by a model task. */
+	guidance?: { contextFiles: Array<{ path: string; content: string }>; readRoots: string[]; physicalRoots: string[] };
 	/** Managed v3 source-root writes; initial writePaths are advisory. */
 	writeRoot?: boolean;
 }
