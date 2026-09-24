@@ -8,6 +8,8 @@ import { getThemeByName } from "../node_modules/@earendil-works/pi-coding-agent/
 import { createGoalStore } from "../extensions/workflow/goal-store.ts";
 import { goalRows } from "../extensions/workflow/goal-ui-render.ts";
 import { registerGoalUi } from "../extensions/workflow/goal-ui.ts";
+import { taskFrontier } from "../extensions/workflow/goal-state.ts";
+import { goalReceipt, registerGoalTool } from "../extensions/workflow/goal-tool.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GoalOperation } from "../extensions/workflow/goal-contracts.ts";
 
@@ -21,6 +23,47 @@ async function fixture(t: test.TestContext) {
  await mutate({ operation: "enroll", goal: "Incremental work", delivery: "source", authority: "fixture", requirements: [{ key: "r", outcome: "done", verification: "fixture" }], tasks: ["a", "b"].map(key => ({ key, title: `Task ${key}`, covers: ["r"] })) });
  return { store, entries, mutate, cwd, ctx };
 }
+
+test("model-visible frontier separates independent work, local blockers and dependency waits", async t => {
+ const { store, mutate, ctx } = await fixture(t);
+ await mutate({ operation: "amend", reason: "one actual join", authority: "fixture", tasks: [
+  { key: "a", title: "Local source", covers: ["r"] },
+  { key: "b", title: "External peer", covers: ["r"] },
+  { key: "join", title: "Peer join", covers: ["r"], dependsOn: ["b"] },
+ ] });
+ await mutate({ operation: "start", task: "b", scope: ["b"] });
+ assert.deepEqual(taskFrontier(store.current()!), { ready: ["a"], running: ["b"], blocked: [], waiting: [{ task: "join", dependencies: ["b"] }] });
+ await mutate({ operation: "report", task: "b", summary: "peer unavailable", blocker: { kind: "capability", reason: "pinned peer unavailable", unblock: "provide peer" } });
+ assert.deepEqual(taskFrontier(store.current()!), { ready: ["a"], running: [], blocked: [{ task: "b", kind: "capability", reason: "pinned peer unavailable" }], waiting: [{ task: "join", dependencies: ["b"] }] });
+ assert.equal(store.current()!.continuation.state, "active");
+ let tool: any;
+ registerGoalTool({ registerTool(value: unknown) { tool = value; }, on() {} } as never, store, () => false);
+ const result = await tool.execute("frontier-inspect", { operation: "inspect" }, undefined, undefined, { ...ctx, sessionManager: { getSessionId: () => ctx.sessionId } });
+ const lines = (result.content[0].text as string).split("\n");
+ assert.equal(lines.find(line => line.startsWith("Ready:")), "Ready: a");
+ assert.ok(lines.find(line => line.startsWith("Blocked:"))?.includes("b [capability]"));
+ assert.ok(lines.find(line => line.startsWith("Waiting on dependencies:"))?.includes("join <- b"));
+ await mutate({ operation: "start", task: "a", scope: ["a"] });
+ await mutate({ operation: "report", task: "a", summary: "local accepted", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "fixture" }] });
+ assert.deepEqual(taskFrontier(store.current()!).ready, []);
+ assert.equal(store.current()!.continuation.state, "waiting");
+});
+
+test("frontier is a bounded read-only projection, not permission to resume or accept", async t => {
+ const { store, mutate, entries } = await fixture(t);
+ await mutate({ operation: "amend", reason: "independent outcomes", authority: "fixture", tasks: Array.from({ length: 64 }, (_, i) => ({ key: `t${i}`, title: `Outcome ${i}`, covers: ["r"] })) });
+ await mutate({ operation: "suspend", reason: "user pause", condition: "explicit resume" });
+ store.delivered(false);
+ const state = store.current()!, count = entries.length;
+ const receipt = goalReceipt(store.view());
+ assert.equal(taskFrontier(state).ready.length, 64);
+ assert.match(receipt, /Ready: t0, t1, t2, t3, t4, t5, … \(\+58;/);
+ assert.ok(receipt.length < 2000);
+ assert.equal(entries.length, count); assert.deepEqual(store.current(), state);
+ assert.equal(state.continuation.state, "suspended"); assert.equal(state.input.aligned, false); assert.equal(state.fulfillment, "pending");
+ const terminal = structuredClone(state); terminal.fulfillment = "cancelled";
+ assert.doesNotMatch(goalReceipt({ state: terminal, deficits: [] }), /Ready:/);
+});
 
 test("real slices remain visible before acceptance, parallel attempts and recovery are honest", async t => {
  const { store, entries, mutate, cwd, ctx } = await fixture(t);

@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGoalStore, canonicalScope, type GoalContext } from "../extensions/workflow/goal-store.ts";
-import { accepted, progressKey } from "../extensions/workflow/goal-state.ts";
+import { accepted, judge, progressKey } from "../extensions/workflow/goal-state.ts";
 import type { GoalOperation } from "../extensions/workflow/goal-contracts.ts";
 import { goalReceipt, registerGoalTool } from "../extensions/workflow/goal-tool.ts";
 import { goalRows } from "../extensions/workflow/goal-ui.ts";
@@ -38,6 +38,45 @@ test("strict enrollment is explicit; normal slice is start + compound report; al
  const final = await f.run(f.report("two", undefined, true));
  assert.equal(final.view.state?.fulfillment, "complete");
  assert.equal(f.snapshots.length, 5);
+});
+
+test("dependency rejection names only missing predecessors and leaves independent work actionable", async t => {
+ const f = await fixture(t); await f.run({ ...enroll, tasks: [...enroll.tasks!,
+  { key: "joined", title: "Actual joined outcome", covers: ["one", "two"], dependsOn: ["one", "two"] },
+  { key: "independent", title: "Independent local outcome", covers: ["one"] },
+ ] });
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
+ const before = structuredClone(f.store.current()), count = f.snapshots.length;
+ const rejected = await f.store.mutate({ operation: "start", task: "joined", scope: ["two"] }, f.ctx, "blocked-join");
+ assert.equal(rejected.code, "dependency_pending");
+ assert.ok(rejected.message?.includes("joined")); assert.match(rejected.message!, /predecessors: two\./);
+ assert.equal(f.snapshots.length, count); assert.deepEqual(f.store.current(), before);
+ assert.match(goalReceipt(rejected.view), /Ready: two, independent/);
+ const state = structuredClone(before!); const diagnostics: string[] = [];
+ judge(state, { subject: "task:joined", facts: ["A1:check"], accepted: true, rationale: "cannot bypass missing predecessor" }, diagnostics);
+ assert.equal(accepted(state, "task:joined"), false); assert.match(diagnostics.join("\n"), /predecessors: two\./);
+ await f.run({ operation: "start", task: "independent", scope: ["one"] });
+ assert.equal(f.store.current()!.attempts.at(-1)!.task, "independent");
+});
+
+test("source-drift rejection withholds stale frontier until inspect revalidates without changing rejected state", async t => {
+ const f = await fixture(t); await f.run({ ...enroll, tasks: [enroll.tasks![0]!, { ...enroll.tasks![1]!, dependsOn: ["one"] }] });
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
+ assert.match(goalReceipt(f.store.view()), /Ready: two/);
+ await writeFile(join(f.cwd, "one"), "changed after acceptance");
+ const before = structuredClone(f.store.current()), count = f.snapshots.length;
+ let tool: any;
+ registerGoalTool({ registerTool(value: unknown) { tool = value; }, on() {} } as never, f.store, () => false);
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => f.ctx.sessionId } };
+ const rejected = await tool.execute("drift-start", { operation: "start", task: "two", scope: ["two"] }, undefined, undefined, ctx);
+ assert.equal(rejected.isError, true); assert.equal(rejected.details.code, "dependency_pending");
+ assert.match(rejected.content[0].text, /predecessors: one\./);
+ assert.doesNotMatch(rejected.content[0].text, /^Ready:|^Blocked:|^Waiting on dependencies:/m);
+ assert.equal(f.snapshots.length, count); assert.deepEqual(f.store.current(), before);
+ const inspected = await tool.execute("drift-inspect", { operation: "inspect" }, undefined, undefined, ctx);
+ assert.match(inspected.content[0].text, /^Ready: one$/m);
+ assert.match(inspected.content[0].text, /two <- one/);
+ assert.equal(accepted(f.store.current()!, "task:one"), false);
 });
 
 test("model-visible inspect exposes captured observation before a fact is reported", async t => {
@@ -135,6 +174,42 @@ test("reported attempts and old checks cannot certify amended verification", asy
  await f.run({ operation: "start", task: "one", scope: ["one"] });
  const result = await f.run({ operation: "report", summary: "cannot reuse obsolete check", judgments: [{ subject: "requirement:one", facts: ["A1:check"], accepted: true, rationale: "old evidence" }] });
  assert.equal(accepted(result.view.state!, "requirement:one"), false);
+});
+
+for (const aggregateAccepted of [false, true]) test(`splitting an ${aggregateAccepted ? "accepted" : "unaccepted"} aggregate preserves unrelated proof without transferring acceptance`, async t => {
+ const f = await fixture(t);
+ const foundation = enroll.tasks![0]!;
+ await f.run({ ...enroll, tasks: [foundation,
+  { key: "owners", title: "Local and peer outcomes", covers: ["two"] },
+  { key: "join", title: "Local consumer", covers: ["two"], dependsOn: ["owners"] },
+ ] });
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
+ const proof = structuredClone(f.store.current()!.acceptance.find(j => j.subject === "task:one"));
+ await f.run({ operation: "start", task: "owners", scope: ["two"] });
+ await f.run({ operation: "report", summary: "aggregate slice", facts: [{ key: "f", kind: "agent", check: "aggregate evidence", result: "pass" }], judgments: [{ subject: "task:owners", facts: ["f"], accepted: aggregateAccepted, rationale: "fixture" }] });
+ await f.run({ operation: "amend", reason: "Separate independent blocker and acceptance boundaries", authority: "same approved outcomes", tasks: [foundation,
+  { key: "local", title: "Local source", covers: ["two"] },
+  { key: "peer", title: "External peer verification", covers: ["two"] },
+  { key: "join", title: "Local consumer", covers: ["two"], dependsOn: ["local"] },
+ ] });
+ const split = f.store.current()!;
+ assert.deepEqual(split.acceptance.find(j => j.subject === "task:one"), proof);
+ assert.equal(accepted(split, "task:one"), true); assert.equal(split.facts.find(f => f.id === "A1:check")!.usable, true);
+ for (const key of ["owners", "local", "peer", "join"]) assert.equal(accepted(split, `task:${key}`), false);
+ assert.equal(split.attempts.find(a => a.task === "owners")!.status, "interrupted");
+ assert.equal(split.facts.find(f => f.id === "A2:f")!.usable, false);
+ const replay = createGoalStore(() => {}); replay.replay(f.snapshots);
+ assert.equal(replay.view().unavailable, undefined); assert.deepEqual(replay.current(), split);
+ await f.run({ operation: "start", task: "peer", scope: ["two"] });
+ await f.run({ operation: "report", summary: "fixture absent", blocker: { kind: "capability", reason: "pinned peer missing", unblock: "peer provided" } });
+ await f.run({ operation: "start", task: "local", scope: ["two"] });
+ const inherited = await f.run({ operation: "report", summary: "old aggregate is not child proof", judgments: [{ subject: "task:local", facts: ["A2:f"], accepted: true, rationale: "must reject obsolete proof" }] });
+ assert.equal(accepted(inherited.view.state!, "task:local"), false);
+ await f.run({ operation: "report", attempt: "A4", summary: "local checked", facts: [{ key: "local", kind: "agent", check: "independent current proof", result: "pass" }], judgments: [{ subject: "task:local", facts: ["local"], accepted: true, rationale: "local result" }] });
+ await f.run({ operation: "start", task: "join", scope: ["two"] });
+ assert.equal(f.store.current()!.attempts.at(-1)!.task, "join");
+ assert.equal(f.store.current()!.tasks.find(t => t.key === "peer")!.blocker?.kind, "capability");
+ assert.equal(f.store.current()!.fulfillment, "pending");
 });
 
 test("active resume cannot renew anti-spin allowance but can unblock an independent task", async t => {

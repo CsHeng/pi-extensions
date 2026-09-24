@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { fingerprintScope, type BasisFingerprint, type SourceDependencies } from "./fingerprints.ts";
 import type { HostObservation } from "./observation.ts";
 import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
-import { accepted, amend, complete, deficits, digest, invalidate, judge, progressKey, validateGoalState, validateGraph } from "./goal-state.ts";
+import { accepted, amend, complete, deficits, dependencyDiagnostic, digest, invalidate, judge, pendingDependencies, progressKey, validateGoalState, validateGraph } from "./goal-state.ts";
 
 export interface SessionEntryLike { type: string; customType?: string; data?: unknown }
 export interface CheckObservation { host: HostObservation; bases: Record<string, BasisFingerprint>; generation: number; owner: number; checkIdentity?: string }
@@ -145,7 +145,8 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
      requireGoal(!next.attempts.some(a => a.task === task.key && a.status === "running"), "running_attempt", "This task already has a running attempt.");
      await refresh(next, ctx.cwd);
      requireGoal(!accepted(next, `task:${task.key}`), "accepted_task", "Task is already accepted.");
-     requireGoal(task.dependsOn?.every(dep => accepted(next, `task:${dep}`)) ?? true, "dependency_pending", "Task predecessors are not accepted.");
+     const dependencies = pendingDependencies(next, task);
+     requireGoal(!dependencies.length, "dependency_pending", dependencyDiagnostic(task.key, dependencies));
      requireGoal(next.attempts.length < GOAL_LIMITS.attempts, "state_limit", "Attempt limit reached; no attempt was started.");
      const scope = declaredScope(op.scope, ctx.cwd); const writes = op.writes?.length ? declaredScope(op.writes, ctx.cwd) : [];
      await canonicalScope(scope, ctx.cwd); if (writes.length) await canonicalScope(writes, ctx.cwd);

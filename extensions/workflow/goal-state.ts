@@ -13,6 +13,27 @@ export function accepted(state: GoalState, subject: string): boolean {
  if (!judgment?.accepted || judgment.revision !== subjectRevision(state, subject) || !judgment.facts.length) return false;
  return judgment.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));
 }
+/** Task-local eligibility only: alignment, continuation and authority still gate execution. No plan semantics are inferred. */
+export function pendingDependencies(state: GoalState, task: GoalState["tasks"][number]): string[] {
+ return (task.dependsOn ?? []).filter(dep => !accepted(state, `task:${dep}`));
+}
+export function dependencyDiagnostic(task: string, dependencies: string[]): string {
+ return `Task ${task} awaits accepted predecessors: ${dependencies.slice(0, 8).join(", ")}${dependencies.length > 8 ? `, … (+${dependencies.length - 8})` : ""}. Continue independent ready work. If only part of an aggregate is needed, amend it into independently verifiable tasks with factual dependencies; do not waive acceptance or suspend the whole contract for this wait.`;
+}
+export function taskFrontier(state: GoalState) {
+ const ready: string[] = [], running: string[] = [];
+ const blocked: { task: string; kind: string; reason: string }[] = [];
+ const waiting: { task: string; dependencies: string[] }[] = [];
+ for (const task of state.tasks) {
+  if (accepted(state, `task:${task.key}`)) continue;
+  if (state.attempts.some(a => a.task === task.key && a.status === "running")) { running.push(task.key); continue; }
+  if (task.blocker) { blocked.push({ task: task.key, kind: task.blocker.kind, reason: task.blocker.reason }); continue; }
+  const dependencies = pendingDependencies(state, task);
+  if (dependencies.length) waiting.push({ task: task.key, dependencies });
+  else ready.push(task.key);
+ }
+ return { ready, running, blocked, waiting };
+}
 export function deficits(state: GoalState): string[] {
  const result: string[] = [];
  if (!state.input.aligned) result.push("Align the delivered input against current authority.");
@@ -110,7 +131,8 @@ export function judge(state: GoalState, input: Omit<GoalAcceptance, "revision">,
  if (!usable) { diagnostics.push(`${input.subject}: passing current evidence is missing.`); return; }
  const task = state.tasks.find(t => input.subject === `task:${t.key}`);
  if (task?.blocker) { diagnostics.push(`${input.subject}: resolve the recorded blocker explicitly.`); return; }
- if (task?.dependsOn?.some(dep => !accepted(state, `task:${dep}`))) { diagnostics.push(`${input.subject}: predecessor acceptance is missing.`); return; }
+ const dependencies = task ? pendingDependencies(state, task) : [];
+ if (dependencies.length) { diagnostics.push(dependencyDiagnostic(task!.key, dependencies)); return; }
  state.acceptance.push({ ...input, revision });
 }
 export function complete(state: GoalState, diagnostics: string[]): void {
