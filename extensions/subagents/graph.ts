@@ -22,6 +22,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SAFE_LOCK = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
 export interface NormalizedTask extends SubagentTask {
+	/** Admission-only physical identities; stored separately from the model-authored task. */
+	externalReadPins?: Array<{ dev: number; ino: number }>;
 	inputs: string[];
 	dependsOn: string[];
 	writePaths: string[];
@@ -95,9 +97,6 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		}
 		if (task.scope.length < 1 || task.scope.some((entry) => !isSafePathGrammar(entry))) {
 			return fail("invalid_scope", `Task ${task.id} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`);
-		}
-		if (task.role === "worker" && (task.externalReadRoots?.length ?? 0) > 0) {
-			return fail("external_read_roots_forbidden", `Worker task ${task.id} cannot declare externalReadRoots.`);
 		}
 		const externalReadRoots = [...(task.externalReadRoots ?? [])];
 		if (externalReadRoots.length > HARD_LIMITS.maxExternalReadRoots) {

@@ -171,14 +171,9 @@ export async function canonicalizeExternalReadRoot(
 		if (!physicalInfo.isFile() && !physicalInfo.isDirectory()) {
 			throw new RepositoryPolicyError("external_read_root_unavailable", "An external read root is missing, inaccessible, special, or not inside a Git worktree.");
 		}
-		const probe = physicalInfo.isDirectory() ? physical : dirname(physical);
-		const externalGit = await findCanonicalGitRoot(probe, host);
-		if (!physicallyContains(externalGit, physical)) {
-			throw new RepositoryPolicyError("external_read_root_unavailable", "An external read root is missing, inaccessible, special, or not inside a Git worktree.");
-		}
 	} catch (error) {
-		if (error instanceof RepositoryPolicyError && error.code !== "repository_root_unavailable") throw error;
-		throw new RepositoryPolicyError("external_read_root_unavailable", "An external read root is missing, inaccessible, special, or not inside a Git worktree.");
+		if (error instanceof RepositoryPolicyError) throw error;
+		throw new RepositoryPolicyError("external_read_root_unavailable", "An external read root is missing, inaccessible, or special.");
 	}
 	if (physicallyContains(gitRoot, physical)) {
 		throw new RepositoryPolicyError("external_read_root_not_external", "An external read root is inside the current repository; use scope instead.");
@@ -190,10 +185,9 @@ function retarget(code: string, taskId: string): string {
 	if (code === "invalid_scope") return `Task ${taskId} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`;
 	if (code === "scope_outside_repository") return `Task ${taskId} scope resolves outside the current Git repository.`;
 	if (code === "invalid_external_read_root") return `Task ${taskId} external read root must be an absolute safe path.`;
-	if (code === "external_read_root_unavailable") return `Task ${taskId} external read root is missing, inaccessible, special, or not inside a Git worktree.`;
+	if (code === "external_read_root_unavailable") return `Task ${taskId} external read root is missing, inaccessible, or special.`;
 	if (code === "external_read_root_not_external") return `Task ${taskId} external read root is inside the current repository; use scope instead.`;
 	if (code === "duplicate_external_read_root") return `Task ${taskId} repeats an external read root after canonicalization.`;
-	if (code === "external_read_roots_forbidden") return `Worker task ${taskId} cannot declare externalReadRoots.`;
 	return "The current working directory is not an accessible Git worktree.";
 }
 
@@ -223,9 +217,6 @@ export async function admitRepositoryTasks(
 	const admitted: NormalizedTask[] = [];
 	for (const task of tasks) {
 		const declaredExternal = task.externalReadRoots ?? [];
-		if (task.role === "worker" && declaredExternal.length > 0) {
-			return failAdmission("external_read_roots_forbidden", task.id);
-		}
 		const scope: string[] = [];
 		for (const entry of task.scope) {
 			try {
@@ -235,12 +226,13 @@ export async function admitRepositoryTasks(
 				return failAdmission(code, task.id);
 			}
 		}
-		if (task.role !== "worker" && declaredExternal.length > HARD_LIMITS.maxExternalReadRoots) {
+		if (declaredExternal.length > HARD_LIMITS.maxExternalReadRoots) {
 			return failAdmission("invalid_external_read_root", task.id);
 		}
 		const externalReadRoots: string[] = [];
+		const externalReadPins: Array<{ dev: number; ino: number }> = [];
 		const seen = new Set<string>();
-		if (task.role !== "worker") {
+		{
 			for (const entry of declaredExternal) {
 				let canonical: string;
 				try {
@@ -251,6 +243,11 @@ export async function admitRepositoryTasks(
 				}
 				if (seen.has(canonical)) return failAdmission("duplicate_external_read_root", task.id);
 				seen.add(canonical);
+				try {
+					const info = await host.lstat(canonical);
+					if (!info.isFile() && !info.isDirectory()) return failAdmission("external_read_root_unavailable", task.id);
+					externalReadPins.push({ dev: info.dev, ino: info.ino });
+				} catch { return failAdmission("external_read_root_unavailable", task.id); }
 				externalReadRoots.push(canonical);
 			}
 		}
@@ -258,6 +255,7 @@ export async function admitRepositoryTasks(
 			...task,
 			scope,
 			externalReadRoots,
+			externalReadPins,
 		});
 	}
 	return { ok: true, gitRoot, tasks: admitted };

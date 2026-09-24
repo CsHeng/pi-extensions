@@ -54,7 +54,7 @@ export const STABLE_TASK_ERROR_CODES = [
 	"child_exit_stalled",
 	"repository_root_unavailable",
 	"scope_outside_repository",
-	"external_read_roots_forbidden",
+	"external_read_roots_forbidden", // Historical diagnostic remains decodable.
 	"invalid_external_read_root",
 	"external_read_root_unavailable",
 	"external_read_root_not_external",
@@ -116,7 +116,7 @@ export const SubagentTaskSchema = Type.Object(
 		scope: Type.Array(Type.String({ minLength: 1 }), {
 			minItems: 1,
 			maxItems: 32,
-			description: "Repository-relative paths this task may read. Prefer '.' for the repository root. Physically contained absolute or parent-traversing spellings are canonicalized to repository-relative form; declare Git-contained paths outside the current repository in externalReadRoots.",
+			description: "Repository-relative paths this task may read. Prefer '.' for the repository root. Physically contained absolute or parent-traversing spellings are canonicalized to repository-relative form; declare explicitly authorized paths outside the current repository in externalReadRoots.",
 		}),
 		inputs: Type.Optional(BoundedStringArray),
 		dependsOn: Type.Optional(Type.Array(Type.String(), {
@@ -129,7 +129,7 @@ export const SubagentTaskSchema = Type.Object(
 		})),
 		externalReadRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
 			maxItems: HARD_LIMITS.maxExternalReadRoots,
-			description: "Explorer/reviewer-only exact absolute Git-contained read roots outside the current repository. At most eight entries. Omit for ordinary current-repository work; workers cannot declare this field.",
+			description: "Explicit absolute regular-file or directory read roots outside the current repository for any role, including workers. At most eight entries. No external write capability.",
 		})),
 		verification: Type.Optional(BoundedStringArray),
 		resourceLocks: Type.Optional(BoundedStringArray),
@@ -231,6 +231,9 @@ export interface TaskResult {
 	id: string;
 	role: RoleName;
 	status: TaskStatus;
+	/** Child outcome before managed finalization; absent on old results. */
+	executionStatus?: TaskStatus | "not-started" | "unavailable";
+	finalization?: { status: "failed"; stage: "native-validation" | "candidate-freeze" | "result-save"; code: string; reason?: string };
 	output: string;
 	stderr: string;
 	usage: UsageTotals;
@@ -340,6 +343,8 @@ export interface ChildCapabilityManifestV2 {
 	readRoots: string[];
 	writePaths: string[];
 	externalReadRoots: string[];
+	/** Admission-pinned filesystem identities, not model-authored. */
+	externalReadPins?: Array<{ dev: number; ino: number }>;
 	/** Runtime-derived native guidance, never supplied by a model task. */
 	guidance?: { contextFiles: Array<{ path: string; content: string }>; readRoots: string[]; physicalRoots: string[] };
 	/** Managed v3 source-root writes; initial writePaths are advisory. */

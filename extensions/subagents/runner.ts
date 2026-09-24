@@ -85,7 +85,7 @@ export interface ChildRunOptions {
 	onChildSettled?(): void;
 }
 
-const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE", "CSHENG_SUBAGENT_WORKER_SCRATCH", "CSHENG_SUBAGENT_WORKER_INPUTS"]);
+const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE", "CSHENG_SUBAGENT_WORKER_SCRATCH", "CSHENG_SUBAGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
 
 export function resolvePiInvocation(extraArgs: string[]): PiInvocation {
 	const currentScript = process.argv[1];

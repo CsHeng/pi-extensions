@@ -55,7 +55,7 @@ async function structure(tasks: Array<Record<string, unknown>>) {
 	return result.ok ? result.tasks : [];
 }
 
-test("structure validation keeps absolute scope and rejects worker external roots", () => {
+test("structure validation keeps absolute scope and permits explicit worker read roots", () => {
 	const absolute = validateGraphStructure({
 		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["/tmp/current"] }],
 	});
@@ -71,10 +71,7 @@ test("structure validation keeps absolute scope and rejects worker external root
 			externalReadRoots: ["/outside"],
 		}],
 	});
-	assert.equal(worker.ok, false);
-	if (worker.ok) return;
-	assert.equal(worker.error.code, "external_read_roots_forbidden");
-	assert.doesNotMatch(worker.error.message, /\//);
+	assert.equal(worker.ok, true);
 
 	const relativeExternal = validateGraphStructure({
 		tasks: [{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: ["../sibling"] }],
@@ -159,7 +156,7 @@ test("non-Git cwd and unsafe paths fail before graph relationships", async (t) =
 	assert.equal(admitted.ok, true);
 });
 
-test("external roots require existing Git-contained absolute targets outside the current repository", async (t) => {
+test("external roots require existing ordinary absolute targets outside the current repository", async (t) => {
 	const { current, sibling, plain } = await layout(t);
 	const gitRoot = await findCanonicalGitRoot(current);
 	const siblingRoot = await realpath(sibling);
@@ -174,9 +171,7 @@ test("external roots require existing Git-contained absolute targets outside the
 	await assert.rejects(canonicalizeExternalReadRoot(gitRoot, join(sibling, "missing.ts")), (error: unknown) => (
 		error instanceof Error && "code" in error && error.code === "external_read_root_unavailable"
 	));
-	await assert.rejects(canonicalizeExternalReadRoot(gitRoot, plain), (error: unknown) => (
-		error instanceof Error && "code" in error && error.code === "external_read_root_unavailable"
-	));
+	assert.equal(await canonicalizeExternalReadRoot(gitRoot, plain), await realpath(plain));
 	await assert.rejects(canonicalizeExternalReadRoot(gitRoot, join(current, "src")), (error: unknown) => (
 		error instanceof Error && "code" in error && error.code === "external_read_root_not_external"
 	));

@@ -63,7 +63,7 @@ export async function freezeCandidate(store: ManagedSessionStore, record: Manage
 	const git = await freezeGitCandidate(workspace);
 	if (git.changedPaths.length) record.candidate = { id: `candidate_${git.id}`, episode: record.episode, status: "not-applied", changedPaths: git.changedPaths, appliedPaths: [], git };
 	else delete record.candidate;
-	await store.save(record);
+	// Finalization commits candidate and execution outcome together; never expose an interim applicable candidate.
 	return record.candidate;
 }
 

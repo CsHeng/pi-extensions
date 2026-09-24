@@ -55,6 +55,10 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
  const checks = new Map<string, CheckObservation>();
  const notify = () => { for (const listener of listeners) try { listener(); } catch { listeners.delete(listener); } };
  const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
+ const availableObservations = (sessionId: string) => state?.attempts.filter(a => a.status !== "interrupted" && a.generation === state?.input.generation).flatMap(a =>
+  [...checks.values()].filter(c => c.bases[a.id] && c.generation === a.generation && c.host.sessionId === sessionId && c.host.at >= a.started && c.host.toolName !== "csheng_workflow")
+   .slice(-8).map(c => ({ attempt: a.id, id: c.host.toolCallId, failed: c.host.isError || (c.host.exitCode != null && c.host.exitCode !== 0) || c.host.managed?.status !== undefined && c.host.managed.status !== "succeeded" })))
+  .slice(-16) ?? [];
  function commit(next: GoalState, call: string): void {
   next.revision++;
   next.calls = [...next.calls, digest(call)].slice(-GOAL_LIMITS.calls);
@@ -106,7 +110,19 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    requireGoal(Check(goalParameters, op), "invalid_request", "Malformed semantic operation.");
    if (op.operation === "inspect") { await revalidate(ctx.cwd); return { ok: true, diagnostics, view: view() }; }
    writable();
-   if (state?.calls.includes(digest(call))) return { ok: true, diagnostics: ["Already recorded."], view: view() };
+   if (op.operation === "close" && state?.fulfillment !== "pending" && state) {
+    requireGoal(op.outcome && op.reason, "invalid_close", "Close needs outcome and reason.");
+    const closeOwner = owner, closeContract = state.id;
+    if (state.fulfillment === "complete") await revalidate(ctx.cwd);
+    requireGoal(!view().unavailable, "state_unavailable", "Current proof could not be revalidated; terminal close is not confirmed.");
+    requireGoal(state?.id === closeContract && !ctx.signal?.aborted && !ctx.fenced?.() && (view().state?.fulfillment === "pending" || owner === closeOwner), "preparation_changed", "Owner, input or cancellation changed during close revalidation.");
+    if (view().state?.fulfillment === "pending") return { ok: true, diagnostics: deficits(state), view: view() };
+    if (view().state?.fulfillment !== "pending") {
+     requireGoal((state.fulfillment === "complete" ? "completed" : state.fulfillment) === op.outcome, "closed_contract", "Contract is terminal with a different outcome; explicitly enroll new work.");
+     return { ok: true, diagnostics: ["Already closed; no new snapshot committed."], view: view() };
+    }
+   }
+   if (op.operation !== "close" && state?.calls.includes(digest(call))) return { ok: true, diagnostics: ["Already recorded."], view: view() };
    const lease = owner;
    let next: GoalState;
    if (op.operation === "enroll") {
@@ -139,14 +155,14 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
     } else if (op.operation === "report") {
      const candidates = next.attempts.filter(a => a.status === "running" && (!op.task || a.task === op.task));
      const attempt = op.attempt ? next.attempts.find(a => a.id === op.attempt) : candidates.length === 1 ? candidates[0] : undefined;
-     requireGoal(attempt && attempt.status !== "interrupted", "unknown_attempt", "Report needs an unambiguous current attempt; corrections may name a reported attempt.");
+     requireGoal(attempt && attempt.status !== "interrupted", "unknown_attempt", `Report attempt ${op.attempt ?? "unspecified"} is not a current unambiguous attempt; available: ${next.attempts.filter(a => a.status !== "interrupted").slice(-8).map(a => a.id).join(", ") || "none"}.`);
      requireGoal(attempt.revision === next.tasks.find(t => t.key === attempt.task)?.revision, "stale_attempt", "Task meaning changed; start a current attempt.");
      requireGoal(op.summary, "invalid_report", "Report needs a truthful outcome summary.");
      attempt.status = "reported"; attempt.summary = op.summary;
      for (const input of op.facts ?? []) {
       const id = `${attempt.id}:${input.key}`;
       const observation = input.observationId ? checks.get(input.observationId) : input.kind === "host" ? [...checks.values()].reverse().find(check => check.bases[attempt.id] && check.host.sessionId === ctx.sessionId && check.generation === attempt.generation && check.host.at >= attempt.started) : undefined;
-      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", "Host evidence requires an actual non-workflow observation in this session.");
+      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.key} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.bases[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.host.toolCallId).join(", ") || "none"}.`);
       const basis = input.kind === "host" ? observation?.bases[attempt.id] : attempt.basis;
       const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.host.toolCallId, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, basis: basis ?? { scope: attempt.basis.scope, fingerprint: "unavailable", state: "unavailable" }, usable: !!basis && basis.state === "current" };
       if (input.kind === "host" && (observation!.generation !== attempt.generation || observation!.host.at < attempt.started)) { fact.usable = false; fact.note = "Observation belongs to another input or predates this attempt."; }
@@ -203,7 +219,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   }
  }
  return {
-  view, mutate, revalidate, owner: () => owner,
+  view, mutate, revalidate, availableObservations, owner: () => owner,
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   current: () => state ? structuredClone(state) : undefined,
   replay(entries: readonly SessionEntryLike[]) {

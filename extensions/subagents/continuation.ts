@@ -17,7 +17,7 @@ import { ManagedSessionStore, fingerprint, type ManagedRecord } from "./managed-
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitWorkspace, retainGitInput, discardGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
-import { MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { MANAGED_LIMITS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
 import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
@@ -52,7 +52,7 @@ interface RunBinding {
 	runObservation?: ObservedRun;
 	deliveryError?: string;
 }
-const failedTask = (record: ManagedRecord, aborted: boolean, code: string): TaskResult => ({ id: record.task.id, role: record.task.role, status: aborted ? "aborted" : "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable", error: { code, message: code } });
+const failedTask = (record: ManagedRecord, aborted: boolean, code: string): TaskResult => ({ id: record.task.id, role: record.task.role, status: aborted ? "aborted" : "failed", executionStatus: "not-started", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable", error: { code, message: code } });
 const activeState = (record: ManagedRecord) => record.state === "queued" || record.state === "running";
 
 /** Session-owned executor, not a model loop. Durable records never resume themselves. */
@@ -105,7 +105,7 @@ export class ContinuationService {
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
 		const cause = (error as { code?: unknown })?.code ?? (error instanceof Error && error.name !== "Error" ? error.name : "unclassified");
-		return { schemaVersion: 3, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
+		return { schemaVersion: 3, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
 	}
 	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void, toolCallId = "direct"): Promise<SessionActionResult> {
 		const rawAction = raw && typeof raw === "object" ? (raw as { action?: unknown }).action : undefined;
@@ -121,8 +121,6 @@ export class ContinuationService {
 			let result = await this.action(request, owner, ctx, signal, onProgress, toolCallId, telemetry);
 			telemetry.durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
 			result = { ...result, requestTelemetry: { ...telemetry, ...(result.kind === "submission" ? { launchedChildren: 0 } : {}) } };
-			try { const warning = await this.dependencies.store.storageWarning(); if (warning) result = { ...result, warnings: [warning] }; }
-			catch { result = { ...result, warnings: [MANAGED_STORAGE_WARNINGS.unavailable] }; }
 			return result;
 		} catch (error) {
 			const result = this.failed(action, error, signal?.aborted);
@@ -370,18 +368,33 @@ export class ContinuationService {
 					});
 				},
 			});
+			let persistenceLost = false;
 			for (const [index, record] of records.entries()) {
 				if (replays.has(record.handle)) continue;
+				const pendingFinalization = await store.finalizationPending(record.handle, record.episode);
 				const current = await store.load(record.handle, owner);
-				if (current.episode === record.episode && activeState(current)) await store.withSession(record.handle, owner, async value => {
-					value.result = scheduled.tasks[index]!; value.state = "idle";
-					const operation = value.requests.at(-1)!; operation.state = "complete"; operation.result = value.result;
-					if (value.result.error) operation.error = { code: value.result.error.code };
-					await store.save(value);
-				});
+				if (pendingFinalization) {
+					persistenceLost = true;
+					const { candidate: _candidate, ...safe } = current;
+					binding.views.set(record.handle, store.view({ ...safe, state: "interrupted", result: scheduled.tasks[index]! }));
+					continue;
+				}
+				if (current.episode === record.episode && activeState(current)) try {
+					await store.withSession(record.handle, owner, async value => {
+						value.result = scheduled.tasks[index]!; value.state = "idle";
+						const operation = value.requests.at(-1)!; operation.state = "complete"; operation.result = value.result;
+						if (value.result.error) operation.error = { code: value.result.error.code };
+						await store.save(value);
+					});
+				} catch {
+					persistenceLost = true;
+					const { candidate: _candidate, ...safe } = current;
+					binding.views.set(record.handle, store.view({ ...safe, state: "interrupted", result: scheduled.tasks[index]! }));
+				}
 			}
-			const response: SessionActionResult = { schemaVersion: 3, action: request.action, kind: "execution", runId: execution.runId, generation: this.supervisor!.currentGeneration, status: scheduled.status, sessions: await Promise.all(binding.records.map(record => this.boundView(binding, record))) };
-			if (request.action === "create") await store.completeBatch(owner, request.requestId!, response);
+			if (persistenceLost) binding.deliveryError = "result_persistence_failed";
+			const response: SessionActionResult = { schemaVersion: 3, action: request.action, kind: "execution", runId: execution.runId, generation: this.supervisor!.currentGeneration, status: persistenceLost ? "failed" : scheduled.status, sessions: await Promise.all(binding.records.map(record => this.boundView(binding, record))), ...(persistenceLost ? { error: { code: "result_persistence_failed" } } : {}) };
+			if (request.action === "create" && !persistenceLost) await store.completeBatch(owner, request.requestId!, response);
 			try {
 				const observed = structuredClone(scheduled.telemetry);
 				const identities = new Map(tasks.map((task, index) => [task.id, scheduled.tasks[index]?.observation?.ownerSessionId ?? fingerprint(records[index]!.handle)]));
@@ -401,6 +414,9 @@ export class ContinuationService {
 		const store = this.dependencies.store;
 		return store.withSession(handle, owner, async record => {
 			const operation = record.requests.at(-1)!;
+			let childResult: TaskResult | undefined;
+			let finalizationPending = false;
+			let finalizationStage: "native-validation" | "candidate-freeze" | "result-save" = "native-validation";
 			try {
 				if (record.version !== 3 || record.state !== "queued") throw new ManagedError("session_not_queued");
 				signal.throwIfAborted();
@@ -412,34 +428,47 @@ export class ContinuationService {
 				record.execution = { startedAtMs: Date.now(), ...(record.inheritSkills === undefined ? {} : { inheritSkills: record.inheritSkills }), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
 				operation.execution = record.execution; await store.save(record);
 				const worker = record.task.role === "worker";
+				if ((record.task.externalReadRoots?.length ?? 0) !== (record.externalReadPins?.length ?? 0)) throw new ManagedError("external_read_root_unavailable");
 				const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
 				const cwd = join(store.path(handle), "source"); const native = join(store.path(handle), "native.jsonl");
 				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, sourceRoot: owner.repo, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL(worker ? "./worker-tools.ts" : "./child-capability-guard.ts", import.meta.url)),
 					...(worker ? { managedWorkerScratch: join(store.path(handle), "scratch"), managedWorkerInputs: record.workspace!.inputs } : {}),
-					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], ...(worker ? { writeRoot: true } : {}) },
+					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], externalReadPins: record.externalReadPins ?? [], ...(worker ? { writeRoot: true } : {}) },
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
 					checkDiagnosticLimits: async () => ({ ok: (await lstat(native)).size <= HARD_LIMITS.diagnosticChildBytes, code: "diagnostic_session_limit", scope: "child" }),
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
 				}).finally(() => observer?.childStopped(handle));
+				result.executionStatus = result.telemetry?.childStarted === true ? result.status : result.telemetry?.childStarted === false ? "not-started" : "unavailable";
+				childResult = result;
 				if (result.telemetry) result.telemetry.workspaceMs = workspaceMs;
 				record.result = result; record.nativeLeaf = (await store.nativeRevision(handle)).leaf;
 				record.state = worker && result.workerToolsSettled !== true ? "interrupted" : "idle";
+				if (record.state === "interrupted" && result.status === "succeeded") record.result = { ...result, status: "failed", finalization: { status: "failed", stage: "candidate-freeze", code: "worker_tools_unsettled" }, error: { code: "worker_tools_unsettled", message: "Worker tools did not settle." } };
 				if (worker && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
-					if (!enterConvergence()) record.result = failedTask(record, true, "aborted");
-					else { await freezeCandidate(store, record); result.changedPaths = record.candidate?.changedPaths ?? []; }
+					if (!enterConvergence()) record.result = { ...result, status: "aborted", executionStatus: result.status, finalization: { status: "failed", stage: "candidate-freeze", code: "aborted" }, error: { code: "aborted", message: "aborted" } };
+					else { finalizationStage = "candidate-freeze"; await freezeCandidate(store, record); result.changedPaths = record.candidate?.changedPaths ?? []; }
 				}
 				operation.state = "complete"; operation.result = record.result;
 				if (record.candidate) operation.candidate = structuredClone(record.candidate);
+				finalizationStage = "result-save";
+				await store.beginFinalization(handle, record.episode); finalizationPending = true;
 				await store.save(record);
+				await store.endFinalization(handle, record.episode); finalizationPending = false;
 				if (record.result.observation) record.result.observation = await store.saveObservation(handle, record.episode, record.result.observation);
 				return record.result;
 			} catch (error) {
 				record.state = "interrupted"; operation.state = "unknown";
 				const failure = this.failed(null, error, signal.aborted).error!;
-				record.result = failedTask(record, signal.aborted, failure.code);
+				record.result = childResult ? { ...childResult, status: signal.aborted ? "aborted" : "failed", executionStatus: childResult.executionStatus ?? "unavailable",
+					finalization: { status: "failed", stage: finalizationStage, code: failure.code, ...(failure.detail ? { reason: failure.detail } : {}) },
+					error: { code: failure.code, message: failure.code } } : { ...failedTask(record, signal.aborted, failure.code), executionStatus: record.execution ? "unavailable" : "not-started" };
+				delete record.candidate; delete operation.candidate;
+				operation.result = record.result;
 				operation.error = { code: failure.code, ...(failure.detail ? { detail: failure.detail } : {}) };
-				await store.save(record); return record.result;
+				try { await store.save(record); if (finalizationPending) { await store.endFinalization(handle, record.episode); finalizationPending = false; } }
+				catch { /* Preserve failed child evidence in this request; a pending fence makes any uncertain registry result non-actionable. */ }
+				return record.result;
 			}
 		});
 	}

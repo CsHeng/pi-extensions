@@ -12,6 +12,7 @@ if (capture) {
 		child: process.env.CSHENG_SUBAGENT_CHILD,
 		capability: process.env.CSHENG_SUBAGENT_CAPABILITY,
 		removedParentMarker: process.env.CSHENG_SUBAGENT_TEST_MODE,
+		ripgrepConfig: process.env.RIPGREP_CONFIG_PATH,
 		sessionPath,
 	}));
 }

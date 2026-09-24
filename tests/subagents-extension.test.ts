@@ -486,7 +486,7 @@ test("managed guidance appears only while the tool is active and follows the con
 	const aggressiveEvent = { systemPrompt: "base", ...options() };
 	assert.equal(await emitBeforeAgentStart(state, aggressiveEvent), undefined);
 	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
-	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("three or more independent files")));
+	assert.equal(aggressiveEvent.systemPromptOptions.promptGuidelines.length, 2);
 	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.every((line) => !line.includes("csheng_subagents")));
 	await emitBeforeAgentStart(state, aggressiveEvent);
 	assert.equal(aggressiveEvent.systemPromptOptions.promptGuidelines.length, 2);
@@ -497,11 +497,11 @@ test("managed guidance appears only while the tool is active and follows the con
 	const balancedEvent = { systemPrompt: "base", ...options() };
 	await emitBeforeAgentStart(balancedState, balancedEvent);
 	assert.ok(balancedEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
-	assert.ok(balancedEvent.systemPromptOptions.promptGuidelines.every((line) => !line.includes("three or more independent files")));
+	assert.equal(balancedEvent.systemPromptOptions.promptGuidelines.length, 1);
 	const fallback = await emitBeforeAgentStart(state);
 	assert.match(fallback?.systemPrompt ?? "", /flat csheng_subagent_sessions create batch/);
 	assert.match(fallback?.systemPrompt ?? "", /explicit parent apply/);
-	assert.match(fallback?.systemPrompt ?? "", /three or more independent files/);
+	assert.equal(fallback?.systemPrompt?.includes("three or more independent files"), false);
 	assert.doesNotMatch(fallback?.systemPrompt ?? "", /csheng_subagents/);
 	state.pi.getActiveTools = () => [];
 	assert.equal(await emitBeforeAgentStart(state, { systemPrompt: "base", ...options() }), undefined);
@@ -754,7 +754,7 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	}
 });
 
-test("worker external roots are rejected before a child starts", async (t) => {
+test("worker explicit external read roots reach the child without an external write grant", async (t) => {
 	const { current, siblingFile } = await gitPair(t);
 	let childCalls = 0;
 	const { state } = await registered(t, {
@@ -771,7 +771,6 @@ test("worker external roots are rejected before a child starts", async (t) => {
 		writePaths: ["src/tracked.ts"],
 		externalReadRoots: [siblingFile],
 	}]), undefined, undefined, context(true, [parentModel], current)));
-	assert.equal(details.error?.code, "external_read_roots_forbidden");
-	assert.equal(details.requestTelemetry?.launchedChildren, 0);
-	assert.equal(childCalls, 0);
+	assert.notEqual(details.error?.code, "external_read_roots_forbidden");
+	assert.equal(childCalls, 1);
 });

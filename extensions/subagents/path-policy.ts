@@ -1,5 +1,5 @@
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	CHILD_CAPABILITY_ENV,
 	CHILD_CAPABILITY_MANIFEST_V1,
@@ -93,7 +93,7 @@ function normalizedCapability(manifest: ChildCapabilityManifest): NormalizedChil
 }
 
 const MANIFEST_V1_KEYS = new Set(["version", "root", "role", "readRoots", "writePaths"]);
-const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "writeRoot", "guidance"]);
+const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "externalReadPins", "writeRoot", "guidance"]);
 
 function assertExactManifestKeys(value: Record<string, unknown>, version: unknown): void {
 	const allowed = version === CHILD_CAPABILITY_MANIFEST_V1 ? MANIFEST_V1_KEYS : MANIFEST_V2_KEYS;
@@ -132,6 +132,8 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	}
 	if (value.writeRoot !== undefined && (value.writeRoot !== true || value.version !== 2 || value.role !== "worker")) throw new Error("invalid source-root write capability");
 	const externalReadRoots = parseExternalReadRoots(value, value.version);
+	const externalReadPins = value.externalReadPins;
+	if (externalReadPins !== undefined && (value.version !== 2 || !Array.isArray(externalReadPins) || externalReadPins.length !== externalReadRoots.length || !externalReadPins.every(pin => isRecord(pin) && Object.keys(pin).length === 2 && typeof pin.dev === "number" && Number.isSafeInteger(pin.dev) && typeof pin.ino === "number" && Number.isSafeInteger(pin.ino) && pin.dev >= 0 && pin.ino >= 0))) throw new Error("invalid external read identities");
 	assertExactManifestKeys(value, value.version);
 	let guidance: NormalizedChildCapability["guidance"];
 	if (value.guidance !== undefined) {
@@ -154,14 +156,11 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	if (value.role !== "worker" && writePaths.length > 0) {
 		throw new Error("read-only capability cannot contain write paths");
 	}
-	if (value.role === "worker" && externalReadRoots.length > 0) {
-		throw new Error("worker capability cannot contain external read roots");
-	}
-	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(guidance ? { guidance } : {}), ...(value.writeRoot === true ? { writeRoot: true } : {}) };
+	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(externalReadPins ? { externalReadPins: externalReadPins as Array<{ dev: number; ino: number }> } : {}), ...(guidance ? { guidance } : {}), ...(value.writeRoot === true ? { writeRoot: true } : {}) };
 }
 
 export async function assertCanonicalExternalRoots(manifest: NormalizedChildCapability): Promise<void> {
-	for (const entry of manifest.externalReadRoots) {
+	for (const [index, entry] of manifest.externalReadRoots.entries()) {
 		let physical: string;
 		try {
 			physical = await realpath(entry);
@@ -171,6 +170,8 @@ export async function assertCanonicalExternalRoots(manifest: NormalizedChildCapa
 		if (physical !== entry) {
 			throw new Error("capability manifest external read roots must be absolute and canonical");
 		}
+		const pin = manifest.externalReadPins?.[index];
+		if (pin) { const info = await lstat(entry); if ((!info.isFile() && !info.isDirectory()) || info.dev !== pin.dev || info.ino !== pin.ino) throw new Error("external read root identity changed"); }
 	}
 }
 
@@ -193,29 +194,6 @@ async function physicalRoots(roots: readonly string[]): Promise<string[]> {
 	return Promise.all(roots.map(async (root) => {
 		try { return await realpath(root); } catch { return root; }
 	}));
-}
-
-async function descendantSymlinkEscapes(start: string, allowedPhysicalRoots: readonly string[]): Promise<boolean> {
-	let info;
-	try {
-		info = await lstat(start);
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return false;
-		throw error;
-	}
-	if (info.isSymbolicLink()) {
-		try {
-			const physical = await realpath(start);
-			return !allowedPhysicalRoots.some((root) => contains(root, physical));
-		} catch {
-			return true;
-		}
-	}
-	if (!info.isDirectory()) return false;
-	for (const entry of await readdir(start, { withFileTypes: true })) {
-		if (await descendantSymlinkEscapes(join(start, entry.name), allowedPhysicalRoots)) return true;
-	}
-	return false;
 }
 
 async function authorizeRead(
@@ -242,10 +220,6 @@ async function authorizeRead(
 		}
 	} catch (error) {
 		if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-		if (!confineToChildRoot) return { allowed: false, reason: "Path is outside the declared read scope." };
-	}
-	if ((toolName === "grep" || toolName === "find") && await descendantSymlinkEscapes(target, allowedPhysical)) {
-		return { allowed: false, reason: "Path resolves outside the declared read scope." };
 	}
 	return { allowed: true, resolvedPath: target };
 }

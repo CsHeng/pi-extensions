@@ -12,8 +12,7 @@ export const MANAGED_LIMITS = Object.freeze({
 	// Native JSONL parsing remains bounded independently of filesystem entries.
 	maxEntries: 100_000, maxNativeLineBytes: 1024 * 1024, maxCandidateBytes: 64 * 1024 * 1024,
 });
-// Aggregate storage is advisory; per-workspace, record and parsing limits remain hard bounds.
-export const MANAGED_STORAGE_THRESHOLDS = Object.freeze({ bytes: 8 * 1024 ** 3, entries: 1_000_000 });
+// Legacy warning shape remains readable in historical responses; no current action estimates aggregate storage.
 const cleanupGuidance = "Cleanup is optional and user-owned: close unneeded handles with disposition=discard to remove their working files (registry/native history remains). For a full reset, stop all Pi/subagent processes using this agent directory, then back up and remove <agent-dir>/subagent-managed-sessions (default ~/.pi/agent/subagent-managed-sessions). A reset loses retained histories, candidates and replay records. No automatic cleanup is performed.";
 export const MANAGED_STORAGE_WARNINGS = {
 	high: { code: "managed_storage_high", message: `Managed storage exceeds the advisory 8 GiB or 1,000,000-entry threshold; work is not blocked. ${cleanupGuidance}` },
@@ -42,7 +41,8 @@ export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
 export class ManagedError extends Error {
 	readonly code: string;
 	readonly missingFields?: string[];
-	constructor(code: string, missingFields?: string[]) { super(code); this.name = "ManagedError"; this.code = code; if (missingFields) this.missingFields = missingFields; }
+	readonly detail?: string;
+	constructor(code: string, missingFields?: string[], detail?: string) { super(code); this.name = "ManagedError"; this.code = code; if (missingFields) this.missingFields = missingFields; if (detail) this.detail = detail; }
 }
 export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(SubagentSessionToolSchema, raw)) throw new ManagedError("invalid_session_request");
@@ -51,7 +51,7 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 		create: ["action", "requestId", "tasks", "mode"], continue: ["action", "episodes", "mode"],
 		inspect: ["action", "handle", "runId"], apply: ["action", "handle", "expectedEpisode", "candidateId"],
 		close: ["action", "handle", "expectedEpisode", "disposition"], refresh: ["action", "handle", "expectedEpisode"],
-		join: ["action", "runId"], cancel: ["action", "runId", "taskId"],
+		join: ["action", "runId", "mode"], cancel: ["action", "runId", "taskId"],
 	};
 	if (Object.keys(input).some((key) => !fields[input.action].includes(key))) throw new ManagedError("invalid_action_fields");
 	if (input.action === "create") {
@@ -66,6 +66,11 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 	if ((input.action === "apply" || input.action === "close" || input.action === "refresh") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value));
 	if (input.action === "apply" && !input.candidateId) throw new ManagedError("missing_candidate");
 	if ((input.action === "join" || input.action === "cancel") && !input.runId) throw new ManagedError("missing_run_id");
+	if (input.action === "join" && input.mode !== undefined) {
+		if (input.mode !== "foreground") throw new ManagedError("invalid_join_mode");
+		const { mode: _mode, ...canonical } = input;
+		return canonical as SessionRequest;
+	}
 	return input;
 }
 
@@ -122,7 +127,7 @@ export interface SessionActionResult {
 	schemaVersion: 1 | 2 | 3;
 	action: SessionRequest["action"] | null;
 	requestTelemetry?: ManagedRequestTelemetry;
-	/** Current best-effort storage advice, not persisted replay state or an execution outcome. */
+	/** Legacy advisory on historical envelopes; current actions do not generate it. */
 	warnings?: ManagedStorageWarning[];
 	status: "accepted" | "succeeded" | "partial" | "failed" | "aborted";
 	kind?: "submission" | "execution";

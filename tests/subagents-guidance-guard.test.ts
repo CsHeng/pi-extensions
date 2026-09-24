@@ -22,7 +22,7 @@ test("internal guidance grant is read-only and narrower than task external roots
 	assert.equal((await authorizePath(manifest, "read", join(global, "reference.md"))).allowed, true);
 	assert.equal((await authorizePath(manifest, "read", join(unrelated, "secret"))).allowed, false);
 	assert.equal((await authorizePath(manifest, "read", join(global, "escape", "secret"))).allowed, false);
-	assert.equal((await authorizePath(manifest, "find", global)).allowed, false);
+	assert.equal((await authorizePath(manifest, "find", global)).allowed, true);
 	assert.equal((await authorizePath(manifest, "write", join(global, "SKILL.md"))).allowed, false);
 	assert.equal((await authorizePath(manifest, "bash", join(global, "SKILL.md"))).allowed, false);
 	assert.throws(() => parseCapability({ ...manifest, guidance: { contextFiles: [], readRoots: ["../global"], physicalRoots: [global] } }), /invalid guidance paths/);

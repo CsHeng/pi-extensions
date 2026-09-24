@@ -106,11 +106,12 @@ test("runner parses fragmented JSONL and aggregates usage", async () => {
 test("runner passes an explicit isolated Pi invocation and cleans private files", async (t) => {
 	const capture = join(tmpdir(), `subagent-capture-${process.pid}-${Date.now()}.json`);
 	t.after(async () => rm(capture, { force: true }));
-	const result = await runChild(options("normal", { env: { ...process.env, FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me" } }));
+	const result = await runChild(options("normal", { env: { ...process.env, FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me", RIPGREP_CONFIG_PATH: "/tmp/follow-links-config" } }));
 	assert.equal(result.status, "succeeded");
-	const recorded = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; child: string; capability: string; sessionPath: string; removedParentMarker?: string };
+	const recorded = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; child: string; capability: string; sessionPath: string; removedParentMarker?: string; ripgrepConfig?: string };
 	assert.equal(recorded.child, "1");
 	assert.equal(recorded.removedParentMarker, undefined);
+	assert.equal(recorded.ripgrepConfig, undefined);
 	assert.ok(recorded.args.includes("--no-extensions"));
 	assert.ok(recorded.args.includes("--session"));
 	assert.equal(recorded.args.includes("--no-session"), false);

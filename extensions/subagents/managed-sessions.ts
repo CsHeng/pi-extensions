@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, opendir, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { NormalizedTask } from "./graph.ts";
 import { SubagentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
@@ -10,7 +10,7 @@ import { validateGraphStructure } from "./graph.ts";
 import { boundNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
 import type { SavedWorkspace } from "./candidates.ts";
 import type { CapturedProjectSkill } from "./guidance-resources.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS, type ManagedStorageWarning, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
 function withoutObservation(result: TaskResult): TaskResult {
 	const copy = { ...result }; delete copy.observation; return copy;
@@ -22,6 +22,7 @@ export interface ManagedRecord {
 	handle: string;
 	owner: SessionOwner;
 	task: NormalizedTask;
+	externalReadPins?: Array<{ dev: number; ino: number }>;
 	state: ManagedState;
 	episode: number;
 	nativeLeaf: string | null;
@@ -61,6 +62,8 @@ const fileStateSchema = Type.Union([
 ]);
 const resultSchema = Type.Object({ id: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }), role: Type.Union([Type.Literal("worker"), Type.Literal("reviewer"), Type.Literal("explorer")]),
 	status: Type.String({ pattern: "^(pending|running|succeeded|failed|blocked|aborted)$" }),
+	executionStatus: Type.Optional(Type.String({ pattern: "^(pending|running|succeeded|failed|blocked|aborted|not-started|unavailable)$" })),
+	finalization: Type.Optional(Type.Object({ status: Type.Literal("failed"), stage: Type.Union([Type.Literal("native-validation"), Type.Literal("candidate-freeze"), Type.Literal("result-save")]), code: identity, reason: Type.Optional(causeSchema) }, { additionalProperties: false })),
 	output: Type.String(), stderr: Type.String(), usage: Type.Object({ input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number(), cost: Type.Number(), turns: Type.Number() }),
 	durationMs: Type.Number(), changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), convergence: Type.String({ pattern: "^(not-applicable|applied|not-applied|conflict)$" }), reportComplete: Type.Optional(Type.Boolean()),
 });
@@ -83,7 +86,7 @@ const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSc
 const recordSchema = Type.Object({
 	version: storageVersion, handle: identity, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: identity, anchor: Type.Union([identity, Type.Null()]) }, { additionalProperties: false }),
-	task: SubagentTaskSchema, state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
+	task: SubagentTaskSchema, externalReadPins: Type.Optional(Type.Array(Type.Object({ dev: Type.Number(), ino: Type.Number() }, { additionalProperties: false }), { maxItems: 8 })), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
 	dispatch: Type.Optional(Type.Object({ runId: identity, generation: identity, toolCallId: Type.String({ maxLength: 256 }), taskId: Type.String({ maxLength: 128 }) }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([identity, Type.Null()]),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
@@ -117,9 +120,6 @@ async function readJson<T>(file: string): Promise<T> {
 	} finally { await handle.close(); }
 }
 
-export function exceedsManagedStorageThreshold(bytes: number, entries: number): boolean {
-	return bytes > MANAGED_STORAGE_THRESHOLDS.bytes || entries > MANAGED_STORAGE_THRESHOLDS.entries;
-}
 
 // Serialize only known in-process root mutations. Disk locks still reject foreign/unknown writers.
 const rootWriters = new Map<string, Promise<void>>();
@@ -166,6 +166,13 @@ export class ManagedSessionStore {
 		return record.owner.repo === owner.repo && record.owner.parentSessionId === owner.parentSessionId &&
 			(record.owner.anchor === null || owner.branch.includes(record.owner.anchor) || owner.anchor === record.owner.anchor);
 	}
+	private finalizationPath(handle: string, episode: number): string { return join(this.path(handle), `finalization_${episode}.pending`); }
+	async beginFinalization(handle: string, episode: number): Promise<void> { await this.write(this.finalizationPath(handle, episode), { episode }); }
+	async endFinalization(handle: string, episode: number): Promise<void> { await rm(this.finalizationPath(handle, episode)); }
+	async finalizationPending(handle: string, episode: number): Promise<boolean> {
+		try { const info = await lstat(this.finalizationPath(handle, episode)); if (!info.isFile() || info.isSymbolicLink()) throw new ManagedError("managed_storage_invalid"); return true; }
+		catch (error) { if (missing(error)) return false; throw error; }
+	}
 	async load(handle: string, owner: CurrentOwner): Promise<ManagedRecord> {
 		await this.ensure(false);
 		const directory = this.path(handle);
@@ -173,6 +180,7 @@ export class ManagedSessionStore {
 		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
 		if (!Check(recordSchema, record) || ![1, 2, MANAGED_SESSION_VERSION].includes(record.version) || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
 		if (![record.task.writePaths, record.task.inputs, record.task.dependsOn, record.task.resourceLocks, record.task.externalReadRoots].every(Array.isArray) || !validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] }).ok) throw new ManagedError("managed_registry_invalid");
+		if (record.externalReadPins && record.externalReadPins.length !== record.task.externalReadRoots?.length) throw new ManagedError("managed_registry_invalid");
 		if (new Set(record.requests.map((request) => request.id)).size !== record.requests.length || record.requests.some((request) => request.episode > record.episode)) throw new ManagedError("managed_registry_invalid");
 		if (record.version < 3 && record.workspace && record.task.writePaths.some((file) => !Object.hasOwn(record.workspace!.parentBaseline, file))) throw new ManagedError("managed_registry_invalid");
 		if (record.candidate && (record.candidate.episode !== record.episode || (record.version < 3 && (record.candidate.changedPaths.some((file) => !record.task.writePaths.includes(file)) || record.candidate.appliedPaths.some((file, index) => record.candidate!.changedPaths[index] !== file) || (record.candidate.status === "applied" && record.candidate.appliedPaths.length !== record.candidate.changedPaths.length))))) throw new ManagedError("managed_registry_invalid");
@@ -186,6 +194,12 @@ export class ManagedSessionStore {
 		if (!this.matches(record, owner)) throw new ManagedError("managed_owner_mismatch");
 		if (record.result) record.result = await this.withObservation(handle, record.episode, record.result);
 		for (const request of record.requests) if (request.result) request.result = withoutObservation(request.result);
+		if (await this.finalizationPending(handle, record.episode)) {
+			if (record.state !== "closed") record.state = "interrupted";
+			delete record.candidate;
+			if (record.result) record.result = { ...record.result, status: "failed", executionStatus: record.result.executionStatus ?? "unavailable", finalization: { status: "failed", stage: "result-save", code: "result_persistence_unknown" }, error: { code: "result_persistence_unknown", message: "Finalization was not durably confirmed." } };
+			const operation = record.requests.at(-1); if (operation) { operation.state = "unknown"; delete operation.candidate; if (record.result) operation.result = record.result; }
+		}
 		return record;
 	}
 	async save(record: ManagedRecord): Promise<void> {
@@ -198,36 +212,6 @@ export class ManagedSessionStore {
 	async withSession<T>(handle: string, owner: CurrentOwner, action: (record: ManagedRecord) => Promise<T>): Promise<T> {
 		await this.load(handle, owner);
 		return this.lock(this.path(handle), async () => action(await this.load(handle, owner)));
-	}
-	/** Advisory, read-only estimate. Stop early rather than delaying work for precise accounting. */
-	async storageWarning(): Promise<ManagedStorageWarning | undefined> {
-		let bytes = 0; let entries = 0;
-		const deadline = performance.now() + 1_000;
-		const visit = async (directory: string): Promise<ManagedStorageWarning | undefined> => {
-			try {
-				for await (const entry of await opendir(directory)) {
-					if (performance.now() >= deadline) return MANAGED_STORAGE_WARNINGS.unavailable;
-					const file = join(directory, entry.name);
-					let info;
-					try { info = await lstat(file); } catch (error) { if (missing(error)) continue; throw error; }
-					bytes += info.size; entries++;
-					if (exceedsManagedStorageThreshold(bytes, entries)) return MANAGED_STORAGE_WARNINGS.high;
-					if (info.isDirectory()) {
-						const warning = await visit(file);
-						if (warning) return warning;
-					}
-				}
-			} catch (error) {
-				if (!missing(error)) return MANAGED_STORAGE_WARNINGS.unavailable;
-			}
-			return undefined;
-		};
-		try {
-			await this.ensure(false);
-			return await visit(this.root);
-		} catch (error) {
-			return missing(error) ? undefined : MANAGED_STORAGE_WARNINGS.unavailable;
-		}
 	}
 	/** Derived performance data is separate from the required registry/ACK commit. */
 	async saveObservation(handle: string, episode: number, value: NativeObservation): Promise<NativeObservation> {
@@ -304,7 +288,7 @@ export class ManagedSessionStore {
 		return this.lock(this.root, async () => {
 			const key = fingerprint([owner.repo, owner.parentSessionId, requestId]);
 			const requestPath = join(this.root, `request_${key}.json`);
-			const digest = fingerprint(tasks);
+			const digest = fingerprint(tasks.map(({ externalReadPins: _pins, ...task }) => task));
 			let prior: BatchRecord | undefined;
 			try { prior = await readJson<BatchRecord>(requestPath); } catch (error) { if (!missing(error)) throw error; }
 			if (prior !== undefined) {
@@ -333,9 +317,10 @@ export class ManagedSessionStore {
 				await privateDirectory(directory, true);
 				await privateDirectory(join(directory, "scratch"), true);
 				const native = await open(join(directory, "native.jsonl"), "wx", 0o600); await native.close();
+				const { externalReadPins, ...persistedTask } = task;
 				const record: ManagedRecord = {
 					version: MANAGED_SESSION_VERSION, handle, owner: { repo: owner.repo, parentSessionId: owner.parentSessionId, anchor: owner.anchor },
-					task, state: "idle", episode: 0, nativeLeaf: null, requests: [],
+					task: persistedTask, ...(externalReadPins ? { externalReadPins } : {}), state: "idle", episode: 0, nativeLeaf: null, requests: [],
 				};
 				await this.save(record); records.push(record);
 			}
@@ -348,7 +333,7 @@ export class ManagedSessionStore {
 		const file = await open(join(this.path(handle), "native.jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
 		try {
 			const info = await file.stat();
-			if (!info.isFile() || info.size > MANAGED_LIMITS.maxNativeBytes || (info.mode & 0o077) !== 0) throw new ManagedError("managed_native_invalid");
+			if (!info.isFile() || info.size > MANAGED_LIMITS.maxNativeBytes || (info.mode & 0o077) !== 0) throw new ManagedError("managed_native_invalid", undefined, "attributes");
 			const text = await file.readFile("utf8");
 			if (!text) return { sessionId: null, leaf: null };
 			if (!text.endsWith("\n")) throw new ManagedError("managed_native_incomplete");
@@ -361,17 +346,20 @@ export class ManagedSessionStore {
 			for (const [index, line] of lines.entries()) {
 				if (Buffer.byteLength(line) > MANAGED_LIMITS.maxNativeLineBytes) throw new ManagedError("managed_native_limit");
 				const entry = JSON.parse(line) as Record<string, unknown>;
-				if (!entry || typeof entry !== "object") throw new ManagedError("managed_native_invalid");
+				if (!entry || typeof entry !== "object") throw new ManagedError("managed_native_invalid", undefined, "shape");
 				if (index === 0) {
-					if (entry.type !== "session" || entry.version !== 3 || typeof entry.id !== "string" || !safeHandle(entry.id)) throw new ManagedError("managed_native_invalid");
+					if (entry.type !== "session" || entry.version !== 3 || typeof entry.id !== "string" || !safeHandle(entry.id)) throw new ManagedError("managed_native_invalid", undefined, "header");
 					sessionId = entry.id;
 				} else {
-					if (typeof entry.type !== "string" || !types.has(entry.type) || typeof entry.id !== "string" || !safeHandle(entry.id) || identifiers.has(entry.id) || (entry.parentId !== null && (typeof entry.parentId !== "string" || !identifiers.has(entry.parentId)))) throw new ManagedError("managed_native_invalid");
-					if (entry.type === "message" && (!entry.message || typeof entry.message !== "object" || typeof (entry.message as Record<string, unknown>).role !== "string")) throw new ManagedError("managed_native_invalid");
+					if (typeof entry.type !== "string" || !types.has(entry.type) || typeof entry.id !== "string" || !safeHandle(entry.id) || identifiers.has(entry.id) || (entry.parentId !== null && (typeof entry.parentId !== "string" || !identifiers.has(entry.parentId)))) throw new ManagedError("managed_native_invalid", undefined, "lineage");
+					if (entry.type === "message" && (!entry.message || typeof entry.message !== "object" || typeof (entry.message as Record<string, unknown>).role !== "string")) throw new ManagedError("managed_native_invalid", undefined, "message");
 					identifiers.add(entry.id); leaf = entry.id;
 				}
 			}
 			return { sessionId, leaf };
+		} catch (error) {
+			if (error instanceof SyntaxError) throw new ManagedError("managed_native_invalid", undefined, "parse");
+			throw error;
 		} finally { await file.close(); }
 	}
 	view(record: ManagedRecord): SessionView {

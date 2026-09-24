@@ -5,11 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { exceedsManagedStorageThreshold, fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
+import { fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { emptyUsage } from "../extensions/subagents/contracts.ts";
 import { collectNativeObservation } from "../extensions/subagents/observability.ts";
-import { MANAGED_LIMITS, MANAGED_STORAGE_THRESHOLDS, MANAGED_STORAGE_WARNINGS } from "../extensions/subagents/session-contracts.ts";
+import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
 
 async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
@@ -21,14 +21,8 @@ async function setup(t: test.TestContext) {
 	return { base, owner, tasks: graph.tasks, store };
 }
 
-test("advisory storage thresholds are independent of hard workspace and parsing bounds", () => {
-	assert.equal(MANAGED_STORAGE_THRESHOLDS.bytes, 8 * 1024 ** 3);
-	assert.equal(MANAGED_STORAGE_THRESHOLDS.entries, 1_000_000);
+test("hard workspace and parsing bounds remain independent of global estimates", () => {
 	assert.equal(MANAGED_LIMITS.maxWorkspaceBytes, 8 * 1024 ** 3);
-	assert.equal(exceedsManagedStorageThreshold(900 * 1024 ** 2, 110_000), false);
-	assert.equal(exceedsManagedStorageThreshold(MANAGED_STORAGE_THRESHOLDS.bytes, MANAGED_STORAGE_THRESHOLDS.entries), false);
-	assert.equal(exceedsManagedStorageThreshold(MANAGED_STORAGE_THRESHOLDS.bytes + 1, 0), true);
-	assert.equal(exceedsManagedStorageThreshold(0, MANAGED_STORAGE_THRESHOLDS.entries + 1), true);
 	assert.equal(MANAGED_LIMITS.maxEntries, 100_000);
 	assert.equal(MANAGED_LIMITS.maxSessions, 10);
 	assert.equal(MANAGED_LIMITS.maxNativeBytes, 32 * 1024 ** 2);
@@ -43,7 +37,6 @@ test("required source above the previous root byte cap is admitted without delet
 	const padding = join(store.path(record.handle), "required-source");
 	await writeFile(padding, "");
 	await truncate(padding, 600 * 1024 ** 2); // Sparse metadata fixture, not a 600 MiB allocation.
-	assert.equal(await store.storageWarning(), undefined);
 	assert.equal((await lstat(padding)).size, 600 * 1024 ** 2);
 	assert.deepEqual(await readFile(join(store.path(record.handle), "registry.json")), registry);
 });
@@ -54,39 +47,17 @@ test("above-threshold storage warns without blocking allocation or deleting any 
 	const native = join(store.path(record.handle), "native.jsonl"); const registry = join(store.path(record.handle), "registry.json");
 	const original = await readFile(registry);
 	const padding = join(store.root, "required-padding"); await writeFile(padding, "");
-	await truncate(padding, MANAGED_STORAGE_THRESHOLDS.bytes + 1); // Sparse file; no 8 GiB allocation.
+	await truncate(padding, MANAGED_LIMITS.maxWorkspaceBytes + 1); // Sparse file; no 8 GiB allocation.
 	const value = collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false });
 	assert.equal((await store.saveObservation(record.handle, 1, value)).available, true);
 	const observation = join(store.path(record.handle), "observation_1.json");
 	const observed = await readFile(observation);
-	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.high);
 	assert.equal((await store.allocate(owner, "another", tasks)).fresh, true);
 	await store.completeBatch(owner, "request", { schemaVersion: 2, action: "create", status: "succeeded", sessions: [store.view(record)] });
 	assert.deepEqual(await readFile(observation), observed);
 	assert.deepEqual(await readFile(registry), original);
 	assert.equal((await readFile(native)).length, 0);
-	assert.equal((await lstat(padding)).size, MANAGED_STORAGE_THRESHOLDS.bytes + 1);
-	assert.match(MANAGED_STORAGE_WARNINGS.high.message, /stop all Pi\/subagent processes/);
-	assert.match(MANAGED_STORAGE_WARNINGS.high.message, /loses retained histories, candidates and replay records/);
-});
-
-test("missing storage is empty and an unreadable estimate returns advice, never an exception", async (t) => {
-	const { store } = await setup(t);
-	assert.equal(await store.storageWarning(), undefined);
-	await writeFile(store.root, "not a directory");
-	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.unavailable);
-});
-
-test("a slow estimate stops with advice and leaves stored files intact", async (t) => {
-	const { store, owner, tasks } = await setup(t);
-	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
-	const registry = join(store.path(record.handle), "registry.json");
-	const before = await readFile(registry);
-	let clockReads = 0;
-	t.mock.method(performance, "now", () => clockReads++ === 0 ? 0 : 1_001);
-	assert.deepEqual(await store.storageWarning(), MANAGED_STORAGE_WARNINGS.unavailable);
-	assert.equal(clockReads, 2, "stop before visiting the first listed entry");
-	assert.deepEqual(await readFile(registry), before);
+	assert.equal((await lstat(padding)).size, MANAGED_LIMITS.maxWorkspaceBytes + 1);
 });
 
 test("concurrent writes and subtree removal do not turn advisory scans into errors", async (t) => {
@@ -104,10 +75,15 @@ test("concurrent writes and subtree removal do not turn advisory scans into erro
 			await rm(scratch, { recursive: true, force: true });
 		}
 	})();
-	const scans = (async () => { for (let round = 0; round < 20; round++) await store.storageWarning(); })();
-	const settled = await Promise.allSettled([peer, scans]);
+	const settled = await Promise.allSettled([peer]);
 	assert.ok(settled.every((result) => result.status === "fulfilled"));
-	assert.equal(await store.storageWarning(), undefined);
+});
+
+test("native validation classifies malformed history without exposing its contents", async (t) => {
+ const { store, owner, tasks } = await setup(t);
+ const record = (await store.allocate(owner, "invalid-native", tasks)).records[0]!;
+ await writeFile(join(store.path(record.handle), "native.jsonl"), "{invalid secret payload}\n");
+ await assert.rejects(store.nativeRevision(record.handle), (error: unknown) => error instanceof Error && "code" in error && error.code === "managed_native_invalid" && "detail" in error && error.detail === "parse" && !error.message.includes("secret"));
 });
 
 test("managed allocation is idempotent and rejects request or parent-branch drift", async (t) => {

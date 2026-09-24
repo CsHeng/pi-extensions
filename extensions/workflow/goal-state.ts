@@ -102,7 +102,8 @@ export function amend(state: GoalState, op: GoalOperation): void {
 export function judge(state: GoalState, input: Omit<GoalAcceptance, "revision">, diagnostics: string[]): void {
  const revision = subjectRevision(state, input.subject);
  requireGoal(revision !== undefined, "unknown_subject", `Unknown subject ${input.subject}.`);
- requireGoal(input.facts.every(id => state.facts.some(f => f.id === id)), "unknown_fact", "Judgment references an unknown fact.");
+ const missingFact = input.facts.find(id => !state.facts.some(f => f.id === id));
+ requireGoal(!missingFact, "unknown_fact", `Judgment fact ${missingFact ?? "unknown"} is unavailable; current facts: ${state.facts.filter(f => f.usable).slice(-8).map(f => f.id).join(", ") || "none"}.`);
  state.acceptance = state.acceptance.filter(j => j.subject !== input.subject);
  if (!input.accepted) { invalidate(state, new Set([input.subject])); return; }
  const usable = input.facts.length > 0 && input.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));

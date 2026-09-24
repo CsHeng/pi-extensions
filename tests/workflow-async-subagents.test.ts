@@ -13,7 +13,7 @@ const enroll = () => call({ operation: "enroll", goal: "Async source work", deli
 const start = () => call({ operation: "start", task: "t", scope: ["source"] });
 const submit = () => fauxAssistantMessage(fauxToolCall("csheng_subagent_sessions", { action: "create" } as never));
 const state = (h: HostHarness): GoalState => (h.session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } }).data.state;
-function transport(early: boolean) {
+function transport(early: boolean, finalizationFailed = false) {
  let send!: (wake?: boolean, foreign?: boolean) => void;
  let terminal: SubagentExecutionEvent | undefined;
  const extension = (pi: ExtensionAPI) => {
@@ -22,7 +22,7 @@ function transport(early: boolean) {
     if (args.action !== "create") return { content: [{ type: "text", text: "historical outcome" }], details: { schemaVersion: 3, action: args.action, status: "succeeded", kind: "execution", runId: "run", sessions: terminal!.sessions } };
     const view = { handle: "handle", episode: 1, role: "worker" as const, state: "queued" as const, reportComplete: false };
     const event: SubagentExecutionEvent = { version: 3, eventId: "terminal", kind: "task-terminal", runId: "run", generation: "generation", owner: { repository: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), branchAnchor: ctx.sessionManager.getLeafId() }, toolCallId: id,
-     sessions: [{ ...view, state: "idle", reportComplete: true, result: { id: "task", role: "worker", status: "succeeded", output: "unreviewed child result", stderr: "", durationMs: 1, usage: emptyUsage(), changedPaths: ["dynamic/new-file"], convergence: "not-applied" } }],
+     sessions: [{ ...view, state: finalizationFailed ? "interrupted" : "idle", reportComplete: true, result: { id: "task", role: "worker", status: finalizationFailed ? "failed" : "succeeded", ...(finalizationFailed ? { executionStatus: "succeeded" as const, finalization: { status: "failed" as const, stage: "result-save" as const, code: "result_persistence_failed" } } : {}), output: "unreviewed child result", stderr: "", durationMs: 1, usage: emptyUsage(), changedPaths: finalizationFailed ? [] : ["dynamic/new-file"], convergence: "not-applied" } }],
     };
     terminal = event;
     send = (wake = false, foreign = false) => {
@@ -37,6 +37,14 @@ function transport(early: boolean) {
  };
  return { extension, send: (wake = false, foreign = false) => send(wake, foreign) };
 }
+
+test("successful child execution with failed finalization cannot certify workflow completion", async t => {
+ const fake = transport(true, true), trace = createTrace();
+ const h = await createHostHarness({ trace, extensions: [workflow, fake.extension, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ h.faux.setResponses([enroll(), start(), submit(), call({ operation: "report", summary: "Child ran but finalization failed", facts: [{ key: "check", kind: "host", check: "terminal outcome", result: "pass", observationId: "terminal" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "Cannot certify failed finalization" })), complete: true }), call({ operation: "close", outcome: "cancelled", reason: "fixture ends" }), fauxAssistantMessage("done")]);
+ await h.session.prompt("implement");
+ assert.equal(state(h).facts[0]?.usable, false); assert.equal(state(h).acceptance.length, 0); assert.equal(state(h).fulfillment, "cancelled"); assert.deepEqual(h.errors, []);
+});
 
 test("late terminal evidence remains bound to dispatch attempt; waiting neither spins nor accepts and only executor wakes", async t => {
  const trace = createTrace(), fake = transport(false);

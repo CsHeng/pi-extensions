@@ -42,7 +42,11 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					const serialized = JSON.stringify(payload.messages);
 					text = serialized.includes("<conversation>") ? "SYNTHETIC_SUMMARY" : `index=${serialized.split("Stored local-task index").length - 1};managedTool=${payload.tools.some((tool) => tool.name === "csheng_subagent_sessions") ? 1 : 0};private=${serialized.includes("PRIVATE_INDEX_PROSE") ? 1 : 0}`;
 				}
-				if (JSON.stringify(context.messages).includes("<conversation>")) text = "SYNTHETIC_SUMMARY";
+				// Pi 0.87 identifies summary requests in the system prompt; older hosts
+				// also expose a <conversation> wrapper in the user message.
+				const isSummary = getCurrentSystemPrompt(context.messages).startsWith("You are a context summarization assistant") ||
+					JSON.stringify(context.messages).includes("<conversation>");
+				if (isSummary) text = "SYNTHETIC_SUMMARY";
 				const message: AssistantMessage = {
 					role: "assistant", content: [{ type: "text", text }], api: model.api,
 					provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop",

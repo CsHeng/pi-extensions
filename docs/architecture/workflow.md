@@ -17,7 +17,7 @@ Version two is the only supported workflow protocol and snapshot format. The ver
 | `report` | Resolve an unambiguous running attempt, or explicitly name a reported attempt for a correction. Supply a summary, stable-key facts, explicit judgments and optional `complete` or task-level `blocker`. |
 | `amend` | Reconcile a semantic goal, delivery, requirement or task change with reason and authority. Compatible source drift is not a semantic amendment or new permission. |
 | `inspect` | Read bounded current requirements, tasks, facts and judgments. Optional `subject` selects `requirement:<key>`, `task:<key>`, an attempt ID or a fact ID. Unsupported snapshots expose only an unavailable-state diagnostic. |
-| `close` | Evaluate completion with `outcome: completed`, or explicitly record cancellation/supersession with a reason. |
+| `close` | Evaluate completion with `outcome: completed`, or explicitly record cancellation/supersession with a reason. Repeating the same terminal outcome on the current contract is a no-op; completed proof is revalidated first, and conflicting outcomes fail. |
 | `suspend` | Record an actual operational reason and explicit resume condition without satisfying unfinished requirements. |
 | `resume` | Record the resolved condition and existing authority; explicitly resume waiting/suspended work after reconciliation. |
 
@@ -45,6 +45,8 @@ sequenceDiagram
         W->>P: ordinary main-agent follow-up
     end
 ```
+
+`start`, `report`, and `inspect` expose bounded model-visible references: contract ID/revision/input generation, recent attempt IDs, usable fact IDs, and captured observation IDs. Missing fact, attempt, and host-observation diagnostics include current bounded choices; they do not infer or substitute evidence. Terminal child execution with failed finalization cannot certify a passing host fact.
 
 ## Evidence, drift and completion
 

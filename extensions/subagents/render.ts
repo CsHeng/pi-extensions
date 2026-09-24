@@ -123,6 +123,9 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 			status: session.result.status,
 		};
 		if (session.result.stopReason !== undefined) result.stopReason = boundScalar(session.result.stopReason);
+		if (session.result.executionStatus) result.executionStatus = session.result.executionStatus;
+		if (session.result.finalization) result.finalization = session.result.finalization;
+		result.durationMs = session.result.executionStatus === "not-started" || session.result.executionStatus === "unavailable" || (!session.result.executionStatus && session.result.durationMs === 0) ? null : session.result.durationMs;
 		if (session.result.error) result.error = { code: boundScalar(session.result.error.code) };
 		const output = session.result.output ?? "";
 		if (reportBudget === null) {
@@ -151,6 +154,9 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		schemaVersion: details.schemaVersion,
 		action: details.action,
 		status: details.status,
+		...(details.kind ? { kind: details.kind } : {}),
+		...(details.runId ? { runId: boundScalar(details.runId) } : {}),
+		...(details.generation ? { generation: boundScalar(details.generation) } : {}),
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
 	};
 	if (details.warnings?.length) payload.warnings = details.warnings;

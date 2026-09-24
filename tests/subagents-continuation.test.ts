@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mergeOwnedUsage } from "../extensions/subagents/observability.ts";
 import type { ObservedRun } from "../extensions/subagents/observation-hooks.ts";
 import { ContinuationService } from "../extensions/subagents/continuation.ts";
+import { formatManagedContent } from "../extensions/subagents/render.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { defaultConfig } from "../extensions/subagents/config.ts";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -115,52 +116,37 @@ test("explicit close releases a slot and retained-history warnings do not block 
 	assert.equal((await f.service.execute(close, f.ctx)).status, "succeeded");
 	assert.equal((await f.store.allocate(owner, "new-slot", [graph.tasks[0]!])).fresh, true);
 	assert.equal((await f.service.execute({ ...close, disposition: "discard" }, f.ctx)).error?.code, "close_disposition_conflict");
-	// Large-root estimation is covered by the store suite; advice never gates the action.
-	f.store.storageWarning = async () => MANAGED_STORAGE_WARNINGS.high;
+	Object.defineProperty(f.store, "storageWarning", { get() { throw new Error("global scan forbidden"); } });
 	const native = join(f.store.path(records[1]!.handle), "native.jsonl");
 	await writeFile(native, "retained-required-evidence");
 	assert.equal((await f.service.execute({ ...close, handle: records[1]!.handle, disposition: "discard" }, f.ctx)).status, "succeeded");
 	assert.equal(await readFile(native, "utf8"), "retained-required-evidence");
 	const admitted = await f.service.execute({ action: "create", requestId: "history-full", tasks: [{ id: "new", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
 	assert.equal(admitted.status, "succeeded");
-	assert.deepEqual(admitted.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(admitted.warnings, undefined);
 	assert.equal(admitted.requestTelemetry?.launchedChildren, 1);
 	assert.equal(f.launches(), 1);
 });
 
 const createWorker = { action: "create", requestId: "create-worker", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", scope: ["."], writePaths: ["candidate.txt"] }] };
 
-test("storage warnings are fresh request advice and never alter replay, continuation, apply or close", async (t) => {
+test("normal and replay actions avoid global inventory while close still releases owned work", async (t) => {
 	const f = await serviceFixture(t);
-	let scans = 0;
-	f.store.storageWarning = async () => { scans++; return MANAGED_STORAGE_WARNINGS.high; };
+	Object.defineProperty(f.store, "storageWarning", { get() { throw new Error("global scan forbidden"); } });
 	const first = await f.service.execute(createWorker, f.ctx);
-	assert.equal(first.status, "succeeded");
-	assert.equal(scans, 1, "one post-request scan, not per-episode admission checks");
-	assert.deepEqual(first.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(first.status, "succeeded"); assert.equal(first.warnings, undefined);
 	const handle = first.sessions[0]!.handle;
-	f.store.storageWarning = async () => { scans++; return undefined; };
 	const replay = await new ContinuationService(f.dependencies).execute(createWorker, f.ctx);
-	assertReplay(replay, first);
-	assert.equal(replay.warnings, undefined, "old warning is not persisted with replay state");
-	assert.equal(f.launches(), 1);
-	f.store.storageWarning = async () => MANAGED_STORAGE_WARNINGS.high;
+	assertReplay(replay, first); assert.equal(f.launches(), 1);
 	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
-	assert.equal(continued.status, "succeeded");
-	assert.deepEqual(continued.warnings, [MANAGED_STORAGE_WARNINGS.high]);
+	assert.equal(continued.status, "succeeded"); assert.equal(continued.warnings, undefined);
 	const applied = await f.service.execute({ action: "apply", handle, expectedEpisode: 2, candidateId: continued.sessions[0]!.candidate!.id }, f.ctx);
 	assert.equal(applied.status, "succeeded");
-	assert.deepEqual(applied.warnings, [MANAGED_STORAGE_WARNINGS.high]);
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
 	const closed = await f.service.execute({ action: "close", handle, expectedEpisode: 2, disposition: "discard" }, f.ctx);
 	assert.equal(closed.status, "succeeded");
-	assert.deepEqual(closed.warnings, [MANAGED_STORAGE_WARNINGS.high]);
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
-	f.store.storageWarning = async () => { throw new Error("private storage path"); };
-	const inspected = await f.service.execute({ action: "inspect", handle }, f.ctx);
-	assert.equal(inspected.status, "succeeded");
-	assert.deepEqual(inspected.warnings, [MANAGED_STORAGE_WARNINGS.unavailable]);
-	assert.doesNotMatch(JSON.stringify(inspected), /private storage path/);
+	assert.equal((await f.service.execute({ action: "inspect", handle }, f.ctx)).status, "succeeded");
 });
 
 function errnoError(code: string, message: string): NodeJS.ErrnoException {
@@ -336,6 +322,139 @@ test("create replay preserves partial and dependency-blocked terminal responses 
 		assertReplay(await service.execute(request, f.ctx), response);
 		assert.equal(calls, before);
 	}
+});
+
+test("known spawn non-start is not presented as a completed zero-duration execution", async (t) => {
+ const f = await serviceFixture(t);
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => ({ id: options.task.id, role: "explorer", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable", telemetry: { ...emptyTaskTelemetry(), childStarted: false }, error: { code: "spawn_failure", message: "not started" } }) });
+ const response = await service.execute({ action: "create", requestId: "no-start", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] }, f.ctx);
+ assert.equal(response.sessions[0]?.result?.executionStatus, "not-started");
+ assert.equal(JSON.parse(formatManagedContent(response)).sessions[0].result.durationMs, null);
+});
+
+test("non-start remains non-start through a result-save failure", async (t) => {
+ const f = await serviceFixture(t); let returned = false;
+ const save = f.store.save.bind(f.store);
+ f.store.save = async record => { if (returned && record.result) throw new Error("disk failure"); return save(record); };
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => {
+  returned = true; return { id: options.task.id, role: "explorer", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 0,
+   changedPaths: [], convergence: "not-applicable", telemetry: { ...emptyTaskTelemetry(), childStarted: false }, error: { code: "spawn_failure", message: "not started" } };
+ } });
+ const result = await service.execute({ action: "create", requestId: "no-start-save", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] }, f.ctx);
+ assert.equal(result.sessions[0]?.result?.executionStatus, "not-started");
+ assert.equal(result.sessions[0]?.result?.finalization?.stage, "result-save");
+ assert.equal(JSON.parse(formatManagedContent(result)).sessions[0].result.durationMs, null);
+});
+
+test("post-child native validation failure retains execution evidence and cannot replay or apply", async (t) => {
+ const f = await serviceFixture(t);
+ const nativeRevision = f.store.nativeRevision.bind(f.store);
+ let childDone = false;
+ f.store.nativeRevision = async (handle) => { const revision = await nativeRevision(handle); if (childDone) throw new Error("native fixture invalid"); return revision; };
+ let calls = 0;
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return { ...result, output: "executed before validation", usage: { ...result.usage, input: 41 }, durationMs: 19, status: "succeeded" }; } });
+ const request = { action: "create", requestId: "native-fault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] };
+ const failed = await service.execute(request, f.ctx);
+ assert.equal(failed.status, "failed");
+ const view = failed.sessions[0]!;
+ assert.equal(view.result?.output, "executed before validation");
+ assert.equal(view.result?.usage.input, 41); assert.equal(view.result?.durationMs, 19);
+ assert.equal(view.result?.executionStatus, "succeeded");
+ assert.deepEqual(view.result?.finalization, { status: "failed", stage: "native-validation", code: "managed_operation_failed", reason: "unclassified" });
+ assert.equal(view.candidate, undefined);
+ const replay = await service.execute(request, f.ctx); assert.equal(replay.status, "failed"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: "missing" }, f.ctx)).status, "succeeded");
+});
+
+test("candidate freeze failure preserves child facts and never exposes an applicable candidate", async (t) => {
+ const f = await serviceFixture(t); let calls = 0;
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => {
+  calls++; const result = await child(options);
+  await rm(join(options.cwd, ".git"), { recursive: true, force: true });
+  return { ...result, status: "succeeded", reportComplete: true, workerToolsSettled: true, output: "worker executed", usage: { ...result.usage, input: 37 }, durationMs: 29 };
+ } });
+ const failed = await service.execute(createWorker, f.ctx);
+ assert.equal(failed.status, "failed");
+ const view = failed.sessions[0]!;
+ assert.equal(view.result?.output, "worker executed"); assert.equal(view.result?.usage.input, 37);
+ assert.equal(view.result?.executionStatus, "succeeded"); assert.equal(view.result?.finalization?.stage, "candidate-freeze");
+ assert.equal(view.candidate, undefined);
+ assert.equal((await service.execute(createWorker, f.ctx)).status, "failed"); assert.equal(calls, 1);
+});
+
+test("repeated post-freeze save failures cannot expose a worker candidate", async (t) => {
+ const f = await serviceFixture(t); let childDone = false; let calls = 0; let candidateId: string | undefined;
+ const save = f.store.save.bind(f.store);
+ f.store.save = async record => { if (childDone) { candidateId ??= record.candidate?.id; throw new Error("persistent disk failure"); } return save(record); };
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return result; } });
+ const response = await service.execute(createWorker, f.ctx);
+ assert.equal(response.status, "failed"); assert.equal(response.error?.code, "result_persistence_failed");
+ const view = response.sessions[0]!;
+ assert.ok(candidateId); assert.equal(view.candidate, undefined);
+ assert.equal(view.result?.executionStatus, "succeeded"); assert.equal(view.result?.finalization?.stage, "result-save");
+ const apply = await service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId }, f.ctx);
+ assert.notEqual(apply.status, "succeeded"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute(createWorker, f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+});
+
+test("post-rename save error leaves a durable fence against the actual worker candidate", async (t) => {
+ const f = await serviceFixture(t); let childDone = false; let candidateId: string | undefined; let calls = 0;
+ const save = f.store.save.bind(f.store);
+ f.store.save = async record => {
+  if (!childDone) return save(record);
+  if (record.candidate && record.result?.status === "succeeded") {
+   candidateId = record.candidate.id; await save(record); throw new Error("fsync failed after rename");
+  }
+  throw new Error("recovery save failed");
+ };
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return result; } });
+ const result = await service.execute(createWorker, f.ctx);
+ assert.equal(result.status, "failed"); assert.equal(result.error?.code, "result_persistence_failed"); assert.ok(candidateId);
+ assert.equal(result.sessions[0]?.result?.executionStatus, "succeeded"); assert.equal(result.sessions[0]?.candidate, undefined);
+ f.store.save = save;
+ const handle = result.sessions[0]!.handle;
+ const inspected = await service.execute({ action: "inspect", handle }, f.ctx);
+ assert.equal(inspected.sessions[0]?.candidate, undefined); assert.equal(inspected.sessions[0]?.result?.status, "failed");
+ const apply = await service.execute({ action: "apply", handle, expectedEpisode: 1, candidateId }, f.ctx);
+ assert.notEqual(apply.status, "succeeded");
+ assert.notEqual((await service.execute(createWorker, f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+ assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "retain" }, f.ctx)).status, "succeeded");
+ assert.equal((await service.execute({ action: "inspect", handle }, f.ctx)).sessions[0]?.state, "closed");
+ assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "discard" }, f.ctx)).error?.code, "close_disposition_conflict");
+ assert.equal((await f.store.list({ repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] })).some(view => view.handle === handle), false);
+});
+
+test("required result-save failure retains child facts and replays failed without a second child", async (t) => {
+ const f = await serviceFixture(t);
+ const save = f.store.save.bind(f.store); let injected = false; let calls = 0;
+ f.store.save = async record => { if (!injected && record.result?.status === "succeeded") { injected = true; throw new Error("write failed"); } return save(record); };
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); return { ...result, status: "succeeded", output: "retained child", usage: { ...result.usage, input: 23 }, durationMs: 17 }; } });
+ const request = { action: "create", requestId: "save-fault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] };
+ const first = await service.execute(request, f.ctx);
+ assert.equal(first.status, "failed"); assert.equal(first.sessions[0]?.result?.output, "retained child");
+ assert.equal(first.sessions[0]?.result?.usage.input, 23); assert.equal(first.sessions[0]?.result?.durationMs, 17);
+ assert.equal(first.sessions[0]?.result?.finalization?.stage, "result-save");
+ assert.equal((await service.execute(request, f.ctx)).status, "failed"); assert.equal(calls, 1);
+});
+
+test("repeated required save failures keep volatile child evidence but fence replay and apply", async (t) => {
+ const f = await serviceFixture(t); let childDone = false; let calls = 0;
+ const save = f.store.save.bind(f.store);
+ f.store.save = async record => { if (childDone) throw new Error("persistent disk failure"); return save(record); };
+ const child = f.dependencies.runChild;
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return { ...result, status: "succeeded", output: "retained despite storage", usage: { ...result.usage, input: 83 }, durationMs: 21 }; } });
+ const request = { action: "create", requestId: "persistent-fault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] };
+ const first = await service.execute(request, f.ctx);
+ assert.equal(first.status, "failed"); assert.equal(first.error?.code, "result_persistence_failed");
+ assert.equal(first.sessions[0]?.result?.output, "retained despite storage"); assert.equal(first.sessions[0]?.result?.usage.input, 83);
+ assert.equal(first.sessions[0]?.result?.finalization?.stage, "result-save");
+ assert.notEqual((await service.execute(request, f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute({ action: "apply", handle: first.sessions[0]!.handle, expectedEpisode: 1, candidateId: "missing" }, f.ctx)).status, "succeeded");
 });
 
 test("optional observation persistence failure leaves the required candidate and replay intact", async (t) => {

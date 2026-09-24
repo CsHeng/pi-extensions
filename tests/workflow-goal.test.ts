@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createGoalStore, canonicalScope, type GoalContext } from "../extensions/workflow/goal-store.ts";
 import { accepted, progressKey } from "../extensions/workflow/goal-state.ts";
 import type { GoalOperation } from "../extensions/workflow/goal-contracts.ts";
-import { goalReceipt } from "../extensions/workflow/goal-tool.ts";
+import { goalReceipt, registerGoalTool } from "../extensions/workflow/goal-tool.ts";
 import { goalRows } from "../extensions/workflow/goal-ui.ts";
 
 const enroll: GoalOperation = { operation: "enroll", goal: "Implement goal", delivery: "source only", authority: "explicit user request", requirements: [{ key: "one", outcome: "first", verification: "check" }, { key: "two", outcome: "second", verification: "check" }], tasks: [{ key: "one", title: "First", covers: ["one"] }, { key: "two", title: "Second", covers: ["two"] }] };
@@ -14,7 +14,8 @@ async function fixture(t: test.TestContext) {
  const cwd = await mkdtemp(join(tmpdir(), "goal-test-")); t.after(() => rm(cwd, { recursive: true, force: true }));
  await writeFile(join(cwd, "one"), "one"); await writeFile(join(cwd, "two"), "two");
  const snapshots: { type: string; customType: string; data: unknown }[] = [];
- const store = createGoalStore((customType, data) => snapshots.push({ type: "custom", customType, data: structuredClone(data) }));
+ let failWrites = false;
+ const store = createGoalStore((customType, data) => { if (failWrites) throw new Error("snapshot unavailable"); snapshots.push({ type: "custom", customType, data: structuredClone(data) }); });
  let serial = 0;
  const ctx: GoalContext = { cwd, now: "2026-09-18T00:00:00.000Z", sessionId: "fixture" };
  const run = async (op: GoalOperation) => { const result = await store.mutate(op, ctx, `call-${++serial}`); assert.equal(result.ok, true, result.message); return result; };
@@ -23,7 +24,7 @@ async function fixture(t: test.TestContext) {
   store.observe({ ...capture, host: { toolCallId: id, toolName: "bash", sessionId: "fixture", at: ctx.now, isError: error, exitCode: error ? 1 : 0 } });
  };
  const report = (task: string, observationId?: string, complete = false): GoalOperation => ({ operation: "report", summary: "Executed check and evaluated result", facts: [{ key: "check", kind: observationId ? "host" : "agent", check: "unit test", result: "pass", ...(observationId ? { observationId } : {}) }], judgments: [`task:${task}`, `requirement:${task}`, ...(complete ? ["delivery"] : [])].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "Covers this subject" })), complete });
- return { store, ctx, run, observe, report, snapshots, cwd };
+ return { store, ctx, run, observe, report, snapshots, cwd, failWrites: () => { failWrites = true; } };
 }
 
 test("strict enrollment is explicit; normal slice is start + compound report; all obligations gate close", async t => {
@@ -37,6 +38,47 @@ test("strict enrollment is explicit; normal slice is start + compound report; al
  const final = await f.run(f.report("two", undefined, true));
  assert.equal(final.view.state?.fulfillment, "complete");
  assert.equal(f.snapshots.length, 5);
+});
+
+test("model-visible inspect exposes captured observation before a fact is reported", async t => {
+ const f = await fixture(t); await f.run(enroll); await f.run({ operation: "start", task: "one", scope: ["one"] });
+ await f.observe("captured-first"); await f.observe("captured-second");
+ let tool: any;
+ registerGoalTool({ registerTool(value: unknown) { tool = value; }, on() {} } as never, f.store, () => false);
+ const result = await tool.execute("inspect-call", { operation: "inspect" }, undefined, undefined,
+  { cwd: f.cwd, sessionManager: { getSessionId: () => f.ctx.sessionId } });
+ const text = result.content[0].text as string;
+ const receipt = JSON.parse(text.split("\n").find(line => line.startsWith('{"contractId"'))!);
+ assert.deepEqual(receipt.observations.map((item: { id: string }) => item.id), ["captured-first", "captured-second"]);
+ const report = await f.run(f.report("one", receipt.observations[0].id));
+ assert.equal(accepted(report.view.state!, "task:one"), true);
+});
+
+test("terminal close is idempotent only for matching current outcome and proof", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ for (const task of ["one", "two"]) { await f.run({ operation: "start", task, scope: [task] }); await f.run(f.report(task, undefined, task === "two")); }
+ assert.equal(f.store.current()!.fulfillment, "complete");
+ const before = f.snapshots.length;
+ const repeat = await f.run({ operation: "close", outcome: "completed", reason: "repeat" });
+ assert.equal(repeat.view.state!.fulfillment, "complete"); assert.equal(f.snapshots.length, before);
+ const conflict = await f.store.mutate({ operation: "close", outcome: "cancelled", reason: "conflict" }, f.ctx, "conflict");
+ assert.equal(conflict.code, "closed_contract");
+ await writeFile(join(f.cwd, "one"), "changed");
+ const drift = await f.run({ operation: "close", outcome: "completed", reason: "repeat" });
+ assert.equal(drift.view.state!.fulfillment, "pending"); assert.ok(drift.diagnostics.includes("requirement:one"));
+ for (const outcome of ["cancelled", "superseded"] as const) {
+  const g = await fixture(t); await g.run(enroll); await g.run({ operation: "close", outcome, reason: "stop" });
+  const count = g.snapshots.length; await g.run({ operation: "close", outcome, reason: "repeat" }); assert.equal(g.snapshots.length, count);
+ }
+});
+
+test("terminal close rejects failed proof revalidation without a stale successful no-op", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ for (const task of ["one", "two"]) { await f.run({ operation: "start", task, scope: [task] }); await f.run(f.report(task, undefined, task === "two")); }
+ await writeFile(join(f.cwd, "one"), "changed"); f.failWrites();
+ const result = await f.store.mutate({ operation: "close", outcome: "completed", reason: "repeat" }, f.ctx, "close-failed-proof");
+ assert.equal(result.ok, false); assert.equal(result.code, "state_unavailable");
+ assert.equal(result.view.state?.fulfillment, "complete"); assert.ok(result.view.unavailable);
 });
 
 test("honest check-time basis supports edits then verification; fake success/failure reports retain diagnostics", async t => {

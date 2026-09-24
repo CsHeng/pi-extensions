@@ -13,7 +13,7 @@ import {
 	formatManagedResult,
 	formatProgress,
 } from "../extensions/subagents/render.ts";
-import { MANAGED_STORAGE_WARNINGS, type SessionActionResult, type SessionView } from "../extensions/subagents/session-contracts.ts";
+import { MANAGED_STORAGE_WARNINGS, parseSessionRequest, type SessionActionResult, type SessionView } from "../extensions/subagents/session-contracts.ts";
 import type { NativeObservation } from "../extensions/subagents/observability.ts";
 
 function task(index: number, output: string): TaskResult {
@@ -45,6 +45,17 @@ function task(index: number, output: string): TaskResult {
 		...(index === 8 ? { error: { code: "synthetic_failure", message: `failure ${"e".repeat(10_000)}` } } : {}),
 	};
 }
+
+test("model-visible submission retains join identity after large reports", () => {
+ const runId = "run-123", generation = "generation-123";
+ const result: SessionActionResult = { schemaVersion: 3, action: "create", kind: "submission", status: "accepted", runId, generation,
+  sessions: [{ handle: "session-123", role: "explorer", episode: 1, state: "running", reportComplete: false, result: task(1, "x".repeat(100_000)) }] };
+ const payload = JSON.parse(formatManagedContent(result));
+ assert.equal(payload.kind, "submission"); assert.equal(payload.runId, runId); assert.equal(payload.generation, generation);
+ assert.deepEqual(parseSessionRequest({ action: "join", runId, mode: "foreground" }), { action: "join", runId });
+ assert.throws(() => parseSessionRequest({ action: "join", runId, mode: "async" }), /invalid_join_mode/);
+ assert.throws(() => parseSessionRequest({ action: "join", mode: "foreground" }), /missing_run_id/);
+});
 
 test("duration rendering is deterministic and compact", () => {
 	assert.equal(formatDuration(0), "0ms");

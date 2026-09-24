@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { createFindToolDefinition, createGrepToolDefinition } from "@earendil-works/pi-coding-agent";
+import { chmod, lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
@@ -141,14 +142,14 @@ test("v2 manifests parse internal and external roots and reject relative or syml
 	});
 	await assert.rejects(assertCanonicalExternalRoots(aliased), /absolute and canonical/);
 
-	assert.throws(() => parseCapability({
+	assert.deepEqual(parseCapability({
 		version: 2,
 		root,
 		role: "worker",
 		readRoots: [join(root, "src")],
 		writePaths: [join(root, "src", "allowed.ts")],
 		externalReadRoots: [externalFile],
-	}), /worker capability cannot contain external/);
+	}).externalReadRoots, [externalFile]);
 	assert.throws(() => parseCapability({
 		version: 2,
 		root,
@@ -221,7 +222,7 @@ test("undeclared, sibling, and relative traversal cannot select an external root
 	assert.equal((await authorizePath({ ...manifest, version: 2, externalReadRoots: [] }, "edit", externalFile)).allowed, false);
 });
 
-test("recursive grep and find reject descendant symlink escape from internal and external roots", async (t) => {
+test("recursive search admits safe roots despite escaping descendants but explicit link access is denied", async (t) => {
 	const { root, outside } = await fixture(t);
 	const externalDir = join(outside, "ext");
 	const hidden = await mkdtemp(join(tmpdir(), "subagent-hidden-"));
@@ -241,14 +242,49 @@ test("recursive grep and find reject descendant symlink escape from internal and
 	};
 	assert.equal((await authorizePath(explorer, "read", "src/allowed.ts")).allowed, true);
 	assert.equal((await authorizePath(explorer, "read", "src/leak-link")).allowed, false);
-	assert.equal((await authorizePath(explorer, "grep", "src")).allowed, false);
-	assert.equal((await authorizePath(explorer, "find", "src")).allowed, false);
+	assert.equal((await authorizePath(explorer, "grep", "src")).allowed, true);
+	assert.equal((await authorizePath(explorer, "find", "src")).allowed, true);
 	assert.equal((await authorizePath(explorer, "ls", "src")).allowed, true);
 	assert.equal((await authorizePath(explorer, "read", join(externalDir, "ok.ts"))).allowed, true);
 	assert.equal((await authorizePath(explorer, "read", join(externalDir, "leak-link"))).allowed, false);
-	assert.equal((await authorizePath(explorer, "grep", externalDir)).allowed, false);
-	assert.equal((await authorizePath(explorer, "find", externalDir)).allowed, false);
+	assert.equal((await authorizePath(explorer, "grep", externalDir)).allowed, true);
+	assert.equal((await authorizePath(explorer, "find", externalDir)).allowed, true);
 	assert.equal((await authorizePath(explorer, "ls", externalDir)).allowed, true);
+	assert.equal((await authorizePath(explorer, "read", join(externalDir, "missing.ts"))).allowed, true);
+});
+
+test("pinned external read identity rejects a same-path replacement", async (t) => {
+ const { root, outside } = await fixture(t);
+ const info = await lstat(outside);
+ const manifest: ChildCapabilityManifest = { version: 2, root, role: "worker", readRoots: [root], writePaths: [], writeRoot: true,
+  externalReadRoots: [outside], externalReadPins: [{ dev: info.dev, ino: info.ino }] };
+ assert.equal((await authorizePath(manifest, "read", join(outside, "secret"))).allowed, true);
+ await rename(outside, `${outside}-old`);
+ t.after(() => rm(`${outside}-old`, { recursive: true, force: true }));
+ await mkdir(outside); await writeFile(join(outside, "secret"), "new unauthorized content");
+ const changed = await authorizePath(manifest, "read", join(outside, "secret"));
+ assert.equal(changed.allowed, false); assert.equal(changed.fatal, true);
+});
+
+test("native grep and find see safe markers but do not traverse escaping links", async (t) => {
+ const { root, outside } = await fixture(t);
+ const safe = join(root, "src", "safe-marker.txt");
+ const leaked = join(outside, "leak-marker.txt");
+ await writeFile(safe, "unique-safe-marker"); await writeFile(leaked, "unique-external-marker");
+ await symlink(outside, join(root, "src", "escaped"));
+ const manifest: ChildCapabilityManifest = { version: 2, root, role: "explorer", readRoots: [join(root, "src")], writePaths: [], externalReadRoots: [] };
+ assert.equal((await authorizePath(manifest, "grep", "src")).allowed, true);
+ assert.equal((await authorizePath(manifest, "find", "src")).allowed, true);
+ const grep = createGrepToolDefinition(root); const find = createFindToolDefinition(root);
+ const searchRoot = join(root, "src");
+ const present = await grep.execute("safe", { pattern: "unique-safe-marker", path: searchRoot }, undefined, undefined, undefined as never);
+ assert.match(JSON.stringify(present.content), /safe-marker/);
+ const absent = await grep.execute("external", { pattern: "unique-external-marker", path: searchRoot }, undefined, undefined, undefined as never);
+ assert.doesNotMatch(JSON.stringify(absent.content), /unique-external-marker/);
+ const matches = await find.execute("find", { pattern: "*marker.txt", path: searchRoot }, undefined, undefined, undefined as never);
+ assert.match(JSON.stringify(matches.content), /safe-marker/);
+ assert.doesNotMatch(JSON.stringify(matches.content), /leak-marker/);
+ assert.equal((await authorizePath(manifest, "read", join(root, "src", "escaped", "leak-marker.txt"))).allowed, false);
 });
 
 test("a safe rejection permits correction but lost root terminates subsequent calls", async (t) => {

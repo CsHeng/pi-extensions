@@ -32,7 +32,13 @@ export function registerGoalTool(pi: ExtensionAPI, store: GoalStore, fenced: () 
     goal: state.goal, delivery: state.delivery, authority: state.authority, requirements: state.requirements, tasks: state.tasks,
     attempts: state.attempts.slice(-8), facts: state.facts.slice(-16), acceptance: state.acceptance,
    } : {})) : "";
-   const text = [result.message, goalReceipt(result.view), ...result.diagnostics.slice(0, 16), inspection].filter(Boolean).join("\n");
+   const refs = state && ["start", "report", "inspect"].includes(params.operation) ? JSON.stringify({
+    contractId: state.id, revision: state.revision, inputGeneration: state.input.generation,
+    attempts: state.attempts.slice(-8).map(a => ({ id: a.id, task: a.task, status: a.status })),
+    facts: state.facts.filter(f => f.usable).slice(-16).map(f => ({ id: f.id, observationId: f.observationId ?? null, result: f.result })),
+    observations: store.availableObservations(ctx.sessionManager.getSessionId()),
+   }) : "";
+   const text = [result.message, goalReceipt(result.view), refs, ...result.diagnostics.slice(0, 16), inspection].filter(Boolean).join("\n");
    return { content: [{ type: "text", text: text.length > 30000 ? `${text.slice(0, 30000)}\n[Inspection bounded; inspect with subject requirement:<key>, task:<key>, attempt ID or fact ID for the omitted record.]` : text }], details: {
     ok: result.ok, ...(result.code ? { code: result.code } : {}), diagnostics: result.diagnostics,
     ...(params.operation === "inspect" ? { workflow: result.view } : { fulfillment: result.view.state?.fulfillment, continuation: result.view.state?.continuation.state }),
