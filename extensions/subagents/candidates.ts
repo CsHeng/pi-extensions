@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { captureGitInput, createGitTaskWorkspace, freezeGitCandidate, applyGitCandidate, refreshGitInputs, retainGitInput } from "./git-workspace.ts";
-import type { ManagedRecord, ManagedSessionStore } from "./managed-sessions.ts";
+import { managedRepository, type ManagedRecord, type ManagedSessionStore } from "./managed-sessions.ts";
+import { validateRepositoryTarget } from "./repository-policy.ts";
 import { ManagedError, type CandidateRef } from "./session-contracts.ts";
 import { inspectWorkerInputs, initialWorkerInputs, prepareWorkerInputs, refreshWorkerInputs, type WorkerInputState } from "./worker-inputs.ts";
 import type { FileState } from "./workspace.ts";
@@ -12,27 +13,29 @@ function writable(record: ManagedRecord): void { if (record.version !== 3) throw
 function workspaceOf(record: ManagedRecord) {
 	writable(record);
 	const workspace = record.workspace?.inputs.gitWorkspace;
-	if (!workspace || workspace.repo !== record.owner.repo) throw new ManagedError("managed_workspace_missing");
+	if (!workspace || workspace.repo !== managedRepository(record)) throw new ManagedError("managed_workspace_missing");
 	return workspace;
 }
 
 /** Admission normally pins input before receipt; direct callers receive the same fixed input. */
 export async function prepareManagedWorkspace(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
 	writable(record);
+	await validateRepositoryTarget(record.repositoryTarget);
+	const repository = managedRepository(record);
 	if (record.workspace) {
 		if (workspaceOf(record).path !== sourcePath(store, record)) throw new ManagedError("managed_workspace_mismatch");
 		await inspectWorkerInputs(sourcePath(store, record), record.workspace.inputs);
 		return;
 	}
 	if (record.task.writePaths.some(file => file === ".git" || file.startsWith(".git/"))) throw new ManagedError("managed_git_write_forbidden");
-	if (!record.input) record.input = await captureGitInput(record.owner.repo);
-	if (!record.inputRef) record.inputRef = await retainGitInput(record.owner.repo, record.handle, record.input);
+	if (!record.input) record.input = await captureGitInput(repository);
+	if (!record.inputRef) record.inputRef = await retainGitInput(repository, record.handle, record.input);
 	await store.save(record);
-	const gitWorkspace = await createGitTaskWorkspace(record.owner.repo, sourcePath(store, record), record.input);
+	const gitWorkspace = await createGitTaskWorkspace(repository, sourcePath(store, record), record.input);
 	try {
 		record.workspace = { baseline: {}, parentBaseline: {}, inputs: initialWorkerInputs(gitWorkspace) };
 		await store.save(record); // Keep exact Git ownership before expensive dependency preparation.
-		const inputs = await prepareWorkerInputs(record.owner.repo, gitWorkspace.path, gitWorkspace, record.task.role === "worker");
+		const inputs = await prepareWorkerInputs(repository, gitWorkspace.path, gitWorkspace, record.task.role === "worker");
 		record.workspace = { baseline: {}, parentBaseline: {}, inputs };
 		await store.save(record);
 	} catch (error) {
@@ -43,6 +46,7 @@ export async function prepareManagedWorkspace(store: ManagedSessionStore, record
 
 /** Explicit refresh, never a side effect of continue or apply. Conflicts retain all bases. */
 export async function syncManagedInputs(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
+	await validateRepositoryTarget(record.repositoryTarget);
 	const workspace = workspaceOf(record);
 	if (record.state !== "idle") throw new ManagedError("session_not_idle");
 	if (record.candidate && ["applying", "partial", "unknown"].includes(record.candidate.status)) throw new ManagedError("candidate_recovery_required");
@@ -50,13 +54,14 @@ export async function syncManagedInputs(store: ManagedSessionStore, record: Mana
 	await store.save(record);
 	if (result.status === "conflict") throw new ManagedError("convergence_conflict");
 	try {
-		record.workspace!.inputs = await refreshWorkerInputs(record.owner.repo, workspace.path, record.workspace!.inputs);
+		record.workspace!.inputs = await refreshWorkerInputs(managedRepository(record), workspace.path, record.workspace!.inputs);
 		delete record.candidate;
 		await store.save(record);
 	} catch (error) { record.state = "interrupted"; await store.save(record); throw error; }
 }
 
 export async function freezeCandidate(store: ManagedSessionStore, record: ManagedRecord): Promise<CandidateRef | undefined> {
+	await validateRepositoryTarget(record.repositoryTarget);
 	const workspace = workspaceOf(record);
 	if (!record.result?.reportComplete || record.result.status !== "succeeded") throw new ManagedError("candidate_report_incomplete");
 	await inspectWorkerInputs(workspace.path, record.workspace!.inputs);
@@ -68,6 +73,7 @@ export async function freezeCandidate(store: ManagedSessionStore, record: Manage
 }
 
 export async function applyCandidate(store: ManagedSessionStore, record: ManagedRecord, candidateId: string): Promise<CandidateRef> {
+	await validateRepositoryTarget(record.repositoryTarget);
 	const workspace = workspaceOf(record); const candidate = record.candidate;
 	if (workspace.path !== sourcePath(store, record) || !candidate?.git || candidate.id !== candidateId || candidate.id !== `candidate_${candidate.git.id}` || candidate.episode !== record.episode) throw new ManagedError("candidate_mismatch");
 	if (candidate.status === "applied") return candidate;

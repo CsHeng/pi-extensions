@@ -1,4 +1,5 @@
 import { isAbsolute, normalize, relative, sep } from "node:path";
+import type { RepositoryTarget } from "./repository-policy.ts";
 import {
 	EXECUTION_PROFILES,
 	HARD_LIMITS,
@@ -24,6 +25,7 @@ const SAFE_LOCK = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 export interface NormalizedTask extends SubagentTask {
 	/** Admission-only physical identities; stored separately from the model-authored task. */
 	externalReadPins?: Array<{ dev: number; ino: number }>;
+	repositoryTarget?: RepositoryTarget;
 	inputs: string[];
 	dependsOn: string[];
 	writePaths: string[];
@@ -90,6 +92,9 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		}
 		if (task.reasoningProfile !== undefined && !REASONING_PROFILE_SET.has(task.reasoningProfile)) {
 			return fail("invalid_reasoning_profile", `Task ${task.id} has an unsupported reasoning profile.`);
+		}
+		if (task.repository !== undefined && (task.role !== "worker" || !isSafePathGrammar(task.repository) || !isAbsolute(task.repository))) {
+			return fail("invalid_task_repository", `Task ${task.id} repository requires an explicitly authorized absolute worker Git root.`);
 		}
 		const inputs = task.inputs ?? [];
 		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {

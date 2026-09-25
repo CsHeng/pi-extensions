@@ -7,13 +7,13 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } fro
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
 import { HARD_LIMITS, emptyUsage, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
-import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, RepositoryPolicyError, type RepositoryHost } from "./repository-policy.ts";
+import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, validateRepositoryTarget, RepositoryPolicyError, type RepositoryHost } from "./repository-policy.ts";
 import { getManagedRole } from "./roles.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
 import { runChild, type ChildRunOptions } from "./runner.ts";
 import { selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
-import { ManagedSessionStore, fingerprint, type ManagedRecord } from "./managed-sessions.ts";
+import { ManagedSessionStore, fingerprint, managedRepository, type ManagedRecord } from "./managed-sessions.ts";
 import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitWorkspace, retainGitInput, discardGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
@@ -27,6 +27,7 @@ import { registerManagedContext } from "./context.ts";
 import { ManagedObserver } from "./managed-observer.ts";
 import { OBSERVER_EVENT, type ObserverSnapshot } from "./observer-events.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
+import { registerSettlementBarrier } from "../shared/settlement.ts";
 
 export interface ContinuationDependencies {
 	store: ManagedSessionStore;
@@ -62,6 +63,7 @@ export class ContinuationService {
 	private supervisorOwner: string | undefined;
 	private readonly bindings = new Map<string, RunBinding>();
 	private readonly delivered = new Map<string, SubagentExecutionEvent>();
+	private readonly observedEpisodes = new Map<string, number>();
 	private readonly observers = new Set<ManagedObserver>();
 	private readonly observerSnapshots = new Map<string, ObserverSnapshot>();
 	private readonly observerOwners = new Map<string, string>();
@@ -85,7 +87,7 @@ export class ContinuationService {
 	}
 	async reset(): Promise<void> {
 		await this.shutdown(); this.supervisor = undefined; this.supervisorOwner = undefined;
-		this.bindings.clear(); this.delivered.clear(); this.stopped = false; this.resetObserver();
+		this.bindings.clear(); this.delivered.clear(); this.observedEpisodes.clear(); this.stopped = false; this.resetObserver();
 	}
 	suppressWake(): void { this.supervisor?.suppressWake(); }
 	allowWake(): void { this.supervisor?.allowWake(); }
@@ -101,6 +103,29 @@ export class ContinuationService {
 		if (!ctx.isProjectTrusted()) return [];
 		try { return await this.dependencies.store.list(await this.owner(ctx)); }
 		catch (error) { if (error instanceof RepositoryPolicyError && error.code === "repository_root_unavailable") return []; throw error; }
+	}
+	/** A terminal tool receipt or delivered notice consumes future wakes, never accepts the work. */
+	acknowledge(result: Pick<SessionActionResult, "sessions">): void {
+		for (const view of result.sessions) {
+			if (view.state === "closed") this.observedEpisodes.delete(view.handle); // Durable closed state fences late events.
+			else if (view.result && ["idle", "interrupted"].includes(view.state)) this.observedEpisodes.set(view.handle, Math.max(view.episode, this.observedEpisodes.get(view.handle) ?? 0));
+		}
+	}
+	async unobservedWake(events: readonly SubagentExecutionEvent[], ctx: ExtensionContext): Promise<SubagentExecutionEvent[]> {
+		if (!ctx.isProjectTrusted()) return [];
+		const owner = await this.owner(ctx); const remaining: SubagentExecutionEvent[] = [];
+		for (const event of events) {
+			if (event.owner.repository !== owner.repo || event.owner.sessionId !== owner.parentSessionId || (event.owner.branchAnchor && event.owner.branchAnchor !== owner.anchor && !owner.branch.includes(event.owner.branchAnchor))) continue;
+			const sessions: SubagentExecutionEvent["sessions"] = [];
+			for (const view of event.sessions) {
+				try {
+					const record = await this.dependencies.store.load(view.handle, owner);
+					if (record.state !== "closed" && record.episode === view.episode && record.dispatch?.runId === event.runId && record.dispatch.generation === event.generation && (this.observedEpisodes.get(view.handle) ?? 0) < view.episode) sessions.push(view);
+				} catch { /* Unavailable/foreign records cannot trigger a turn; durable execution evidence remains inspectable. */ }
+			}
+			if (sessions.length) remaining.push({ ...event, sessions });
+		}
+		return remaining;
 	}
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
@@ -158,9 +183,10 @@ export class ContinuationService {
 					} else {
 						if (record.state === "closed" && record.retained !== (request.disposition !== "discard")) throw new ManagedError("close_disposition_conflict");
 						if (request.disposition === "discard" && record.state !== "closed") {
+							await validateRepositoryTarget(record.repositoryTarget);
 							const workspace = record.workspace?.inputs.gitWorkspace;
 							if (workspace) { await discardGitWorkspace(workspace); delete record.workspace; await store.save(record); }
-							if (record.inputRef && record.input) { await discardGitInput(record.owner.repo, record.inputRef, record.input); delete record.inputRef; await store.save(record); }
+							if (record.inputRef && record.input) { await discardGitInput(managedRepository(record), record.inputRef, record.input); delete record.inputRef; await store.save(record); }
 							for (const name of await readdir(store.path(record.handle))) {
 								if (["source", "scratch"].includes(name) || /^candidate_[a-zA-Z0-9_-]+$/.test(name) || /^inputs_(?:old_)?[0-9a-f-]{36}$/.test(name)) await rm(join(store.path(record.handle), name), { recursive: true, force: true });
 							}
@@ -247,7 +273,13 @@ export class ContinuationService {
 			try { const provenance = loaded.source ? await this.dependencies.provenance?.observeConfiguration(loaded.source) : undefined; if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; } } catch { /* Optional. */ }
 			const receipt = await this.supervisor.submit({ requestId, requestKey: digest,
 				prepare: async (preparationSignal, identity) => {
-					const input = records.some(record => !replays.has(record.handle) && !record.workspace && !record.input) ? await captureGitInput(owner.repo) : undefined;
+					const inputs = new Map<string, Awaited<ReturnType<typeof captureGitInput>>>();
+					for (const record of records) {
+						if (replays.has(record.handle)) continue;
+						await validateRepositoryTarget(record.repositoryTarget);
+						const repository = managedRepository(record);
+						if (!record.workspace && !record.input && !inputs.has(repository)) inputs.set(repository, await captureGitInput(repository));
+					}
 					preparationSignal.throwIfAborted();
 					for (const [index, record] of records.entries()) {
 						if (replays.has(record.handle)) continue;
@@ -264,17 +296,19 @@ export class ContinuationService {
 							if (current.state !== "idle" || current.episode !== record.episode) throw new ManagedError("session_not_idle");
 							if (current.candidate && ["applying", "partial", "unknown"].includes(current.candidate.status)) throw new ManagedError("candidate_recovery_required");
 							if ((await store.nativeRevision(current.handle)).leaf !== current.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
+							await validateRepositoryTarget(current.repositoryTarget);
+							const repository = managedRepository(current); const input = inputs.get(repository);
 							if (!current.workspace) {
-								if (!current.input && input) { current.input = input; current.inputRef = await retainGitInput(owner.repo, current.handle, input); }
-								else if (current.input && current.inputRef) await inspectGitInput(owner.repo, current.inputRef, current.input);
+								if (!current.input && input) { current.input = input; current.inputRef = await retainGitInput(repository, current.handle, input); }
+								else if (current.input && current.inputRef) await inspectGitInput(repository, current.inputRef, current.input);
 								else throw new ManagedError("managed_input_ref_missing");
 							}
 							current.episode++; current.state = "queued"; delete current.result; delete current.candidate;
 							current.route = routes[index]!;
 							current.inheritSkills = config.roles[current.task.role].inheritSkills;
 							if (current.projectSkills === undefined) {
-								const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
-								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(owner.repo, parentSkills);
+								const parentSkills = repository === owner.repo ? this.dependencies.getParentSkills?.(repository) : undefined;
+								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(repository, parentSkills);
 							}
 							current.dispatch = { ...identity, toolCallId, taskId: tasks[index]!.id };
 							current.requests.push({ id: request.episodes?.[index]?.requestId ?? fingerprint([requestId, current.task.id]), fingerprint: request.episodes?.[index] ? fingerprint([request.episodes[index]!.expectedEpisode, request.episodes[index]!.message]) : digest, episode: current.episode, state: "running", runId: identity.runId, generation: identity.generation });
@@ -429,9 +463,10 @@ export class ContinuationService {
 				operation.execution = record.execution; await store.save(record);
 				const worker = record.task.role === "worker";
 				if ((record.task.externalReadRoots?.length ?? 0) !== (record.externalReadPins?.length ?? 0)) throw new ManagedError("external_read_root_unavailable");
-				const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
+				const repository = managedRepository(record);
+				const parentSkills = repository === owner.repo ? this.dependencies.getParentSkills?.(repository) : undefined;
 				const cwd = join(store.path(handle), "source"); const native = join(store.path(handle), "native.jsonl");
-				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, sourceRoot: owner.repo, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), prompt: message, approveProject: true, signal, managedProcessGroup: true,
+				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, sourceRoot: repository, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL(worker ? "./worker-tools.ts" : "./child-capability-guard.ts", import.meta.url)),
 					...(worker ? { managedWorkerScratch: join(store.path(handle), "scratch"), managedWorkerInputs: record.workspace!.inputs } : {}),
 					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], externalReadPins: record.externalReadPins ?? [], ...(worker ? { writeRoot: true } : {}) },
@@ -476,31 +511,49 @@ export class ContinuationService {
 
 export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial<ContinuationDependencies> = {}): ContinuationService {
 	let context: ExtensionContext | undefined;
-	let pendingWake: { token: string; events: SubagentExecutionEvent[] } | undefined;
+	const pendingWake = new Map<string, SubagentExecutionEvent>();
+	let wakeEpoch = 0, flushing = false, dispatching = false;
+	const clearWake = () => { pendingWake.clear(); wakeEpoch++; dispatching = false; };
+	const barrier = registerSettlementBarrier(pi, { command: "csheng-subagents-wait", tool: SUBAGENT_SESSION_TOOL_NAME, enabled: () => pendingWake.size > 0 || service.busy, compaction: true });
 	const wakeContent = (events: SubagentExecutionEvent[]) => `Subagent execution evidence is ready. Inspect terminal evidence and decide whether to review, apply, continue, or close; execution is not acceptance.\n${JSON.stringify(events.map(event => ({ eventId: event.eventId, runId: event.runId, sessions: event.sessions.map(session => ({ handle: session.handle, episode: session.episode, status: session.result?.status, candidateId: session.candidate?.id })) })))}`;
 	const current = (event: SubagentExecutionEvent) => context?.isProjectTrusted() && context.sessionManager.getSessionId() === event.owner.sessionId && (!event.owner.branchAnchor || context.sessionManager.getLeafId() === event.owner.branchAnchor || context.sessionManager.getBranch().some(entry => entry.id === event.owner.branchAnchor));
+	const requestWake = () => {
+		if (!context || dispatching || barrier.aborted || !pendingWake.size || !["tui", "rpc"].includes(context.mode)) return;
+		barrier.arm();
+		if (barrier.waiting) { barrier.schedule(() => { void flushWake(); }); return; }
+		if (context.isIdle()) void flushWake();
+	};
+	const flushWake = async () => {
+		const ctx = context; if (!ctx || flushing || dispatching || !ctx.isIdle() || !pendingWake.size) return;
+		const epoch = wakeEpoch, snapshot = [...pendingWake.values()]; pendingWake.clear(); flushing = true;
+		try {
+			const events = await service.unobservedWake(snapshot, ctx);
+			if (epoch !== wakeEpoch || barrier.aborted || ctx.signal?.aborted || ctx.hasPendingMessages()) return;
+			if (context !== ctx || !ctx.isIdle()) { for (const event of events) pendingWake.set(event.eventId, event); return; }
+			if (!events.length || !ctx.isProjectTrusted() || !pi.getActiveTools().includes(SUBAGENT_SESSION_TOOL_NAME)) return;
+			dispatching = true;
+			// No provider-triggering message is queued while the parent is busy. The public
+			// waiter crosses settlement first; receipt/record fences are checked at delivery.
+			pi.sendMessage({ customType: SUBAGENT_EXECUTION_EVENT, content: wakeContent(events), display: false, details: { version: 3 } }, { triggerTurn: true });
+			for (const event of events) service.acknowledge(event);
+		} catch { dispatching = false; /* Notification failure never erases stored execution evidence or starts a retry loop. */ }
+		finally { flushing = false; if (pendingWake.size && !dispatching) requestWake(); }
+	};
 	const service = new ContinuationService({ ...dependencies,
 		onObserver: dependencies.onObserver ?? (snapshot => pi.events.emit(OBSERVER_EVENT, snapshot)),
 		onExecution: dependencies.onExecution ?? (event => { if (current(event)) { pi.appendEntry(SUBAGENT_EXECUTION_EVENT, event); pi.events.emit(SUBAGENT_EXECUTION_EVENT, event); } }),
 		onWake: dependencies.onWake ?? (events => {
-			const owned = events.filter(current); if (!owned.length) return;
-			if (pendingWake) { pendingWake.events = [...pendingWake.events, ...owned].slice(-MANAGED_LIMITS.maxSessions); return; }
-			pendingWake = { token: randomUUID(), events: owned.slice(-MANAGED_LIMITS.maxSessions) };
-			try { pi.sendMessage({ customType: SUBAGENT_EXECUTION_EVENT, content: wakeContent(pendingWake.events), display: false, details: { version: 3, wakeToken: pendingWake.token } }, { triggerTurn: true, deliverAs: "followUp" }); }
-			catch (error) { pendingWake = undefined; throw error; }
+			for (const event of events.filter(current)) pendingWake.set(event.eventId, event);
+			requestWake();
 		}),
 	});
-	pi.on("session_start", async (_event, ctx) => { pendingWake = undefined; context = ctx; await service.reset(); });
-	pi.on("session_tree", async (_event, ctx) => { pendingWake = undefined; await service.reset(); context = ctx; });
-	pi.on("context", event => {
-		const wake = pendingWake;
-		if (!wake || !event.messages.some(message => message.role === "custom" && message.customType === SUBAGENT_EXECUTION_EVENT && (message.details as { wakeToken?: string } | undefined)?.wakeToken === wake.token)) return;
-		pendingWake = undefined; // The public context hook, not a microtask, consumes a queued wake.
-		return { messages: event.messages.map(message => message.role === "custom" && message.customType === SUBAGENT_EXECUTION_EVENT && (message.details as { wakeToken?: string } | undefined)?.wakeToken === wake.token ? { ...message, content: wakeContent(wake.events.filter(current)) } : message) };
-	});
-	pi.on("agent_start", (_event, ctx) => { context = ctx; });
-	pi.on("input", event => { if (event.source === "interactive" || event.source === "rpc") service.allowWake(); });
-	pi.on("agent_end", (event) => { if (event.messages.some(message => message.role === "assistant" && ["aborted", "error"].includes(message.stopReason))) { pendingWake = undefined; service.suppressWake(); } });
+	pi.on("session_start", async (_event, ctx) => { clearWake(); context = ctx; await service.reset(); });
+	pi.on("session_tree", async (_event, ctx) => { clearWake(); await service.reset(); context = ctx; });
+	pi.on("agent_start", (_event, ctx) => { context = ctx; dispatching = false; requestWake(); });
+	pi.on("session_before_compact", (_event, ctx) => { context = ctx; dispatching = false; requestWake(); });
+	pi.on("session_compact_failed", event => { if (event.aborted) { clearWake(); service.suppressWake(); } });
+	pi.on("input", event => { if (event.source === "interactive" || event.source === "rpc") { clearWake(); service.allowWake(); } });
+	pi.on("agent_end", (event) => { if (event.messages.some(message => message.role === "assistant" && ["aborted", "error"].includes(message.stopReason))) { clearWake(); service.suppressWake(); } });
 	pi.registerTool({
 		name: SUBAGENT_SESSION_TOOL_NAME, label: "Subagent sessions",
 		description: SUBAGENT_TOOL_DESCRIPTION,
@@ -510,6 +563,8 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		async execute(id, input, signal, onUpdate, ctx) {
 			context = ctx;
 			const details = await service.execute(input, ctx, signal, (tasks, elapsedMs) => onUpdate?.({ content: [{ type: "text", text: formatProgress(tasks, elapsedMs) }], details: undefined }), id);
+			service.acknowledge(details);
+			barrier.arm(); // Outstanding asynchronous work can complete during a later settlement consumer.
 			return { content: [{ type: "text", text: formatManagedContent(details) }], details };
 		},
 		renderResult(result, { expanded, isPartial }) {
@@ -521,7 +576,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		const details = event.details as SessionActionResult | undefined;
 		if (details && [1, 2, 3].includes(details.schemaVersion)) return { isError: !["accepted", "succeeded"].includes(details.status) };
 	});
-	pi.on("session_shutdown", async () => { await service.shutdown(); pendingWake = undefined; context = undefined; });
+	pi.on("session_shutdown", async () => { clearWake(); context = undefined; await service.shutdown(); });
 	registerManagedContext(pi, ctx => service.contextIndex(ctx));
 	return service;
 }

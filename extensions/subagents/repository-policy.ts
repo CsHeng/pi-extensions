@@ -8,6 +8,39 @@ import {
 	type TaskError,
 } from "./contracts.ts";
 import type { NormalizedTask } from "./graph.ts";
+import { runReadGit } from "./git-workspace.ts";
+
+export interface RepositoryTarget {
+	declared: string;
+	root: string;
+	identities: Array<{ path: string; dev: number; ino: number }>;
+}
+
+/** Explicit target selection is not authority; pin the worktree and Git administration identities. */
+export async function captureRepositoryTarget(declared: string): Promise<RepositoryTarget> {
+	if (!isAbsolute(declared) || !isSafePathGrammar(declared)) throw new RepositoryPolicyError("invalid_task_repository", "Worker repository must name an authorized absolute Git worktree root.");
+	try {
+		const root = await findCanonicalGitRoot(declared);
+		if (await realpath(declared) !== root) throw new Error("not the repository root");
+		const gitDir = await realpath((await runReadGit(root, ["rev-parse", "--absolute-git-dir"])).stdout.toString().trim());
+		const commonDir = await realpath(resolve(root, (await runReadGit(root, ["rev-parse", "--git-common-dir"])).stdout.toString().trim()));
+		const identities = await Promise.all([root, gitDir, commonDir].map(async path => {
+			const info = await lstat(path); if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("not a physical directory");
+			return { path, dev: info.dev, ino: info.ino };
+		}));
+		return { declared, root, identities };
+	} catch { throw new RepositoryPolicyError("task_repository_unavailable", "The selected worker repository is not an accessible Git worktree root."); }
+}
+
+export async function validateRepositoryTarget(target: RepositoryTarget | undefined): Promise<void> {
+	if (!target) return; // Existing v3 records retain their original parent-root binding.
+	try {
+		const current = await captureRepositoryTarget(target.declared);
+		if (current.root !== target.root || current.identities.length !== target.identities.length || current.identities.some((pin, index) => {
+			const before = target.identities[index]; return !before || pin.path !== before.path || pin.dev !== before.dev || pin.ino !== before.ino;
+		})) throw new Error("changed identity");
+	} catch { throw new RepositoryPolicyError("task_repository_changed", "The pinned worker repository identity changed; do not redirect this session to another checkout."); }
+}
 
 export class RepositoryPolicyError extends Error {
 	readonly code: string;
@@ -182,6 +215,8 @@ export async function canonicalizeExternalReadRoot(
 }
 
 function retarget(code: string, taskId: string): string {
+	if (code === "invalid_task_repository") return `Task ${taskId} repository requires an explicitly authorized absolute worker Git root.`;
+	if (code === "task_repository_unavailable") return `Task ${taskId} selected repository is not an accessible Git worktree root.`;
 	if (code === "invalid_scope") return `Task ${taskId} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`;
 	if (code === "scope_outside_repository") return `Task ${taskId} scope resolves outside the current Git repository.`;
 	if (code === "invalid_external_read_root") return `Task ${taskId} external read root must be an absolute safe path.`;
@@ -216,11 +251,18 @@ export async function admitRepositoryTasks(
 
 	const admitted: NormalizedTask[] = [];
 	for (const task of tasks) {
+		let repositoryTarget: RepositoryTarget | undefined;
+		if (task.repository !== undefined) {
+			if (task.role !== "worker") return failAdmission("invalid_task_repository", task.id);
+			try { repositoryTarget = await captureRepositoryTarget(task.repository); }
+			catch (error) { return failAdmission(error instanceof RepositoryPolicyError ? error.code : "task_repository_unavailable", task.id); }
+		}
+		const taskRoot = repositoryTarget?.root ?? gitRoot;
 		const declaredExternal = task.externalReadRoots ?? [];
 		const scope: string[] = [];
 		for (const entry of task.scope) {
 			try {
-				scope.push(await canonicalizeInternalScope(gitRoot, entry, host));
+				scope.push(await canonicalizeInternalScope(taskRoot, entry, host));
 			} catch (error) {
 				const code = error instanceof RepositoryPolicyError ? error.code : "invalid_scope";
 				return failAdmission(code, task.id);
@@ -236,7 +278,7 @@ export async function admitRepositoryTasks(
 			for (const entry of declaredExternal) {
 				let canonical: string;
 				try {
-					canonical = await canonicalizeExternalReadRoot(gitRoot, entry, host);
+					canonical = await canonicalizeExternalReadRoot(taskRoot, entry, host);
 				} catch (error) {
 					const code = error instanceof RepositoryPolicyError ? error.code : "invalid_external_read_root";
 					return failAdmission(code, task.id);
@@ -256,6 +298,7 @@ export async function admitRepositoryTasks(
 			scope,
 			externalReadRoots,
 			externalReadPins,
+			...(repositoryTarget ? { repositoryTarget } : {}),
 		});
 	}
 	return { ok: true, gitRoot, tasks: admitted };

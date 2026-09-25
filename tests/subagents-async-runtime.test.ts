@@ -34,6 +34,24 @@ async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) =
 }
 const task = (id: string) => ({ id, role: "worker" as const, objective: "change source", scope: ["."], writePaths: [] });
 
+test("wake filtering fences observed episodes, late run aggregates, new episodes and owner identity without accepting work", async t => {
+ const f = await fixture(t, async () => {});
+ const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "wake", tasks: [task("one")] }, f.ctx);
+ assert.equal(first.status, "succeeded"); const event = f.events.findLast(value => value.kind === "run-terminal")!; assert.ok(event);
+ assert.equal((await f.service.unobservedWake([event], f.ctx)).length, 1);
+ for (const changed of [{ ...event, runId: "wrong" }, { ...event, generation: "wrong" }, { ...event, owner: { ...event.owner, repository: join(f.repo, "wrong") } }, { ...event, owner: { ...event.owner, sessionId: "wrong" } }, { ...event, owner: { ...event.owner, branchAnchor: "other-branch" } }]) assert.deepEqual(await f.service.unobservedWake([changed], f.ctx), []);
+ assert.deepEqual(await f.service.unobservedWake([event], { ...f.ctx, isProjectTrusted: () => false }), []);
+ f.service.acknowledge(first); assert.deepEqual(await f.service.unobservedWake([event], f.ctx), []);
+ const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, requestId: "next", message: "continue" }] }, f.ctx);
+ assert.equal(second.status, "succeeded"); const next = f.events.findLast(value => value.kind === "run-terminal")!;
+ assert.equal((await f.service.unobservedWake([next], f.ctx)).length, 1); assert.deepEqual(await f.service.unobservedWake([event], f.ctx), []);
+ // A delivered notice is also one-shot, but the result remains unapplied and inspectable.
+ f.service.acknowledge(next); assert.deepEqual(await f.service.unobservedWake([next], f.ctx), []);
+ const inspected = await f.service.execute({ action: "inspect", handle: first.sessions[0]!.handle }, f.ctx); assert.equal(inspected.sessions[0]!.episode, 2); assert.equal(inspected.sessions[0]!.reportComplete, true);
+ const closed = await f.service.execute({ action: "close", handle: first.sessions[0]!.handle, expectedEpisode: 2, disposition: "discard" }, f.ctx); f.service.acknowledge(closed);
+ assert.deepEqual(await f.service.unobservedWake([next], f.ctx), []);
+});
+
 test("v3 receipts precede completion, early apply leaves sibling active, fixed input and explicit refresh reuse worktree", async t => {
 	const slow = gate(); const started = gate(); const paths: string[] = [];
 	t.after(() => slow.release());

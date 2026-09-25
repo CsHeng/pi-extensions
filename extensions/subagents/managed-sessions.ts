@@ -23,6 +23,7 @@ export interface ManagedRecord {
 	owner: SessionOwner;
 	task: NormalizedTask;
 	externalReadPins?: Array<{ dev: number; ino: number }>;
+	repositoryTarget?: import("./repository-policy.ts").RepositoryTarget;
 	state: ManagedState;
 	episode: number;
 	nativeLeaf: string | null;
@@ -41,6 +42,8 @@ export interface ManagedRecord {
 	/** Only bounded request identities/digests, not a business task ledger. */
 	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution; error?: { code: string; detail?: string }; runId?: string; generation?: string }>;
 }
+export function managedRepository(record: ManagedRecord): string { return record.repositoryTarget?.root ?? record.owner.repo; }
+
 interface BatchRecord { version: 1 | 2 | 3; fingerprint: string; handles: string[]; complete: boolean; requestFingerprint?: string; response?: SessionActionResult }
 
 export function fingerprint(value: unknown): string {
@@ -87,6 +90,7 @@ const recordSchema = Type.Object({
 	version: storageVersion, handle: identity, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: identity, anchor: Type.Union([identity, Type.Null()]) }, { additionalProperties: false }),
 	task: SubagentTaskSchema, externalReadPins: Type.Optional(Type.Array(Type.Object({ dev: Type.Number(), ino: Type.Number() }, { additionalProperties: false }), { maxItems: 8 })), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
+	repositoryTarget: Type.Optional(Type.Object({ declared: Type.String(), root: Type.String(), identities: Type.Array(Type.Object({ path: Type.String(), dev: Type.Number(), ino: Type.Number() }, { additionalProperties: false }), { minItems: 3, maxItems: 3 }) }, { additionalProperties: false })),
 	dispatch: Type.Optional(Type.Object({ runId: identity, generation: identity, toolCallId: Type.String({ maxLength: 256 }), taskId: Type.String({ maxLength: 128 }) }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([identity, Type.Null()]),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
@@ -180,6 +184,7 @@ export class ManagedSessionStore {
 		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
 		if (!Check(recordSchema, record) || ![1, 2, MANAGED_SESSION_VERSION].includes(record.version) || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
 		if (![record.task.writePaths, record.task.inputs, record.task.dependsOn, record.task.resourceLocks, record.task.externalReadRoots].every(Array.isArray) || !validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] }).ok) throw new ManagedError("managed_registry_invalid");
+		if ((record.task.repository !== undefined) !== (record.repositoryTarget !== undefined) || (record.repositoryTarget && (record.version !== 3 || record.task.role !== "worker" || record.task.repository !== record.repositoryTarget.declared || record.repositoryTarget.root !== record.repositoryTarget.identities[0]?.path))) throw new ManagedError("managed_registry_invalid");
 		if (record.externalReadPins && record.externalReadPins.length !== record.task.externalReadRoots?.length) throw new ManagedError("managed_registry_invalid");
 		if (new Set(record.requests.map((request) => request.id)).size !== record.requests.length || record.requests.some((request) => request.episode > record.episode)) throw new ManagedError("managed_registry_invalid");
 		if (record.version < 3 && record.workspace && record.task.writePaths.some((file) => !Object.hasOwn(record.workspace!.parentBaseline, file))) throw new ManagedError("managed_registry_invalid");
@@ -188,7 +193,7 @@ export class ManagedSessionStore {
 		if (record.version === 3) {
 			if (record.inputRef && (!record.input || record.inputRef !== `refs/csheng/subagents/inputs/${handle}`)) throw new ManagedError("managed_registry_invalid");
 			const workspace = record.workspace?.inputs.gitWorkspace;
-			if (record.workspace && (!workspace || workspace.repo !== record.owner.repo || workspace.path !== join(directory, "source"))) throw new ManagedError("managed_registry_invalid");
+			if (record.workspace && (!workspace || workspace.repo !== managedRepository(record) || workspace.path !== join(directory, "source"))) throw new ManagedError("managed_registry_invalid");
 			if (record.candidate && (!record.candidate.git || JSON.stringify(record.candidate.changedPaths) !== JSON.stringify(record.candidate.git.changedPaths) || (workspace && record.candidate.git.workspaceId !== workspace.id))) throw new ManagedError("managed_registry_invalid");
 		}
 		if (!this.matches(record, owner)) throw new ManagedError("managed_owner_mismatch");
@@ -288,7 +293,7 @@ export class ManagedSessionStore {
 		return this.lock(this.root, async () => {
 			const key = fingerprint([owner.repo, owner.parentSessionId, requestId]);
 			const requestPath = join(this.root, `request_${key}.json`);
-			const digest = fingerprint(tasks.map(({ externalReadPins: _pins, ...task }) => task));
+			const digest = fingerprint(tasks.map(({ externalReadPins: _pins, repositoryTarget: _target, ...task }) => task));
 			let prior: BatchRecord | undefined;
 			try { prior = await readJson<BatchRecord>(requestPath); } catch (error) { if (!missing(error)) throw error; }
 			if (prior !== undefined) {
@@ -317,10 +322,10 @@ export class ManagedSessionStore {
 				await privateDirectory(directory, true);
 				await privateDirectory(join(directory, "scratch"), true);
 				const native = await open(join(directory, "native.jsonl"), "wx", 0o600); await native.close();
-				const { externalReadPins, ...persistedTask } = task;
+				const { externalReadPins, repositoryTarget, ...persistedTask } = task;
 				const record: ManagedRecord = {
 					version: MANAGED_SESSION_VERSION, handle, owner: { repo: owner.repo, parentSessionId: owner.parentSessionId, anchor: owner.anchor },
-					task: persistedTask, ...(externalReadPins ? { externalReadPins } : {}), state: "idle", episode: 0, nativeLeaf: null, requests: [],
+					task: persistedTask, ...(externalReadPins ? { externalReadPins } : {}), ...(repositoryTarget ? { repositoryTarget } : {}), state: "idle", episode: 0, nativeLeaf: null, requests: [],
 				};
 				await this.save(record); records.push(record);
 			}

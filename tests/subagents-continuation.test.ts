@@ -8,12 +8,13 @@ import { ContinuationService } from "../extensions/subagents/continuation.ts";
 import { formatManagedContent } from "../extensions/subagents/render.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { defaultConfig } from "../extensions/subagents/config.ts";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { runChild } from "../extensions/subagents/runner.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
+import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
 import { validateGraphStructure } from "../extensions/subagents/graph.ts";
 import { emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 
@@ -584,6 +585,77 @@ test("episode provenance and actual route survive config changes and fresh repla
 	const historical = await service.execute(createWorker, f.ctx);
 	assertReplay(historical, first);
 	assert.equal(reads, 2);
+});
+
+test("one origin independently owns sibling worker targets, inputs, apply, refresh and cleanup", async t => {
+ const f = await serviceFixture(t); const targets = [join(f.base, "left"), join(f.base, "right")]; const roots: string[] = [];
+ await writeFile(join(f.repo, "origin-only.txt"), "parent");
+ for (const target of targets) { await mkdir(target); await promisify(execFile)("git", ["init", "-q", target]); await writeFile(join(target, "dirty.txt"), target); }
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => { roots.push(options.sourceRoot!); return f.dependencies.runChild(options); } });
+ const created = await service.execute({ action: "create", requestId: "siblings", tasks: targets.map((repository, i) => ({ id: `worker-${i}`, role: "worker", objective: "host-worker-fixture", repository, scope: ["."] })) }, f.ctx);
+ assert.equal(created.status, "succeeded", JSON.stringify(created)); assert.deepEqual(new Set(roots), new Set(targets));
+ const records = await Promise.all(created.sessions.map(view => f.store.load(view.handle, { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] })));
+ assert.notEqual(records[0]!.input!.commit, records[1]!.input!.commit);
+ for (const [i, view] of created.sessions.entries()) {
+  const record = records[i]!; assert.equal(record.owner.repo, f.repo); assert.equal(record.repositoryTarget!.root, targets[i]); assert.equal(record.workspace!.inputs.gitWorkspace!.repo, targets[i]);
+  assert.equal(await readFile(join(f.store.path(view.handle), "source", "dirty.txt"), "utf8"), targets[i]);
+  await assert.rejects(readFile(join(f.store.path(view.handle), "source", "origin-only.txt")), { code: "ENOENT" });
+  await assert.rejects(readFile(join(targets[i]!, "candidate.txt")), { code: "ENOENT" });
+  const wrongOwner = await service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id }, { ...f.ctx, cwd: targets[i]! });
+  assert.equal(wrongOwner.status, "failed");
+ }
+ const first = created.sessions[0]!; const second = created.sessions[1]!;
+ assert.equal((await service.execute({ action: "apply", handle: first.handle, expectedEpisode: 1, candidateId: first.candidate!.id }, f.ctx)).status, "succeeded");
+ assert.equal(await readFile(join(targets[0]!, "candidate.txt"), "utf8"), "candidate-1");
+ await assert.rejects(readFile(join(targets[1]!, "candidate.txt")), { code: "ENOENT" });
+ await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
+ await writeFile(join(targets[0]!, "later.txt"), "new target input");
+ assert.equal((await service.execute({ action: "refresh", handle: first.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
+ assert.equal(await readFile(join(f.store.path(first.handle), "source", "later.txt"), "utf8"), "new target input");
+ await assert.rejects(readFile(join(f.store.path(second.handle), "source", "later.txt")), { code: "ENOENT" });
+ assert.equal((await service.execute({ action: "continue", episodes: [{ handle: first.handle, requestId: "again", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx)).status, "succeeded");
+ for (const [i, view] of created.sessions.entries()) {
+  assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: i === 0 ? 2 : 1, disposition: "discard" }, f.ctx)).status, "succeeded");
+  assert.equal((await promisify(execFile)("git", ["-C", targets[i]!, "for-each-ref", "refs/csheng/subagents/"])).stdout, "");
+  assert.equal((await promisify(execFile)("git", ["-C", targets[i]!, "worktree", "list", "--porcelain"])).stdout.match(/^worktree /gm)?.length, 1);
+  assert.equal(await readFile(join(targets[i]!, "dirty.txt"), "utf8"), targets[i]);
+ }
+ assert.equal(await readFile(join(f.repo, "origin-only.txt"), "utf8"), "parent");
+});
+
+test("a target containing the origin repository discovers target skills instead of reusing the origin catalog", async t => {
+ const f = await serviceFixture(t); const target = join(f.base, "target"), origin = join(target, "nested"); await mkdir(target); await rename(f.repo, origin); await promisify(execFile)("git", ["init", "-q", target]);
+ await writeFile(join(target, ".gitignore"), "nested/\n");
+ for (const [root, name] of [[target, "target-only"], [origin, "origin-only"]]) { const path = join(root!, ".agents", "skills", name!); await mkdir(path, { recursive: true }); await writeFile(join(path, "SKILL.md"), `---\nname: ${name}\ndescription: fixture\n---\nFixture guidance.\n`); }
+ let catalogCalls = 0, checked = false;
+ const service = new ContinuationService({ ...f.dependencies, getParentSkills: () => { catalogCalls++; return []; }, runChild: async options => {
+  assert.equal(options.parentSkills, undefined); assert.equal(options.projectSkills, undefined);
+  const guidance = await prepareChildGuidance(options.sourceRoot!, options.cwd, true, join(f.base, "empty-agent"), f.base, options.parentSkills, options.projectSkills);
+  assert.ok(guidance.skillPaths.some(path => path.endsWith("/target-only"))); assert.ok(guidance.skillPaths.every(path => !path.endsWith("/origin-only"))); checked = true;
+  return f.dependencies.runChild(options);
+ } });
+ const ctx = { ...f.ctx, cwd: origin };
+ const result = await service.execute({ action: "create", requestId: "nested-guidance", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", repository: target, scope: ["."] }] }, ctx);
+ assert.equal(result.status, "succeeded", JSON.stringify(result)); assert.equal(catalogCalls, 0); assert.equal(checked, true);
+ assert.equal((await service.execute({ action: "close", handle: result.sessions[0]!.handle, expectedEpisode: 1, disposition: "discard" }, ctx)).status, "succeeded");
+});
+
+test("retargeted repository alias cannot redirect an accepted worker or delete another target", async t => {
+ const f = await serviceFixture(t); const other = join(f.base, "other"); await mkdir(other); await promisify(execFile)("git", ["init", "-q", other]);
+ const alias = join(f.base, "alias"); await symlink(f.repo, alias);
+ const first = await f.service.execute({ action: "create", requestId: "pinned", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", repository: alias, scope: ["."] }] }, f.ctx);
+ assert.equal(first.status, "succeeded", JSON.stringify(first)); const view = first.sessions[0]!; const launches = f.launches();
+ await unlink(alias); await symlink(other, alias);
+ for (const request of [
+  { action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id },
+  { action: "refresh", handle: view.handle, expectedEpisode: 1 },
+  { action: "continue", episodes: [{ handle: view.handle, requestId: "wrong-target", expectedEpisode: 1, message: "host-worker-fixture" }] },
+  { action: "close", handle: view.handle, expectedEpisode: 1, disposition: "discard" },
+ ] as const) { const result = await f.service.execute(request, f.ctx); assert.equal(result.status, "failed", JSON.stringify(result)); assert.equal(result.error?.code, "task_repository_changed"); }
+ assert.equal(f.launches(), launches); await assert.rejects(readFile(join(other, "candidate.txt")), { code: "ENOENT" });
+ await unlink(alias); await symlink(f.repo, alias);
+ assert.equal((await f.service.execute({ action: "close", handle: view.handle, expectedEpisode: 1, disposition: "discard" }, f.ctx)).status, "succeeded");
+ assert.equal((await promisify(execFile)("git", ["-C", f.repo, "for-each-ref", "refs/csheng/subagents/"])).stdout, "");
 });
 
 test("native explorer create/continue reads an explicit external Git file without shell", async (t) => {

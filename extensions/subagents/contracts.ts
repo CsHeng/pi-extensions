@@ -113,6 +113,7 @@ export const SubagentTaskSchema = Type.Object(
 		id: Type.String({ minLength: 1, maxLength: 64 }),
 		role: RoleSchema,
 		objective: Type.String({ minLength: 1 }),
+		repository: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "Worker-only explicit absolute Git worktree root already authorized for this task. Defaults to the parent repository. Each worker still writes exactly one pinned repository; scope and writePaths are relative to that target. Target selection does not grant authority." })),
 		scope: Type.Array(Type.String({ minLength: 1 }), {
 			minItems: 1,
 			maxItems: 32,
@@ -148,6 +149,7 @@ export interface SubagentTask {
 	id: string;
 	role: RoleName;
 	objective: string;
+	repository?: string;
 	scope: string[];
 	inputs?: string[];
 	dependsOn?: string[];

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,8 @@ import { validateGraphRelationships, validateGraphStructure } from "../extension
 import {
 	admitRepositoryTasks,
 	canonicalizeExternalReadRoot,
+	captureRepositoryTarget,
+	validateRepositoryTarget,
 	canonicalizeInternalScope,
 	findCanonicalGitRoot,
 	type RepositoryHost,
@@ -54,6 +56,37 @@ async function structure(tasks: Array<Record<string, unknown>>) {
 	assert.equal(result.ok, true, result.ok ? undefined : result.error.message);
 	return result.ok ? result.tasks : [];
 }
+
+test("explicit worker repository admission binds scope and read grants to the target, not origin", async t => {
+ const f = await layout(t);
+ for (const repository of ["../sibling", "bad\u0000path"]) assert.equal(validateGraphStructure({ tasks: [{ id: "w", role: "worker", objective: "edit", scope: ["."], repository }] }).ok, false);
+ for (const role of ["explorer", "reviewer"] as const) assert.equal(validateGraphStructure({ tasks: [{ id: "r", role, objective: "read", scope: ["."], repository: f.sibling }] }).ok, false);
+ const tasks = await structure([{ id: "w", role: "worker", objective: "edit", repository: f.sibling, scope: [f.sibling], externalReadRoots: [f.current] }]);
+ const admitted = await admitRepositoryTasks(f.current, tasks); assert.equal(admitted.ok, true);
+ if (!admitted.ok) return;
+ assert.equal(admitted.gitRoot, f.current); assert.equal(admitted.tasks[0]!.repositoryTarget!.root, f.sibling); assert.deepEqual(admitted.tasks[0]!.scope, ["."]); assert.deepEqual(admitted.tasks[0]!.externalReadRoots, [f.current]);
+ const defaults = await admitRepositoryTasks(f.current, await structure([{ id: "w", role: "worker", objective: "edit", scope: ["."] }]));
+ assert.equal(defaults.ok && defaults.tasks[0]!.repositoryTarget, undefined);
+ for (const repository of [f.plain, join(f.sibling, "lib"), join(f.parent, "missing")]) {
+  const rejected = await admitRepositoryTasks(f.current, [{ ...tasks[0]!, repository }]); assert.equal(rejected.ok, false); if (!rejected.ok) assert.equal(rejected.error.code, "task_repository_unavailable");
+ }
+ const escape = await admitRepositoryTasks(f.current, [{ ...tasks[0]!, scope: [f.current] }]); assert.equal(escape.ok, false);
+});
+
+for (const replace of ["root", "git-dir"] as const) test(`pinned repository detects replacement of ${replace} at the same path`, async t => {
+ const f = await layout(t); const pin = await captureRepositoryTarget(f.sibling); await validateRepositoryTarget(pin);
+ await rename(replace === "root" ? f.sibling : join(f.sibling, ".git"), join(f.parent, "old")); await gitInit(f.sibling);
+ await assert.rejects(validateRepositoryTarget(pin), { code: "task_repository_changed" });
+});
+
+test("linked target detects independent common-directory replacement with unchanged worktree and Git-dir identities", async t => {
+ const f = await layout(t); await exec("git", ["-C", f.sibling, "add", "secret.ts"]); await exec("git", ["-C", f.sibling, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]);
+ const linked = join(f.parent, "linked"); await exec("git", ["-C", f.sibling, "worktree", "add", "--detach", linked]);
+ const before = await captureRepositoryTarget(linked); const common = before.identities[2]!.path; const old = join(f.parent, "old-common");
+ await rename(common, old); await mkdir(common); for (const entry of await readdir(old)) await rename(join(old, entry), join(common, entry));
+ const after = await captureRepositoryTarget(linked); assert.deepEqual(after.identities.slice(0, 2), before.identities.slice(0, 2)); assert.notEqual(after.identities[2]!.ino, before.identities[2]!.ino);
+ await assert.rejects(validateRepositoryTarget(before), { code: "task_repository_changed" });
+});
 
 test("structure validation keeps absolute scope and permits explicit worker read roots", () => {
 	const absolute = validateGraphStructure({
