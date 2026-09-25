@@ -50,9 +50,11 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	await waitFor(async () => { try { return (await readFile(join(agent, "observer-ready"), "utf8")) === "ready"; } catch { return false; } }, "fixture tool did not start");
 	await delay(300);
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F, the registered shortcut.
-	await waitFor(() => output.includes("OBSERVER_MODEL") && output.includes("thinking:high"), "real floating observer not visible");
-	await waitFor(() => output.includes("finished 1") && output.includes("t8"), "observer did not update to settled work");
-	assert.ok(output.includes("running 1"));
+	await waitFor(() => output.includes("Subagents") && output.includes("1 running"), "real floating observer not visible");
+	await waitFor(() => output.includes("1 finished") && output.includes("8 turns"), "observer did not update to settled work");
+	child.stdin.write("\r"); // Enter expands the folded settled group; routes are tertiary detail.
+	await waitFor(() => output.includes("OBSERVER_MODEL") && output.includes("thinking:high"), "folded settled route not revealed by enter");
+	assert.ok(output.includes("1 running"));
 	assert.equal(output.includes("CC_HIDDEN_LIVE_MARKER"), false, "CC must really replace/hide the partial tool card in this oracle");
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F toggles the observer closed.
 	await delay(200); child.stdin.write("/quit\r");

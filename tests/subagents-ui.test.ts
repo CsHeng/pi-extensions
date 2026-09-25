@@ -15,8 +15,14 @@ import {
 	EMPTY_OBSERVER_MESSAGE,
 	OBSERVER_STALE_MS,
 	closeMarkerColumns,
-	formatTaskAssignment,
-	formatTaskMeta,
+	formatGroupRow,
+	formatLiveRow,
+	formatSettledRow,
+	formatStatus,
+	formatTitle,
+	helpText,
+	settledSummary,
+	taskColumns,
 } from "../extensions/subagents-ui/render.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -82,6 +88,17 @@ function task(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): Obser
 	};
 }
 
+function settledTask(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): ObserverSnapshot["tasks"][number] {
+	return task({
+		id: "done",
+		ordinal: 2,
+		status: "succeeded",
+		executionPhase: "settled",
+		elapsedMs: 5_000,
+		...overrides,
+	});
+}
+
 function snapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
 	return {
 		version: OBSERVER_VERSION,
@@ -101,6 +118,19 @@ function snapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
 		tasks: [task()],
 		...overrides,
 	};
+}
+
+function mixedSnapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
+	return snapshot({
+		requestedTasks: 2,
+		admittedTasks: 2,
+		launchedChildren: 2,
+		activeChildren: 1,
+		settledTasks: 1,
+		aggregateAssistantTurns: 4,
+		tasks: [task(), settledTask()],
+		...overrides,
+	});
 }
 
 function owner(overrides: { sessionId?: string; leafId?: string | null; branch?: string[] } = {}) {
@@ -164,16 +194,24 @@ async function openWith(
 	await shortcut.handler(ctx);
 }
 
-test("successive real publishers use generation-wide revisions and keep the shorter second run visible", async () => {
+function captureCtx(target: { overlay?: SubagentsOverlay }): ExtensionContext {
+	return context({
+		custom: async (factory) => {
+			target.overlay = factory({ requestRender() {} } as TUI, undefined, undefined, () => {}) as SubagentsOverlay;
+			return null;
+		},
+	});
+}
+
+test("successive real publishers label each run as its own batch and fold settled routes", async () => {
 	const pi = install();
-	let rendered = "";
-	const ctx = context({ custom: async factory => {
-		const overlay = factory({ requestRender() {} } as TUI, undefined, undefined, () => {}) as SubagentsOverlay;
-		rendered = overlay.render(160).join("\n"); return null;
-	} });
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
 	let revision = 0;
+	let batch = 0;
 	for (const [run, beats] of [["first", 20], ["second", 0]] as const) {
+		batch += 1;
 		const observer = new ManagedObserver(run, { repo: "/fixture", parentSessionId: "parent_session-1", anchor: "leaf_entry-1", branch: ["leaf_entry-1"] }, "generation",
 			[{ id: "task", role: "reviewer", episode: 1, replayed: false, route: { provider: "fixture", model: run, thinking: "off" } as never }], () => 0,
 			value => pi.events.emit(OBSERVER_EVENT, value), () => ++revision);
@@ -181,7 +219,12 @@ test("successive real publishers use generation-wide revisions and keep the shor
 		for (let index = 0; index < beats; index++) observer.update([]);
 		observer.childStopped("task"); observer.finish(false, false);
 		await openWith(pi, ctx);
-		assert.match(rendered, new RegExp(`fixture ${run} thinking:off`));
+		const collapsed = held.overlay?.render(160).join("\n") ?? "";
+		assert.match(collapsed, new RegExp(`Subagents · batch ${batch} · run ${run.slice(0, 4)}… · settled`));
+		assert.doesNotMatch(collapsed, new RegExp(`fixture ${run} thinking:off`), "settled route stays folded");
+		held.overlay?.handleInput("enter");
+		const expanded = held.overlay?.render(160).join("\n") ?? "";
+		assert.match(expanded, new RegExp(`fixture ${run} thinking:off`));
 	}
 });
 
@@ -208,146 +251,125 @@ test("owner lifecycle resets dismiss an open overlay and reject its retired gene
 	}
 });
 
-test("actual render(width) respects terminal cell width and derives a scrollable viewport", () => {
-	const overlay = new SubagentsOverlay({ snapshot: snapshot({ tasks: [task({ route: { provider: "fixture", model: "宽模型".repeat(35), thinking: "high" } })] }), receivedAt: 0 },
+test("actual render(width) wraps folded-out routes and derives a scrollable viewport", () => {
+	const overlay = new SubagentsOverlay(
+		{ snapshot: snapshot({ tasks: [settledTask({ route: { provider: "fixture", model: "宽模型".repeat(35), thinking: "high" } })] }), receivedAt: 0 },
 		{ terminal: { rows: 10 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	const first = overlay.render(16);
-	assert.ok(first.length <= 8);
-	assert.ok(first.every(line => visibleWidth(line) <= 16));
-	overlay.handleInput("\u001b[6~");
-	const second = overlay.render(16);
-	assert.notDeepEqual(second, first);
-	assert.ok(second.length <= 8);
-	assert.ok(second.every(line => visibleWidth(line) <= 16));
+	const folded = overlay.render(16);
+	assert.ok(folded.length <= 8);
+	assert.ok(folded.every(line => visibleWidth(line) <= 16));
+	assert.equal(folded.join("\n").includes("宽模型"), false, "folded settled group hides routes");
+	overlay.handleInput("enter");
+	const expanded = overlay.render(16, 40);
+	assert.match(expanded.join("\n"), /宽模型/);
+	assert.ok(expanded.every(line => visibleWidth(line) <= 16));
+	const paged = overlay.render(16);
+	assert.ok(paged.some(line => line.trimStart().startsWith("↑ ") || line.trimStart().startsWith("↓ ")), "overflow markers appear");
 });
 
-test("default TUI snapshots never write widgets, status, footer, working, or entries", async () => {
+test("widget and status stay off unless explicitly enabled", async () => {
 	const pi = install();
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
-	const working: Array<string | undefined> = [];
-	const footers: unknown[] = [];
-	const ctx = context({ statuses, widgets, working, footers });
+	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	pi.events.emit(OBSERVER_EVENT, snapshot({ phase: "settled", activeChildren: 0, settledTasks: 1, revision: 1 }));
 	assert.deepEqual(statuses, []);
 	assert.deepEqual(widgets, []);
-	assert.deepEqual(working, []);
-	assert.deepEqual(footers, []);
-	assert.deepEqual(pi.entries, []);
-	assert.ok(pi.shortcuts.has("ctrl+alt+f"));
-	assert.ok(pi.commands.has(SUBAGENTS_UI_COMMAND));
 });
 
-test("task rows put assignment beside turns and keep route status tools on the next line", () => {
-	const row = task({
-		role: "explorer",
-		assistantTurns: 5,
-		headline: "搜索确认治理边界主入口与旧条款是否对齐",
-		activeTools: ["read", "grep"],
-		status: "running",
-		route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "high" },
-	});
-	assert.equal(formatTaskAssignment(row), "explorer t5 搜索确认治理边界主入口与旧条款是否对齐");
-	assert.equal(
-		formatTaskMeta(row, "live", 48_800),
-		"  openai-codex gpt-5.6-luna thinking:high  running 48.8s  read,grep",
-	);
+test("row formatters keep live-first hierarchy, folded summaries, and honest help", () => {
+	const tasks = [task(), settledTask()];
+	const columns = taskColumns(tasks, "live");
+	const live = formatLiveRow(task(), "live", columns);
+	assert.equal(live.text, "● explorer t2  running   4.0s");
+	assert.deepEqual(live.segments?.map(segment => segment.color), ["accent", "text", "accent", "text"]);
+	const settled = formatSettledRow(settledTask(), columns);
+	assert.match(settled.text, /^ {2}✓ explorer t2  succeeded 5\.0s  openai gpt-4\.1 thinking:off$/);
+	assert.deepEqual(settled.segments?.map(segment => segment.color), ["dim"]);
+	const summary = settledSummary(tasks);
+	assert.deepEqual(summary, { count: 1, rangeText: "5.0s", turns: 2 });
+	assert.equal(formatGroupRow(summary, false), "▸ 1 finished · 5.0s · 2 turns");
+	assert.equal(formatGroupRow(summary, true), "▾ 1 finished · 5.0s · 2 turns");
+	assert.equal(formatTitle(snapshot(), "live", { batch: 3 }), "Subagents · batch 3 · run run-… · running");
+	assert.equal(formatTitle(snapshot(), "stale", { batch: 1 }), "Subagents · batch 1 · run run-… · stale");
+	assert.equal(formatTitle(undefined, "empty"), "Subagents");
+	assert.equal(formatStatus(snapshot()), "SA ●1 running · 0 finished · 4.0s");
+	assert.equal(helpText({ overflow: false, hasGroup: false, expanded: false }), "ctrl+alt+f close");
+	assert.equal(helpText({ overflow: false, hasGroup: true, expanded: false }), "enter expand · ctrl+alt+f close");
+	assert.equal(helpText({ overflow: true, hasGroup: true, expanded: true }), "↑↓ scroll · enter collapse · ctrl+alt+f close");
 });
 
-test("registered command and shortcut open the overlay with route, counts, and no execution controls", async () => {
+test("registered command and shortcut open the live-first overlay without closing on stray keys", async () => {
 	const pi = install();
-	let overlay: SubagentsOverlay | undefined;
-	let customOptions: { overlay?: boolean } | undefined;
-	let doneCount = 0;
-	const tui = { requestRender() {} } as TUI;
-	const ctx = context({
-		custom: async (factory, options) => {
-			customOptions = options as { overlay?: boolean };
-			overlay = factory(tui, undefined, undefined, () => { doneCount += 1; }) as SubagentsOverlay;
-			return null;
-		},
-	});
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot());
-	await openWith(pi, ctx, "shortcut");
-	assert.equal(customOptions?.overlay, true);
-	assert.ok(overlay);
-	const text = overlay.render(80).join("\n");
-	assert.match(text, /running/);
-	assert.match(text, /launched 1 running 1 finished 0/);
-	assert.match(text, /openai/);
-	assert.match(text, /gpt-4\.1/);
-	assert.match(text, /thinking:off/);
-	assert.match(text, /t2/);
-	assert.match(text, /scan the bounded facts/);
-	assert.doesNotMatch(text, /child-execution/);
-	assert.match(text, /ctrl\+alt\+f close/);
-	assert.match(text, /Subagents · running/);
-	assert.match(text, /\[ ✕ \]/);
-	assert.doesNotMatch(text, /cancel/i);
-	const before = pi.events.emitted.length;
-	overlay.handleInput("x");
-	overlay.handleInput("R");
-	overlay.handleInput("shift+r");
-	assert.equal(pi.events.emitted.length, before);
-	assert.equal(doneCount, 0);
-	overlay.handleInput("escape");
-	assert.equal(doneCount, 0);
-	overlay.handleInput("ctrl+alt+f");
-	assert.equal(doneCount, 1);
-	await openWith(pi, ctx, "command");
-	assert.ok(overlay);
-});
-
-test("content-fitted overlay options keep rows complete and expose one clickable close marker", async () => {
-	const pi = install();
-	let customOptions: { overlay?: boolean; overlayOptions?: { width?: unknown } } | undefined;
-	let overlay: SubagentsOverlay | undefined;
-	let doneCount = 0;
-	const tui = { requestRender() {}, terminal: { columns: 200, rows: 40 } } as unknown as TUI;
-	const ctx = context({
-		custom: async (factory, options) => {
-			customOptions = options as { overlay?: boolean; overlayOptions?: { width?: unknown } };
-			overlay = factory(tui, undefined, undefined, () => { doneCount += 1; }) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	const headline = "search confirm the governance entry against the old clauses and the source matrix now";
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		tasks: [task({ headline, route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" } })],
-	}));
+	pi.events.emit(OBSERVER_EVENT, snapshot({ elapsedMs: 4_000, tasks: [task({ elapsedMs: 4_000 })] }));
 	await openWith(pi, ctx);
-	assert.equal(customOptions?.overlay, true);
-	const width = Number(customOptions?.overlayOptions?.width);
-	assert.ok(width >= 80, "panel keeps its previous default width as a floor");
-	assert.ok(width < 200, "panel must fit its content instead of filling the terminal");
-	assert.ok(overlay);
+	await openWith(pi, ctx, "shortcut");
+	const rendered = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(rendered, /Subagents · batch 1 · run run-… · running/);
+	assert.match(rendered, /1 running · 0 finished · 2 turns · 4\.0s/);
+	assert.match(rendered, /● explorer t2\s+running\s+4\.0s/);
+	assert.match(rendered, /scan the bounded facts/);
+	assert.doesNotMatch(rendered, /gpt-4\.1/, "live rows keep tertiary route details folded away");
+	assert.match(rendered, /ctrl\+alt\+f close/);
+	assert.doesNotMatch(rendered, /↑↓ scroll|enter expand/, "help lists only keys that act now");
+	for (const key of ["x", "R", "shift+r", "escape"]) held.overlay?.handleInput(key);
+	assert.ok(held.overlay);
+});
+
+test("content-fitted overlay options keep the close chip hit-testable and rows filled", () => {
+	const width = 90;
+	const tui = { requestRender() {} } as TUI;
+	const overlay = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
 	const lines = overlay.render(width);
-	const first = lines[0] ?? "";
-	assert.equal(visibleWidth(first), width);
-	const chip = closeMarkerColumns(width);
-	assert.ok(first.includes("[ ✕ ]"));
-	assert.equal(visibleWidth(first.slice(0, first.indexOf("✕"))), chip.start + 2, "drawn marker sits inside the declared hit range");
-	assert.ok(chip.end - chip.start >= 5, "close hit range is wider than the marker glyph");
-	assert.ok(chip.end < width, "close hit range stays off the panel edge");
-	assert.equal(lines.filter(line => line.includes("✕")).length, 1);
 	assert.ok(lines.every(line => visibleWidth(line) === width), "every panel row fills the width");
-	const assignment = lines.find(line => line.includes(headline)) ?? "";
-	assert.ok(assignment.includes("explorer t2"), "assignment stays on one panel row");
-	const meta = lines.find(line => line.includes("gpt-5.6-luna")) ?? "";
-	assert.ok(meta.includes("thinking:medium") && meta.includes("running"), "route status stay on one panel row");
-	overlay.handleMouse({ type: "click", button: "left", x: chip.start - 1, y: 0 });
-	overlay.handleMouse({ type: "click", button: "left", x: chip.start, y: 1 });
-	overlay.handleMouse({ type: "wheel", button: "none", x: chip.start, y: 0 });
-	overlay.handleMouse({ type: "click", button: "right", x: chip.start, y: 0 });
+	assert.equal(lines.filter(line => line.includes("✕")).length, 1);
+	const chip = closeMarkerColumns(width);
+	const live = lines.find(line => line.includes("explorer t2")) ?? "";
+	assert.match(live, /running\s+4\.0s/, "live row carries role, turns and status in one aligned line");
+	const detail = lines.find(line => line.includes("scan the bounded facts")) ?? "";
+	assert.ok(detail.startsWith("     "), "objective is demoted to an indented line");
+	assert.match(lines.join("\n"), /▸ 1 finished · 5\.0s · 2 turns/, "settled work folds into one summary row");
+	let doneCount = 0;
+	const closing = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => { doneCount += 1; }, { now: () => 0 });
+	closing.render(width);
+	closing.handleMouse({ type: "click", button: "left", x: chip.start - 1, y: 0 });
+	closing.handleMouse({ type: "click", button: "left", x: chip.start, y: 1 });
+	closing.handleMouse({ type: "wheel", button: "none", x: chip.start, y: 0 });
+	closing.handleMouse({ type: "click", button: "right", x: chip.start, y: 0 });
 	assert.equal(doneCount, 0);
-	assert.deepEqual(overlay.handleMouse({ type: "press", button: "left", x: chip.start, y: 0 }), { handled: true });
+	assert.deepEqual(closing.handleMouse({ type: "press", button: "left", x: chip.start, y: 0 }), { handled: true });
 	assert.equal(doneCount, 0);
-	overlay.handleMouse({ type: "click", button: "left", x: chip.end - 1, y: 0 });
+	closing.handleMouse({ type: "click", button: "left", x: chip.end - 1, y: 0 });
 	assert.equal(doneCount, 1);
+});
+
+test("group keys expand and fold settled work; arrows only scroll when something overflows", () => {
+	const tui = { requestRender() {} } as TUI;
+	const overlay = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
+	const folded = overlay.render(120).join("\n");
+	assert.doesNotMatch(folded, /gpt-4\.1 thinking:off/);
+	assert.match(folded, /enter expand · ctrl\+alt\+f close/);
+	overlay.handleInput("down");
+	const opened = overlay.render(120).join("\n");
+	assert.match(opened, /✓ explorer t2\s+succeeded 5\.0s  openai gpt-4\.1 thinking:off/);
+	assert.match(opened, /enter collapse · ctrl\+alt\+f close/);
+	overlay.handleInput("up");
+	assert.doesNotMatch(overlay.render(120).join("\n"), /thinking:off/);
+	overlay.handleInput("enter");
+	assert.match(overlay.render(120).join("\n"), /thinking:off/);
+	overlay.handleInput("enter");
+	overlay.handleInput("down");
+	assert.match(overlay.render(120).join("\n"), /thinking:off/, "down at offset 0 reopens the folded group when nothing overflows");
+	const short = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
+	const paged = short.render(60, 6);
+	assert.ok(paged.some(line => line.trimStart().startsWith("↓ +")), "short viewport overflows");
+	short.handleInput("down");
+	const scrolled = short.render(60, 6);
+	assert.ok(scrolled.some(line => line.trimStart().startsWith("↑ ")), "down scrolls instead of expanding under overflow");
 });
 
 test("live observations widen an open panel without filling the terminal", async () => {
@@ -377,284 +399,164 @@ test("live observations widen an open panel without filling the terminal", async
 	await opening;
 });
 
-test("panel width grows with observed content and themed rows stay edge to edge", () => {
+test("panel width grows with observed content and themed rows keep hierarchy colors", () => {
 	const tui = { requestRender() {} } as TUI;
 	const overlay = new SubagentsOverlay({ snapshot: undefined, receivedAt: 0 }, tui, () => {}, { now: () => 0 });
 	assert.equal(overlay.desiredWidth(200), 80);
-	overlay.update({ snapshot: snapshot({ tasks: [task({
-		headline: "search confirm the governance entry against the old clauses and the source matrix now",
-		route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" },
-	})] }), receivedAt: 0 });
+	overlay.update({ snapshot: mixedSnapshot({ tasks: [task({ headline: "search confirm the governance entry against the old clauses and the source matrix now" }), settledTask()] }), receivedAt: 0 });
 	const width = overlay.desiredWidth(200);
-	assert.ok(width > 80 && width < 200, `busy panel width ${width} must fit content without filling the terminal`);
+	assert.ok(width > 80 && width < 200, `busy panel width ${width} must grow with content without filling the terminal`);
 	const codes: Record<string, string> = { accent: "35", borderMuted: "34", dim: "90", text: "37" };
 	const theme = {
-		fg: (color: string, text: string) => `\u001b[${codes[color] ?? "37"}m${text}\u001b[39m`,
-		bg: (color: string, text: string) => `\u001b[48;5;17m${text}\u001b[49m`,
+		fg: (color: string, text: string) => `\u001b[${codes[color]}m${text}\u001b[0m`,
+		bg: (_color: string, text: string) => `\u001b[44m${text}\u001b[0m`,
 	};
-	const themed = new SubagentsOverlay({ snapshot: snapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0, theme });
+	const themed = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0, theme });
 	const lines = themed.render(width);
-	assert.ok(lines.every(line => line.startsWith("\u001b[48;5;17m") && line.endsWith("\u001b[49m")));
-	assert.ok(lines.every(line => visibleWidth(line) === width), "themed rows cover the whole panel");
-	assert.equal(lines.filter(line => line.includes("✕")).length, 1);
-	assert.ok((lines[0] ?? "").includes("\u001b[35m"), "title uses the accent color");
-	assert.ok((lines[1] ?? "").includes("\u001b[34m"), "rule uses the border color");
-	assert.ok(lines.some(line => line.includes("\u001b[90m")), "help uses the dim color");
+	const plain = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
+	assert.equal(lines.length, plain.render(width).length);
+	assert.ok(lines.every(line => line.includes("44")), "panel background fills every row");
+	const title = lines[0] ?? "";
+	assert.ok(title.includes(`${codes.accent}mSubagents`), "title stays accent");
+	const counts = lines.find(line => line.includes("1 running")) ?? "";
+	assert.ok(counts.includes(`${codes.accent}m1 running`), "live count is the emphasized fact");
+	assert.ok(counts.includes(`${codes.dim}m · 1 finished`), "settled counts stay secondary");
+	const live = lines.find(line => line.includes("explorer t2")) ?? "";
+	assert.ok(live.includes(`${codes.accent}m● `) && live.includes(`${codes.accent}mrunning`));
+	const detail = lines.find(line => line.includes("scan the bounded facts")) ?? "";
+	assert.ok(detail.includes(`${codes.dim}m`), "demoted objective is dim");
+	const group = lines.find(line => line.includes("1 finished · 5.0s")) ?? "";
+	assert.ok(group.includes(`${codes.dim}m▸`), "folded summary is dim");
 });
 
-test("optional widget opt-in still renders the retained panel without completion entries", async () => {
+test("explicit widget opt-in mirrors the live-first hierarchy in status and panel", async () => {
 	const pi = install({ enableWidget: true });
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
-	const working: Array<string | undefined> = [];
-	const footers: unknown[] = [];
-	const ctx = context({ statuses, widgets, working, footers });
+	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.equal(statuses.at(-1)?.includes("launched 1 running 1 finished 0"), true);
-	assert.equal(widgets.at(-1)?.key, SUBAGENTS_UI_PANEL_KEY);
-	assert.equal(widgets.at(-1)?.lines?.some((line) => line.includes("gpt-4.1")), true);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ phase: "settled", activeChildren: 0, settledTasks: 1, revision: 1 }));
-	assert.equal(statuses.at(-1), undefined);
-	assert.equal(widgets.at(-1)?.lines, undefined);
-	assert.deepEqual(working, []);
-	assert.deepEqual(footers, []);
-	assert.deepEqual(pi.entries, []);
+	assert.deepEqual(statuses, [undefined, "SA ●1 running · 0 finished · 4.0s"]);
+	assert.equal(widgets.length, 2);
+	assert.equal(widgets[1]?.key, SUBAGENTS_UI_PANEL_KEY);
+	assert.deepEqual(widgets[1]?.lines, [
+		"1 running · 0 finished · 2 turns · 4.0s",
+		"● explorer t2  running 4.0s",
+		"    scan the bounded facts",
+	]);
+	pi.events.emit(OBSERVER_EVENT, mixedSnapshot({ revision: 1 }));
+	const last = widgets.at(-1)?.lines ?? [];
+	assert.match(last[last.length - 1] ?? "", /▸ 1 finished · 5\.0s · 2 turns/);
 });
 
-test("headless modes ignore snapshots, overlays, and repaint intervals", async () => {
+test("headless modes ignore observer snapshots", async () => {
+	for (const mode of ["rpc", "json", "print"] as const) {
+		const pi = install({ enableWidget: true });
+		const statuses: Array<string | undefined> = [];
+		const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
+		const ctx = context({ mode, statuses, widgets });
+		await pi.handlers.get("session_start")?.({}, ctx);
+		pi.events.emit(OBSERVER_EVENT, snapshot());
+		assert.deepEqual(statuses, []);
+		assert.deepEqual(widgets, []);
+		let opened = false;
+		const openCtx = context({ mode, custom: async () => { opened = true; return null; } });
+		await openWith(pi, openCtx);
+		assert.equal(opened, false);
+	}
+});
+
+test("late open shows the retained run without native polling", async () => {
 	const scheduler = new FakeScheduler();
-	let now = 0;
-	const pi = install({
-		now: () => now,
-		setInterval: (callback) => scheduler.setInterval(callback),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	});
+	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: handle => scheduler.clearInterval(handle) });
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1, elapsedMs: 5_000, tasks: [settledTask({ assistantTurns: 2, elapsedMs: 5_000 })] }));
+	assert.equal(scheduler.setCount, 0, "settled observations need no repaint timer");
+	await openWith(pi, ctx);
+	const rendered = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(rendered, /· settled/);
+	assert.match(rendered, /1 finished · 5\.0s · 2 turns/);
+	assert.doesNotMatch(rendered, /stale|unknown/);
+});
+
+test("missing heartbeats freeze elapsed time and label the run stale", async () => {
+	const scheduler = new FakeScheduler();
+	let clock = 0;
+	const pi = install({ now: () => clock, setInterval: callback => scheduler.setInterval(callback), clearInterval: handle => scheduler.clearInterval(handle) });
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, elapsedMs: 1_000, tasks: [task({ elapsedMs: 1_000 })] }));
+	clock = OBSERVER_STALE_MS + 1;
+	await openWith(pi, ctx);
+	const rendered = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(rendered, /· stale/);
+	assert.match(rendered, /1 unknown · 0 finished · 2 turns · 1\.0s frozen/);
+	assert.match(rendered, /● explorer t2\s+unknown\s+1\.0s/);
+	assert.doesNotMatch(rendered, /stale\/unknown/);
+	scheduler.callback?.();
+	pi.events.emit(OBSERVER_EVENT, snapshot({ runId: "run-2", revision: 2, generation: "gen-2", elapsedMs: 200, tasks: [task({ role: "worker", elapsedMs: 200 })] }));
+	await openWith(pi, ctx);
+	const fresh = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(fresh, /batch 2 · run run-… · running/);
+	assert.match(fresh, /● worker t2\s+running\s+200ms/);
+	assert.doesNotMatch(fresh, /stale|unknown/);
+});
+
+test("foreign owners and stale revisions cannot repaint an open panel", async () => {
+	const pi = install();
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, tasks: [task({ headline: "kept headline" })] }));
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, parentSessionId: "parent_session-2", anchor: "leaf_entry-2", tasks: [task({ headline: "foreign headline" })] }));
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 0, tasks: [task({ headline: "old headline" })] }));
+	await openWith(pi, ctx);
+	let rendered = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(rendered, /kept headline/);
+	assert.doesNotMatch(rendered, /foreign headline|old headline/);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, phase: "settled", activeChildren: 0, settledTasks: 1, tasks: [settledTask({ headline: "kept headline" })] }));
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 3, phase: "running", tasks: [task({ headline: "resurrected headline" })] }));
+	rendered = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(rendered, /kept headline/);
+	assert.doesNotMatch(rendered, /resurrected headline/);
+});
+
+test("session start and shutdown clear retained observations and the widget", async () => {
+	const pi = install({ enableWidget: true });
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
-	let customCalls = 0;
-	const ctx = context({
-		mode: "rpc",
-		statuses,
-		widgets,
-		custom: async () => {
-			customCalls += 1;
-			return null;
-		},
-	});
+	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	pi.events.emit(OBSERVER_EVENT, { version: 1, prompt: "SECRET" });
-	await openWith(pi, ctx, "command");
-	assert.equal(customCalls, 0);
-	assert.deepEqual(statuses, []);
-	assert.deepEqual(widgets, []);
-	assert.equal(scheduler.setCount, 0);
+	assert.equal(statuses.length, 2);
+	await pi.handlers.get("session_shutdown")?.({}, ctx);
+	assert.equal(statuses.at(-1), undefined);
+	assert.equal(widgets.at(-1)?.lines, undefined);
+	const held: { overlay?: SubagentsOverlay } = {};
+	const reopen = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, reopen);
+	await openWith(pi, reopen);
+	assert.match(held.overlay?.render(120).join("\n") ?? "", new RegExp(EMPTY_OBSERVER_MESSAGE));
 });
 
-test("late open shows current work; completed work stays viewable with frozen elapsed", async () => {
-	let now = 1_000;
-	const pi = install({ now: () => now });
-	let overlay: SubagentsOverlay | undefined;
-	const tui = { requestRender() {} } as TUI;
-	const ctx = context({
-		custom: async (factory) => {
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ elapsedMs: 4_000, tasks: [task({ elapsedMs: 4_000 })] }));
-	now = 3_000;
-	await openWith(pi, ctx);
-	assert.match(overlay?.render(80).join("\n") ?? "", /6\.0s/);
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		revision: 1,
-		phase: "settled",
-		activeChildren: 0,
-		settledTasks: 1,
-		elapsedMs: 5_000,
-		tasks: [task({ status: "succeeded", executionPhase: "settled", elapsedMs: 5_000 })],
-	}));
-	now = 20_000;
-	await openWith(pi, ctx);
-	const completed = overlay?.render(80).join("\n") ?? "";
-	assert.match(completed, /settled/);
-	assert.match(completed, /5\.0s/);
-	assert.doesNotMatch(completed, /stale\/unknown/);
-});
-
-test("stale silence freezes elapsed as unknown instead of fake running, and does not block a fresh generation", async () => {
-	let now = 0;
-	const pi = install({ now: () => now });
-	let overlay: SubagentsOverlay | undefined;
-	const tui = { requestRender() {} } as TUI;
-	const ctx = context({
-		custom: async (factory) => {
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ elapsedMs: 1_000, tasks: [task({ elapsedMs: 1_000 })] }));
-	now = OBSERVER_STALE_MS + 1;
-	await openWith(pi, ctx);
-	const stale = overlay?.render(80).join("\n") ?? "";
-	assert.match(stale, /stale\/unknown/);
-	assert.match(stale, /running unknown/);
-	assert.match(stale, /1\.0s/);
-	assert.doesNotMatch(stale, /running child-execution/);
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		generation: "gen-2",
-		runId: "run-2",
-		revision: 0,
-		elapsedMs: 200,
-		aggregateAssistantTurns: 1,
-		tasks: [task({
-			id: "write",
-			role: "worker",
-			route: { provider: "openai", model: "gpt-4.1-mini", thinking: "low" },
-			assistantTurns: 1,
-			elapsedMs: 200,
-		})],
-	}));
-	await openWith(pi, ctx);
-	const fresh = overlay?.render(80).join("\n") ?? "";
-	assert.match(fresh, /gpt-4\.1-mini/);
-	assert.match(fresh, /thinking:low/);
-	assert.match(fresh, /worker/);
-	assert.doesNotMatch(fresh, /stale\/unknown/);
-});
-
-test("owner, branch, generation, and revision checks ignore foreign, reordered, and resurrected snapshots", async () => {
-	let now = 0;
-	const pi = install({ now: () => now });
-	let overlay: SubagentsOverlay | undefined;
-	const tui = { requestRender() {} } as TUI;
-	const ctx = context({
-		custom: async (factory) => {
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		revision: 1,
-		tasks: [task({ route: { provider: "openai", model: "kept-model", thinking: "high" } })],
-	}));
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		revision: 0,
-		tasks: [task({ route: { provider: "openai", model: "old-model", thinking: "off" } })],
-	}));
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		generation: "gen-other",
-		runId: "run-other",
-		tasks: [task({ route: { provider: "openai", model: "busy-block", thinking: "off" } })],
-	}));
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		parentSessionId: "other_session",
-		tasks: [task({ route: { provider: "openai", model: "foreign-model", thinking: "off" } })],
-	}));
-	await openWith(pi, ctx);
-	assert.match(overlay?.render(80).join("\n") ?? "", /kept-model/);
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		revision: 2,
-		phase: "settled",
-		activeChildren: 0,
-		settledTasks: 1,
-		tasks: [task({
-			status: "succeeded",
-			executionPhase: "settled",
-			route: { provider: "openai", model: "kept-model", thinking: "high" },
-		})],
-	}));
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		revision: 1,
-		phase: "running",
-		tasks: [task({ route: { provider: "openai", model: "resurrected", thinking: "off" } })],
-	}));
-	await openWith(pi, ctx);
-	const settled = overlay?.render(80).join("\n") ?? "";
-	assert.match(settled, /kept-model/);
-	assert.doesNotMatch(settled, /resurrected/);
-	const branched = context({
-		session: owner({ branch: ["other-leaf"], leafId: "other-leaf" }),
-		custom: async (factory) => {
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_tree")?.({}, branched);
-	await openWith(pi, branched);
-	assert.match(overlay?.render(80).join("\n") ?? "", new RegExp(EMPTY_OBSERVER_MESSAGE));
-});
-
-test("session start and shutdown drop cached work and clean intervals", async () => {
-	const scheduler = new FakeScheduler();
-	let now = 0;
-	const pi = install({
-		now: () => now,
-		setInterval: (callback) => scheduler.setInterval(callback),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	});
-	let overlay: SubagentsOverlay | undefined;
-	const tui = { requestRender() {} } as TUI;
-	let release: (() => void) | undefined;
-	const ctx = context({
-		custom: (factory) => new Promise((resolve) => {
-			release = () => resolve(null);
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-		}),
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.equal(scheduler.setCount, 0);
-	const opening = openWith(pi, ctx);
-	assert.equal(scheduler.setCount, 1);
-	pi.handlers.get("session_shutdown")?.({}, ctx);
-	assert.equal(scheduler.clearCount, 1);
-	release?.();
-	await opening;
-	const emptyCtx = context({
-		custom: async (factory) => {
-			overlay = factory(tui, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
-		},
-	});
-	await pi.handlers.get("session_start")?.({}, emptyCtx);
-	await openWith(pi, emptyCtx);
-	assert.match(overlay?.render(80).join("\n") ?? "", new RegExp(EMPTY_OBSERVER_MESSAGE));
-});
-
-test("narrow terminals wrap long model names and page keys scroll with overflow markers", async () => {
-	const longModel = "very-long-model-name-that-must-remain-inspectable";
+test("narrow terminals wrap folded-out routes and page with honest markers", () => {
 	const overlay = new SubagentsOverlay(
-		{
-			snapshot: snapshot({
-				requestedTasks: 3,
-				admittedTasks: 3,
-				launchedChildren: 3,
-				activeChildren: 3,
-				aggregateAssistantTurns: 3,
-				tasks: [
-					task({ id: "a", ordinal: 1, route: { provider: "openai", model: longModel, thinking: "max" } }),
-					task({ id: "b", ordinal: 2, role: "reviewer", route: { provider: "openai", model: longModel, thinking: "high" } }),
-					task({ id: "c", ordinal: 3, role: "worker", route: { provider: "openai", model: longModel, thinking: "low" } }),
-				],
-			}),
-			receivedAt: 0,
-		},
-		{ requestRender() {} } as TUI,
-		() => {},
-	);
-	const wrapped = overlay.render(16).map(line => line.trim()).join("");
-	assert.match(wrapped, new RegExp(longModel));
+		{ snapshot: snapshot({ tasks: [settledTask({ route: { provider: "fixture", model: "long-model-name-that-must-wrap", thinking: "max" } })] }), receivedAt: 0 },
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const folded = overlay.render(40);
+	assert.equal(folded.join("\n").includes("long-model"), false, "folded group hides routes at narrow widths too");
+	overlay.handleInput("enter");
+	const wrapped = overlay.render(40).join("\n");
+	assert.match(wrapped, /long-model-name-that-must-wrap/);
 	assert.match(wrapped, /thinking:max/);
 	const paged = overlay.render(40, 3);
 	overlay.handleInput("\u001b[6~");
 	const after = overlay.render(40, 3);
 	assert.notDeepEqual(after, paged);
-	assert.equal(after.some((line) => line.trimStart().startsWith("↑ ") || line.trimStart().startsWith("↓ ")), true);
+	assert.equal(after.some(line => line.trimStart().startsWith("↑ ") || line.trimStart().startsWith("↓ ")), true);
 	overlay.handleInput("down");
 	overlay.handleInput("up");
 	overlay.handleInput("\u001b[5~");

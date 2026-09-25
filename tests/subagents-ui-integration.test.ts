@@ -103,10 +103,11 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	await command.handler("", ctx);
 	assert.equal(overlayFlag, true);
 	const text = overlay?.render(80).join("\n") ?? "";
-	assert.match(text, /thinking:medium/);
+	assert.doesNotMatch(text, /thinking:medium/, "tertiary route details stay folded on live rows");
 	assert.match(text, /scan the bounded facts/);
 	assert.match(text, /read/);
-	assert.match(text, /launched 1 running 1 finished 0/);
+	assert.match(text, /1 running · 0 finished · 1 turns · 1\.0s/);
+	assert.match(text, /● explorer t1\s+running\s+1\.0s  read/);
 	events.emit(OBSERVER_EVENT, { ...snapshot, revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1 });
 	assert.deepEqual(working, []);
 	assert.deepEqual(footers, []);

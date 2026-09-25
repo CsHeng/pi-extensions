@@ -62,7 +62,8 @@ test("installed Pi fullscreen: clicking the observer close marker dismisses the 
 	await waitFor(async () => { try { return (await readFile(join(agent, "observer-ready"), "utf8")) === "ready"; } catch { return false; } }, "fixture tool did not start");
 	await delay(300);
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F opens the floating observer.
-	await waitFor(() => output.includes("OBSERVER_MODEL"), "floating observer not visible");
+	await waitFor(() => output.includes("Subagents"), "floating observer not visible");
+	await waitFor(() => output.includes("1 finished"), "observer did not settle");
 	await delay(300);
 	// The marker sits in the panel's last column, so read its screen cell from the last drawn frame.
 	const markerIndex = output.lastIndexOf("\u2715");

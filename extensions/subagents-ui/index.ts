@@ -97,6 +97,8 @@ export function createSubagentsUiExtension(
 		let ctx: ExtensionContext | undefined;
 		let current: CachedObservation | undefined;
 		let latestTerminal: CachedObservation | undefined;
+		// Display-only observation order: the observer is per-run, so the panel labels which run it shows.
+		let runOrder: string[] = [];
 		let overlay: SubagentsOverlay | undefined;
 		let overlayLayout: OverlayOptions | undefined;
 		let overlayTui: TUI | undefined;
@@ -113,10 +115,18 @@ export function createSubagentsUiExtension(
 			intervalHandle = undefined;
 		};
 
-		const displayed = (): OverlaySnapshot => ({
-			snapshot: current?.snapshot ?? latestTerminal?.snapshot,
-			receivedAt: current?.receivedAt ?? latestTerminal?.receivedAt ?? 0,
-		});
+		const batchOf = (snapshot: ObserverSnapshot | undefined): number | undefined => {
+			if (!snapshot) return undefined;
+			const index = runOrder.indexOf(snapshot.runId);
+			return index < 0 ? undefined : index + 1;
+		};
+
+		const displayed = (): OverlaySnapshot => {
+			const snapshot = current?.snapshot ?? latestTerminal?.snapshot;
+			const receivedAt = current?.receivedAt ?? latestTerminal?.receivedAt ?? 0;
+			const batch = batchOf(snapshot);
+			return batch === undefined ? { snapshot, receivedAt } : { snapshot, receivedAt, batch };
+		};
 
 		const clearWidget = (): void => {
 			if (!enableWidget || !tui() || !ctx) return;
@@ -157,6 +167,7 @@ export function createSubagentsUiExtension(
 			retiredGeneration = current?.snapshot.generation ?? retiredGeneration;
 			current = undefined;
 			latestTerminal = undefined;
+			runOrder = [];
 		};
 
 		const revalidate = (): void => {
@@ -196,6 +207,7 @@ export function createSubagentsUiExtension(
 				}
 			}
 			current = { snapshot: incoming, receivedAt };
+			if (!runOrder.includes(incoming.runId)) runOrder.push(incoming.runId);
 			if (isSettled(incoming)) latestTerminal = current;
 		};
 
