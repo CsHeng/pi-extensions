@@ -13,7 +13,7 @@ const source = [
 	"herdr-handoff-workspace.test.ts", "installed-herdr-handoff-probe.test.ts", "installed-subagents-probe.test.ts",
 	"installed-workflow-probe.test.ts", "live-subagents-e2e.test.ts", "multi-skill-mentions.test.ts",
 	"package.test.ts", "prepared-input.test.ts", "publish-local-package.test.ts", "repository-boundary.test.ts",
-	"session-cost-report.test.ts", "status-footer.test.ts", "subagents-async-evaluator.test.ts",
+	"session-cost-report.test.ts", "settlement.test.ts", "status-footer.test.ts", "subagents-async-evaluator.test.ts",
 	"subagents-async-git-components.test.ts", "subagents-async-host.test.ts", "subagents-async-runtime.test.ts",
 	"subagents-candidates.test.ts", "subagents-cc-tui.test.ts", "subagents-context-delivery.test.ts",
 	"subagents-continuation.test.ts", "subagents-continuity.test.ts", "subagents-contract.test.ts",

@@ -40,6 +40,20 @@ test("strict enrollment is explicit; normal slice is start + compound report; al
  assert.equal(f.snapshots.length, 5);
 });
 
+for (const field of ["scope", "writes"] as const) test(`overlong ${field} is a typed atomic path error, not a task description or unavailable contract`, async t => {
+ const f = await fixture(t); await f.run(enroll);
+ const before = structuredClone(f.store.current()), count = f.snapshots.length;
+ const invalid = await f.store.mutate({ operation: "start", task: "one", scope: ["one"], [field]: ["x".repeat(300)] }, f.ctx, `overlong-${field}`);
+ assert.equal(invalid.code, "invalid_scope"); assert.match(invalid.message!, /ENAMETOOLONG/);
+ assert.ok(invalid.message!.includes("filesystem paths")); assert.ok(invalid.message!.length < 500);
+ assert.equal(f.snapshots.length, count); assert.deepEqual(f.store.current(), before);
+ assert.equal(f.store.view().unavailable, undefined);
+ const path = "release notes 说明.md"; await writeFile(join(f.cwd, path), "valid path, not prose detection");
+ await f.run({ operation: "start", task: "one", scope: [path, "planned 未来.ts"], writes: ["planned 未来.ts"] });
+ assert.equal(f.store.current()!.attempts.at(-1)!.basis.state, "current");
+ assert.deepEqual(f.store.current()!.attempts.at(-1)!.basis.scope, ["planned 未来.ts", path]);
+});
+
 test("dependency rejection names only missing predecessors and leaves independent work actionable", async t => {
  const f = await fixture(t); await f.run({ ...enroll, tasks: [...enroll.tasks!,
   { key: "joined", title: "Actual joined outcome", covers: ["one", "two"], dependsOn: ["one", "two"] },
@@ -77,6 +91,33 @@ test("source-drift rejection withholds stale frontier until inspect revalidates 
  assert.match(inspected.content[0].text, /^Ready: one$/m);
  assert.match(inspected.content[0].text, /two <- one/);
  assert.equal(accepted(f.store.current()!, "task:one"), false);
+});
+
+for (const broadFoundation of [false, true]) test(`foundation evidence ${broadFoundation ? "including mutable consumers propagates their drift" : "owned independently preserves unrelated acceptance but tracks shared drift"}`, async t => {
+ const f = await fixture(t); await writeFile(join(f.cwd, "schema"), "shared interface");
+ const keys = ["foundation", "one", "two"];
+ await f.run({ ...enroll,
+  requirements: keys.map(key => ({ key, outcome: key, verification: "owned source check" })),
+  tasks: keys.map(key => ({ key, title: key, covers: [key], ...(key === "foundation" ? {} : { dependsOn: ["foundation"] }) })),
+ });
+ await f.run({ operation: "start", task: "foundation", scope: broadFoundation ? ["schema", "one", "two"] : ["schema"] });
+ await f.observe("foundation-check"); await f.run(f.report("foundation", "foundation-check"));
+ await f.run({ operation: "start", task: "two", scope: ["schema", "two"] });
+ await f.observe("sibling-check"); await f.run(f.report("two", "sibling-check"));
+ await f.run({ operation: "start", task: "one", scope: ["schema", "one"], writes: ["one"] });
+ await writeFile(join(f.cwd, "one"), "consumer-only edit"); await f.run({ operation: "inspect" });
+ assert.equal(accepted(f.store.current()!, "task:foundation"), !broadFoundation);
+ assert.equal(accepted(f.store.current()!, "task:two"), !broadFoundation);
+ assert.equal(f.store.current()!.attempts.at(-1)!.status, broadFoundation ? "interrupted" : "running");
+ if (broadFoundation) {
+  assert.match(goalReceipt(f.store.view()), /one <- foundation/);
+  return; // Honest broad inputs cannot be ignored by the runtime to manufacture independence.
+ }
+ await f.observe("consumer-check"); await f.run(f.report("one", "consumer-check"));
+ assert.equal(accepted(f.store.current()!, "task:one"), true);
+ await writeFile(join(f.cwd, "schema"), "changed shared interface"); await f.run({ operation: "inspect" });
+ for (const key of keys) assert.equal(accepted(f.store.current()!, `task:${key}`), false);
+ assert.ok(f.store.current()!.attempts.every(attempt => attempt.status === "interrupted"));
 });
 
 test("model-visible inspect exposes captured observation before a fact is reported", async t => {

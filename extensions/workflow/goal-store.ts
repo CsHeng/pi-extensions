@@ -149,7 +149,11 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
      requireGoal(!dependencies.length, "dependency_pending", dependencyDiagnostic(task.key, dependencies));
      requireGoal(next.attempts.length < GOAL_LIMITS.attempts, "state_limit", "Attempt limit reached; no attempt was started.");
      const scope = declaredScope(op.scope, ctx.cwd); const writes = op.writes?.length ? declaredScope(op.writes, ctx.cwd) : [];
-     await canonicalScope(scope, ctx.cwd); if (writes.length) await canonicalScope(writes, ctx.cwd);
+     try { await canonicalScope(scope, ctx.cwd); if (writes.length) await canonicalScope(writes, ctx.cwd); }
+     catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENAMETOOLONG") throw new GoalError("invalid_scope", "ENAMETOOLONG: a declared path exceeds the filesystem limit. scope/writes require actual filesystem paths relative to cwd or authorized absolute paths, not task descriptions. Put objectives in goal/task title and outcomes in report.summary; shortening prose does not make it an evidence scope.");
+      throw error;
+     }
      const basis = await goalFingerprint(scope, ctx.cwd);
      if (basis.state !== "current") diagnostics.push(`Attempt basis unavailable: ${basis.note ?? "scope could not be captured"}. Host checks need their own valid capture; declared evidence cannot certify this basis.`);
      next.attempts.push({ id: `A${++next.serial}`, task: task.key, revision: task.revision, generation: next.input.generation, status: "running", started: ctx.now, basis, writes });

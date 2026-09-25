@@ -20,9 +20,30 @@ test("actual provider schema exposes only semantic operations, no revision or ba
 });
 
 for (const mode of ["tui", "rpc", "print", "json"] as const) test(`ordinary ${mode} analysis has no enrollment/snapshot/continuation`, async t => {
- const h = await createHostHarness({ mode, extensions: [workflow] }); t.after(() => h.dispose());
+ const waits: string[] = [];
+ const h = await createHostHarness({ mode, extensions: [pi => workflow({ ...pi, sendUserMessage(message, options) {
+  if (typeof message === "string" && message.startsWith("/csheng-workflow-wait ")) waits.push(message);
+  pi.sendUserMessage(message, options);
+ } })] }); t.after(() => h.dispose());
  h.faux.setResponses([fauxAssistantMessage("Analysis only. No implementation contract.")]); await h.session.prompt("explain the project");
  assert.equal(h.faux.state.callCount, 1); assert.equal(h.session.sessionManager.getBranch().some(e => e.type === "custom" && e.customType === "csheng-workflow-state"), false);
+ assert.deepEqual(waits, []); assert.deepEqual(h.errors, []);
+});
+
+for (const terminal of ["complete", "suspended"] as const) test(`ordinary question after ${terminal} has no waiter; mid-run resume can arm`, async t => {
+ const waits: string[] = [];
+ const h = await createHostHarness({ extensions: [pi => workflow({ ...pi, sendUserMessage(message, options) {
+  if (typeof message === "string" && message.startsWith("/csheng-workflow-wait ")) waits.push(message);
+  pi.sendUserMessage(message, options);
+ } })] }); t.after(() => h.dispose());
+ const finish = [call({ operation: "start", task: "t", scope: ["planned"] }), call({ operation: "report", summary: "verified fixture", facts: [{ key: "c", kind: "agent", check: "fixture assertion", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["c"], rationale: "fixture" })), complete: true })];
+ h.faux.setResponses([enroll(), ...(terminal === "complete" ? finish : [call({ operation: "suspend", reason: "user pause", condition: "user resumes" })]), fauxAssistantMessage("stopped")]);
+ await h.session.prompt("implement"); assert.equal(waits.length, 1);
+ h.faux.setResponses([fauxAssistantMessage("answer only")]); await h.session.prompt("explain a term"); assert.equal(waits.length, 1);
+ if (terminal === "suspended") {
+  h.faux.setResponses([call({ operation: "resume", reason: "user resumes", authority: "same scope", alignment: "resume approved work after question" }), ...finish, fauxAssistantMessage("done")]);
+  await h.session.prompt("resume implementation"); assert.equal(waits.length, 2); assert.equal(state(h).fulfillment, "complete");
+ }
  assert.deepEqual(h.errors, []);
 });
 

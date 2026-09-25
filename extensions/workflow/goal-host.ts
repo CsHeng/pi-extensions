@@ -2,7 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPreparedInputTracker } from "../shared/prepared-input.ts";
 import { summarizeHostObservation, MANAGED_SESSION_TOOL_NAME, type ManagedResultObservation } from "./observation.ts";
-import { registerSettlementBarrier } from "./settlement.ts";
+import { registerSettlementBarrier } from "../shared/settlement.ts";
 import { createGoalStore } from "./goal-store.ts";
 import { accepted, digest } from "./goal-state.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
@@ -38,7 +38,11 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  const store = createGoalStore((type, data) => pi.appendEntry(type, data));
  const ui = registerGoalUi(pi, store);
  const tracker = createPreparedInputTracker();
- const barrier = registerSettlementBarrier(pi);
+ const barrier = registerSettlementBarrier(pi, { command: "csheng-workflow-wait", tool: "csheng_workflow", enabled: () => {
+  const state = store.current();
+  return state?.fulfillment === "pending" && state.continuation.state === "active" && state.input.aligned;
+ } });
+ const stopArming = store.subscribe(() => { barrier.arm(); });
  let fenced = false; let epoch = 0; let stopped = false; let projected: number | undefined;
  type Capture = Awaited<ReturnType<typeof store.capture>> & { input: string | undefined };
  const captures = new Map<string, Capture>();
@@ -145,7 +149,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
   store.observe({ bases: binding.capture.bases, owner: binding.capture.owner, generation: binding.capture.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
   store.executionReady(event.runId); // The executor alone owns the completion wake.
  });
- pi.on("session_shutdown", () => { unsubscribeExecution(); });
+ pi.on("session_shutdown", () => { unsubscribeExecution(); stopArming(); });
  pi.on("agent_settled", (_event, ctx) => {
   if (!fenced) tracker.reset();
   const state = store.current();
