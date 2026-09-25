@@ -6,7 +6,7 @@ import { Type, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../../extensions/subagents/guidance.ts";
 import { SubagentTaskSchema } from "../../extensions/subagents/contracts.ts";
-import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema } from "../../extensions/subagents/session-contracts.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest } from "../../extensions/subagents/session-contracts.ts";
 import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/subagents/tool-surface.ts";
 
 export const PROBE_SHAPE_ENV = "CSHENG_PROBE_SHAPE";
@@ -20,7 +20,7 @@ export const PROBE_SHAPES: readonly ProbeShape[] = ["production", "flat", "agent
 export const PROBE_GUIDANCE_LEVELS: readonly ProbeGuidance[] = ["off", "balanced", "aggressive"];
 
 /** The flat shape is derived from the production task object, not copied, so it cannot drift from the real fields. */
-export const FLAT_SHAPE_PARAMETERS = Type.Pick(SubagentTaskSchema, ["objective", "role", "scope", "inputs", "verification"]);
+export const FLAT_SHAPE_PARAMETERS = Type.Pick(SubagentTaskSchema, ["objective", "role", "repository", "scope", "inputs", "writePaths", "verification"]);
 
 /** External reference shape only; it corresponds to no production contract and is never derived. */
 export const AGENT_SHAPE_PARAMETERS = Type.Object({
@@ -71,6 +71,12 @@ export function probeShapeDefinition(shape: ProbeShape): ProbeShapeDefinition {
 	return { name: SUBAGENT_SESSION_TOOL_NAME, description: SUBAGENT_TOOL_DESCRIPTION, promptSnippet: SUBAGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...SUBAGENT_TOOL_PROMPT_GUIDELINES], parameters: SubagentSessionToolSchema };
 }
 
+/** Lifecycle operations never request new task roles, even with invalid stray tasks. */
+export function probeRequestedTasks(params: Record<string, unknown>): unknown[] {
+	if (params.action !== undefined) return params.action === "create" && Array.isArray(params.tasks) ? params.tasks : [];
+	return [params]; // Flat and external Agent reference shapes.
+}
+
 const receipt = (text: string) => ({ content: [{ type: "text" as const, text }], details: { probeFixture: true } });
 
 export default function delegationProbe(pi: ExtensionAPI): void {
@@ -81,8 +87,9 @@ export default function delegationProbe(pi: ExtensionAPI): void {
 		...definition,
 		label: "Subagent sessions",
 		async execute(_id: string, params: Record<string, unknown>) {
-			const role = String(params.subagent_type ?? params.role ?? "explorer");
-			return receipt(`Probe fixture receipt: accepted, no child process was launched. handle=probe-1 episode=1 candidateId=probe-candidate role=${role} sessions=1. This lane measures whether the parent called the tool; it provides no report.`);
+			if (shape === "production") parseSessionRequest(params); // Mirror field validation, never execute a lifecycle action.
+			const roles = probeRequestedTasks(params).map(value => { const task = value && typeof value === "object" ? value as Record<string, unknown> : {}; return task.role ?? task.subagent_type ?? "unknown"; });
+			return receipt(`Probe fixture recorded the requested roles: ${JSON.stringify(roles)}. No child process was launched, no session or candidate exists, and no implementation was verified. This lane measures invocation decisions only; it provides no child report.`);
 		},
 	});
 	const lines = probeGuidanceLines(guidance);

@@ -6,14 +6,15 @@
 // parent model called that tool. It measures a decision, not child quality, and
 // it is never a pass/fail gate. Results are dated evaluation evidence for
 // $AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/.
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
-import { PROBE_GUIDANCE_ENV, PROBE_GUIDANCE_LEVELS, PROBE_SHAPES, PROBE_SHAPE_ENV, PROBE_TOOL_NAMES, type ProbeGuidance, type ProbeShape } from "./fixtures/delegation-probe-extension.ts";
+import { parseArgs, promisify } from "node:util";
+import { StringDecoder } from "node:string_decoder";
+import { PROBE_GUIDANCE_ENV, PROBE_GUIDANCE_LEVELS, PROBE_SHAPES, PROBE_SHAPE_ENV, PROBE_TOOL_NAMES, probeRequestedTasks, type ProbeGuidance, type ProbeShape } from "./fixtures/delegation-probe-extension.ts";
 
 export const PROBE_GATE_ENV = "CSHENG_SUBAGENTS_DELEGATION_PROBE";
 export const PROBE_FIXTURE_RELATIVE_PATH = "scripts/fixtures/delegation-probe-extension.ts";
@@ -40,6 +41,16 @@ export const PROBE_PROMPTS: readonly ProbePrompt[] = [
 		text: "当前目录下的 repo/ 是一份代码库拷贝，其中 repo/extensions 下是八个 Pi 扩展。请只依据这份拷贝把它们逐个梳理清楚：每个扩展的职责是什么，注册了哪些工具或命令，依赖哪些共享模块，最后给我一张完整的对照表。",
 	},
 	{
+		id: "implement-same-repository",
+		kind: "target",
+		text: "请实现当前 Git 仓库 same/normalize.mjs 与 same/clamp.mjs 中两个独立功能：normalize(text) 去除首尾空白并转为小写；clamp(value, min, max) 将数字限制在闭区间内。分别补充边界测试并运行 node --test same/*.test.mjs。允许修改这两个功能及测试，不修改其他模块，不提交或推送。请完成实现与验证，而不是只做调查或计划。",
+	},
+	{
+		id: "implement-sibling-repositories",
+		kind: "target",
+		text: "当前目录是协调仓库，../sibling-a 与 ../sibling-b 是两个已授权修改的独立 Git 仓库。分别实现 sibling-a/normalize.mjs 的 normalize(text)：去除首尾空白并转为小写；sibling-b/clamp.mjs 的 clamp(value, min, max)：将数字限制在闭区间内。两项互不依赖，分别补充边界测试并在各自仓库运行 node --test。只修改这两个功能及测试，不提交或推送。请完成实现与验证，而不是只做调查或计划。",
+	},
+	{
 		id: "module-summary",
 		kind: "control",
 		text: "当前目录下 proj/src 里有 6 个业务模块：store.py、collector.py、parser.py、report.py、thresholds.py、export.py。请逐个把每个模块的职责、对外接口和它依赖的其他模块查清楚，最后给我一张汇总表。",
@@ -62,7 +73,12 @@ export function assertProbeAuthorized(env: Record<string, string | undefined>): 
 	}
 }
 
+export type ProbeRole = "worker" | "explorer" | "reviewer" | "unknown";
+const emptyRoleTasks = (): Record<ProbeRole, number> => ({ worker: 0, explorer: 0, reviewer: 0, unknown: 0 });
 export interface ProbeEventCounts {
+	/** Requested roles, not admitted/executed workers or accepted implementation. */
+	roleTasks: Record<ProbeRole, number>;
+	workerTargets: { parent: number; explicit: number; invalid: number };
 	called: boolean;
 	callCount: number;
 	argErrors: number;
@@ -75,7 +91,7 @@ export interface ProbeEventCounts {
 
 /** Parses one `pi --mode json|rpc` event stream; both modes share the wire events. */
 export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
-	const counts: ProbeEventCounts = { called: false, callCount: 0, argErrors: 0, otherToolCalls: 0, turns: 0, stopReason: null, costUsd: 0, settled: false };
+	const counts: ProbeEventCounts = { roleTasks: emptyRoleTasks(), workerTargets: { parent: 0, explicit: 0, invalid: 0 }, called: false, callCount: 0, argErrors: 0, otherToolCalls: 0, turns: 0, stopReason: null, costUsd: 0, settled: false };
 	for (const line of lines) {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) continue;
@@ -92,6 +108,18 @@ export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
 			if (subagentTools.has(name)) {
 				counts.callCount += 1;
 				counts.called = true;
+				const args = event["args"] as Record<string, unknown> | undefined;
+				const tasks = args && typeof args === "object" ? probeRequestedTasks(args) : [];
+				for (const value of tasks) {
+					const task = value && typeof value === "object" ? value as Record<string, unknown> : {};
+					const requested = task["role"] ?? task["subagent_type"];
+					const role: ProbeRole = requested === "worker" || requested === "explorer" || requested === "reviewer" ? requested : "unknown";
+					counts.roleTasks[role]++;
+					if (role === "worker") {
+						const repository = task["repository"];
+						counts.workerTargets[repository === undefined ? "parent" : typeof repository === "string" && isAbsolute(repository) ? "explicit" : "invalid"]++;
+					}
+				}
 			} else counts.otherToolCalls += 1;
 		} else if (type === "tool_execution_end") {
 			if (subagentTools.has(String(event["toolName"] ?? "")) && event["isError"] === true) counts.argErrors += 1;
@@ -116,7 +144,7 @@ export function wilsonInterval(successes: number, total: number, z = 1.96): { lo
 	return { low: Math.max(0, (center - spread) / denominator), high: Math.min(1, (center + spread) / denominator) };
 }
 
-export interface ProbeRunResult {
+export interface ProbeRunResult extends ProbeEventCounts {
 	shape: ProbeShape;
 	guidance: ProbeGuidance;
 	mode: ProbeMode;
@@ -147,6 +175,9 @@ export function summarizeCell(rows: readonly ProbeRunResult[]): Record<string, u
 		called,
 		rate: rows.length === 0 ? null : called / rows.length,
 		rateWilson95: { low: interval.low, high: interval.high },
+		roleTasks: Object.fromEntries(Object.keys(emptyRoleTasks()).map(role => [role, rows.reduce((sum, row) => sum + row.roleTasks[role as ProbeRole], 0)])),
+		roleCallRates: Object.fromEntries(Object.keys(emptyRoleTasks()).map(role => { const called = rows.filter(row => row.roleTasks[role as ProbeRole] > 0).length; return [role, { called, rate: rows.length ? called / rows.length : null, rateWilson95: wilsonInterval(called, rows.length) }]; })),
+		workerTargets: Object.fromEntries((["parent", "explicit", "invalid"] as const).map(target => [target, rows.reduce((sum, row) => sum + row.workerTargets[target], 0)])),
 		argErrors: rows.reduce((sum, row) => sum + row.argErrors, 0),
 		timedOut: rows.filter((row) => row.timedOut).length,
 		medianTurns: turns.length === 0 ? null : turns[Math.floor(turns.length / 2)],
@@ -179,6 +210,20 @@ export async function writeProbeProject(root: string): Promise<void> {
 	}
 }
 
+/** Each trial gets a private coordination checkout and two real sibling Git roots. */
+export async function writeProbeTrial(root: string): Promise<string> {
+	const parent = join(root, "parent"); await writeProbeProject(parent);
+	const implementations = { normalize: "export function normalize(text) { throw new Error('not implemented'); }\n", clamp: "export function clamp(value, min, max) { throw new Error('not implemented'); }\n" };
+	const checks = { normalize: "import assert from 'node:assert/strict'; import { normalize } from './normalize.mjs'; assert.equal(normalize(' A '), 'a');\n", clamp: "import assert from 'node:assert/strict'; import { clamp } from './clamp.mjs'; assert.equal(clamp(12, 0, 10), 10);\n" };
+	for (const [directory, names] of [[join(parent, "same"), ["normalize", "clamp"]], [join(root, "sibling-a"), ["normalize"]], [join(root, "sibling-b"), ["clamp"]]] as const) {
+		await mkdir(directory, { recursive: true });
+		for (const name of names) { await writeFile(join(directory, `${name}.mjs`), implementations[name]); await writeFile(join(directory, `${name}.test.mjs`), checks[name]); }
+	}
+	await writeFile(join(parent, ".gitignore"), "repo/\n");
+	for (const directory of [parent, join(root, "sibling-a"), join(root, "sibling-b")]) await promisify(execFile)("git", ["init", "-q", directory]);
+	return parent;
+}
+
 export interface ProbeRunOptions {
 	shape: ProbeShape;
 	guidance: ProbeGuidance;
@@ -189,6 +234,18 @@ export interface ProbeRunOptions {
 	model: string;
 	thinking: string;
 	timeoutSeconds: number;
+}
+
+/** Preserve JSON events and UTF-8 split across process stdout chunks. */
+export function probeEventCollector() {
+	const decoder = new StringDecoder("utf8"), lines: string[] = []; let pending = "";
+	return {
+		push(chunk: Buffer): boolean {
+			pending += decoder.write(chunk); const complete = pending.split("\n"); pending = complete.pop()!; lines.push(...complete);
+			return complete.some(line => { try { return JSON.parse(line).type === "agent_settled"; } catch { return false; } });
+		},
+		finish(): string[] { pending += decoder.end(); if (pending) lines.push(pending); pending = ""; return lines; },
+	};
 }
 
 export async function runProbeTrial(options: ProbeRunOptions): Promise<ProbeRunResult> {
@@ -203,18 +260,13 @@ export async function runProbeTrial(options: ProbeRunOptions): Promise<ProbeRunR
 		// prompt input and would wait for EOF instead of running the argument prompt.
 		stdio: [options.mode === "rpc" ? "pipe" : "ignore", "pipe", "pipe"],
 	});
-	const lines: string[] = [];
+	const collector = probeEventCollector();
 	let bytes = 0;
-	let settled = false;
 	const consume = (chunk: Buffer): void => {
 		bytes += chunk.byteLength;
 		if (bytes > MAX_STDOUT_BYTES) return;
-		for (const line of chunk.toString().split("\n")) {
-			lines.push(line);
-			if (line.includes("\"agent_settled\"")) settled = true;
-			if (options.mode === "rpc" && settled) {
-				try { child.stdin?.end(); } catch { /* already closed */ }
-			}
+		if (collector.push(chunk) && options.mode === "rpc") {
+			try { child.stdin?.end(); } catch { /* already closed */ }
 		}
 	};
 	child.stdout?.on("data", consume);
@@ -235,7 +287,7 @@ export async function runProbeTrial(options: ProbeRunOptions): Promise<ProbeRunR
 		child.on("close", (code) => resolveExit(code));
 	});
 	clearTimeout(timeout);
-	const counts = parseProbeEvents(lines);
+	const counts = parseProbeEvents(collector.finish());
 	const result: ProbeRunResult = {
 		shape: options.shape,
 		guidance: options.guidance,
@@ -263,7 +315,9 @@ async function runPool<T>(items: readonly T[], concurrency: number, worker: (ite
 			if (item !== undefined) await worker(item);
 		}
 	});
-	await Promise.all(lanes);
+	const settled = await Promise.allSettled(lanes);
+	const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+	if (failures.length) throw new AggregateError(failures.map(result => result.reason), "probe lanes failed after all active trials drained");
 }
 
 function formatRate(cell: Record<string, unknown>): string {
@@ -341,10 +395,11 @@ async function main(argv: readonly string[]): Promise<void> {
 	for (const shape of shapes) if (!PROBE_SHAPES.includes(shape)) throw new Error(`unknown_shape:${shape}`);
 	for (const level of guidance) if (!PROBE_GUIDANCE_LEVELS.includes(level)) throw new Error(`unknown_guidance:${level}`);
 	for (const mode of modes) if (mode !== "print" && mode !== "rpc") throw new Error(`unknown_mode:${mode}`);
-	const selected = values.prompts === "all"
+	const requested = values.prompts === "all"
 		? PROBE_PROMPTS
 		: PROBE_PROMPTS.filter((prompt) => values.prompts.split(",").map((value) => value.trim()).includes(prompt.id) || values.prompts.split(",").map((value) => value.trim()).includes(prompt.kind));
-	if (selected.length === 0 || shapes.length === 0 || guidance.length === 0 || modes.length === 0) throw new Error("empty_probe_selection");
+	const selected = PROBE_PROMPTS.filter(prompt => requested.includes(prompt) || prompt.kind === "control");
+	if (requested.length === 0 || shapes.length === 0 || guidance.length === 0 || modes.length === 0) throw new Error("empty_probe_selection");
 	const trials = Number.parseInt(values.trials, 10);
 	const timeoutSeconds = Number.parseInt(values.timeout, 10);
 	const totalRuns = shapes.length * guidance.length * modes.length * selected.length * trials;
@@ -357,7 +412,6 @@ async function main(argv: readonly string[]): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "delegation-probe-"));
 	const results: ProbeRunResult[] = [];
 	try {
-		await writeProbeProject(root);
 		const jobs: ProbeRunOptions[] = [];
 		for (const shape of shapes) for (const level of guidance) for (const mode of modes) for (const prompt of selected) {
 			for (let trial = 0; trial < trials; trial += 1) {
@@ -365,7 +419,10 @@ async function main(argv: readonly string[]): Promise<void> {
 			}
 		}
 		await runPool(jobs, Number.parseInt(values.concurrency, 10), async (job) => {
-			const result = await runProbeTrial(job);
+			const trialRoot = await mkdtemp(join(root, "trial-"));
+			let result: ProbeRunResult;
+			try { result = await runProbeTrial({ ...job, projectRoot: await writeProbeTrial(trialRoot) }); }
+			finally { await rm(trialRoot, { recursive: true, force: true }); }
 			results.push(result);
 			console.log(`  ${job.shape}/${job.guidance}/${job.mode}/${job.prompt.id}#${job.trial} called=${result.called} calls=${result.callCount} turns=${result.turns} ${Math.round(result.durationMs / 1000)}s${result.timedOut ? " TIMEOUT" : ""}${result.argErrors > 0 ? " ARG_ERROR" : ""}`);
 		});
@@ -386,9 +443,9 @@ async function main(argv: readonly string[]): Promise<void> {
 		console.log(`  ${key.padEnd(48)} ${formatRate(cell)}`);
 	}
 	const artifact = {
-		version: 1,
+		version: 2,
 		generatedAt: new Date().toISOString(),
-		measurement: "parent model calls the registered subagent tool in a throwaway project; mock executor, so this is a call decision and not child quality",
+		measurement: "parent tool-call and requested-role decisions in isolated same/sibling-repository implementation and investigation scenarios; mock executor does not execute, verify, apply or accept worker output. Explicit target counts do not prove target authorization or admission.",
 		method: {
 			piVersion: await piVersion(),
 			repositoryRevision: await repositoryRevision(),
