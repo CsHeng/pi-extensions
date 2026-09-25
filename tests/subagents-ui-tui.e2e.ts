@@ -22,7 +22,7 @@ test("installed Pi fullscreen: clicking the observer close marker dismisses the 
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], tuiMode: "fullscreen" }));
 	const cols = 120;
-	const rows = 8;
+	const rows = 24;
 	// Run the installed Pi, not this checkout's dev dependency: overlay pointer dispatch exists in
 	// Pi 0.85 hosts, while the pinned 0.84.4 dev dependency never calls `handleMouse`.
 	const installedDirs = (process.env.PATH ?? "").split(":").filter(entry => entry.length > 0 && !entry.includes("node_modules/.bin"));
@@ -64,6 +64,8 @@ test("installed Pi fullscreen: clicking the observer close marker dismisses the 
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F opens the floating observer.
 	await waitFor(() => output.includes("Subagents"), "floating observer not visible");
 	await waitFor(() => output.includes("1 finished"), "observer did not settle");
+	child.stdin.write("\r"); // Enter expands the folded settled group; routes are tertiary detail.
+	await waitFor(() => output.includes("OBSERVER_MODEL"), "folded settled route not revealed by enter");
 	await delay(300);
 	// The marker sits in the panel's last column, so read its screen cell from the last drawn frame.
 	const markerIndex = output.lastIndexOf("\u2715");
