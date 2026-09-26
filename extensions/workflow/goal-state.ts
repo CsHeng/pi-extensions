@@ -1,7 +1,7 @@
 /** Pure semantic transitions. Facts never imply the main agent's acceptance judgment. */
 import { createHash } from "node:crypto";
 import { Check } from "typebox/value";
-import { GoalError, GOAL_LIMITS, goalStateSchema, requireGoal, type GoalAcceptance, type GoalOperation, type GoalState } from "./goal-contracts.ts";
+import { goalStateSchema, requireGoal, type GoalAcceptance, type GoalOperation, type GoalState } from "./goal-contracts.ts";
 
 export const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export function subjectRevision(state: GoalState, subject: string): number | undefined {
@@ -86,9 +86,9 @@ export function invalidate(state: GoalState, subjects: Set<string>, obsoleteExec
  if (subjects.size) subjects.add("delivery");
  const revoked = new Set(state.acceptance.filter(j => j.accepted && subjects.has(j.subject)).map(j => j.subject));
  state.acceptance = state.acceptance.filter(j => !subjects.has(j.subject));
- // Retain lost acceptance in existing attempt state, even after a predecessor is reaccepted.
+ // Fence obsolete writers and retain lost acceptance in the projection. A revoked judgment does not invalidate its observations.
+ // Source refresh/corrected facts own evidence validity; the agent must explicitly rejudge any changed support relation.
  for (const attempt of state.attempts) if (subjects.has(`task:${attempt.task}`) && (obsoleteExecution || attempt.status === "running" || revoked.has(`task:${attempt.task}`))) attempt.status = "interrupted";
- for (const fact of state.facts) if (state.attempts.some(a => a.id === fact.attempt && a.status === "interrupted")) { fact.usable = false; fact.note = "Attempt invalidated."; }
  if (subjects.size && state.fulfillment === "complete") state.fulfillment = "pending";
 }
 export function amend(state: GoalState, op: GoalOperation): void {
@@ -112,7 +112,8 @@ export function amend(state: GoalState, op: GoalOperation): void {
   for (const old of state.tasks) if (!op.tasks.some(t => t.key === old.key)) affected.add(`task:${old.key}`);
   state.tasks = op.tasks.map(t => {
    const old = state.tasks.find(o => o.key === t.key);
-   const same = old && digest([old.covers, old.dependsOn ?? []]) === digest([t.covers, t.dependsOn ?? []]);
+   const relations = (task: typeof t) => [[...new Set(task.covers)].sort(), [...new Set(task.dependsOn ?? [])].sort()];
+   const same = old && digest(relations(old)) === digest(relations(t));
    if (!same) affected.add(`task:${t.key}`);
    return { ...t, revision: same ? old.revision : (old?.revision ?? 0) + 1, ...(old?.blocker ? { blocker: old.blocker } : {}) };
   });
@@ -140,11 +141,10 @@ export function complete(state: GoalState, diagnostics: string[]): void {
  if (missing.length) { diagnostics.push(...missing); return; }
  state.fulfillment = "complete";
 }
-/** Bound durable counters and relational integrity; malformed latest snapshots are never skipped. */
+/** Validate shape, safe counters and relational integrity; malformed latest snapshots are never skipped. */
 export function validateGoalState(state: GoalState): void {
  requireGoal(Check(goalStateSchema, state), "state_unavailable", "Invalid snapshot shape or bounded field.");
  requireGoal(state.version === 2 && Number.isSafeInteger(state.revision) && state.revision > 0 && Number.isSafeInteger(state.serial) && state.serial >= 0, "state_unavailable", "Invalid version/counters.");
- requireGoal(state.attempts.length <= GOAL_LIMITS.attempts && state.facts.length <= GOAL_LIMITS.facts && state.calls.length <= GOAL_LIMITS.calls, "state_unavailable", "Record limit exceeded.");
  validateGraph(state);
  const attemptIds = new Set(state.attempts.map(a => a.id));
  const factIds = new Set(state.facts.map(f => f.id));
@@ -158,5 +158,4 @@ export function validateGoalState(state: GoalState): void {
  for (const fact of state.facts) requireGoal(attemptIds.has(fact.attempt), "state_unavailable", "Fact references missing attempt.");
  for (const j of state.acceptance) requireGoal(subjectRevision(state, j.subject) !== undefined && j.facts.every(id => factIds.has(id)), "state_unavailable", "Acceptance references missing subject/fact.");
  if (state.fulfillment === "complete") requireGoal(deficits(state).length === 0, "state_unavailable", "Complete snapshot has deficits.");
- if (Buffer.byteLength(JSON.stringify(state)) > GOAL_LIMITS.bytes) throw new GoalError("state_limit", "Contract snapshot is full; nothing committed. Continue the task and disclose unavailable bookkeeping.");
 }

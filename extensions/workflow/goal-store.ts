@@ -61,9 +61,10 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   .slice(-16) ?? [];
  function commit(next: GoalState, call: string): void {
   next.revision++;
-  next.calls = [...next.calls, digest(call)].slice(-GOAL_LIMITS.calls);
+  next.calls = [...next.calls, digest(call)];
   validateGoalState(next);
-  append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 2, state: next });
+  try { append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 2, state: next }); }
+  catch (error) { throw new GoalError("persistence_failed", `Snapshot persistence failed; proposed state was not installed. Reconcile host storage, not business checks; do not repair history. ${String(error).slice(0, 500)}`); }
   state = next; owner++; notify();
  }
  const writable = () => requireGoal(!unavailable, "state_unavailable", `Workflow unavailable: ${unavailable}. Continue authorized work without claiming contract certification; do not repair history.`);
@@ -147,7 +148,6 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
      requireGoal(!accepted(next, `task:${task.key}`), "accepted_task", "Task is already accepted.");
      const dependencies = pendingDependencies(next, task);
      requireGoal(!dependencies.length, "dependency_pending", dependencyDiagnostic(task.key, dependencies));
-     requireGoal(next.attempts.length < GOAL_LIMITS.attempts, "state_limit", "Attempt limit reached; no attempt was started.");
      const scope = declaredScope(op.scope, ctx.cwd); const writes = op.writes?.length ? declaredScope(op.writes, ctx.cwd) : [];
      try { await canonicalScope(scope, ctx.cwd); if (writes.length) await canonicalScope(writes, ctx.cwd); }
      catch (error) {
@@ -208,7 +208,11 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
      const blocked = next.tasks.filter(t => t.blocker && (!op.task || t.key === op.task));
      requireGoal(!active || blocked.length > 0, "already_active", "Active work has no matching resolved blocker; resume cannot replenish continuation history.");
      await refresh(next, ctx.cwd);
-     if (!active) next.continuation = { state: "active", repeat: 0, dispatched: next.continuation.dispatched };
+     if (!active) {
+      // Resume resolves a real pause/blocker, not the observed automatic-dispatch history.
+      next.continuation.state = "active";
+      delete next.continuation.reason; delete next.continuation.unblock; delete next.continuation.waitingFor;
+     }
      for (const task of blocked) delete task.blocker;
     } else if (op.operation === "close") {
      requireGoal(op.outcome && op.reason, "invalid_close", "Close needs outcome and reason.");
@@ -258,7 +262,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   observe(observation: CheckObservation) { checks.set(observation.host.toolCallId, observation); while (checks.size > 256) checks.delete(checks.keys().next().value!); },
   pendingExecutions(runIds: string[]) {
    if (!state || state.fulfillment !== "pending") return;
-   const values = [...new Set(runIds)].slice(0, 256);
+   const values = [...new Set(runIds)];
    if (digest(values) === digest(state.executionPending ?? [])) return;
    const next = structuredClone(state); next.executionPending = values;
    commit(next, `execution-pending:${owner}`);
@@ -266,7 +270,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   waitForExecutions(runIds: string[]) {
    if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active" || !runIds.length) return;
    const next = structuredClone(state);
-   next.continuation.state = "waiting"; next.continuation.waitingFor = [...new Set(runIds)].slice(0, 256);
+   next.continuation.state = "waiting"; next.continuation.waitingFor = [...new Set(runIds)];
    next.continuation.reason = "Awaiting accepted subagent execution; receipts are not completion.";
    next.continuation.unblock = "A current-owner terminal event makes evidence available; the executor owns the wake.";
    commit(next, `execution-wait:${owner}`);
@@ -283,13 +287,22 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    const lease = owner; const next = structuredClone(state); await refresh(next, ctx.cwd);
    if (lease !== owner || ctx.signal?.aborted || ctx.fenced?.()) return;
    const key = progressKey(next);
-   next.continuation.repeat = key === next.continuation.lastProgress ? next.continuation.repeat + 1 : 0;
+   next.continuation.repeat = key === next.continuation.lastProgress ? Math.min(next.continuation.repeat + 1, GOAL_LIMITS.noProgress) : 0;
    next.continuation.lastProgress = key;
    if (next.continuation.repeat >= GOAL_LIMITS.noProgress) {
-    next.continuation.state = "suspended"; next.continuation.reason = "Repeated unchanged deficits without material progress."; next.continuation.unblock = "Diagnose the repeated condition, then explicitly resume under existing authority.";
-   } else next.continuation.dispatched++;
+    // Stop only repeated automatic messages; this heuristic cannot withdraw authority or prohibit normal tool work.
+    next.continuation.automaticPaused = true;
+    next.continuation.reason = "Automatic dispatch paused: no new observed evidence for another follow-up; the task remains unfinished.";
+    next.continuation.unblock = "Continue authorized work through normal host input/tools. New relevant evidence can re-enable automatic dispatch; no new task approval is implied.";
+    if (digest(next) !== digest(state)) commit(next, `automatic-pause:${owner}`);
+    return;
+   }
+   if (next.continuation.automaticPaused) {
+    delete next.continuation.automaticPaused; delete next.continuation.reason; delete next.continuation.unblock;
+   }
+   next.continuation.dispatched++;
    commit(next, `settled:${owner}`);
-   if (next.continuation.state === "active") dispatch();
+   dispatch();
   },
   suspend(reason: string) {
    if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active") return;

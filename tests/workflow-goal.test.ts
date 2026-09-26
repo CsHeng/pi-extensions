@@ -40,6 +40,65 @@ test("strict enrollment is explicit; normal slice is start + compound report; al
  assert.equal(f.snapshots.length, 5);
 });
 
+test("legitimate long contracts outlive cumulative record and snapshot ceilings", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ const initial = structuredClone(f.snapshots[0]!);
+ let appendedBytes = Buffer.byteLength(JSON.stringify(initial.data));
+ const samples: { attempts: number; facts: number; snapshotBytes: number; appendedBytes: number; elapsedMs: number }[] = [];
+ const started = performance.now();
+ // Keep only the newest fixture entry in memory; account for every append, not just the live projection.
+ const advance = async (op: GoalOperation) => {
+  const result = await f.run(op);
+  appendedBytes += Buffer.byteLength(JSON.stringify(f.snapshots.at(-1)!.data));
+  f.snapshots.splice(0, f.snapshots.length - 1);
+  return result;
+ };
+ for (let i = 0; i < 260; i++) {
+  await advance({ operation: "start", task: "one", scope: ["one"] });
+  await advance({ operation: "report", summary: "A useful independently recorded investigation", facts: Array.from({ length: 1 }, (_, n) => ({
+   key: `check${n}`, kind: "agent" as const, check: `case ${i}/${n}`, result: "pass" as const, artifacts: ["x".repeat(500), "y".repeat(500), "z".repeat(500), "w".repeat(500)],
+  })) });
+  if (i === 31 || i === 259) samples.push({ attempts: i + 1, facts: f.store.current()!.facts.length,
+   snapshotBytes: Buffer.byteLength(JSON.stringify(f.snapshots.at(-1)!.data)), appendedBytes, elapsedMs: Math.round(performance.now() - started) });
+ }
+ assert.equal(f.store.current()!.attempts.length, 260); assert.equal(f.store.current()!.facts.length, 260);
+ assert.ok(samples.at(-1)!.snapshotBytes > 512 * 1024);
+ await advance({ operation: "inspect" });
+ await advance({ operation: "amend", reason: "same goal after investigation", authority: "existing" });
+ await advance({ operation: "suspend", reason: "explicit test pause", condition: "explicit resume" });
+ await advance({ operation: "resume", reason: "pause resolved", authority: "existing" });
+ const replay = createGoalStore(() => {}); replay.replay([initial, ...f.snapshots]);
+ assert.equal(replay.view().unavailable, undefined); assert.deepEqual(replay.current(), f.store.current());
+ // Idempotency must not expire merely because another 128 operations occurred.
+ const before = f.store.current(); await f.store.mutate(enroll, f.ctx, "call-1"); assert.deepEqual(f.store.current(), before);
+ await advance({ operation: "start", task: "one", scope: ["one"] });
+ await advance({ operation: "report", summary: "judge still-current early evidence", judgments: ["task:one", "requirement:one"].map(subject => ({ subject, facts: ["A1:check0"], accepted: true, rationale: "same source and supported obligation" })) });
+ await advance({ operation: "start", task: "two", scope: ["two"] });
+ await advance(f.report("two", undefined, true)); assert.equal(f.store.current()!.fulfillment, "complete");
+ t.diagnostic(`synthetic growth (not a performance gate): ${JSON.stringify(samples)}`);
+});
+
+test("contract size and pending execution sets do not silently truncate real obligations", async t => {
+ const f = await fixture(t);
+ const keys = Array.from({ length: 70 }, (_, n) => `item${n}`);
+ await f.run({ ...enroll, requirements: keys.map(key => ({ key, outcome: key, verification: "owned check" })),
+  tasks: [...keys.map(key => ({ key, title: key, covers: [key] })), { key: "joined", title: "Real aggregate", covers: keys, dependsOn: keys }],
+ });
+ const runs = Array.from({ length: 270 }, (_, n) => `run-${n}`);
+ f.store.pendingExecutions(runs); f.store.waitForExecutions(runs);
+ assert.deepEqual(f.store.current()!.executionPending, runs); assert.deepEqual(f.store.current()!.continuation.waitingFor, runs);
+ const replay = createGoalStore(() => {}); replay.replay(f.snapshots);
+ assert.equal(replay.view().unavailable, undefined); assert.deepEqual(replay.current(), f.store.current());
+});
+
+test("append failure is a persistence diagnostic, not corrupt state or a reason to rerun checks", async t => {
+ const f = await fixture(t); await f.run(enroll); const before = f.store.current(), writes = f.snapshots.length;
+ f.failWrites();
+ const result = await f.store.mutate({ operation: "start", task: "one", scope: ["one"] }, f.ctx, "failed-append");
+ assert.equal(result.code, "persistence_failed"); assert.match(result.message!, /not installed/);
+ assert.deepEqual(f.store.current(), before); assert.equal(f.snapshots.length, writes);
+});
+
 for (const field of ["scope", "writes"] as const) test(`overlong ${field} is a typed atomic path error, not a task description or unavailable contract`, async t => {
  const f = await fixture(t); await f.run(enroll);
  const before = structuredClone(f.store.current()), count = f.snapshots.length;
@@ -206,15 +265,41 @@ test("contained symlink retarget invalidates proof even if the old target stays 
  assert.equal(accepted(f.store.current()!, "task:one"), false); assert.equal(f.store.current()!.facts[0]!.usable, false);
 });
 
-test("reported attempts and old checks cannot certify amended verification", async t => {
+test("amended verification needs new judgment, not erased evidence or a relabeled old observation", async t => {
  const f = await fixture(t); await f.run(enroll);
- await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
- await f.run({ operation: "amend", reason: "verification changed", authority: "user clarification", requirements: [{ ...enroll.requirements![0]!, verification: "different check" }, enroll.requirements![1]!] });
- assert.equal(f.store.current()!.attempts[0]!.status, "interrupted"); assert.equal(f.store.current()!.facts[0]!.usable, false);
- assert.equal((await f.store.mutate({ ...f.report("one"), attempt: "A1" }, f.ctx, "stale-correction")).code, "unknown_attempt");
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.observe("original-check"); await f.run(f.report("one", "original-check"));
+ const original = structuredClone(f.store.current()!.facts[0]!);
+ await f.run({ operation: "amend", reason: "clarify the oracle meaning", authority: "same intent", requirements: [{ ...enroll.requirements![0]!, verification: "the same check proves the clarified boundary" }, enroll.requirements![1]!] });
+ assert.equal(f.store.current()!.attempts[0]!.status, "interrupted");
+ assert.deepEqual(f.store.current()!.facts[0], original);
+ assert.equal(accepted(f.store.current()!, "task:one"), false); assert.equal(accepted(f.store.current()!, "requirement:one"), false);
+ assert.equal((await f.store.mutate({ ...f.report("one"), attempt: "A1" }, f.ctx, "late-old-writer")).code, "unknown_attempt");
  await f.run({ operation: "start", task: "one", scope: ["one"] });
- const result = await f.run({ operation: "report", summary: "cannot reuse obsolete check", judgments: [{ subject: "requirement:one", facts: ["A1:check"], accepted: true, rationale: "old evidence" }] });
- assert.equal(accepted(result.view.state!, "requirement:one"), false);
+ const result = await f.run({ operation: "report", summary: "explicitly rejudge the original fact for the clarified requirement",
+  facts: [{ key: "not-a-fresh-check", kind: "host", check: "must not relabel old execution", observationId: "original-check", result: "pass" }],
+  judgments: ["task:one", "requirement:one"].map(subject => ({ subject, facts: ["A1:check"], accepted: true, rationale: "original actual check supports the clarified obligation; no new execution claimed" })),
+ });
+ assert.equal(result.view.state!.facts.find(fact => fact.id === "A2:not-a-fresh-check")!.usable, false);
+ assert.equal(accepted(result.view.state!, "requirement:one"), true); assert.equal(accepted(result.view.state!, "task:one"), true);
+ await writeFile(join(f.cwd, "one"), "real oracle input changed");
+ await f.run({ operation: "inspect" });
+ assert.equal(f.store.current()!.facts[0]!.usable, false); assert.equal(accepted(f.store.current()!, "task:one"), false);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ await f.run({ operation: "report", summary: "cannot rejudge source-invalid evidence", judgments: [{ subject: "task:one", facts: ["A1:check"], accepted: true, rationale: "must reject" }] });
+ assert.equal(accepted(f.store.current()!, "task:one"), false);
+});
+
+test("task and dependency presentation order is not changed meaning", async t => {
+ const f = await fixture(t);
+ const tasks = [...enroll.tasks!, { key: "join", title: "Join", covers: ["one", "two"], dependsOn: ["one", "two"] }];
+ await f.run({ ...enroll, tasks });
+ for (const task of ["one", "two"]) { await f.run({ operation: "start", task, scope: [task] }); await f.run(f.report(task)); }
+ await f.run({ operation: "start", task: "join", scope: ["one", "two"] });
+ await f.run({ operation: "report", summary: "joined", judgments: [{ subject: "task:join", facts: ["A1:check", "A2:check"], accepted: true, rationale: "actual inputs" }] });
+ const before = f.store.current()!;
+ await f.run({ operation: "amend", reason: "presentation only", authority: "existing", tasks: [...tasks].reverse().map(task => ({ ...task, title: `Clearer ${task.title}`, covers: [...task.covers].reverse(), ...(task.dependsOn ? { dependsOn: [...task.dependsOn].reverse() } : {}) })) });
+ assert.deepEqual(f.store.current()!.acceptance, before.acceptance); assert.deepEqual(f.store.current()!.facts, before.facts);
+ assert.deepEqual(f.store.current()!.attempts, before.attempts);
 });
 
 for (const aggregateAccepted of [false, true]) test(`splitting an ${aggregateAccepted ? "accepted" : "unaccepted"} aggregate preserves unrelated proof without transferring acceptance`, async t => {
@@ -238,15 +323,14 @@ for (const aggregateAccepted of [false, true]) test(`splitting an ${aggregateAcc
  assert.equal(accepted(split, "task:one"), true); assert.equal(split.facts.find(f => f.id === "A1:check")!.usable, true);
  for (const key of ["owners", "local", "peer", "join"]) assert.equal(accepted(split, `task:${key}`), false);
  assert.equal(split.attempts.find(a => a.task === "owners")!.status, "interrupted");
- assert.equal(split.facts.find(f => f.id === "A2:f")!.usable, false);
+ assert.equal(split.facts.find(f => f.id === "A2:f")!.usable, true, "a decomposition change is not source invalidation");
  const replay = createGoalStore(() => {}); replay.replay(f.snapshots);
  assert.equal(replay.view().unavailable, undefined); assert.deepEqual(replay.current(), split);
  await f.run({ operation: "start", task: "peer", scope: ["two"] });
  await f.run({ operation: "report", summary: "fixture absent", blocker: { kind: "capability", reason: "pinned peer missing", unblock: "peer provided" } });
  await f.run({ operation: "start", task: "local", scope: ["two"] });
- const inherited = await f.run({ operation: "report", summary: "old aggregate is not child proof", judgments: [{ subject: "task:local", facts: ["A2:f"], accepted: true, rationale: "must reject obsolete proof" }] });
- assert.equal(accepted(inherited.view.state!, "task:local"), false);
- await f.run({ operation: "report", attempt: "A4", summary: "local checked", facts: [{ key: "local", kind: "agent", check: "independent current proof", result: "pass" }], judgments: [{ subject: "task:local", facts: ["local"], accepted: true, rationale: "local result" }] });
+ const judged = await f.run({ operation: "report", summary: "review original local-source evidence against the separated local obligation", judgments: [{ subject: "task:local", facts: ["A2:f"], accepted: true, rationale: "still-current source evidence suffices for this local result, not the blocked peer" }] });
+ assert.equal(accepted(judged.view.state!, "task:local"), true);
  await f.run({ operation: "start", task: "join", scope: ["two"] });
  assert.equal(f.store.current()!.attempts.at(-1)!.task, "join");
  assert.equal(f.store.current()!.tasks.find(t => t.key === "peer")!.blocker?.kind, "capability");
@@ -260,8 +344,8 @@ test("active resume cannot renew anti-spin allowance but can unblock an independ
   const result = await f.store.mutate({ operation: "resume", reason: "same wording", authority: "existing" }, f.ctx, `resume-${i}`);
   assert.equal(result.code, "already_active"); await f.store.settle(f.ctx, () => dispatched++);
  }
- assert.equal(dispatched, 2); assert.equal(f.store.current()!.continuation.state, "suspended");
- await f.run({ operation: "resume", reason: "diagnosed stagnation", authority: "existing" });
+ assert.equal(dispatched, 2); assert.equal(f.store.current()!.continuation.state, "active");
+ assert.equal(f.store.current()!.continuation.automaticPaused, true);
  await f.run({ operation: "start", task: "one", scope: ["one"] });
  await f.run({ operation: "report", summary: "blocked task", blocker: { kind: "prerequisite", reason: "missing", unblock: "restored" } });
  const history = structuredClone(f.store.current()!.continuation);
@@ -311,7 +395,30 @@ test("productive continuation repeats; churn and changed wording cannot renew no
  await f.store.settle(f.ctx, () => count++); assert.equal(count, 3);
  await f.run({ operation: "report", attempt: "A2", summary: "new prose without work" });
  await f.store.settle(f.ctx, () => count++); await f.store.settle(f.ctx, () => count++);
- assert.equal(count, 4); assert.equal(f.store.current()!.continuation.state, "suspended"); assert.equal(f.store.current()!.fulfillment, "pending");
+ assert.equal(count, 4); assert.equal(f.store.current()!.continuation.state, "active"); assert.equal(f.store.current()!.continuation.automaticPaused, true); assert.equal(f.store.current()!.fulfillment, "pending");
+});
+
+test("automatic anti-spin pause leaves authorized exploration executable without a resume ritual", async t => {
+ const f = await fixture(t); await f.run(enroll); let dispatches = 0;
+ const settle = () => f.store.settle(f.ctx, () => dispatches++);
+ await settle(); await settle(); await settle();
+ assert.equal(dispatches, 2); assert.equal(f.store.current()!.continuation.state, "active");
+ assert.equal(f.store.current()!.continuation.automaticPaused, true);
+ const paused = f.store.current(); await settle(); assert.deepEqual(f.store.current(), paused, "unchanged settlements do not churn snapshots");
+ assert.match(goalReceipt(f.store.view()), /automatic dispatch paused/i);
+ assert.equal((await f.store.mutate({ operation: "resume", reason: "new wording only", authority: "same" }, f.ctx, "no-refill")).code, "already_active");
+ // Even a suspend/resume round trip cannot refresh the automatic dispatch budget.
+ await f.run({ operation: "suspend", reason: "actual user pause", condition: "explicit user continuation" });
+ assert.equal((await f.store.mutate({ operation: "start", task: "one", scope: ["one"] }, f.ctx, "paused-start")).code, "suspended");
+ await f.run({ operation: "resume", reason: "explicit user continuation", authority: "same" }); await settle();
+ assert.equal(dispatches, 2); assert.equal(f.store.current()!.continuation.automaticPaused, true);
+ // A normal host run can investigate without another resume; failures and more necessary tasks can be useful progress.
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.observe("diagnostic-failure", true);
+ await f.run({ operation: "report", summary: "found a real missing prerequisite", facts: [{ key: "diagnostic", kind: "host", check: "real failed diagnostic", observationId: "diagnostic-failure", result: "fail" }] });
+ await f.run({ operation: "amend", reason: "discovered necessary investigation", authority: "same outcome", tasks: [...enroll.tasks!, { key: "investigate", title: "Investigate", covers: ["one"] }] });
+ await settle(); assert.equal(dispatches, 3); assert.equal(f.store.current()!.continuation.automaticPaused, undefined);
+ assert.equal(f.store.current()!.acceptance.length, 0); assert.equal(f.store.current()!.tasks.length, 3);
+ assert.equal(f.store.current()!.facts[0]!.result, "fail");
 });
 
 test("persistence is append-before-install, newest corruption fails closed, recovery is not autoresume", async t => {

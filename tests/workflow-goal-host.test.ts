@@ -76,13 +76,30 @@ test("real host makes three productive continuations on unchanged source and the
  assert.equal(h.faux.state.callCount, 17); assert.deepEqual(h.errors, []);
 });
 
-test("real host repeated unchanged incomplete settlement suspends without false completion", async t => {
+test("real host limits repeated automatic dispatch but permits ordinary diagnostic continuation", async t => {
  const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([enroll(), fauxAssistantMessage("unfinished"), fauxAssistantMessage("still unfinished"), fauxAssistantMessage("same deficits")]);
  await h.session.prompt("implement");
  await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 3);
- await waitForTrace(trace, () => state(h).continuation.state === "suspended");
- assert.equal(h.faux.state.callCount, 4); assert.equal(state(h).fulfillment, "pending"); assert.equal(state(h).continuation.dispatched, 2); assert.deepEqual(h.errors, []);
+ await waitForTrace(trace, () => state(h).continuation.automaticPaused === true);
+ assert.equal(h.faux.state.callCount, 4); assert.equal(state(h).fulfillment, "pending"); assert.equal(state(h).continuation.dispatched, 2);
+ assert.equal(state(h).continuation.state, "active");
+ h.faux.setResponses([
+  call({ operation: "start", task: "t", scope: ["source"], alignment: "continue existing authorized work after the dispatch guard" }),
+  fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'identified missing prerequisite'; exit 1" } as never)),
+  call({ operation: "report", summary: "useful failed diagnostic", facts: [{ key: "diagnostic", kind: "host", check: "prerequisite diagnosis", result: "fail" }] }),
+  fauxAssistantMessage("diagnosis complete, work remains"),
+  call({ operation: "start", task: "t", scope: ["source"] }),
+  fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'verified repaired boundary'" } as never)),
+  call({ operation: "report", summary: "verified", facts: [{ key: "check", kind: "host", check: "repair verification", result: "pass" }],
+   judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "current passing verification" })), complete: true }),
+  fauxAssistantMessage("complete"),
+ ]);
+ await h.session.prompt("Continue the same authorized task with a concrete diagnostic");
+ await waitForTrace(trace, () => state(h).fulfillment === "complete");
+ await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 5);
+ assert.equal(state(h).continuation.dispatched, 3); assert.equal(state(h).continuation.automaticPaused, undefined);
+ assert.equal(state(h).input.generation, 1); assert.ok(state(h).facts.some(f => f.result === "fail")); assert.deepEqual(h.errors, []);
 });
 
 for (const replace of [false, true]) test(`v2 queued draft ${replace ? "replaced" : "withdrawn"}: only prepared native input aligns`, async t => {

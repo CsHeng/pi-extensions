@@ -10,8 +10,8 @@ const key = Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-
 const list = <T extends ReturnType<typeof text>>(item: T, maxItems = 32) => Type.Array(item, { maxItems });
 const requirement = Type.Object({ key, outcome: text(), verification: text(), required: Type.Optional(Type.Boolean()) }, { additionalProperties: false });
 const task = Type.Object({
- key, title: text(80), covers: list(key),
- dependsOn: Type.Optional(Type.Array(key, { maxItems: 32, description: "Only task outputs actually required to start and accept this task; not display groups, phase order or every owner in a plan." })),
+ key, title: text(80), covers: Type.Array(key),
+ dependsOn: Type.Optional(Type.Array(key, { description: "Only task outputs actually required to start and accept this task; not display groups, phase order or every owner in a plan." })),
 }, { additionalProperties: false, description: "An independently verifiable outcome. Preserve independently deliverable plan task IDs; split different acceptance or blocker boundaries. Do not collapse independent owners into an umbrella task or track each command as a task." });
 const fact = Type.Object({
  key, kind: Type.Union([Type.Literal("host"), Type.Literal("agent"), Type.Literal("user"), Type.Literal("review")]),
@@ -25,8 +25,8 @@ const enums = <T extends string>(...values: T[]) => Type.Unsafe<T>({ type: "stri
 export const goalParameters = Type.Object({
  operation: enums("enroll", "start", "report", "amend", "inspect", "close", "suspend", "resume"),
  goal: Type.Optional(text()), delivery: Type.Optional(text()), authority: Type.Optional(text()),
- requirements: Type.Optional(Type.Array(requirement, { minItems: 1, maxItems: 32 })),
- tasks: Type.Optional(Type.Array(task, { maxItems: 64 })),
+ requirements: Type.Optional(Type.Array(requirement, { minItems: 1 })),
+ tasks: Type.Optional(Type.Array(task)),
  subject: Type.Optional(text(128)), task: Type.Optional(key),
  scope: Type.Optional(Type.Array(text(500), { maxItems: 32, description: "Filesystem file/directory paths whose state the work and checks depend on, relative to cwd or explicitly authorized absolute roots. Not task descriptions, goals or summaries. Include the actual checked source paths; planned missing paths are supported." })),
  writes: Type.Optional(Type.Array(text(500), { maxItems: 32, description: "Planned filesystem write paths for overlap detection, relative to cwd or explicitly authorized absolute roots. Not objectives, summaries or permission grants; missing targets for new files are supported." })),
@@ -55,7 +55,7 @@ export interface GoalState {
  version: 2; revision: number; id: string;
  goal: string; delivery: string; authority: string; goalRevision: number;
  fulfillment: "pending" | "complete" | "cancelled" | "superseded";
- continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number; waitingFor?: string[] };
+ continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number; waitingFor?: string[]; automaticPaused?: boolean };
  input: { generation: number; aligned: boolean; unknown: boolean };
  requirements: GoalRequirement[]; tasks: GoalTask[]; attempts: GoalAttempt[]; facts: GoalFact[]; acceptance: GoalAcceptance[];
  /** Inert provenance retained when reading v2 snapshots created by the retired v1 migrator. */
@@ -68,18 +68,20 @@ const basis = Type.Object({ scope: list(text(500)), fingerprint: text(256), stat
 export const goalStateSchema = Type.Object({
  version: Type.Literal(2), revision: Type.Integer({ minimum: 1 }), id: text(128), goal: text(), delivery: text(), authority: text(), goalRevision: Type.Integer({ minimum: 1 }),
  fulfillment: enums("pending", "complete", "cancelled", "superseded"),
- continuation: Type.Object({ state: enums("active", "waiting", "suspended"), reason: Type.Optional(text()), unblock: Type.Optional(text()), lastProgress: Type.Optional(text(128)), repeat: integer, dispatched: integer, waitingFor: Type.Optional(list(text(128), 256)) }, { additionalProperties: false }),
+ continuation: Type.Object({ state: enums("active", "waiting", "suspended"), reason: Type.Optional(text()), unblock: Type.Optional(text()), lastProgress: Type.Optional(text(128)), repeat: integer, dispatched: integer, waitingFor: Type.Optional(Type.Array(text(128))), automaticPaused: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
  input: Type.Object({ generation: integer, aligned: Type.Boolean(), unknown: Type.Boolean() }, { additionalProperties: false }),
- requirements: Type.Array(Type.Object({ ...requirement.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 32 }),
- tasks: Type.Array(Type.Object({ ...task.properties, revision: Type.Integer({ minimum: 1 }), blocker: Type.Optional(blocker) }, { additionalProperties: false }), { maxItems: 64 }),
- attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), basis, writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false }), { maxItems: 256 }),
- facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), basis, at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false }), { maxItems: 256 }),
- acceptance: Type.Array(Type.Object({ ...judgment.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { maxItems: 97 }),
- legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), executionPending: Type.Optional(list(text(128), 256)), calls: Type.Array(text(256), { maxItems: 128 }), serial: integer,
+ requirements: Type.Array(Type.Object({ ...requirement.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { minItems: 1 }),
+ tasks: Type.Array(Type.Object({ ...task.properties, revision: Type.Integer({ minimum: 1 }), blocker: Type.Optional(blocker) }, { additionalProperties: false })),
+ // Session lifetime is not an execution budget. Retain evidence and idempotency identities without a cumulative cutoff.
+ attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), basis, writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false })),
+ facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), basis, at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false })),
+ acceptance: Type.Array(Type.Object({ ...judgment.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false })),
+ legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), executionPending: Type.Optional(Type.Array(text(128))), calls: Type.Array(text(256)), serial: integer,
 }, { additionalProperties: false });
 export interface GoalSnapshot { schemaVersion: 2; state: GoalState }
 export interface GoalView { state?: GoalState; unavailable?: string; deficits: string[] }
-export const GOAL_LIMITS = { bytes: 512 * 1024, attempts: 256, facts: 256, calls: 128, noProgress: 2 } as const;
+// This bounds repeated automatic dispatch, not the amount of legitimate work in a contract.
+export const GOAL_LIMITS = { noProgress: 2 } as const;
 export class GoalError extends Error {
  readonly code: string;
  constructor(code: string, message: string) { super(message); this.code = code; }

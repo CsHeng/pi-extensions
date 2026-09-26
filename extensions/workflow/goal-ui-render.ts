@@ -53,7 +53,7 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
  const doneCount = tasks.filter(t => t.status === "done").length;
  const outcome = s.fulfillment === "complete" ? " · completed" : s.fulfillment === "cancelled" ? " · cancelled" : s.fulfillment === "superseded" ? " · superseded" : "";
  const warnings = s.fulfillment === "pending" ? [
-  ...(s.continuation.state !== "active" ? [s.continuation.state] : []), ...(!s.input.aligned ? ["needs alignment"] : []),
+  ...(s.continuation.state !== "active" ? [s.continuation.state] : s.continuation.automaticPaused ? ["automatic dispatch paused"] : []), ...(!s.input.aligned ? ["needs alignment"] : []),
  ] : [];
  let prefix = warnings.length ? `! ${warnings.join(" · ")} · Tasks` : "● Tasks";
  const counts = ["running", "reported"].map(status => { const n = tasks.filter(t => t.status === status).length; return n ? ` · ${n} ${status}` : ""; }).join("");

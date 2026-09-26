@@ -101,12 +101,16 @@ test("losing accepted predecessor evidence marks a reported dependent for rechec
  assert.match(goalRows(store.view(), 120).join("\n"), /2\/2 accepted/);
  await writeFile(join(cwd, "a"), "new predecessor"); await store.revalidate(cwd);
  assert.equal(store.current()!.attempts.at(-1)!.status, "interrupted");
- assert.equal(store.current()!.facts.at(-1)!.usable, false, "revoked acceptance also invalidates dependent attempt proof");
+ assert.equal(store.current()!.facts[0]!.usable, false, "changed predecessor source invalidates its own fact");
+ assert.equal(store.current()!.facts.at(-1)!.usable, true, "unchanged dependent source remains evidence, not accepted support for the new predecessor");
  assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/);
  await mutate({ operation: "start", task: "a", scope: ["a"] });
  await mutate({ operation: "report", task: "a", summary: "predecessor rechecked", facts: [{ key: "f", kind: "agent", check: "new predecessor", result: "pass" }], judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "rechecked" }] });
  assert.match(goalRows(store.view(), 120).join("\n"), /1\/2 accepted/);
- assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/, "reaccepting A cannot restore B's old reported basis");
+ assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/, "reaccepting A cannot automatically restore B's judgment");
+ await mutate({ operation: "start", task: "b", scope: ["b"] });
+ await mutate({ operation: "report", task: "b", summary: "independent source check still supports the current dependent outcome", judgments: [{ subject: "task:b", facts: ["A2:f"], accepted: true, rationale: "explicitly reviewed against the accepted predecessor; no new execution claimed" }] });
+ assert.match(goalRows(store.view(), 120).join("\n"), /2\/2 accepted/);
 });
 
 test("recovered narrow warning view reserves acceptance count and an identifiable task", async t => {

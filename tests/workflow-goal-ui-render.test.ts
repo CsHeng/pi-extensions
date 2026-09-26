@@ -98,6 +98,15 @@ test("terminal data is sanitized before styling and narrow/zero dimensions remai
  assert.deepEqual(goalRows(view(state), 0), []); assert.deepEqual(goalRows(view(state), 80, 0), []);
 });
 
+test("automatic dispatch pause is visible without presenting a user pause or blocking ready work", async () => {
+ const state = await fixture(); state.continuation.automaticPaused = true;
+ state.continuation.reason = "No new observed evidence for another automatic message.";
+ const before = structuredClone(state);
+ const rows = goalRows(view(state), 120);
+ assert.match(rows[0]!, /automatic dispatch paused/); assert.doesNotMatch(rows[0]!, /suspended|completed/);
+ assert.equal(state.continuation.state, "active"); assert.deepEqual(state, before);
+});
+
 test("empty and unavailable views do not fall back to protocol receipts", () => {
  assert.deepEqual(goalRows({ deficits: [] }, 80), []);
  assert.deepEqual(goalRows({ unavailable: "raw internal exception", deficits: [] }, 120), ["! Tasks · state unavailable · /workflow-ui list"]);
