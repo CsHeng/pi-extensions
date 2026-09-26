@@ -99,7 +99,7 @@ bash scripts/run-temporary-multi-skill-mentions-probe.sh
 bash scripts/run-installed-multi-skill-mentions-probe.sh
 ```
 
-The delegation probe lane is a measurement lane, not a gate: it runs headless `pi` against a throwaway project and a mock subagent tool to measure whether the parent model calls the tool under a selected shape and guidance level. It spends provider capacity, always includes control prompts, prints Wilson intervals with the frozen prompt-set fingerprint, and writes one JSON artifact; use `--dry-run` to inspect the plan first. Keep its dated results in `$AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/`, and never add it to `bun run test`:
+The delegation probe lane is a measurement lane, not a gate: it runs headless `pi` against a throwaway project and a mock subagent tool to measure whether the parent model calls the tool under a selected shape and guidance level. It spends provider capacity, always includes control prompts, prints Wilson intervals with the frozen prompt-set fingerprint, and writes one JSON artifact; use `--dry-run` to inspect the plan first. Keep its dated conclusion in `$AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/` and its raw JSON artifact under `$AGENT_TMP_ROOT/extensions/`, and never add it to `bun run test`:
 
 ```bash
 CSHENG_SUBAGENTS_DELEGATION_PROBE=1 bun scripts/run-delegation-probe.ts --dry-run

@@ -4,8 +4,9 @@
 // It runs headless `pi` against a throwaway project and one mock subagent tool
 // (scripts/fixtures/delegation-probe-extension.ts), then reports how often the
 // parent model called that tool. It measures a decision, not child quality, and
-// it is never a pass/fail gate. Results are dated evaluation evidence for
-// $AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/.
+// it is never a pass/fail gate. The dated conclusion is evaluation evidence for
+// $AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/; the raw JSON artifact stays
+// under $AGENT_TMP_ROOT/extensions/ and is not committed.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
