@@ -1,6 +1,8 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { formatDuration } from "../subagents/render.ts";
 import type { ObserverSnapshot, ObserverTask } from "../subagents/observer-events.ts";
+import type { SessionViewHistoryRow, SessionViewReply } from "../subagents/session-view.ts";
+import type { RecordedUsageProjection } from "../subagents/observability.ts";
 
 export const SUBAGENTS_UI_STATUS_KEY = "csheng.subagents.status";
 export const SUBAGENTS_UI_PANEL_KEY = "csheng.subagents.panel";
@@ -19,10 +21,6 @@ export const PANEL_MIN_WIDTH = 80;
 const CLOSE_CHIP_TRAILING_PAD = 1;
 /** Indent of a live task's demoted objective line, inside the glyph column. */
 const LIVE_DETAIL_INDENT = 4;
-/** Indent of expanded settled rows under the group row. */
-const SETTLED_INDENT = 2;
-/** Characters of the run id shown in the title scope label. */
-const RUN_PREFIX_CHARS = 4;
 
 export type OverlayRowKind =
 	| "title" | "rule" | "counts" | "live" | "liveDetail" | "gap"
@@ -42,16 +40,6 @@ export interface OverlayRow {
 }
 
 export type ObserverFreshness = "empty" | "live" | "stale" | "terminal";
-
-export interface OverlayScope {
-	batch: number;
-}
-
-export interface HelpState {
-	overflow: boolean;
-	hasGroup: boolean;
-	expanded: boolean;
-}
 
 export function wrapText(text: string, width: number): string[] {
 	if (width <= 0) return [];
@@ -136,16 +124,6 @@ function isLiveTask(task: ObserverTask): boolean {
 	return task.status === "pending" || task.status === "running";
 }
 
-/** Title scope label: the panel always shows exactly one observed run, never a session total. */
-export function formatTitle(snapshot: ObserverSnapshot | undefined, freshness: ObserverFreshness, scope?: OverlayScope): string {
-	if (!snapshot || freshness === "empty") return OVERLAY_TITLE;
-	const phase = freshness === "stale" ? "stale" : snapshot.phase;
-	const batch = scope ? ` · batch ${scope.batch}` : "";
-	const prefix = snapshot.runId.slice(0, RUN_PREFIX_CHARS);
-	const run = snapshot.runId.length > RUN_PREFIX_CHARS ? `${prefix}…` : prefix;
-	return `${OVERLAY_TITLE}${batch} · run ${run} · ${phase}`;
-}
-
 function liveStatusLabel(task: ObserverTask, freshness: ObserverFreshness): string {
 	if (freshness === "stale") return "unknown";
 	return task.status === "pending" ? "queued" : task.status;
@@ -220,10 +198,10 @@ export function taskColumns(tasks: readonly ObserverTask[], freshness: ObserverF
 	return columns;
 }
 
-export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, columns: TaskColumns): OverlayRow {
+export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, columns: TaskColumns, label?: string): OverlayRow {
 	const status = liveStatusLabel(task, freshness);
 	const tools = task.activeTools.join(",");
-	const head = `${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
+	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
 	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
 	const segments: RowSegment[] = [
 		{ text: `${taskGlyph(task)} `, color: "accent" },
@@ -265,75 +243,6 @@ export function formatGroupRow(summary: SettledSummary, expanded: boolean): stri
 	return `${expanded ? "▾" : "▸"} ${summary.count} finished · ${summary.rangeText} · ${summary.turns} turns`;
 }
 
-/** Inline right-side hint on the group row; only advertises keys that act right now. */
-export function formatGroupHint(expanded: boolean, arrow: "down" | "up" | undefined): string {
-	if (!expanded) return arrow === "down" ? "enter/↓ expand" : "enter expand";
-	return arrow === "up" ? "enter/↑ collapse" : "enter collapse";
-}
-
-export function formatSettledRow(task: ObserverTask, columns: TaskColumns): OverlayRow {
-	const head = `${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
-	const status = settledStatusLabel(task).padEnd(columns.status);
-	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
-	const text = `${" ".repeat(SETTLED_INDENT)}${taskGlyph(task)} ${head}${status} ${elapsed}  ${formatRoute(task)}`;
-	return { kind: "settled", text, segments: [{ text, color: "dim" }] };
-}
-
-/** Help row lists only keys that currently do something. */
-export function helpText(state: HelpState): string {
-	const parts: string[] = [];
-	if (state.overflow) parts.push("↑↓ scroll");
-	if (state.hasGroup) parts.push(state.expanded ? "enter collapse" : "enter expand");
-	parts.push("ctrl+alt+f close");
-	return parts.join(" · ");
-}
-
-export function overlayRows(
-	snapshot: ObserverSnapshot | undefined,
-	freshness: ObserverFreshness,
-	headerElapsed: number | null,
-	taskElapsed: (task: ObserverTask) => number | null,
-	scope?: OverlayScope,
-): OverlayRow[] {
-	const rows: OverlayRow[] = [
-		{ kind: "title", text: formatTitle(snapshot, freshness, scope) },
-		{ kind: "rule", text: "" },
-	];
-	if (!snapshot || freshness === "empty") {
-		rows.push({ kind: "summary", text: EMPTY_OBSERVER_MESSAGE, segments: [{ text: EMPTY_OBSERVER_MESSAGE, color: "dim" }] });
-		return rows;
-	}
-	const parts = countParts(snapshot, freshness, headerElapsed);
-	rows.push({ kind: "counts", text: formatCountsText(parts), segments: countsSegments(parts) });
-	rows.push({ kind: "rule", text: "" });
-	const withElapsed = snapshot.tasks.map(task => ({ task, elapsed: taskElapsed(task) }));
-	const columns = taskColumns(snapshot.tasks, freshness);
-	const live = withElapsed.filter(entry => isLiveTask(entry.task));
-	const settled = withElapsed.filter(entry => !isLiveTask(entry.task));
-	for (const entry of live) {
-		rows.push(formatLiveRow({ ...entry.task, elapsedMs: entry.elapsed }, freshness, columns));
-		const detail = formatLiveDetail(entry.task);
-		if (detail) rows.push(detail);
-	}
-	if (settled.length > 0) {
-		if (live.length > 0) rows.push({ kind: "gap", text: "" });
-		const groupText = formatGroupRow(settledSummary(snapshot.tasks), false);
-		rows.push({ kind: "group", text: groupText, segments: [{ text: groupText, color: "dim" }] });
-	}
-	return rows;
-}
-
-/** Expanded settled rows for the component once the group is open. */
-export function settledRows(
-	snapshot: ObserverSnapshot,
-	taskElapsed: (task: ObserverTask) => number | null,
-	columns: TaskColumns,
-): OverlayRow[] {
-	return snapshot.tasks
-		.filter(task => !isLiveTask(task))
-		.map(task => formatSettledRow({ ...task, elapsedMs: taskElapsed(task) }, columns));
-}
-
 export function formatStatus(snapshot: ObserverSnapshot): string {
 	const parts = countParts(snapshot, "live", snapshot.elapsedMs);
 	const live = parts.liveLabel ? `●${parts.liveLabel} · ` : "";
@@ -352,4 +261,176 @@ export function formatPanel(snapshot: ObserverSnapshot): string[] {
 	const summary = settledSummary(snapshot.tasks);
 	if (summary.count > 0) lines.push(formatGroupRow(summary, false));
 	return lines;
+}
+
+// ── Session-scoped overlay formatters (session-view contract consumer) ──────────────────
+
+/** Characters of the host session id shown in the session-scoped title. */
+export const SESSION_SCOPE_CHARS = 6;
+
+/** Session-scoped title; never a batch number or a run prefix. */
+export function formatSessionTitle(sessionId: string | undefined): string {
+	if (!sessionId) return `${OVERLAY_TITLE} · session`;
+	const prefix = sessionId.slice(0, SESSION_SCOPE_CHARS);
+	return `${OVERLAY_TITLE} · session ${prefix}${sessionId.length > SESSION_SCOPE_CHARS ? "…" : ""}`;
+}
+
+export function compactCount(value: number | null): string {
+	if (value === null) return "?";
+	if (value < 1_000) return String(value);
+	if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+	return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+export function compactCost(value: number | null): string {
+	if (value === null) return "?";
+	if (value < 100) return value.toFixed(2);
+	return compactCount(value);
+}
+
+function usageCoverageTag(usage: RecordedUsageProjection): string {
+	return usage.status === "complete" ? "" : usage.status === "incomplete" ? "partial" : "unknown";
+}
+
+/** Cumulative recorded usage line; live current-episode turns stay on the live rows. */
+export function formatSessionUsage(usage: RecordedUsageProjection | null): OverlayRow | undefined {
+	if (!usage) return undefined;
+	const turns = usage.assistantTurns === null ? "?" : String(usage.assistantTurns);
+	const text = `recorded Σ${turns} turns · ↑${compactCount(usage.usage.input)} ↓${compactCount(usage.usage.output)} · $${compactCost(usage.usage.cost)}`
+		+ (usageCoverageTag(usage) ? ` (${usageCoverageTag(usage)})` : "");
+	return { kind: "summary", text, segments: [{ text, color: "dim" }] };
+}
+
+export interface SessionCounts {
+	live: number;
+	liveTurns: number;
+	known: boolean;
+	agents: string;
+	episodes: string;
+	idle: string;
+	interrupted: string;
+	closed: string;
+	historyLabel: string;
+	limitedLive: boolean;
+}
+
+export function sessionCounts(
+	snapshot: ObserverSnapshot | undefined,
+	reply: SessionViewReply | undefined,
+	historyState: string,
+	reason: string | undefined,
+	refreshing: boolean,
+): SessionCounts {
+	const live = snapshot?.tasks.filter(isLiveTask) ?? [];
+	const summary = reply?.summary;
+	const states = summary?.states;
+	let historyLabel = "";
+	if (historyState === "loading") historyLabel = refreshing ? "history refreshing" : "history loading";
+	else if (historyState === "unavailable") historyLabel = `history unavailable${reason ? ` (${reason})` : ""}`;
+	else if (reply && !reply.inventory.complete) historyLabel = "history partial";
+	return {
+		live: live.length,
+		liveTurns: live.reduce((sum, task) => sum + task.assistantTurns, 0),
+		known: summary !== undefined && summary !== null,
+		agents: summary ? String(summary.agents) : "?",
+		episodes: !summary ? "?" : summary.acceptedEpisodes === null ? "?" : String(summary.acceptedEpisodes),
+		idle: states ? String(states.idle) : "?",
+		interrupted: states ? String(states.interrupted) : "?",
+		closed: states ? String(states.closed) : "?",
+		historyLabel,
+		limitedLive: snapshot !== undefined && (reply === undefined || snapshot.version !== 3),
+	};
+}
+
+export function formatSessionCounts(counts: SessionCounts): OverlayRow {
+	const head = counts.live > 0 ? `${counts.live} live (t${counts.liveTurns})` : "0 live";
+	const body = `${counts.agents} agents · ${counts.episodes} episodes · ${counts.idle} idle · ${counts.interrupted} int · ${counts.closed} closed`;
+	const tail = [counts.historyLabel, counts.limitedLive ? "limited live observation" : ""].filter(Boolean).join(" · ");
+	const text = [head, body, tail].filter(Boolean).join(" · ");
+	const segments: RowSegment[] = [{ text: head, color: "accent" }, { text: ` · ${body}`, color: "dim" }];
+	if (tail) segments.push({ text: ` · ${tail}`, color: "borderMuted" });
+	return { kind: "counts", text, segments };
+}
+
+/** Stable short agent label with collision disambiguation across the visible set. */
+export function shortLabel(handle: string, others: readonly string[] = []): string {
+	const uuid = handle.startsWith("session_") ? handle.slice("session_".length) : handle;
+	for (const length of [8, 12, 36]) {
+		const candidate = uuid.slice(0, length);
+		if (!others.some(other => other !== handle && shortLabelBase(other, length) === candidate)) return candidate;
+	}
+	return handle;
+}
+function shortLabelBase(handle: string, length: number): string {
+	const uuid = handle.startsWith("session_") ? handle.slice("session_".length) : handle;
+	return uuid.slice(0, length);
+}
+
+export interface HistoryColumns { label: number; role: number; episode: number; state: number; outcome: number; }
+
+export function historyColumns(rows: readonly SessionViewHistoryRow[], labels: ReadonlyMap<string, string>): HistoryColumns {
+	const columns: HistoryColumns = { label: 0, role: 0, episode: 0, state: 0, outcome: 0 };
+	for (const row of rows) {
+		columns.label = Math.max(columns.label, (labels.get(row.handle) ?? row.handle).length);
+		columns.role = Math.max(columns.role, row.role.length);
+		columns.episode = Math.max(columns.episode, `ep${row.episode}`.length);
+		columns.state = Math.max(columns.state, historyStateLabel(row).length);
+		columns.outcome = Math.max(columns.outcome, row.latestOutcome.length);
+	}
+	return columns;
+}
+
+/** Durable managed state; running/queued in history is unconfirmed without fresh live evidence. */
+function historyStateLabel(row: SessionViewHistoryRow): string {
+	return row.state === "running" || row.state === "queued" ? `${row.state}?` : row.state;
+}
+
+function historyGlyph(row: SessionViewHistoryRow): string {
+	if (row.state === "running" || row.state === "queued") return "?";
+	if (row.state === "closed") return "■";
+	if (row.latestOutcome === "succeeded") return "✓";
+	if (row.latestOutcome === "failed") return "✗";
+	if (row.latestOutcome === "aborted") return "⊘";
+	return "·";
+}
+
+export function formatHistoryRow(row: SessionViewHistoryRow, label: string, columns: HistoryColumns): OverlayRow {
+	const badges = [row.onCurrentBranch ? "" : "off-branch", row.legacy ? "legacy" : ""].filter(Boolean).join(" ");
+	const turns = row.recordedUsage.assistantTurns === null ? "?" : String(row.recordedUsage.assistantTurns);
+	const coverage = usageCoverageTag(row.recordedUsage);
+	const usage = `Σ${turns}t ↑${compactCount(row.recordedUsage.usage.input)} $${compactCost(row.recordedUsage.usage.cost)}${coverage ? `·${coverage}` : ""}`;
+	const text = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)} ${usage}`
+		+ (badges ? `  ${badges}` : "")
+		+ (row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "");
+	return { kind: "settled", text, segments: [{ text, color: "dim" }] };
+}
+
+/** Honest visible range and page indicator for the expanded history section. */
+export function formatHistoryNav(history: SessionViewReply["history"]): string {
+	const from = history.totalRows === 0 ? 0 : history.page * history.pageSize + 1;
+	const to = Math.min(history.totalRows, (history.page + 1) * history.pageSize);
+	return `history ${from}–${to} of ${history.totalRows} · page ${history.page + 1}/${Math.max(1, history.totalPages)} · pgup/pgdn`;
+}
+
+export function formatHistoryCollapsed(session: { kind: string; reply?: SessionViewReply; reason?: string }): string {
+	if (session.kind === "loading") return session.reply ? "▸ history refreshing · enter" : "▸ history loading · enter";
+	if (session.kind === "unavailable") return `▸ history unavailable${session.reason ? ` (${session.reason})` : ""} · enter retry`;
+	const count = session.reply?.history.totalRows ?? 0;
+	return `▸ ${count} retained agents · enter`;
+}
+
+export interface SessionHelpState {
+	liveOverflow: boolean;
+	historyOpen: boolean;
+	historyOverflow: boolean;
+}
+
+export function sessionHelpText(state: SessionHelpState): string {
+	const parts: string[] = [];
+	if (state.liveOverflow) parts.push("↑↓ live");
+	if (state.historyOverflow) parts.push("↑↓ rows");
+	parts.push(state.historyOpen ? "enter collapse" : "enter history");
+	if (state.historyOpen) parts.push("pgup/pgdn page");
+	parts.push("ctrl+alt+f close");
+	return parts.join(" · ");
 }

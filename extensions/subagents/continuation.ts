@@ -25,7 +25,8 @@ import type { ObservedRun } from "./observation-hooks.ts";
 import type { ProvenanceCore } from "./provenance.ts";
 import { registerManagedContext } from "./context.ts";
 import { ManagedObserver } from "./managed-observer.ts";
-import { OBSERVER_EVENT, type ObserverSnapshot } from "./observer-events.ts";
+import { OBSERVER_EVENT, type ObserverSnapshot, type ObserverTask } from "./observer-events.ts";
+import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_CHANGED_EVENT, SessionViewBuilder, parseSessionViewReply, parseSessionViewRequest, type SessionViewReply, type SessionViewRequest } from "./session-view.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
 import { registerSettlementBarrier } from "../shared/settlement.ts";
 
@@ -39,6 +40,7 @@ export interface ContinuationDependencies {
 	onRun?: (run: ObservedRun) => void;
 	provenance?: ProvenanceCore;
 	onObserver?: (snapshot: ObserverSnapshot) => void;
+	onSessionViewChange?: () => void;
 	onExecution?: (event: SubagentExecutionEvent) => void | Promise<void>;
 	onWake?: (events: readonly SubagentExecutionEvent[]) => void | Promise<void>;
 }
@@ -72,10 +74,16 @@ export class ContinuationService {
 	private admission = false;
 	private stopped = false;
 	private applying = false;
+	private readonly sessionViewBuilder: SessionViewBuilder;
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
 		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
+		this.sessionViewBuilder = new SessionViewBuilder({ store: this.dependencies.store });
 	}
 	get busy(): boolean { return this.admission || this.supervisor?.hasActiveWork === true; }
+	private invalidateSessionView(): void {
+		this.sessionViewBuilder.invalidate();
+		try { this.dependencies.onSessionViewChange?.(); } catch { /* Display consumers never affect execution. */ }
+	}
 	resetObserver(): void { this.generation = randomUUID(); this.observerRevision = 0; this.observerSnapshots.clear(); this.observerOwners.clear(); }
 	private publishObserver(snapshot: ObserverSnapshot): void {
 		if (!this.observerSnapshots.has(snapshot.runId)) for (const row of snapshot.tasks) this.observerOwners.set(row.id, snapshot.runId);
@@ -88,6 +96,7 @@ export class ContinuationService {
 	async reset(): Promise<void> {
 		await this.shutdown(); this.supervisor = undefined; this.supervisorOwner = undefined;
 		this.bindings.clear(); this.delivered.clear(); this.observedEpisodes.clear(); this.stopped = false; this.resetObserver();
+		this.sessionViewBuilder.reset();
 	}
 	suppressWake(): void { this.supervisor?.suppressWake(); }
 	allowWake(): void { this.supervisor?.allowWake(); }
@@ -126,6 +135,22 @@ export class ContinuationService {
 			if (sessions.length) remaining.push({ ...event, sessions });
 		}
 		return remaining;
+	}
+	/** Fresh live rows from core-owned execution observations; a persisted running/queued state alone never animates a row. */
+	liveObserverTasks(): ObserverTask[] {
+		const rows = new Map<string, ObserverTask>();
+		for (const snapshot of this.observerSnapshots.values()) for (const row of snapshot.tasks) if (this.observerOwners.get(row.id) === snapshot.runId) rows.set(row.id, row);
+		return [...rows.values()].filter((row) => row.status === "pending" || row.status === "running")
+			.sort((left, right) => left.ordinal - right.ordinal || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+	}
+	/** Read-only session-wide view query; never mutates records or controls a child. */
+	async sessionView(request: SessionViewRequest, ctx: ExtensionContext): Promise<SessionViewReply> {
+		let owner: CurrentOwner | null = null; let reason: string | undefined;
+		if (ctx.isProjectTrusted()) {
+			try { owner = await this.owner(ctx); }
+			catch (error) { const code = (error as { code?: unknown })?.code; reason = typeof code === "string" && code.length > 0 && code.length <= 48 ? code : "owner_unavailable"; }
+		}
+		return this.sessionViewBuilder.build(request, { ownerSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), trusted: ctx.isProjectTrusted(), owner, ...(reason ? { reason } : {}), live: this.liveObserverTasks(), generation: this.generation });
 	}
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
@@ -196,7 +221,7 @@ export class ContinuationService {
 					return store.view(record);
 				});
 				return { schemaVersion: 3, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
-			} finally { if (request.action === "apply") this.applying = false; }
+			} finally { if (request.action === "apply") this.applying = false; this.invalidateSessionView(); }
 		}
 		if (this.stopped) throw new ManagedError("supervisor_closed");
 		if (this.admission) throw new ManagedError("managed_admission_active");
@@ -273,6 +298,7 @@ export class ContinuationService {
 			try { const provenance = loaded.source ? await this.dependencies.provenance?.observeConfiguration(loaded.source) : undefined; if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; } } catch { /* Optional. */ }
 			const receipt = await this.supervisor.submit({ requestId, requestKey: digest,
 				prepare: async (preparationSignal, identity) => {
+					try {
 					const inputs = new Map<string, Awaited<ReturnType<typeof captureGitInput>>>();
 					for (const record of records) {
 						if (replays.has(record.handle)) continue;
@@ -320,6 +346,7 @@ export class ContinuationService {
 					const response: SessionActionResult = { schemaVersion: 3, action: request.action, status: "accepted", kind: "submission", ...identity, sessions: records.map(record => store.view(record)) };
 					if (request.action === "create") await store.completeBatch(owner, request.requestId!, response);
 					return records;
+					} finally { this.invalidateSessionView(); }
 				},
 				execute: (prepared, execution) => this.run(request, owner, prepared, tasks, execution, telemetry, ctx, replays, onProgress),
 			}, signal);
@@ -446,7 +473,7 @@ export class ContinuationService {
 	}
 	private async episode(handle: string, owner: CurrentOwner, message: string, signal: AbortSignal, lifecycle: ChildLifecycle, telemetry: ManagedRequestTelemetry, observer: ManagedObserver | undefined, enterConvergence: () => boolean): Promise<TaskResult> {
 		const store = this.dependencies.store;
-		return store.withSession(handle, owner, async record => {
+		try { return await store.withSession(handle, owner, async record => {
 			const operation = record.requests.at(-1)!;
 			let childResult: TaskResult | undefined;
 			let finalizationPending = false;
@@ -506,6 +533,7 @@ export class ContinuationService {
 				return record.result;
 			}
 		});
+		} finally { this.invalidateSessionView(); }
 	}
 }
 
@@ -541,11 +569,23 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	};
 	const service = new ContinuationService({ ...dependencies,
 		onObserver: dependencies.onObserver ?? (snapshot => pi.events.emit(OBSERVER_EVENT, snapshot)),
+		onSessionViewChange: dependencies.onSessionViewChange ?? (() => pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {})),
 		onExecution: dependencies.onExecution ?? (event => { if (current(event)) { pi.appendEntry(SUBAGENT_EXECUTION_EVENT, event); pi.events.emit(SUBAGENT_EXECUTION_EVENT, event); } }),
 		onWake: dependencies.onWake ?? (events => {
 			for (const event of events.filter(current)) pendingWake.set(event.eventId, event);
 			requestWake();
 		}),
+	});
+	pi.events.on(SESSION_VIEW_REQUEST_EVENT, (data: unknown) => {
+		// Display-only request/reply: malformed or foreign requests never affect execution.
+		const request = parseSessionViewRequest(data);
+		if (!request || !context || !["tui", "rpc"].includes(context.mode)) return;
+		void (async () => {
+			try {
+				const parsed = parseSessionViewReply(await service.sessionView(request, context));
+				if (parsed.ok) pi.events.emit(SESSION_VIEW_EVENT, parsed.value);
+			} catch { /* A failed display query is invisible, not an execution failure. */ }
+		})();
 	});
 	pi.on("session_start", async (_event, ctx) => { clearWake(); context = ctx; await service.reset(); });
 	pi.on("session_tree", async (_event, ctx) => { clearWake(); await service.reset(); context = ctx; });

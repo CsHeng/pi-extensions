@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeLeaf, unavailableObservation } from "../extensions/subagents/observability.ts";
+import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeLeaf, projectRecordedUsage, unavailableObservation, type NativeObservation, type NativeUsageRow, type ObservedUsage } from "../extensions/subagents/observability.ts";
 import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
 import { emptyUsage, HARD_LIMITS } from "../extensions/subagents/contracts.ts";
 
@@ -434,4 +434,150 @@ test("boundNativeObservation fails closed past 64KiB without a truncated complet
 	assert.equal(bounded.available, false);
 	assert.deepEqual(bounded.entries, []);
 	assert.deepEqual(bounded.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
+});
+
+// Session-wide recorded usage projection over saved episode observations.
+const idleObservation = collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false });
+const recordedHandle = (handle: string, expectedEpisodes: number | null, episodes: Array<{ episode: number; observation: NativeObservation }>) =>
+	({ handle, expectedEpisodes, episodes });
+const row = (ownerSessionId: string, entryId: string, usage: Partial<ObservedUsage>, kind: NativeUsageRow["kind"] = "assistant"): NativeUsageRow =>
+	({ ownerSessionId, entryId, kind, modelKey: null, usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null, ...usage } });
+const syntheticObservation = (ownerSessionId: string, entries: NativeUsageRow[]): NativeObservation =>
+	({ available: true, ownerSessionId, entries, commands: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, contextWindow: null, toolNames: null, capabilityKey: null });
+
+test("recorded usage overflow cannot be labeled as a complete metric", () => {
+	const observation = syntheticObservation("overflow", [row("overflow", "a", { input: Number.MAX_VALUE }), row("overflow", "b", { input: Number.MAX_VALUE })]);
+	const result = projectRecordedUsage([recordedHandle("h-overflow", 1, [{ episode: 1, observation }])]);
+	assert.equal(result.usage.input, null);
+	assert.equal(result.metrics.input, "unavailable");
+	assert.equal(result.assistantTurns, 2);
+	assert.equal(result.turnsCoverage, "complete");
+	assert.equal(result.status, "incomplete");
+});
+
+test("recorded usage projection sums exact turns and tokens across handles beyond admission limits", () => {
+	const first = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1))), through("a1"));
+	const second = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1)), message("u2", "a1", "user"), assistant("a2", "u2", usage(5, 0.5, { output: 2, totalTokens: 7 })), { type: "compaction", id: "c1", parentId: "a2", summary: "tail", firstKeptEntryId: "u2", usage: usage(1, 0.25, { output: 0, totalTokens: 1 }) }), through("c1", "a1"));
+	const other = collectNativeObservation(jsonl(session("n2"), message("v1", null, "user"), assistant("b1", "v1", usage(3, 2, { output: 4, totalTokens: 6 }))), through("b1"));
+	// More handles than the open-session admission limit; history size is not capped by it.
+	const inputs = [recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: second }]), recordedHandle("h2", 1, [{ episode: 1, observation: other }]),
+		...Array.from({ length: 10 }, (_, index) => recordedHandle(`idle-${index}`, 0, []))];
+	const result = projectRecordedUsage(inputs);
+	assert.equal(result.status, "complete");
+	assert.deepEqual(result.usage, { input: 19, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 25, cost: 3.75 });
+	assert.equal(result.assistantTurns, 3);
+	assert.deepEqual(result.episodes, { recorded: 3, missing: 0, orphaned: 0, unprovable: false });
+	assert.deepEqual(result.metrics, { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" });
+	assert.equal(result.turnsCoverage, "complete");
+	assert.equal(result.conflicts, 0);
+});
+
+test("replayed overlap, duplicate sources and repartitioned inputs keep one billing identity", () => {
+	const first = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1))), through("a1"));
+	const reread = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1)), message("u2", "a1", "user"), assistant("a2", "u2", usage(5, 0.5))), through("a2"));
+	const other = collectNativeObservation(jsonl(session("n2"), message("v1", null, "user"), assistant("b1", "v1", usage(3, 2))), through("b1"));
+	const withOverlap = projectRecordedUsage([recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: reread }, { episode: 1, observation: first }]), recordedHandle("h2", 1, [{ episode: 1, observation: other }])]);
+	const without = projectRecordedUsage([recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: reread }]), recordedHandle("h2", 1, [{ episode: 1, observation: other }])]);
+	assert.deepEqual(withOverlap.usage, without.usage);
+	assert.equal(withOverlap.assistantTurns, without.assistantTurns);
+	assert.equal(withOverlap.conflicts, 0);
+	assert.deepEqual(withOverlap.usage, { input: 18, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 21, cost: 3.5 });
+	// Partitioning the same evidence never manufactures a new billing identity.
+	const partOne = projectRecordedUsage([recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: reread }])]);
+	const partTwo = projectRecordedUsage([recordedHandle("h2", 1, [{ episode: 1, observation: other }])]);
+	const add = (left: ObservedUsage, right: ObservedUsage): ObservedUsage => ({ input: left.input! + right.input!, output: left.output! + right.output!, cacheRead: left.cacheRead! + right.cacheRead!, cacheWrite: left.cacheWrite! + right.cacheWrite!, totalTokens: left.totalTokens! + right.totalTokens!, cost: left.cost! + right.cost! });
+	assert.deepEqual(add(partOne.usage, partTwo.usage), without.usage);
+	assert.equal(partOne.assistantTurns! + partTwo.assistantTurns!, without.assistantTurns);
+	assert.equal(partOne.status, "complete"); assert.equal(partTwo.status, "complete");
+});
+
+test("conflicting duplicate native identities make the whole projection explicitly unavailable", () => {
+	const good = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(3, 1))), through("a1"));
+	const conflict = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(3, 2))), through("a1"));
+	const result = projectRecordedUsage([recordedHandle("h1", 2, [{ episode: 1, observation: good }, { episode: 2, observation: conflict }])]);
+	assert.equal(result.status, "unavailable");
+	assert.equal(result.reason, "conflicting-rows");
+	assert.equal(result.conflicts, 1);
+	assert.deepEqual(result.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
+	assert.equal(result.assistantTurns, null);
+	assert.equal(result.turnsCoverage, "unavailable");
+	assert.deepEqual(Object.values(result.metrics).every((value) => value === "unavailable"), true);
+});
+
+test("missing observations keep the labeled known subtotal and never fabricate zero totals", () => {
+	const first = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1))), through("a1"));
+	const second = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1)), message("u2", "a1", "user"), assistant("a2", "u2", usage(5, 0.5))), through("a2", "a1"));
+	const result = projectRecordedUsage([recordedHandle("h1", 3, [{ episode: 1, observation: first }, { episode: 2, observation: second }])]);
+	assert.equal(result.status, "incomplete");
+	assert.deepEqual(result.episodes, { recorded: 2, missing: 1, orphaned: 0, unprovable: false });
+	assert.deepEqual(result.usage, { input: 15, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 17, cost: 1.5 });
+	assert.equal(result.assistantTurns, 2);
+	assert.equal(result.metrics.input, "incomplete");
+	assert.equal(result.metrics.cost, "incomplete");
+	assert.equal(result.turnsCoverage, "incomplete");
+	// No recorded evidence at all is unavailable, not a free zero total.
+	const none = projectRecordedUsage([recordedHandle("h2", 1, [])]);
+	assert.equal(none.status, "unavailable");
+	assert.deepEqual(none.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
+	assert.equal(none.assistantTurns, null);
+	assert.deepEqual(none.episodes, { recorded: 0, missing: 1, orphaned: 0, unprovable: false });
+	// A degraded handle never hides a valid recorded row.
+	const mixed = projectRecordedUsage([recordedHandle("h1", 3, [{ episode: 1, observation: first }, { episode: 2, observation: second }]), recordedHandle("h2", 1, [])]);
+	assert.deepEqual(mixed.usage, { input: 15, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 17, cost: 1.5 });
+	assert.equal(mixed.assistantTurns, 2);
+	assert.equal(mixed.metrics.input, "incomplete");
+});
+
+test("null usage fields stay unknown instead of turning into zeros or complete totals", () => {
+	const partial = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", { input: 3 })), through("a1"));
+	const result = projectRecordedUsage([recordedHandle("h1", 1, [{ episode: 1, observation: partial }])]);
+	assert.equal(result.status, "incomplete");
+	assert.deepEqual(result.usage, { input: 3, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
+	assert.equal(result.assistantTurns, 1);
+	assert.equal(result.metrics.input, "complete");
+	assert.equal(result.metrics.cost, "unavailable");
+	assert.equal(result.turnsCoverage, "complete");
+	const withMissing = projectRecordedUsage([recordedHandle("h2", 2, [{ episode: 1, observation: partial }])]);
+	assert.equal(withMissing.metrics.input, "incomplete");
+	assert.deepEqual(withMissing.usage.input, 3);
+	assert.equal(withMissing.usage.cost, null);
+});
+
+test("copied fork prefixes and unavailable observations stay unbilled missing evidence", () => {
+	const fork = collectNativeObservation(jsonl({ ...session("n9"), parentSession: "origin" }, message("u1", null, "user"), assistant("a1", "u1", usage(3, 1))), none);
+	assert.equal(fork.available, false);
+	const result = projectRecordedUsage([recordedHandle("h1", 1, [{ episode: 1, observation: fork }]), recordedHandle("h2", 1, [{ episode: 1, observation: unavailableObservation() }])]);
+	assert.equal(result.status, "unavailable");
+	assert.deepEqual(result.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
+	assert.equal(result.assistantTurns, null);
+	assert.deepEqual(result.episodes, { recorded: 0, missing: 2, orphaned: 0, unprovable: false });
+	assert.equal(result.metrics.input, "unavailable");
+});
+
+test("unprovable episode counts and orphaned observations degrade coverage without dropping rows", () => {
+	const first = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1))), through("a1"));
+	const legacy = projectRecordedUsage([recordedHandle("h1", null, [{ episode: 1, observation: first }])]);
+	assert.equal(legacy.status, "incomplete");
+	assert.deepEqual(legacy.episodes, { recorded: 1, missing: 0, orphaned: 0, unprovable: true });
+	assert.equal(legacy.usage.input, 10);
+	assert.equal(legacy.metrics.input, "incomplete");
+	const orphaned = projectRecordedUsage([recordedHandle("h2", 1, [{ episode: 1, observation: first }, { episode: 2, observation: first }])]);
+	assert.equal(orphaned.status, "incomplete");
+	assert.deepEqual(orphaned.episodes, { recorded: 2, missing: 0, orphaned: 1, unprovable: false });
+	assert.equal(orphaned.usage.input, 10);
+	assert.equal(orphaned.assistantTurns, 1);
+});
+
+test("recorded usage inputs are validated per observation and bounded rows fail explicitly", () => {
+	assert.equal(projectRecordedUsage(undefined as unknown as Parameters<typeof projectRecordedUsage>[0]).reason, "invalid-input");
+	assert.equal(projectRecordedUsage([{ handle: "bad handle", expectedEpisodes: 0, episodes: [] }]).reason, "invalid-input");
+	assert.equal(projectRecordedUsage([{ handle: "h1", expectedEpisodes: MANAGED_LIMITS.maxEpisodes + 1, episodes: [] }]).reason, "invalid-input");
+	assert.equal(projectRecordedUsage([{ handle: "h1", expectedEpisodes: 1, episodes: [{ episode: 0, observation: idleObservation }] }]).reason, "invalid-input");
+	assert.equal(projectRecordedUsage([{ handle: "h1", expectedEpisodes: 1, episodes: [{ episode: 1, observation: {} as NativeObservation }] }]).reason, "invalid-input");
+	const half = Array.from({ length: 60_000 }, (_, index) => row("n1", `e${index}`, { input: 1 }));
+	const budget = projectRecordedUsage([recordedHandle("h1", 1, [{ episode: 1, observation: syntheticObservation("n1", half) }]), recordedHandle("h2", 1, [{ episode: 1, observation: syntheticObservation("n2", half.map((entry) => ({ ...entry, ownerSessionId: "n2" }))) }])]);
+	assert.equal(budget.status, "unavailable");
+	assert.equal(budget.reason, "row-budget");
+	assert.equal(budget.metrics.cost, "unavailable");
+	assert.equal(budget.assistantTurns, null);
 });

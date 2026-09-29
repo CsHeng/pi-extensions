@@ -7,8 +7,9 @@ import { SubagentTaskSchema, type EffectiveRoute, type TaskResult } from "./cont
 import { Check } from "typebox/value";
 import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
-import { boundNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
+import { boundNativeObservation, unavailableObservation, type NativeObservation, type RecordedUsageEpisodes } from "./observability.ts";
 import type { SavedWorkspace } from "./candidates.ts";
+import { parseObserverRoute, type ObserverTask } from "./observer-events.ts";
 import type { CapturedProjectSkill } from "./guidance-resources.ts";
 import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
@@ -45,6 +46,48 @@ export interface ManagedRecord {
 export function managedRepository(record: ManagedRecord): string { return record.repositoryTarget?.root ?? record.owner.repo; }
 
 interface BatchRecord { version: 1 | 2 | 3; fingerprint: string; handles: string[]; complete: boolean; requestFingerprint?: string; response?: SessionActionResult }
+
+/** Internal marker: a valid retained record owned by another session/repository; excluded from inventory without exposing details. */
+class OutOfScopeRecord extends Error {}
+
+export interface SessionInventoryEntry {
+	handle: string;
+	route: ObserverTask["route"];
+	role: "worker" | "reviewer" | "explorer";
+	/** Durable managed state; persisted running/queued is not proof that a child is currently alive. */
+	state: ManagedState;
+	episode: number;
+	/** Latest committed episode outcome; unknown without terminal evidence. */
+	latestOutcome: "succeeded" | "failed" | "aborted" | "unknown";
+	/** Distinct accepted episode identities; null when persistence cannot prove the count. */
+	acceptedEpisodes: number | null;
+	/** False for retained records of the same session rooted at another branch anchor. */
+	onCurrentBranch: boolean;
+	/** Records older than the current managed version are limited history. */
+	legacy: boolean;
+	reportComplete: boolean;
+	retained: boolean;
+	/** Recorded episode observation references available for core aggregation. */
+	usageEvidence: { episodes: number[] };
+}
+
+export interface SessionInventory {
+	available: true;
+	entries: SessionInventoryEntry[];
+	/** False when retained records could not be scanned or validated. */
+	complete: boolean;
+	/** Generic completeness counts; unreadable contents and foreign owners stay unexposed. */
+	problems: { unreadableRecords: number };
+	summary: { agents: number; acceptedEpisodes: number | null; states: Record<ManagedState, number> };
+}
+
+export type SessionInventoryResult = SessionInventory | { available: false; reason: string };
+
+function inventoryReason(error: unknown): string {
+	if (error instanceof ManagedError) return error.code;
+	const code = (error as NodeJS.ErrnoException)?.code;
+	return typeof code === "string" && /^[A-Z0-9_]{1,31}$/.test(code) ? code : "inventory_unavailable";
+}
 
 export function fingerprint(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value, (_key, item: unknown) =>
@@ -182,6 +225,14 @@ export class ManagedSessionStore {
 		const directory = this.path(handle);
 		await privateDirectory(directory, false);
 		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
+		this.validateRecord(handle, directory, record);
+		if (!this.matches(record, owner)) throw new ManagedError("managed_owner_mismatch");
+		if (record.result) record.result = await this.withObservation(handle, record.episode, record.result);
+		for (const request of record.requests) if (request.result) request.result = withoutObservation(request.result);
+		await this.finalizationView(handle, record);
+		return record;
+	}
+	private validateRecord(handle: string, directory: string, record: ManagedRecord): void {
 		if (!Check(recordSchema, record) || ![1, 2, MANAGED_SESSION_VERSION].includes(record.version) || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
 		if (![record.task.writePaths, record.task.inputs, record.task.dependsOn, record.task.resourceLocks, record.task.externalReadRoots].every(Array.isArray) || !validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] }).ok) throw new ManagedError("managed_registry_invalid");
 		if ((record.task.repository !== undefined) !== (record.repositoryTarget !== undefined) || (record.repositoryTarget && (record.version !== 3 || record.task.role !== "worker" || record.task.repository !== record.repositoryTarget.declared || record.repositoryTarget.root !== record.repositoryTarget.identities[0]?.path))) throw new ManagedError("managed_registry_invalid");
@@ -196,16 +247,15 @@ export class ManagedSessionStore {
 			if (record.workspace && (!workspace || workspace.repo !== managedRepository(record) || workspace.path !== join(directory, "source"))) throw new ManagedError("managed_registry_invalid");
 			if (record.candidate && (!record.candidate.git || JSON.stringify(record.candidate.changedPaths) !== JSON.stringify(record.candidate.git.changedPaths) || (workspace && record.candidate.git.workspaceId !== workspace.id))) throw new ManagedError("managed_registry_invalid");
 		}
-		if (!this.matches(record, owner)) throw new ManagedError("managed_owner_mismatch");
-		if (record.result) record.result = await this.withObservation(handle, record.episode, record.result);
-		for (const request of record.requests) if (request.result) request.result = withoutObservation(request.result);
+	}
+	/** In-memory view of an unconfirmed finalization; never repairs or rewrites persisted state. */
+	private async finalizationView(handle: string, record: ManagedRecord): Promise<void> {
 		if (await this.finalizationPending(handle, record.episode)) {
 			if (record.state !== "closed") record.state = "interrupted";
 			delete record.candidate;
 			if (record.result) record.result = { ...record.result, status: "failed", executionStatus: record.result.executionStatus ?? "unavailable", finalization: { status: "failed", stage: "result-save", code: "result_persistence_unknown" }, error: { code: "result_persistence_unknown", message: "Finalization was not durably confirmed." } };
 			const operation = record.requests.at(-1); if (operation) { operation.state = "unknown"; delete operation.candidate; if (record.result) operation.result = record.result; }
 		}
-		return record;
 	}
 	async save(record: ManagedRecord): Promise<void> {
 		await privateDirectory(this.path(record.handle), false);
@@ -241,6 +291,13 @@ export class ManagedSessionStore {
 		} catch { /* Optional evidence unavailable; core state remains authoritative. */ }
 		return observation;
 	}
+	/** Read saved episode observations for core aggregation. Read-only, bounded, and never repairs storage. */
+	async recordedObservations(handle: string, episodes: readonly number[]): Promise<RecordedUsageEpisodes[]> {
+		const unique = [...new Set(episodes)].filter((episode) => Number.isSafeInteger(episode) && episode >= 1 && episode <= MANAGED_LIMITS.maxEpisodes).sort((left, right) => left - right);
+		const recorded: RecordedUsageEpisodes[] = [];
+		for (const episode of unique) recorded.push({ episode, observation: await this.readObservation(handle, episode) });
+		return recorded;
+	}
 	async list(owner: CurrentOwner): Promise<SessionView[]> {
 		try { await this.ensure(false); } catch (error) { if (missing(error)) return []; throw error; }
 		const views: SessionView[] = [];
@@ -253,6 +310,56 @@ export class ManagedSessionStore {
 			if (views.length > MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_session_limit");
 		}
 		return views;
+	}
+	/** Read-only retained inventory across the owner's session, including closed and off-branch history. */
+	async inventory(owner: CurrentOwner): Promise<SessionInventoryResult> {
+		let names: string[];
+		try {
+			await this.ensure(false);
+			names = (await readdir(this.root, { withFileTypes: true })).map((entry) => entry.name).filter((name) => name.startsWith("session_"));
+		} catch (error) {
+			if (missing(error)) return { available: true, entries: [], complete: true, problems: { unreadableRecords: 0 }, summary: { agents: 0, acceptedEpisodes: 0, states: { idle: 0, queued: 0, running: 0, interrupted: 0, closed: 0 } } };
+			return { available: false, reason: inventoryReason(error) };
+		}
+		const entries: SessionInventoryEntry[] = [];
+		let unreadableRecords = 0;
+		for (const name of names) {
+			try { entries.push(await this.inventoryEntry(name, owner)); }
+			catch (error) { if (error instanceof OutOfScopeRecord) continue; unreadableRecords++; }
+		}
+		entries.sort((left, right) => left.handle < right.handle ? -1 : left.handle > right.handle ? 1 : 0);
+		const states: Record<ManagedState, number> = { idle: 0, queued: 0, running: 0, interrupted: 0, closed: 0 };
+		for (const entry of entries) states[entry.state]++;
+		const acceptedEpisodes = entries.every((entry) => entry.acceptedEpisodes !== null)
+			? entries.reduce((total, entry) => total + entry.acceptedEpisodes!, 0) : null;
+		return { available: true, entries, complete: unreadableRecords === 0, problems: { unreadableRecords },
+			summary: { agents: entries.length, acceptedEpisodes, states } };
+	}
+	private async inventoryEntry(name: string, owner: CurrentOwner): Promise<SessionInventoryEntry> {
+		const directory = this.path(name);
+		await privateDirectory(directory, false);
+		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
+		this.validateRecord(name, directory, record);
+		// Intentional read-only widening: same repository and parent session, regardless of branch anchor.
+		if (record.owner.repo !== owner.repo || record.owner.parentSessionId !== owner.parentSessionId) throw new OutOfScopeRecord();
+		await this.finalizationView(name, record);
+		const acceptedEpisodes = new Set(record.requests.map((request) => request.episode)).size;
+		const episodes: number[] = [];
+		for (const entry of await readdir(directory, { withFileTypes: true })) {
+			const match = /^observation_(\d+)\.json$/.exec(entry.name);
+			if (!match || !entry.isFile()) continue;
+			const episode = Number(match[1]);
+			if (episode >= 1 && episode <= MANAGED_LIMITS.maxEpisodes) episodes.push(episode);
+		}
+		episodes.sort((left, right) => left - right);
+		const status = record.result?.status;
+		return { handle: record.handle, role: record.task.role, state: record.state, episode: record.episode,
+			route: record.route ? parseObserverRoute({ provider: record.route.provider, model: record.route.model, thinking: record.route.thinking }) ?? null : null,
+			latestOutcome: status === "succeeded" || status === "failed" || status === "aborted" ? status : "unknown",
+			acceptedEpisodes: acceptedEpisodes === record.episode ? acceptedEpisodes : null,
+			onCurrentBranch: record.owner.anchor === null || owner.branch.includes(record.owner.anchor) || owner.anchor === record.owner.anchor,
+			legacy: record.version !== MANAGED_SESSION_VERSION, reportComplete: record.result?.reportComplete === true,
+			retained: record.retained === true, usageEvidence: { episodes } };
 	}
 	private batchPath(owner: CurrentOwner, requestId: string): string { return join(this.root, `request_${fingerprint([owner.repo, owner.parentSessionId, requestId])}.json`); }
 	private async readBatch(owner: CurrentOwner, requestId: string): Promise<BatchRecord | undefined> {

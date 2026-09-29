@@ -166,6 +166,120 @@ export function mergeOwnedUsage(observations: readonly NativeObservation[]): { a
 	return { available: true, usage: sumUsage(unique), entries: unique };
 }
 
+export type RecordedUsageMetric = "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens" | "cost";
+export type RecordedCoverage = "complete" | "incomplete" | "unavailable";
+export type RecordedUsageFailure = "invalid-input" | "conflicting-rows" | "row-budget";
+
+export interface RecordedUsageEpisodes { episode: number; observation: NativeObservation }
+export interface RecordedUsageHandleInput {
+	handle: string;
+	/** Accepted episodes per the durable registry; null when persistence cannot prove the count. */
+	expectedEpisodes: number | null;
+	episodes: readonly RecordedUsageEpisodes[];
+}
+
+export interface RecordedUsageProjection {
+	status: RecordedCoverage;
+	/** Null-aware deduplicated totals over recorded rows; unknown fields stay null, never zero. */
+	usage: ObservedUsage;
+	/** Distinct recorded assistant entries; null when unprovable. */
+	assistantTurns: number | null;
+	metrics: Readonly<Record<RecordedUsageMetric, RecordedCoverage>>;
+	turnsCoverage: RecordedCoverage;
+	episodes: { recorded: number; missing: number; orphaned: number; unprovable: boolean };
+	/** Native identities rejected by whole-row comparison; the projection is unavailable when nonzero. */
+	conflicts: number;
+	reason?: RecordedUsageFailure;
+}
+
+// History aggregation bound, independent of open-session admission limits.
+const MAX_RECORDED_USAGE_ROWS = MANAGED_LIMITS.maxEntries;
+const USAGE_METRICS: readonly RecordedUsageMetric[] = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"];
+
+/** Cumulative recorded usage across many handles/episodes from saved episode observations only. */
+export function projectRecordedUsage(handles: readonly RecordedUsageHandleInput[]): RecordedUsageProjection {
+	const parsed = parseRecordedInputs(handles);
+	if (parsed === undefined) return unavailableProjection("invalid-input");
+	const unique: NativeUsageRow[] = [];
+	const index = new Map<string, number>();
+	let processed = 0, conflicts = 0, assistantTurns = 0, recorded = 0, missing = 0, orphaned = 0;
+	let unprovable = false;
+	for (const [, { expected, observations }] of parsed) {
+		const availableEpisodes = new Set<number>();
+		for (const [episode, list] of observations) {
+			if (!list.some((observation) => observation.available)) continue;
+			availableEpisodes.add(episode);
+			for (const observation of list) {
+				if (!observation.available) continue;
+				for (const row of observation.entries) {
+					if (++processed > MAX_RECORDED_USAGE_ROWS) return unavailableProjection("row-budget");
+					const key = `${row.ownerSessionId}\0${row.entryId}`;
+					const existing = index.get(key);
+					if (existing === undefined) {
+						index.set(key, unique.length);
+						unique.push(copyRow(row));
+						if (row.kind === "assistant") assistantTurns++;
+						continue;
+					}
+					if (!sameRow(unique[existing]!, row)) conflicts++;
+				}
+			}
+		}
+		recorded += availableEpisodes.size;
+		if (expected === null) { unprovable = true; continue; }
+		for (let episode = 1; episode <= expected; episode++) if (!availableEpisodes.has(episode)) missing++;
+		for (const episode of availableEpisodes) if (episode > expected) orphaned++;
+	}
+	if (conflicts > 0) return unavailableProjection("conflicting-rows", conflicts);
+	const gaps = missing > 0 || orphaned > 0 || unprovable;
+	const usage = sumUsage(unique);
+	const metrics = {} as Record<RecordedUsageMetric, RecordedCoverage>;
+	for (const field of USAGE_METRICS) {
+		const known = unique.reduce((count, row) => count + (row.usage[field] !== null ? 1 : 0), 0);
+		if (known > 0) metrics[field] = known < unique.length || gaps ? "incomplete" : "complete";
+		else if (unique.length === 0) metrics[field] = gaps ? "unavailable" : "complete";
+		else metrics[field] = "unavailable";
+		// Valid finite rows can still overflow when aggregated; null is never a complete total.
+		if (usage[field] === null && metrics[field] === "complete") metrics[field] = "unavailable";
+		if (metrics[field] === "unavailable") usage[field] = null;
+	}
+	const turnsCoverage: RecordedCoverage = !gaps ? "complete" : recorded > 0 ? "incomplete" : "unavailable";
+	const coverages: RecordedCoverage[] = [...USAGE_METRICS.map((field) => metrics[field]), turnsCoverage];
+	const status: RecordedCoverage = coverages.every((value) => value === "complete") ? "complete"
+		: coverages.every((value) => value === "unavailable") ? "unavailable" : "incomplete";
+	return { status,
+		usage, assistantTurns: turnsCoverage === "unavailable" ? null : assistantTurns, metrics, turnsCoverage,
+		episodes: { recorded, missing, orphaned, unprovable }, conflicts };
+}
+
+function parseRecordedInputs(handles: readonly RecordedUsageHandleInput[]): Map<string, { expected: number | null; observations: Map<number, NativeObservation[]> }> | undefined {
+	if (!Array.isArray(handles)) return undefined;
+	const parsed = new Map<string, { expected: number | null; observations: Map<number, NativeObservation[]> }>();
+	for (const item of handles) {
+		if (!isRecord(item) || typeof item.handle !== "string" || !OPAQUE_ID.test(item.handle)) return undefined;
+		const expected = item.expectedEpisodes;
+		if (expected !== null && (typeof expected !== "number" || !Number.isSafeInteger(expected) || expected < 0 || expected > MANAGED_LIMITS.maxEpisodes)) return undefined;
+		if (!Array.isArray(item.episodes)) return undefined;
+		const existing = parsed.get(item.handle) ?? { expected: null, observations: new Map<number, NativeObservation[]>() };
+		if (existing.expected !== null && expected !== null && existing.expected !== expected) return undefined;
+		if (existing.expected === null) existing.expected = expected;
+		for (const source of item.episodes) {
+			if (!isRecord(source) || typeof source.episode !== "number" || !Number.isSafeInteger(source.episode) || source.episode < 1 || source.episode > MANAGED_LIMITS.maxEpisodes || !isNativeObservation(source.observation)) return undefined;
+			const list = existing.observations.get(source.episode) ?? [];
+			list.push(source.observation);
+			existing.observations.set(source.episode, list);
+		}
+		parsed.set(item.handle, existing);
+	}
+	return parsed;
+}
+
+function unavailableProjection(reason: RecordedUsageFailure, conflicts = 0): RecordedUsageProjection {
+	return { status: "unavailable", usage: nullUsage(), assistantTurns: null,
+		metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" },
+		turnsCoverage: "unavailable", episodes: { recorded: 0, missing: 0, orphaned: 0, unprovable: false }, conflicts, reason };
+}
+
 export function isNativeObservation(value: unknown): value is NativeObservation {
 	if (!isRecord(value) || Object.keys(value).some((key) => !OBSERVATION_KEYS.has(key))
 		|| typeof value.available !== "boolean" || (value.ownerSessionId !== null && (typeof value.ownerSessionId !== "string" || !OPAQUE_ID.test(value.ownerSessionId)))

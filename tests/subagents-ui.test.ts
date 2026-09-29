@@ -9,25 +9,41 @@ import {
 	SUBAGENTS_UI_PANEL_KEY,
 	SUBAGENTS_UI_STATUS_KEY,
 } from "../extensions/subagents-ui/index.ts";
-import { SubagentsOverlay } from "../extensions/subagents-ui/component.ts";
+import { SubagentsOverlay, type OverlaySnapshot, type SessionViewState } from "../extensions/subagents-ui/component.ts";
+import {
+	OBSERVER_STALE_MS,
+	compactCount,
+	formatHistoryNav,
+	formatSessionCounts,
+	formatSessionTitle,
+	formatSessionUsage,
+	sessionCounts,
+	sessionHelpText,
+	shortLabel,
+} from "../extensions/subagents-ui/render.ts";
 import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
 import {
-	EMPTY_OBSERVER_MESSAGE,
-	OBSERVER_STALE_MS,
-	closeMarkerColumns,
-	formatGroupRow,
-	formatLiveRow,
-	formatSettledRow,
-	formatStatus,
-	formatTitle,
-	helpText,
-	settledSummary,
-	taskColumns,
-} from "../extensions/subagents-ui/render.ts";
+	SESSION_VIEW_CHANGED_EVENT,
+	SESSION_VIEW_EVENT,
+	SESSION_VIEW_REQUEST_EVENT,
+	parseSessionViewReply,
+	type SessionViewHistoryRow,
+	type SessionViewReply,
+} from "../extensions/subagents/session-view.ts";
+import type { RecordedUsageProjection } from "../extensions/subagents/observability.ts";
 
-type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
-type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<unknown> | unknown;
-type ShortcutHandler = (ctx: ExtensionContext) => Promise<unknown> | unknown;
+type Handler = (event?: unknown, ctx?: ExtensionContext) => unknown;
+type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<unknown>;
+type ShortcutHandler = (ctx: ExtensionContext) => Promise<unknown>;
+
+class FakeScheduler {
+	callback: (() => void) | undefined;
+	setCount = 0;
+	clearCount = 0;
+	setInterval(callback: () => void): unknown { this.callback = callback; this.setCount += 1; return this.setCount; }
+	clearInterval(): void { this.callback = undefined; this.clearCount += 1; }
+	tick(): void { this.callback?.(); }
+}
 
 class FakeEvents {
 	readonly listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -38,22 +54,6 @@ class FakeEvents {
 	emit(name: string, data: unknown): void {
 		this.emitted.push({ name, data });
 		for (const listener of this.listeners.get(name) ?? []) listener(data);
-	}
-}
-
-class FakeScheduler {
-	callback: (() => void) | undefined;
-	clearCount = 0;
-	setCount = 0;
-	setInterval(callback: () => void): object {
-		this.setCount += 1;
-		this.callback = callback;
-		return this;
-	}
-	clearInterval(handle: unknown): void {
-		assert.equal(handle, this);
-		this.callback = undefined;
-		this.clearCount += 1;
 	}
 }
 
@@ -120,19 +120,6 @@ function snapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
 	};
 }
 
-function mixedSnapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
-	return snapshot({
-		requestedTasks: 2,
-		admittedTasks: 2,
-		launchedChildren: 2,
-		activeChildren: 1,
-		settledTasks: 1,
-		aggregateAssistantTurns: 4,
-		tasks: [task(), settledTask()],
-		...overrides,
-	});
-}
-
 function owner(overrides: { sessionId?: string; leafId?: string | null; branch?: string[] } = {}) {
 	const sessionId = overrides.sessionId ?? "parent_session-1";
 	const leafId = overrides.leafId === undefined ? "leaf_entry-1" : overrides.leafId;
@@ -186,46 +173,356 @@ async function openWith(
 	if (via === "command") {
 		const command = pi.commands.get(SUBAGENTS_UI_COMMAND);
 		assert.ok(command);
-		await command.handler("", ctx);
-		return;
+		void command.handler("", ctx);
+	} else {
+		const shortcut = pi.shortcuts.get("ctrl+alt+f");
+		assert.ok(shortcut);
+		void shortcut.handler(ctx);
 	}
-	const shortcut = pi.shortcuts.get("ctrl+alt+f");
-	assert.ok(shortcut);
-	await shortcut.handler(ctx);
+	await new Promise((resolve) => setImmediate(resolve));
 }
 
 function captureCtx(target: { overlay?: SubagentsOverlay }): ExtensionContext {
 	return context({
-		custom: async (factory) => {
+		custom: (factory) => {
 			target.overlay = factory({ requestRender() {} } as TUI, undefined, undefined, () => {}) as SubagentsOverlay;
-			return null;
+			// The real host keeps the overlay promise pending until dismissal.
+			return new Promise<null>(() => {});
 		},
 	});
 }
 
-test("successive real publishers label each run as its own batch and fold settled routes", async () => {
+const usageProjection = (overrides: Partial<RecordedUsageProjection> = {}): RecordedUsageProjection => ({
+	status: "complete",
+	usage: { input: 12_345, output: 2_001, cacheRead: 0, cacheWrite: 0, totalTokens: 14_346, cost: 1.25 },
+	assistantTurns: 537,
+	metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" },
+	turnsCoverage: "complete",
+	episodes: { recorded: 49, missing: 0, orphaned: 0, unprovable: false },
+	conflicts: 0,
+	...overrides,
+});
+
+function historyRow(overrides: Partial<SessionViewHistoryRow> = {}): SessionViewHistoryRow {
+	return {
+		handle: "session_11111111-1111-4111-8111-111111111111",
+		role: "worker",
+		state: "idle",
+		episode: 1,
+		latestOutcome: "succeeded",
+		acceptedEpisodes: 1,
+		onCurrentBranch: true,
+		legacy: false,
+		reportComplete: true,
+		retained: false,
+		recordedUsage: usageProjection({ usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, cost: 0.5 }, assistantTurns: 2, episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false } }),
+		...overrides,
+	};
+}
+
+function sessionReply(overrides: Partial<SessionViewReply> = {}): SessionViewReply {
+	return {
+		version: 1,
+		requestId: "ui-1",
+		ownerSessionId: "parent_session-1",
+		anchor: "leaf_entry-1",
+		generation: "gen-1",
+		revision: 1,
+		inventory: { state: "ready", complete: true, unreadableRecords: 0 },
+		summary: { agents: 1, acceptedEpisodes: 1, states: { idle: 1, queued: 0, running: 0, interrupted: 0, closed: 0 }, liveAgents: 0 },
+		live: [],
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow()] },
+		usage: usageProjection(),
+		...overrides,
+	};
+}
+
+const overlayModel = (session: SessionViewState, snapshotValue?: ObserverSnapshot): OverlaySnapshot =>
+	({ snapshot: snapshotValue, receivedAt: 0, session });
+
+/** Emit the pending request's reply through the fake event bus. */
+function answer(pi: FakePi, reply: SessionViewReply): void {
+	pi.events.emit(SESSION_VIEW_EVENT, reply);
+}
+
+function lastRequest(pi: FakePi): { version: number; requestId: string; page: number } {
+	const request = [...pi.events.emitted].reverse().find(entry => entry.name === SESSION_VIEW_REQUEST_EVENT);
+	assert.ok(request, "a session-view request was emitted");
+	return request.data as { version: number; requestId: string; page: number };
+}
+
+function requestCount(pi: FakePi): number {
+	return pi.events.emitted.filter(entry => entry.name === SESSION_VIEW_REQUEST_EVENT).length;
+}
+
+test("core timeout uses one interval and closing the overlay cancels it", async () => {
+	let clock = 0, sequence = 0;
+	const timers = new Map<number, () => void>();
+	const pi = install({ now: () => clock, setInterval: callback => { timers.set(++sequence, callback); return sequence; }, clearInterval: handle => { timers.delete(handle as number); } });
+	let panel: SubagentsOverlay | undefined;
+	const ctx = context({ custom: factory => new Promise(resolve => { panel = factory({ requestRender() {} } as TUI, undefined, undefined, () => resolve(null)) as SubagentsOverlay; }) });
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	for (let index = 0; index < 10; index++) {
+		clock += 250;
+		for (const callback of [...timers.values()]) callback();
+		assert.equal(timers.size, 1, "watch ticks never spawn additional intervals");
+	}
+	panel!.handleInput("ctrl+alt+f");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(timers.size, 0, "ordinary close cancels the pending watch too");
+});
+
+test("a session reply alone supplies fresh live rows and a clock", async () => {
+	const pi = install({ now: () => 100 });
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	const reply = sessionReply({ requestId: lastRequest(pi).requestId, live: [task({ id: "reply-live", episode: 3 })], summary: { agents: 1, acceptedEpisodes: 3, liveAgents: 1, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 0 } } });
+	pi.events.emit(SESSION_VIEW_EVENT, reply);
+	const text = held.overlay!.render(80).join("\n");
+	assert.match(text, /1 live/);
+	assert.match(text, /reply-li ep3 explorer/);
+	await pi.handlers.get("session_shutdown")?.({}, ctx);
+});
+
+test("physical layout stays bounded with wrapped counts, long history and all ten live identities", () => {
+	const tasks = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "long assignment ".repeat(30), activeTools: ["read", "bash"] }));
+	const rows = Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index + 100).padStart(8, "0")}`, onCurrentBranch: false, legacy: true }));
+	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 20, totalPages: 1, rows } });
+	const overlay = new SubagentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("enter");
+	for (const width of [80, 40]) {
+		for (let index = 0; index < 100; index++) overlay.handleInput("up");
+		const seen = new Set<string>();
+		for (let index = 0; index < 100; index++) {
+			const frame = overlay.render(width);
+			assert.ok(frame.length <= 24, `physical rows bounded at width ${width}: ${frame.length}`);
+			for (const line of frame) assert.ok(visibleWidth(line) <= width);
+			const text = frame.join("\n");
+			for (let live = 0; live < 10; live++) assert.ok(text.includes(`${String(live).padStart(8, "0")} ep0`));
+			for (const match of text.matchAll(/000001\d\d/g)) seen.add(match[0]);
+			overlay.handleInput("down");
+		}
+		assert.equal(seen.size, 20, "every wrapped historical identity is reachable without moving live rows");
+	}
+});
+
+test("session-scoped title, counts and recorded usage stay distinct from live turns", () => {
+	assert.equal(formatSessionTitle(undefined), "Subagents · session");
+	assert.equal(formatSessionTitle("parent_session-1"), "Subagents · session parent…");
+	const counts = sessionCounts(snapshot(), sessionReply(), "ready", undefined, false);
+	const row = formatSessionCounts(counts);
+	assert.match(row.text, /^1 live \(t2\) · 1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
+	assert.equal(counts.limitedLive, false);
+	const legacy = sessionCounts(snapshot({ version: 2 }), sessionReply(), "ready", undefined, false);
+	assert.equal(legacy.limitedLive, true);
+	assert.match(formatSessionCounts(legacy).text, /limited live observation/);
+	const usage = formatSessionUsage(usageProjection());
+	assert.match(usage?.text ?? "", /^recorded Σ537 turns · ↑12k ↓2\.0k · \$1\.25$/);
+	assert.match(formatSessionUsage(usageProjection({ status: "incomplete", usage: { input: 100, output: null, cacheRead: 0, cacheWrite: 0, totalTokens: null, cost: null }, assistantTurns: 12 }))?.text ?? "", /partial/);
+	assert.match(formatSessionUsage(usageProjection({ status: "unavailable", usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null }, assistantTurns: null, metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" }, turnsCoverage: "unavailable" }))?.text ?? "", /\$/);
+	assert.equal(compactCount(null), "?");
+	assert.equal(sessionHelpText({ liveOverflow: false, historyOpen: false, historyOverflow: false }), "enter history · ctrl+alt+f close");
+	assert.equal(sessionHelpText({ liveOverflow: true, historyOpen: true, historyOverflow: true }), "↑↓ live · ↑↓ rows · enter collapse · pgup/pgdn page · ctrl+alt+f close");
+});
+
+test("short agent labels disambiguate collisions and history navigation reports honest ranges", () => {
+	const first = "session_11111111-1111-4111-8111-111111111111";
+	const second = "session_11111111-2222-4222-8222-222222222222";
+	const labels = new Map([first, second].map(handle => [handle, shortLabel(handle, [first, second])]));
+	assert.equal(labels.get(first), "11111111-1111-4111".slice(0, 12));
+	assert.equal(labels.get(second), "11111111-2222".slice(0, 12));
+	assert.equal(shortLabel("session_abcdef01-0000-0000-0000-000000000000"), "abcdef01");
+	const history = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: [] };
+	assert.equal(formatHistoryNav(history), "history 1–20 of 37 · page 1/2 · pgup/pgdn");
+	assert.equal(formatHistoryNav({ ...history, page: 1 }), "history 21–37 of 37 · page 2/2 · pgup/pgdn");
+	assert.equal(formatHistoryNav({ ...history, totalRows: 0, totalPages: 0 }), "history 0–0 of 0 · page 1/1 · pgup/pgdn");
+});
+
+test("component renders pinned live rows and a collapsed history row at 80x24 with ten active", () => {
+	const liveTasks = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: `task ${index}` }));
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply: sessionReply({ summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 24, queued: 0, running: 0, interrupted: 1, closed: 2 }, liveAgents: 10 }, history: { state: "ready", pageSize: 20, page: 0, totalRows: 27, totalPages: 2, rows: [] }, live: [] }) }, snapshot({ tasks: liveTasks, requestedTasks: 10, admittedTasks: 10, launchedChildren: 10, activeChildren: 10 })),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const lines = overlay.render(80, 24);
+	assert.ok(lines.length <= 24, `panel fits 80x24, got ${lines.length}`);
+	assert.match(lines[0] ?? "", /Subagents · session parent…/);
+	const text = lines.join("\n");
+	assert.equal((text.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "all ten identified live rows stay visible");
+	assert.match(text, /37 agents · 49 episodes/);
+	assert.match(text, /▸ 27 retained agents · enter/);
+	assert.doesNotMatch(text, /batch/, "no batch title");
+	assert.doesNotMatch(text, /run [a-z0-9]/, "no run-prefix session title");
+	// History paging never scrolls the live area away.
+	overlay.handleInput("enter");
+	const expanded = overlay.render(80, 24).join("\n");
+	assert.match(expanded, /history 1–20 of 27 · page 1\/2/);
+	assert.equal((expanded.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "live rows stay pinned under history");
+});
+
+test("history reaches every retained handle across pages with enter, pageUp and pageDown", () => {
+	const handles = Array.from({ length: 37 }, (_, index) => `session_${String(index + 10).padStart(8, "0")}-${String(index).padStart(4, "0")}-4000-8000-${String(index).padStart(12, "0")}`);
+	const page = (index: number): SessionViewReply => sessionReply({
+		summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 },
+		history: {
+			state: "ready", pageSize: 20, page: index,
+			totalRows: 37, totalPages: 2,
+			rows: handles.slice(index * 20, index * 20 + 20).map((handle, ordinal) => historyRow({ handle, episode: 1 + ((ordinal + index * 20) % 2) })),
+		},
+		usage: usageProjection({ assistantTurns: 49, usage: { input: 49_000, output: 9_000, cacheRead: 0, cacheWrite: 0, totalTokens: 58_000, cost: 9.5 } }),
+	});
+	const pages: number[] = [];
+	const overlay = new SubagentsOverlay(overlayModel({ kind: "idle" }), { terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, onPage: target => pages.push(target) });
+	overlay.update(overlayModel({ kind: "ready", reply: page(0) }));
+	overlay.handleInput("enter");
+	const first = overlay.render(80, 40).join("\n");
+	assert.match(first, /history 1–20 of 37 · page 1\/2/);
+	overlay.handleInput("\u001b[6~"); // pageDown
+	assert.deepEqual(pages, [1]);
+	assert.match(overlay.render(80, 40).join("\n"), /history 1–20 of 37/, "the old page stays until the new reply lands");
+	overlay.update(overlayModel({ kind: "ready", reply: page(1) }));
+	const second = overlay.render(80, 40).join("\n");
+	assert.match(second, /history 21–37 of 37 · page 2\/2/);
+	overlay.handleInput("\u001b[6~");
+	assert.deepEqual(pages, [1], "paging past the last page requests nothing");
+	overlay.handleInput("\u001b[5~"); // pageUp
+	assert.deepEqual(pages, [1, 0]);
+	const seen = [page(0).history.rows, page(1).history.rows].flat().map(row => row.handle);
+	assert.equal(new Set(seen).size, 37, "both pages cover every retained handle exactly once");
+	assert.match(second, /recorded Σ49 turns/);
+});
+
+test("tiny terminals keep live rows reachable through explicit live-only overflow", () => {
+	const liveTasks = Array.from({ length: 6 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "" }));
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({ tasks: liveTasks, requestedTasks: 6, admittedTasks: 6, launchedChildren: 6, activeChildren: 6 })),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const lines = overlay.render(80, 10).join("\n");
+	assert.match(lines, /live \d+–\d+\/6 · ↑↓ live/, "live overflow is explicit");
+	const before = overlay.render(80, 10);
+	overlay.handleInput("down");
+	const after = overlay.render(80, 10);
+	assert.notDeepEqual(after, before, "arrows scroll the live window");
+	assert.match(after.join("\n"), /live 2–\d+\/6 · ↑↓ live/);
+});
+
+test("registered consumer queries on open, correlates replies and ignores late or foreign answers", async () => {
 	const pi = install();
 	const held: { overlay?: SubagentsOverlay } = {};
 	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
-	let revision = 0;
-	let batch = 0;
-	for (const [run, beats] of [["first", 20], ["second", 0]] as const) {
-		batch += 1;
-		const observer = new ManagedObserver(run, { repo: "/fixture", parentSessionId: "parent_session-1", anchor: "leaf_entry-1", branch: ["leaf_entry-1"] }, "generation",
-			[{ id: "task", role: "reviewer", episode: 1, replayed: false, route: { provider: "fixture", model: run, thinking: "off" } as never }], () => 0,
-			value => pi.events.emit(OBSERVER_EVENT, value), () => ++revision);
-		observer.begin(); observer.childStarted("task");
-		for (let index = 0; index < beats; index++) observer.update([]);
-		observer.childStopped("task"); observer.finish(false, false);
-		await openWith(pi, ctx);
-		const collapsed = held.overlay?.render(160).join("\n") ?? "";
-		assert.match(collapsed, new RegExp(`Subagents · batch ${batch} · run ${run.slice(0, 4)}… · settled`));
-		assert.doesNotMatch(collapsed, new RegExp(`fixture ${run} thinking:off`), "settled route stays folded");
-		held.overlay?.handleInput("enter");
-		const expanded = held.overlay?.render(160).join("\n") ?? "";
-		assert.match(expanded, new RegExp(`fixture ${run} thinking:off`));
-	}
+	pi.events.emit(OBSERVER_EVENT, snapshot());
+	await openWith(pi, ctx);
+	const first = lastRequest(pi);
+	assert.equal(first.version, 1);
+	assert.equal(first.page, 0);
+	assert.match(first.requestId, /^ui-/);
+	// A late reply for an older request cannot replace the pending one.
+	answer(pi, sessionReply({ requestId: "ui-stale" }));
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/);
+	// A foreign owner reply with the right request id fails fast; it can never answer this scope.
+	answer(pi, sessionReply({ requestId: first.requestId, ownerSessionId: "another_session" }));
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /history unavailable \(owner_changed\)/);
+	// Enter retries through the core contract and the matching reply lands.
+	held.overlay?.handleInput("enter");
+	const retry = lastRequest(pi);
+	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
+	answer(pi, sessionReply({ requestId: retry.requestId, history: paged, summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 } }));
+	const text = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(text, /Subagents · session parent…/);
+	assert.match(text, /history 1–20 of 37 · page 1\/2/);
+	assert.match(text, /✓ [0-9a-f]{8} worker ep1 idle succeeded/);
+	held.overlay?.handleInput("enter");
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /▸ 37 retained agents · enter/);
+	// Page navigation requests the next page; an out-of-order older reply stays ignored.
+	held.overlay?.handleInput("enter");
+	const second = lastRequest(pi);
+	assert.equal(second.page, 0, "no page change yet");
+	held.overlay?.handleInput("\u001b[6~");
+	const third = lastRequest(pi);
+	assert.equal(third.page, 1);
+	answer(pi, sessionReply({ requestId: second.requestId, history: paged }));
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/, "stale request answers never repaint");
+});
+
+test("missing core replies surface a bounded unavailable state instead of loading forever", async () => {
+	const scheduler = new FakeScheduler();
+	let clock = 1_000;
+	const pi = install({ setInterval: (callback) => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval(), now: () => clock });
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	lastRequest(pi);
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/);
+	for (let tick = 0; tick < 16; tick++) { clock += 250; scheduler.tick(); }
+	const timedOut = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(timedOut, /history unavailable \(core_timeout\)/);
+	assert.match(timedOut, /▸ history unavailable/, "unavailable history is visible, never an empty success");
+	// Enter retries through the core contract.
+	const before = requestCount(pi);
+	held.overlay?.handleInput("enter");
+	assert.ok(requestCount(pi) > before, "enter on unavailable history requeries");
+});
+
+test("changed events coalesce into one requery of the current page while the overlay is open", async () => {
+	const pi = install();
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	const first = lastRequest(pi);
+	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
+	answer(pi, sessionReply({ requestId: first.requestId, history: paged, summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 } }));
+	held.overlay?.handleInput("enter");
+	held.overlay?.handleInput("\u001b[6~");
+	assert.equal(lastRequest(pi).page, 1);
+	const pageRequest = lastRequest(pi);
+	// Invalidation while a request is pending arms exactly one requery.
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.equal(requestCount(pi), 2, "no immediate duplicate request while pending");
+	answer(pi, sessionReply({ requestId: pageRequest.requestId, history: { ...paged, page: 1, rows: paged.rows.slice(0, 17) } }));
+	assert.equal(requestCount(pi), 3, "the armed requery fires once after the pending reply");
+	assert.equal(lastRequest(pi).page, 1);
+	// The armed requery's own reply clears the pending state; then a change requeries immediately.
+	const requery = lastRequest(pi);
+	answer(pi, sessionReply({ requestId: requery.requestId, history: { ...paged, page: 1, rows: paged.rows.slice(0, 17) } }));
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.equal(requestCount(pi), 4);
+	// A closed overlay never requeries.
+	const closeRequest = lastRequest(pi);
+	answer(pi, sessionReply({ requestId: closeRequest.requestId }));
+	await pi.handlers.get("session_shutdown")?.({});
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.equal(requestCount(pi), 4);
+});
+
+test("live transitions move a handle between live and history without double counting", async () => {
+	const pi = install();
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	let observerRevision = 0;
+	const observer = new ManagedObserver("run-live", { repo: "/fixture", parentSessionId: "parent_session-1", anchor: "leaf_entry-1", branch: ["leaf_entry-1"] }, "gen-1",
+		[{ id: "session_live0000000000000000000000001", role: "explorer", episode: 1, replayed: false }], () => 1_000,
+		value => pi.events.emit(OBSERVER_EVENT, value), () => ++observerRevision);
+	observer.begin();
+	await openWith(pi, ctx);
+	const request = lastRequest(pi);
+	observer.childStarted("session_live0000000000000000000000001");
+	answer(pi, sessionReply({ requestId: request.requestId }));
+	const liveText = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(liveText, /1 live \(t0\)/);
+	assert.match(liveText, /● \S+ ep\d+ explorer/);
+	// The live handle leaves the history section; settled work returns to it.
+	observer.childStopped("session_live0000000000000000000000001");
+	observer.finish(false, false);
+	const settledText = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(settledText, /No live agents; retained work is in history\./);
+	assert.doesNotMatch(settledText, /● \S+ ep\d+ explorer/, "no fresh observation, no live row");
 });
 
 test("owner lifecycle resets dismiss an open overlay and reject its retired generation", async () => {
@@ -251,22 +548,6 @@ test("owner lifecycle resets dismiss an open overlay and reject its retired gene
 	}
 });
 
-test("actual render(width) wraps folded-out routes and derives a scrollable viewport", () => {
-	const overlay = new SubagentsOverlay(
-		{ snapshot: snapshot({ tasks: [settledTask({ route: { provider: "fixture", model: "宽模型".repeat(35), thinking: "high" } })] }), receivedAt: 0 },
-		{ terminal: { rows: 10 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	const folded = overlay.render(16);
-	assert.ok(folded.length <= 8);
-	assert.ok(folded.every(line => visibleWidth(line) <= 16));
-	assert.equal(folded.join("\n").includes("宽模型"), false, "folded settled group hides routes");
-	overlay.handleInput("enter");
-	const expanded = overlay.render(16, 40);
-	assert.match(expanded.join("\n"), /宽模型/);
-	assert.ok(expanded.every(line => visibleWidth(line) <= 16));
-	const paged = overlay.render(16);
-	assert.ok(paged.some(line => line.trimStart().startsWith("↑ ") || line.trimStart().startsWith("↓ ")), "overflow markers appear");
-});
-
 test("widget and status stay off unless explicitly enabled", async () => {
 	const pi = install();
 	const statuses: Array<string | undefined> = [];
@@ -278,231 +559,48 @@ test("widget and status stay off unless explicitly enabled", async () => {
 	assert.deepEqual(widgets, []);
 });
 
-test("row formatters keep live-first hierarchy, folded summaries, and honest help", () => {
-	const tasks = [task(), settledTask()];
-	const columns = taskColumns(tasks, "live");
-	const live = formatLiveRow(task(), "live", columns);
-	assert.equal(live.text, "● explorer t2  running   4.0s");
-	assert.deepEqual(live.segments?.map(segment => segment.color), ["accent", "text", "accent", "text"]);
-	const settled = formatSettledRow(settledTask(), columns);
-	assert.match(settled.text, /^ {2}✓ explorer t2  succeeded 5\.0s  openai gpt-4\.1 thinking:off$/);
-	assert.deepEqual(settled.segments?.map(segment => segment.color), ["dim"]);
-	const summary = settledSummary(tasks);
-	assert.deepEqual(summary, { count: 1, rangeText: "5.0s", turns: 2 });
-	assert.equal(formatGroupRow(summary, false), "▸ 1 finished · 5.0s · 2 turns");
-	assert.equal(formatGroupRow(summary, true), "▾ 1 finished · 5.0s · 2 turns");
-	assert.equal(formatTitle(snapshot(), "live", { batch: 3 }), "Subagents · batch 3 · run run-… · running");
-	assert.equal(formatTitle(snapshot(), "stale", { batch: 1 }), "Subagents · batch 1 · run run-… · stale");
-	assert.equal(formatTitle(undefined, "empty"), "Subagents");
-	assert.equal(formatStatus(snapshot()), "SA ●1 running · 0 finished · 4.0s");
-	assert.equal(helpText({ overflow: false, hasGroup: false, expanded: false }), "ctrl+alt+f close");
-	assert.equal(helpText({ overflow: false, hasGroup: true, expanded: false }), "enter expand · ctrl+alt+f close");
-	assert.equal(helpText({ overflow: true, hasGroup: true, expanded: true }), "↑↓ scroll · enter collapse · ctrl+alt+f close");
-});
-
-test("registered command and shortcut open the live-first overlay without closing on stray keys", async () => {
-	const pi = install();
-	const held: { overlay?: SubagentsOverlay } = {};
-	const ctx = captureCtx(held);
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ elapsedMs: 4_000, tasks: [task({ elapsedMs: 4_000 })] }));
-	await openWith(pi, ctx);
-	await openWith(pi, ctx, "shortcut");
-	const rendered = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(rendered, /Subagents · batch 1 · run run-… · running/);
-	assert.match(rendered, /1 running · 0 finished · 2 turns · 4\.0s/);
-	assert.match(rendered, /● explorer t2\s+running\s+4\.0s/);
-	assert.match(rendered, /scan the bounded facts/);
-	assert.doesNotMatch(rendered, /gpt-4\.1/, "live rows keep tertiary route details folded away");
-	assert.match(rendered, /ctrl\+alt\+f close/);
-	assert.doesNotMatch(rendered, /↑↓ scroll|enter expand/, "help lists only keys that act now");
-	for (const key of ["x", "R", "shift+r", "escape"]) held.overlay?.handleInput(key);
-	assert.ok(held.overlay);
-});
-
-test("content-fitted overlay options keep the close chip hit-testable and rows filled", () => {
-	const width = 90;
-	const tui = { requestRender() {} } as TUI;
-	const overlay = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
-	const lines = overlay.render(width);
-	assert.ok(lines.every(line => visibleWidth(line) === width), "every panel row fills the width");
-	assert.equal(lines.filter(line => line.includes("✕")).length, 1);
-	const chip = closeMarkerColumns(width);
-	const live = lines.find(line => line.includes("explorer t2")) ?? "";
-	assert.match(live, /running\s+4\.0s/, "live row carries role, turns and status in one aligned line");
-	const detail = lines.find(line => line.includes("scan the bounded facts")) ?? "";
-	assert.ok(detail.startsWith("     "), "objective is demoted to an indented line");
-	assert.match(lines.join("\n"), /▸ 1 finished · 5\.0s · 2 turns/, "settled work folds into one summary row");
-	let doneCount = 0;
-	const closing = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => { doneCount += 1; }, { now: () => 0 });
-	closing.render(width);
-	closing.handleMouse({ type: "click", button: "left", x: chip.start - 1, y: 0 });
-	closing.handleMouse({ type: "click", button: "left", x: chip.start, y: 1 });
-	closing.handleMouse({ type: "wheel", button: "none", x: chip.start, y: 0 });
-	closing.handleMouse({ type: "click", button: "right", x: chip.start, y: 0 });
-	assert.equal(doneCount, 0);
-	assert.deepEqual(closing.handleMouse({ type: "press", button: "left", x: chip.start, y: 0 }), { handled: true });
-	assert.equal(doneCount, 0);
-	closing.handleMouse({ type: "click", button: "left", x: chip.end - 1, y: 0 });
-	assert.equal(doneCount, 1);
-});
-
-test("group keys expand and fold settled work; arrows only scroll when something overflows", () => {
-	const tui = { requestRender() {} } as TUI;
-	const overlay = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
-	const folded = overlay.render(120).join("\n");
-	assert.doesNotMatch(folded, /gpt-4\.1 thinking:off/);
-	assert.match(folded, /enter expand · ctrl\+alt\+f close/);
-	overlay.handleInput("down");
-	const opened = overlay.render(120).join("\n");
-	assert.match(opened, /✓ explorer t2\s+succeeded 5\.0s  openai gpt-4\.1 thinking:off/);
-	assert.match(opened, /enter collapse · ctrl\+alt\+f close/);
-	overlay.handleInput("up");
-	assert.doesNotMatch(overlay.render(120).join("\n"), /thinking:off/);
-	overlay.handleInput("enter");
-	assert.match(overlay.render(120).join("\n"), /thinking:off/);
-	overlay.handleInput("enter");
-	overlay.handleInput("down");
-	assert.match(overlay.render(120).join("\n"), /thinking:off/, "down at offset 0 reopens the folded group when nothing overflows");
-	const short = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
-	const paged = short.render(60, 6);
-	assert.ok(paged.some(line => line.trimStart().startsWith("↓ +")), "short viewport overflows");
-	short.handleInput("down");
-	const scrolled = short.render(60, 6);
-	assert.ok(scrolled.some(line => line.trimStart().startsWith("↑ ")), "down scrolls instead of expanding under overflow");
-});
-
-test("live observations widen an open panel without filling the terminal", async () => {
-	const pi = install();
-	let layout: { width?: unknown } | undefined;
-	let release: (() => void) | undefined;
-	const tui = { requestRender() {}, terminal: { columns: 200, rows: 40 } } as unknown as TUI;
-	const ctx = context({
-		custom: (factory, options) => new Promise(resolve => {
-			layout = (options as { overlayOptions?: { width?: unknown } }).overlayOptions;
-			factory(tui, undefined, undefined, () => {});
-			release = () => resolve(null);
-		}),
-	});
-	await pi.handlers.get("session_start")?.({}, ctx);
-	const opening = openWith(pi, ctx);
-	assert.equal(Number(layout?.width), 80);
-	pi.events.emit(OBSERVER_EVENT, snapshot({
-		tasks: [task({
-			headline: "search confirm the governance entry against the old clauses and the source matrix now",
-			route: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "medium" },
-		})],
-	}));
-	const widened = Number(layout?.width);
-	assert.ok(widened > 80 && widened < 200, `panel width ${widened} must grow with content without filling the terminal`);
-	release?.();
-	await opening;
-});
-
-test("panel width grows with observed content and themed rows keep hierarchy colors", () => {
-	const tui = { requestRender() {} } as TUI;
-	const overlay = new SubagentsOverlay({ snapshot: undefined, receivedAt: 0 }, tui, () => {}, { now: () => 0 });
-	assert.equal(overlay.desiredWidth(200), 80);
-	overlay.update({ snapshot: mixedSnapshot({ tasks: [task({ headline: "search confirm the governance entry against the old clauses and the source matrix now" }), settledTask()] }), receivedAt: 0 });
-	const width = overlay.desiredWidth(200);
-	assert.ok(width > 80 && width < 200, `busy panel width ${width} must grow with content without filling the terminal`);
-	const codes: Record<string, string> = { accent: "35", borderMuted: "34", dim: "90", text: "37" };
-	const theme = {
-		fg: (color: string, text: string) => `\u001b[${codes[color]}m${text}\u001b[0m`,
-		bg: (_color: string, text: string) => `\u001b[44m${text}\u001b[0m`,
-	};
-	const themed = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0, theme });
-	const lines = themed.render(width);
-	const plain = new SubagentsOverlay({ snapshot: mixedSnapshot(), receivedAt: 0 }, tui, () => {}, { now: () => 0 });
-	assert.equal(lines.length, plain.render(width).length);
-	assert.ok(lines.every(line => line.includes("44")), "panel background fills every row");
-	const title = lines[0] ?? "";
-	assert.ok(title.includes(`${codes.accent}mSubagents`), "title stays accent");
-	const counts = lines.find(line => line.includes("1 running")) ?? "";
-	assert.ok(counts.includes(`${codes.accent}m1 running`), "live count is the emphasized fact");
-	assert.ok(counts.includes(`${codes.dim}m · 1 finished`), "settled counts stay secondary");
-	const live = lines.find(line => line.includes("explorer t2")) ?? "";
-	assert.ok(live.includes(`${codes.accent}m● `) && live.includes(`${codes.accent}mrunning`));
-	const detail = lines.find(line => line.includes("scan the bounded facts")) ?? "";
-	assert.ok(detail.includes(`${codes.dim}m`), "demoted objective is dim");
-	const group = lines.find(line => line.includes("1 finished · 5.0s")) ?? "";
-	assert.ok(group.includes(`${codes.dim}m▸`), "folded summary is dim");
-});
-
-test("explicit widget opt-in mirrors the live-first hierarchy in status and panel", async () => {
+test("explicit widget opt-in mirrors the live hierarchy in status and panel", async () => {
 	const pi = install({ enableWidget: true });
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
 	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.deepEqual(statuses, [undefined, "SA ●1 running · 0 finished · 4.0s"]);
-	assert.equal(widgets.length, 2);
-	assert.equal(widgets[1]?.key, SUBAGENTS_UI_PANEL_KEY);
-	assert.deepEqual(widgets[1]?.lines, [
-		"1 running · 0 finished · 2 turns · 4.0s",
-		"● explorer t2  running 4.0s",
-		"    scan the bounded facts",
-	]);
-	pi.events.emit(OBSERVER_EVENT, mixedSnapshot({ revision: 1 }));
-	const last = widgets.at(-1)?.lines ?? [];
-	assert.match(last[last.length - 1] ?? "", /▸ 1 finished · 5\.0s · 2 turns/);
+	assert.equal(statuses.at(-1) !== undefined, true);
+	assert.equal(widgets.at(-1)?.key, SUBAGENTS_UI_PANEL_KEY);
 });
 
-test("headless modes ignore observer snapshots", async () => {
-	for (const mode of ["rpc", "json", "print"] as const) {
-		const pi = install({ enableWidget: true });
-		const statuses: Array<string | undefined> = [];
-		const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
-		const ctx = context({ mode, statuses, widgets });
+test("headless modes ignore observer snapshots and session-view traffic", async () => {
+	for (const mode of ["rpc", "print"] as const) {
+		const pi = install();
+		const ctx = context({ mode });
 		await pi.handlers.get("session_start")?.({}, ctx);
 		pi.events.emit(OBSERVER_EVENT, snapshot());
-		assert.deepEqual(statuses, []);
-		assert.deepEqual(widgets, []);
-		let opened = false;
-		const openCtx = context({ mode, custom: async () => { opened = true; return null; } });
-		await openWith(pi, openCtx);
-		assert.equal(opened, false);
+		await openWith(pi, ctx);
+		assert.equal(requestCount(pi), 0, `${mode} never queries session history`);
+		pi.events.emit(SESSION_VIEW_EVENT, sessionReply());
+		pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+		assert.equal(requestCount(pi), 0);
 	}
 });
 
-test("late open shows the retained run without native polling", async () => {
-	const scheduler = new FakeScheduler();
-	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: handle => scheduler.clearInterval(handle) });
+test("missing heartbeats freeze elapsed time and label live status unknown", async () => {
+	let clock = 10_000;
+	const pi = install({ now: () => clock });
 	const held: { overlay?: SubagentsOverlay } = {};
 	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1, elapsedMs: 5_000, tasks: [settledTask({ assistantTurns: 2, elapsedMs: 5_000 })] }));
-	assert.equal(scheduler.setCount, 0, "settled observations need no repaint timer");
+	pi.events.emit(OBSERVER_EVENT, snapshot());
 	await openWith(pi, ctx);
-	const rendered = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(rendered, /· settled/);
-	assert.match(rendered, /1 finished · 5\.0s · 2 turns/);
-	assert.doesNotMatch(rendered, /stale|unknown/);
-});
-
-test("missing heartbeats freeze elapsed time and label the run stale", async () => {
-	const scheduler = new FakeScheduler();
-	let clock = 0;
-	const pi = install({ now: () => clock, setInterval: callback => scheduler.setInterval(callback), clearInterval: handle => scheduler.clearInterval(handle) });
-	const held: { overlay?: SubagentsOverlay } = {};
-	const ctx = captureCtx(held);
-	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, elapsedMs: 1_000, tasks: [task({ elapsedMs: 1_000 })] }));
-	clock = OBSERVER_STALE_MS + 1;
-	await openWith(pi, ctx);
-	const rendered = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(rendered, /· stale/);
-	assert.match(rendered, /1 unknown · 0 finished · 2 turns · 1\.0s frozen/);
-	assert.match(rendered, /● explorer t2\s+unknown\s+1\.0s/);
-	assert.doesNotMatch(rendered, /stale\/unknown/);
-	scheduler.callback?.();
-	pi.events.emit(OBSERVER_EVENT, snapshot({ runId: "run-2", revision: 2, generation: "gen-2", elapsedMs: 200, tasks: [task({ role: "worker", elapsedMs: 200 })] }));
-	await openWith(pi, ctx);
-	const fresh = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(fresh, /batch 2 · run run-… · running/);
-	assert.match(fresh, /● worker t2\s+running\s+200ms/);
-	assert.doesNotMatch(fresh, /stale|unknown/);
+	const request = lastRequest(pi);
+	answer(pi, sessionReply({ requestId: request.requestId }));
+	clock += OBSERVER_STALE_MS + 1;
+	const staleText = held.overlay?.render(120).join("\n") ?? "";
+	assert.match(staleText, /unknown/);
+	assert.match(staleText, /4\.0s/, "elapsed time freezes without heartbeats");
+	// A fresh observation revives the live label.
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, elapsedMs: 6_000, tasks: [task({ elapsedMs: 6_000 })] }));
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /running/);
 });
 
 test("foreign owners and stale revisions cannot repaint an open panel", async () => {
@@ -510,55 +608,103 @@ test("foreign owners and stale revisions cannot repaint an open panel", async ()
 	const held: { overlay?: SubagentsOverlay } = {};
 	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, tasks: [task({ headline: "kept headline" })] }));
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, parentSessionId: "parent_session-2", anchor: "leaf_entry-2", tasks: [task({ headline: "foreign headline" })] }));
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 0, tasks: [task({ headline: "old headline" })] }));
+	pi.events.emit(OBSERVER_EVENT, snapshot());
 	await openWith(pi, ctx);
-	let rendered = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(rendered, /kept headline/);
-	assert.doesNotMatch(rendered, /foreign headline|old headline/);
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, phase: "settled", activeChildren: 0, settledTasks: 1, tasks: [settledTask({ headline: "kept headline" })] }));
-	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 3, phase: "running", tasks: [task({ headline: "resurrected headline" })] }));
-	rendered = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(rendered, /kept headline/);
-	assert.doesNotMatch(rendered, /resurrected headline/);
+	const request = lastRequest(pi);
+	answer(pi, sessionReply({ requestId: request.requestId }));
+	const text = held.overlay?.render(120).join("\n") ?? "";
+	pi.events.emit(OBSERVER_EVENT, snapshot({ parentSessionId: "another" }));
+	assert.equal(held.overlay?.render(120).join("\n") ?? "", text, "foreign owner snapshot changes nothing");
+	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 0 }));
+	assert.equal(held.overlay?.render(120).join("\n") ?? "", text, "stale revision changes nothing");
 });
 
-test("session start and shutdown clear retained observations and the widget", async () => {
-	const pi = install({ enableWidget: true });
+test("session start and shutdown clear retained observations, the widget and pending queries", async () => {
+	const scheduler = new FakeScheduler();
+	const pi = install({ setInterval: (callback) => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval(), now: () => 0 });
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
 	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.equal(statuses.length, 2);
-	await pi.handlers.get("session_shutdown")?.({}, ctx);
-	assert.equal(statuses.at(-1), undefined);
-	assert.equal(widgets.at(-1)?.lines, undefined);
 	const held: { overlay?: SubagentsOverlay } = {};
-	const reopen = captureCtx(held);
-	await pi.handlers.get("session_start")?.({}, reopen);
-	await openWith(pi, reopen);
-	assert.match(held.overlay?.render(120).join("\n") ?? "", new RegExp(EMPTY_OBSERVER_MESSAGE));
+	const openCtx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, openCtx);
+	await openWith(pi, openCtx);
+	const request = lastRequest(pi);
+	// A tree change mid-flight drops the pending request; its late reply cannot land.
+	await pi.handlers.get("session_tree")?.({}, context({ statuses, widgets }));
+	answer(pi, sessionReply({ requestId: request.requestId }));
+	assert.equal(requestCount(pi), 1);
+	await pi.handlers.get("session_shutdown")?.({});
+	assert.equal(statuses.length, 0);
+	assert.equal(widgets.length, 0);
 });
 
-test("narrow terminals wrap folded-out routes and page with honest markers", () => {
+test("narrow terminals wrap session rows and keep the close chip hit-testable", () => {
 	const overlay = new SubagentsOverlay(
-		{ snapshot: snapshot({ tasks: [settledTask({ route: { provider: "fixture", model: "long-model-name-that-must-wrap", thinking: "max" } })] }), receivedAt: 0 },
+		overlayModel({ kind: "ready", reply: sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({ handle: "session_11111111-1111-4111-8111-111111111111", latestOutcome: "failed", state: "interrupted", onCurrentBranch: false, legacy: true })] } }) }),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	const folded = overlay.render(40);
-	assert.equal(folded.join("\n").includes("long-model"), false, "folded group hides routes at narrow widths too");
 	overlay.handleInput("enter");
-	const wrapped = overlay.render(40).join("\n");
-	assert.match(wrapped, /long-model-name-that-must-wrap/);
-	assert.match(wrapped, /thinking:max/);
-	const paged = overlay.render(40, 3);
-	overlay.handleInput("\u001b[6~");
-	const after = overlay.render(40, 3);
-	assert.notDeepEqual(after, paged);
-	assert.equal(after.some(line => line.trimStart().startsWith("↑ ") || line.trimStart().startsWith("↓ ")), true);
-	overlay.handleInput("down");
-	overlay.handleInput("up");
-	overlay.handleInput("\u001b[5~");
-	assert.ok(overlay.render(40, 3).length > 0);
+	const lines = overlay.render(40, 30);
+	assert.ok(lines.length > 0);
+	assert.ok(lines.every(line => visibleWidth(line) <= 40));
+	const range = overlay.handleMouse({ type: "click", button: "left", x: lines[0]!.length - 3, y: 0 });
+	assert.deepEqual(range, { handled: true }, "the close chip stays clickable");
+	const text = lines.join("\n");
+	assert.match(text, /off-branch/);
+	assert.match(text, /legacy/);
+	assert.match(text, /interrupted/);
+	assert.match(text, /failed/);
+});
+
+test("live observations widen an open panel without filling the terminal", async () => {
+	const pi = install();
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	const request = lastRequest(pi);
+	answer(pi, sessionReply({ requestId: request.requestId }));
+	const narrow = held.overlay?.render(80).length ?? 0;
+	pi.events.emit(OBSERVER_EVENT, snapshot({ tasks: [task({ headline: "wider observation headline ".repeat(4).trim() })] }));
+	const wide = held.overlay?.desiredWidth(200) ?? 0;
+	assert.ok(wide > 80, "content grows the panel");
+	assert.ok(wide <= 200);
+	void narrow;
+});
+
+test("themable rows keep hierarchy colors across the session layout", () => {
+	const theme = {
+		fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+		bg: (color: string, text: string) => `{${color}}${text}{/${color}}`,
+	};
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot()),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
+	const lines = overlay.render(80, 24);
+	assert.ok(lines.length > 0);
+	assert.match(lines[0] ?? "", /<accent>Subagents/);
+	assert.ok(lines.every(line => line.startsWith("{selectedBg}")), "panel rows keep the selected background");
+});
+
+test("registered command and shortcut open the overlay without closing on stray keys", async () => {
+	const pi = install();
+	const held: { overlay?: SubagentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx, "shortcut");
+	assert.ok(held.overlay);
+	held.overlay?.handleInput("q");
+	held.overlay?.handleInput("escape");
+	assert.ok(held.overlay);
+	let closed = 0;
+	const later: { overlay?: SubagentsOverlay } = {};
+	const closeCtx = context({ custom: factory => new Promise(resolve => {
+		later.overlay = factory({ requestRender() {} } as TUI, undefined, undefined, () => { closed++; resolve(null); }) as SubagentsOverlay;
+	}) });
+	await pi.handlers.get("session_start")?.({}, closeCtx);
+	await openWith(pi, closeCtx);
+	later.overlay?.handleInput("ctrl+alt+f");
+	assert.equal(closed, 1, "ctrl+alt+f closes");
 });

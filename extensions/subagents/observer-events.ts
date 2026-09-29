@@ -107,7 +107,7 @@ function routeString(value: unknown): value is string {
 		&& Buffer.byteLength(value, "utf8") <= MAX_ROUTE_BYTES;
 }
 
-function parseRoute(value: unknown): ObserverTask["route"] | undefined {
+export function parseObserverRoute(value: unknown): ObserverTask["route"] | undefined {
 	if (value === null) return null;
 	if (!isRecord(value) || !keysExact(value, ROUTE_KEYS, true)) return undefined;
 	if (!routeString(value.provider) || !routeString(value.model) || !THINKING_SET.has(value.thinking as string)) {
@@ -193,7 +193,7 @@ function parseTask(value: unknown, version: ObserverSnapshotVersion): ObserverTa
 		return undefined;
 	}
 	if (typeof value.replayed !== "boolean") return undefined;
-	const route = parseRoute(value.route);
+	const route = parseObserverRoute(value.route);
 	if (route === undefined) return undefined;
 	const headline = version === OBSERVER_VERSION ? parseHeadline(value.headline) : "";
 	const activeTools = version === OBSERVER_VERSION ? parseActiveTools(value.activeTools) : [];
@@ -217,6 +217,11 @@ function parseTask(value: unknown, version: ObserverSnapshotVersion): ObserverTa
 function snapshotVersion(value: unknown): ObserverSnapshotVersion | undefined {
 	if (value === OBSERVER_VERSION || value === OBSERVER_LEGACY_VERSION) return value;
 	return undefined;
+}
+
+/** Strict consumer-side validation of one current-version observer task row. */
+export function parseObserverTask(value: unknown): ObserverTask | undefined {
+	return parseTask(value, OBSERVER_VERSION);
 }
 
 export function parseObserverSnapshot(value: unknown): ObserverParse<ObserverSnapshot> {

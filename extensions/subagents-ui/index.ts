@@ -5,7 +5,14 @@ import {
 	parseObserverSnapshot,
 	type ObserverSnapshot,
 } from "../subagents/observer-events.ts";
-import { SubagentsOverlay, type OverlaySnapshot, type OverlayTheme } from "./component.ts";
+import {
+	SESSION_VIEW_CHANGED_EVENT,
+	SESSION_VIEW_EVENT,
+	SESSION_VIEW_REQUEST_EVENT,
+	SESSION_VIEW_VERSION,
+	parseSessionViewReply,
+} from "../subagents/session-view.ts";
+import { SubagentsOverlay, type OverlaySnapshot, type OverlayTheme, type SessionViewState } from "./component.ts";
 import {
 	OBSERVER_STALE_MS,
 	OVERLAY_HORIZONTAL_MARGIN,
@@ -43,6 +50,18 @@ interface OwnerState {
 
 const REPAINT_MS = 250;
 const FALLBACK_TERMINAL_COLUMNS = 80;
+/** Bounded wait for the core session-view reply before the panel says unavailable. */
+export const CORE_VIEW_TIMEOUT_MS = 4_000;
+const CORE_VIEW_WATCH_MS = 250;
+
+interface PendingViewRequest {
+	requestId: string;
+	page: number;
+	epoch: number;
+	sentAt: number;
+	sessionId: string;
+	generation?: string;
+}
 
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
 	const handle = globalThis.setInterval(callback, intervalMs);
@@ -97,9 +116,15 @@ export function createSubagentsUiExtension(
 		let ctx: ExtensionContext | undefined;
 		let current: CachedObservation | undefined;
 		let latestTerminal: CachedObservation | undefined;
-		// Display-only observation order: the observer is per-run, so the panel labels which run it shows.
-		let runOrder: string[] = [];
+		let sessionView: SessionViewState = { kind: "idle" };
+		let pending: PendingViewRequest | undefined;
+		let requestSeq = 0;
+		let ownerEpoch = 0;
+		let coreWatch: unknown;
+		let requeryArmed = false;
+		let viewObservedAt = 0;
 		let overlay: SubagentsOverlay | undefined;
+		let overlayOpen = false;
 		let overlayLayout: OverlayOptions | undefined;
 		let overlayTui: TUI | undefined;
 		let intervalHandle: unknown;
@@ -115,17 +140,21 @@ export function createSubagentsUiExtension(
 			intervalHandle = undefined;
 		};
 
-		const batchOf = (snapshot: ObserverSnapshot | undefined): number | undefined => {
-			if (!snapshot) return undefined;
-			const index = runOrder.indexOf(snapshot.runId);
-			return index < 0 ? undefined : index + 1;
-		};
-
 		const displayed = (): OverlaySnapshot => {
-			const snapshot = current?.snapshot ?? latestTerminal?.snapshot;
-			const receivedAt = current?.receivedAt ?? latestTerminal?.receivedAt ?? 0;
-			const batch = batchOf(snapshot);
-			return batch === undefined ? { snapshot, receivedAt } : { snapshot, receivedAt, batch };
+			let snapshot = current?.snapshot ?? latestTerminal?.snapshot;
+			let receivedAt = current?.receivedAt ?? latestTerminal?.receivedAt ?? 0;
+			const reply = sessionView.reply;
+			if (reply && (!snapshot || viewObservedAt > receivedAt)) {
+				const tasks = reply.live;
+				snapshot = { version: 3, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
+					runId: reply.generation, revision: reply.revision, phase: tasks.length ? "running" : "settled", tasks,
+					requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(t => t.elapsedMs !== null).length,
+					activeChildren: tasks.filter(t => t.status === "running").length, settledTasks: 0,
+					aggregateAssistantTurns: tasks.reduce((sum, t) => sum + t.assistantTurns, 0), elapsedMs: null };
+				receivedAt = viewObservedAt;
+			}
+			if (sessionView.reason === "project_trust_required") snapshot = undefined;
+			return { snapshot, receivedAt, session: sessionView };
 		};
 
 		const clearWidget = (): void => {
@@ -146,9 +175,9 @@ export function createSubagentsUiExtension(
 		};
 
 		const overlayNeedsClock = (): boolean => {
-			const cache = current ?? latestTerminal;
-			if (!cache || isSettled(cache.snapshot)) return false;
-			return !isStaleCache(cache, now());
+			const model = displayed();
+			if (!model.snapshot || isSettled(model.snapshot)) return false;
+			return now() - model.receivedAt <= OBSERVER_STALE_MS;
 		};
 
 		const startRepaint = (): void => {
@@ -167,7 +196,50 @@ export function createSubagentsUiExtension(
 			retiredGeneration = current?.snapshot.generation ?? retiredGeneration;
 			current = undefined;
 			latestTerminal = undefined;
-			runOrder = [];
+		};
+
+		const stopCoreWatch = (): void => {
+			if (coreWatch === undefined) return;
+			cancelTimer(coreWatch);
+			coreWatch = undefined;
+		};
+
+		const forgetPendingView = (): void => {
+			pending = undefined;
+			requeryArmed = false;
+			stopCoreWatch();
+		};
+
+		const scheduleCoreWatch = (): void => {
+			if (coreWatch !== undefined) return;
+			coreWatch = schedule(() => {
+				const request = pending;
+				if (!request) { stopCoreWatch(); return; }
+				if (now() - request.sentAt < CORE_VIEW_TIMEOUT_MS) return;
+				stopCoreWatch();
+				// A missing or failed core query surfaces as a bounded unavailable state, never endless loading.
+				pending = undefined;
+				sessionView = { kind: "unavailable", reason: "core_timeout" };
+				publishOverlay();
+			}, CORE_VIEW_WATCH_MS);
+		}
+
+		const requestSessionView = (page: number): void => {
+			if (!tui() || !ctx || !overlay) return;
+			const owner = readOwner(ctx);
+			if (!owner) {
+				sessionView = { kind: "unavailable", reason: "owner_unavailable" };
+				publishOverlay();
+				return;
+			}
+			const refreshing = sessionView.reply?.history.page === page;
+			const requestId = `ui-${++requestSeq}`;
+			pending = { requestId, page, epoch: ownerEpoch, sentAt: now(), sessionId: owner.sessionId,
+				...(current ? { generation: current.snapshot.generation } : {}) };
+			sessionView = { kind: "loading", ...(refreshing ? { reply: sessionView.reply, refreshing: true } : {}) };
+			publishOverlay();
+			scheduleCoreWatch();
+			pi.events.emit(SESSION_VIEW_REQUEST_EVENT, { version: SESSION_VIEW_VERSION, requestId, page });
 		};
 
 		const revalidate = (): void => {
@@ -207,7 +279,6 @@ export function createSubagentsUiExtension(
 				}
 			}
 			current = { snapshot: incoming, receivedAt };
-			if (!runOrder.includes(incoming.runId)) runOrder.push(incoming.runId);
 			if (isSettled(incoming)) latestTerminal = current;
 		};
 
@@ -224,11 +295,14 @@ export function createSubagentsUiExtension(
 			await Promise.resolve(ctx.ui.custom<null>(
 				(tuiInstance, theme, _kb, done) => {
 					dismissOverlay = () => done(null);
-					overlay = new SubagentsOverlay(model, tuiInstance, dismissOverlay, { now, theme });
+					overlayOpen = true;
+					overlay = new SubagentsOverlay(model, tuiInstance, dismissOverlay, { now, theme, onPage: requestSessionView });
 					overlayTui = tuiInstance;
 					overlayLayout = layout;
 					syncOverlayWidth();
 					startRepaint();
+					// Opening (or reopening) the overlay queries retained history again.
+					requestSessionView(0);
 					return overlay;
 				},
 				{
@@ -239,10 +313,12 @@ export function createSubagentsUiExtension(
 			)).finally(() => {
 				if (version !== overlayVersion) return;
 				overlay = undefined;
+				overlayOpen = false;
 				overlayLayout = undefined;
 				overlayTui = undefined;
 				dismissOverlay = undefined;
 				stopRepaint();
+				forgetPendingView();
 			});
 		};
 
@@ -252,11 +328,68 @@ export function createSubagentsUiExtension(
 				const parsed = parseObserverSnapshot(data);
 				if (!parsed.ok) return;
 				revalidate();
+				const liveKey = () => current?.snapshot.tasks.filter(t => t.status === "running" || t.status === "pending")
+					.map(t => `${t.id}:${t.episode}:${t.status}`).sort().join("|") ?? "";
+				const before = liveKey();
 				accept(parsed.value, now());
 				renderWidget();
 				publishOverlay();
+				if (overlayOpen && before !== liveKey()) {
+					if (pending) requeryArmed = true;
+					else requestSessionView(sessionView.reply?.history.page ?? 0);
+				}
 			} catch {
 				/* Display-only observer. */
+			}
+		});
+
+		pi.events.on(SESSION_VIEW_EVENT, (data) => {
+			try {
+				if (!tui() || !overlayOpen) return;
+				const parsed = parseSessionViewReply(data);
+				if (!parsed.ok) return;
+				const reply = parsed.value;
+				const request = pending;
+				// Only the newest request can be answered; late, foreign or stale replies are dropped.
+				if (!request || reply.requestId !== request.requestId) return;
+				if (request.epoch !== ownerEpoch) {
+					pending = undefined; stopCoreWatch();
+					sessionView = { kind: "unavailable", reason: "owner_changed" };
+					publishOverlay();
+					return;
+				}
+				const owner = readOwner(ctx);
+				if (!owner || reply.ownerSessionId !== owner.sessionId || reply.ownerSessionId !== request.sessionId
+					|| (reply.anchor !== null && reply.anchor !== owner.leafId && !owner.branch.includes(reply.anchor))
+					|| (request.generation !== undefined && reply.generation !== request.generation)) {
+					pending = undefined; stopCoreWatch();
+					sessionView = { kind: "unavailable", reason: "owner_changed" };
+					publishOverlay();
+					return;
+				}
+				pending = undefined;
+				stopCoreWatch();
+				viewObservedAt = request.sentAt;
+				sessionView = { kind: reply.history.state === "ready" ? "ready" : "unavailable", reply,
+					...(reply.history.reason === undefined ? {} : { reason: reply.history.reason }) };
+				publishOverlay();
+				if (requeryArmed) {
+					requeryArmed = false;
+					requestSessionView(sessionView.reply?.history.page ?? 0);
+				}
+			} catch {
+				/* Display-only consumer. */
+			}
+		});
+
+		pi.events.on(SESSION_VIEW_CHANGED_EVENT, () => {
+			try {
+				if (!tui() || !overlayOpen) return;
+				// Coalesce lifecycle invalidations into one requery of the current scope.
+				if (pending) requeryArmed = true;
+				else requestSessionView(sessionView.reply?.history.page ?? 0);
+			} catch {
+				/* Display-only consumer. */
 			}
 		});
 
@@ -279,12 +412,16 @@ export function createSubagentsUiExtension(
 		const closeOverlay = () => {
 			++overlayVersion;
 			const dismiss = dismissOverlay;
-			dismissOverlay = undefined; overlay = undefined;
+			dismissOverlay = undefined; overlay = undefined; overlayOpen = false;
+			forgetPendingView();
 			stopRepaint(); dismiss?.();
 		};
 
 		pi.on("session_start", (_event, sessionCtx) => {
 			ctx = sessionCtx;
+			ownerEpoch++;
+			forgetPendingView();
+			sessionView = { kind: "idle" };
 			resetCache();
 			closeOverlay();
 			clearWidget();
@@ -292,12 +429,18 @@ export function createSubagentsUiExtension(
 
 		pi.on("session_tree", (_event, sessionCtx) => {
 			ctx = sessionCtx;
+			ownerEpoch++;
+			forgetPendingView();
+			sessionView = { kind: "idle" };
 			resetCache();
 			closeOverlay();
 			clearWidget();
 		});
 
 		pi.on("session_shutdown", () => {
+			ownerEpoch++;
+			forgetPendingView();
+			sessionView = { kind: "idle" };
 			closeOverlay();
 			resetCache();
 			clearWidget();

@@ -27,7 +27,7 @@ const source = [
 	"subagents-provenance.test.ts", "subagents-reliability.test.ts", "subagents-render.test.ts",
 	"subagents-repository-policy.test.ts", "subagents-routing.test.ts", "subagents-runner.test.ts",
 	"subagents-scheduler.test.ts", "subagents-session-contracts.test.ts", "subagents-session-supervisor.test.ts",
-	"subagents-telemetry.test.ts", "subagents-ui-integration.test.ts", "subagents-ui.test.ts",
+	"subagents-telemetry.test.ts", "subagents-session-view.test.ts", "subagents-session-ui.test.ts", "subagents-ui-integration.test.ts", "subagents-ui.test.ts",
 	"subagents-worker-inputs.test.ts", "subagents-worker-tools.test.ts", "subagents-workspace.test.ts",
 	"work-timing-tui.test.ts", "work-timing.test.ts", "workflow-async-subagents.test.ts",
 	"workflow-co-load.test.ts", "workflow-command-barrier.test.ts", "workflow-cross-root.test.ts",
@@ -50,7 +50,7 @@ const isolated = new Set([
 	"subagents-guidance.test.ts", "subagents-host-contract.test.ts", "subagents-managed-sessions.test.ts",
 	"subagents-native-continuation.test.ts", "subagents-native-observation.test.ts", "subagents-provenance.test.ts",
 	"subagents-repository-policy.test.ts", "subagents-routing.test.ts", "subagents-runner.test.ts",
-	"subagents-worker-inputs.test.ts", "subagents-worker-tools.test.ts", "workflow-cross-root.test.ts",
+	"subagents-worker-inputs.test.ts", "subagents-worker-tools.test.ts", "subagents-session-view.test.ts", "subagents-session-ui.test.ts", "workflow-cross-root.test.ts",
 	"workflow-evidence.test.ts", "workflow-goal-host.test.ts", "workflow-goal.test.ts",
 	"workflow-paths.test.ts", "workflow-progress.test.ts",
 ]);
