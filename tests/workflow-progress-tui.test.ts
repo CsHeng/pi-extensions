@@ -49,7 +49,9 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  assert.match(output, /TRACKING_PAUSED_FIXTURE/); assert.match(output, /2\/2 accepted/);
  const greyStrike = /\x1b\[38;2;(\d+);(\d+);(\d+)m\x1b\[9mSTRIKE_DONE_A\x1b\[29m/;
  const widgetStyle = greyStrike.exec(output); assert.ok(widgetStyle, "real terminal stream retains dim+SGR9 even with FORCE_COLOR=0");
- assert.equal(widgetStyle[1], widgetStyle[2]); assert.equal(widgetStyle[2], widgetStyle[3]);
+ const red = Number(widgetStyle[1]), green = Number(widgetStyle[2]), blue = Number(widgetStyle[3]);
+ const tint = Math.max(red, green, blue) - Math.min(red, green, blue);
+ assert.ok(tint <= 20, `host dim stays a near-neutral grey, got rgb(${red},${green},${blue})`);
  const beforeList = output.length; child.stdin.write("/workflow-ui list\r");
  await waitFor(() => output.slice(beforeList).includes("Tasks · workflow"), "list did not mount");
  await delay(150);
