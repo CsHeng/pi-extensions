@@ -47,6 +47,7 @@ export interface ProtocolParserOptions {
 export class JsonlProtocolParser {
 	private buffer = "";
 	private discardingLine = false;
+	private discardedAggregate = false;
 	private assistantOpen = false;
 	private compactionOpen = false;
 	private protocolInvalid = false;
@@ -82,13 +83,17 @@ export class JsonlProtocolParser {
 		const lines = this.buffer.split("\n");
 		this.buffer = lines.pop() ?? "";
 		for (const line of lines) {
-			if (this.discardingLine) this.discardingLine = false;
-			else this.processLine(line);
+			if (this.discardingLine) {
+				this.discardingLine = false;
+				if (this.discardedAggregate) this.processLine('{"type":"agent_end"}');
+				this.discardedAggregate = false;
+			} else this.processLine(line);
 		}
 		if (Buffer.byteLength(this.buffer) > HARD_LIMITS.maxProtocolLineBytes) {
+			if (!this.discardingLine) this.discardedAggregate = isRedundantAggregate(this.buffer);
 			this.buffer = "";
 			this.discardingLine = true;
-			this.protocolInvalid = true;
+			if (!this.discardedAggregate) this.protocolInvalid = true;
 		}
 	}
 
@@ -128,7 +133,8 @@ export class JsonlProtocolParser {
 	private processLine(line: string): void {
 		if (!line.trim()) return;
 		if (Buffer.byteLength(line) > HARD_LIMITS.maxProtocolLineBytes) {
-			this.protocolInvalid = true;
+			if (isRedundantAggregate(line)) this.processLine('{"type":"agent_end"}');
+			else this.protocolInvalid = true;
 			return;
 		}
 		let event: unknown;
@@ -230,7 +236,9 @@ export class JsonlProtocolParser {
 		this.assistantOpen = false;
 		this.agentSettledObserved = false;
 		for (const part of message.content ?? []) {
-			if (part.type === "toolCall") {
+			// Failed response proposals were never admitted for execution. An actual
+			// tool_execution_start remains fenced independently of this response.
+			if (part.type === "toolCall" && message.stopReason !== "error" && message.stopReason !== "aborted" && !message.errorMessage) {
 				if (typeof part.id === "string" && typeof part.name === "string") this.trackTool(part.id, part.name);
 				else this.protocolInvalid = true;
 			}
@@ -258,6 +266,12 @@ export class JsonlProtocolParser {
 		}
 		this.activeToolCalls.set(id, tool);
 	}
+}
+
+// Native print JSON emits the discriminant first. The redundant run aggregate
+// is not a completion oracle: message_end + agent_settled remain indispensable.
+function isRedundantAggregate(prefix: string): boolean {
+	return /^\s*\{\s*"type"\s*:\s*"agent_end"\s*[,}]/.test(prefix);
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

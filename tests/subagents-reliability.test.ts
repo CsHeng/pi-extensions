@@ -72,7 +72,7 @@ test("command correlation preserves punctuation and normalizes legacy evidence e
 		const noEnd = collectNativeObservation(text.replace('"endMs":1', '"endMs":null'), { startLeaf: null, endLeaf: "b", launched: true });
 		assert.equal(noEnd.commandCoverage, "partial");
 		const missingHash = { ...observation, commands: observation.commands.map(row => ({ ...row, sourceAfterKey: null })) };
-		assert.equal(normalizeCommandCorrelation(missingHash).commandCoverage, "partial");
+		assert.equal(normalizeCommandCorrelation(missingHash).commandCoverage, "complete", "legacy filesystem hashes are not command provenance requirements");
 		const reversed = { ...observation, commands: observation.commands.map(row => ({ ...row, startMs: 2, endMs: 1 })) };
 		const normalized = normalizeCommandCorrelation(reversed);
 		assert.equal(normalized.commandCoverage, "partial");

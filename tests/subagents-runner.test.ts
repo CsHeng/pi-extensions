@@ -184,32 +184,33 @@ test("activity arrives before close and intermediate error evidence does not ove
 });
 
 test("agent_end does not settle and settled exit stall has first-cause classification", async () => {
-	const ended = await runChild(options("agent-end-only", { timeoutMs: 20, killGraceMs: 20, settledExitGraceMs: 5 }));
-	assert.equal(ended.error?.code, "timeout");
+	const controller = new AbortController();
+	const waiting = runChild(options("agent-end-only", { signal: controller.signal, killGraceMs: 20, settledExitGraceMs: 5 }));
+	setTimeout(() => controller.abort(), 50);
+	const ended = await waiting;
+	assert.equal(ended.error?.code, "aborted");
 	const started = Date.now();
-	const stalled = await runChild(options("settled-stall", { timeoutMs: 2_000, killGraceMs: 20, settledExitGraceMs: 20 }));
+	const stalled = await runChild(options("settled-stall", { killGraceMs: 20, settledExitGraceMs: 20 }));
 	assert.equal(stalled.error?.code, "child_exit_stalled");
 	assert.ok(Date.now() - started < 1_000);
 });
 
-test("diagnostic child and run limits are typed first-cause stops", async () => {
-	const limited = await runChild(options("settled-stall", {
-		killGraceMs: 20,
-		checkDiagnosticLimits: async () => ({ ok: false, code: "diagnostic_session_limit", scope: "child" }),
-	}));
-	assert.equal(limited.error?.code, "diagnostic_session_limit");
-
-	let runLimitCallbacks = 0;
-	const runLimited = await runChild(options("settled-stall", {
-		killGraceMs: 20,
-		checkDiagnosticLimits: async () => ({ ok: false, code: "diagnostic_session_limit", scope: "run" }),
-		onRunDiagnosticLimit: () => { runLimitCallbacks += 1; },
-	}));
-	assert.equal(runLimited.error?.code, "diagnostic_session_limit");
-	assert.ok(runLimitCallbacks >= 1);
+test("a live child has no implicit fifteen-minute deadline", async (t) => {
+	const original = globalThis.setTimeout;
+	// Accelerate the former production deadline, not the explicit cancel or exit grace.
+	t.mock.method(globalThis, "setTimeout", ((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => original(callback, delay === 900_000 ? 1 : delay, ...args)) as typeof setTimeout);
+	const controller = new AbortController();
+	let completed = false;
+	const running = runChild(options("wait-term", { signal: controller.signal, killGraceMs: 20 })).then(result => { completed = true; return result; });
+	await new Promise(resolve => original(resolve, 80));
+	const wasLive = !completed;
+	controller.abort();
+	const result = await running;
+	assert.equal(wasLive, true);
+	assert.equal(result.error?.code, "aborted");
 });
 
-test("abort terminates a child and timeout escalates to bounded kill", async () => {
+test("explicit abort terminates a child and escalates an ignored TERM to bounded kill", async () => {
 	const controller = new AbortController();
 	const abortedPromise = runChild(options("wait-term", { signal: controller.signal, killGraceMs: 20 }));
 	setTimeout(() => controller.abort(), 20);
@@ -218,10 +219,13 @@ test("abort terminates a child and timeout escalates to bounded kill", async () 
 	assert.equal(aborted.error?.code, "aborted");
 
 	const started = Date.now();
-	const timeoutOptions = options("ignore-term", { timeoutMs: 20, killGraceMs: 20 });
-	const timedOut = await runChild(timeoutOptions);
-	assert.equal(timedOut.status, "failed");
-	assert.equal(timedOut.error?.code, "timeout");
-	assert.equal(typeof await readFile(timeoutOptions.diagnosticSession.path, "utf8"), "string");
+	const stubbornController = new AbortController();
+	const stubbornOptions = options("ignore-term", { signal: stubbornController.signal, killGraceMs: 20 });
+	const stopping = runChild(stubbornOptions);
+	setTimeout(() => stubbornController.abort(), 20);
+	const stopped = await stopping;
+	assert.equal(stopped.status, "aborted");
+	assert.equal(stopped.error?.code, "aborted");
+	assert.equal(typeof await readFile(stubbornOptions.diagnosticSession.path, "utf8"), "string");
 	assert.ok(Date.now() - started < 2000);
 });

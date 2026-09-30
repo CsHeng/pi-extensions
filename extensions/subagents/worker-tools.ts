@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV, HARD_LIMITS } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
-import { inspectWorkerInputs, workerGitEnvironment, workerSourceFingerprint, type WorkerInputState } from "./worker-inputs.ts";
+import { workerGitEnvironment } from "./worker-inputs.ts";
 import { registerObservationHooks } from "./observation-hooks.ts";
 
 export const WORKER_SCRATCH_ENV = "CSHENG_SUBAGENT_WORKER_SCRATCH";
@@ -30,8 +30,7 @@ export interface WorkerToolsOptions {
 	scratch: string;
 	/** Task environment, not an OS security boundary. Pi authentication stays with Pi. */
 	env?: NodeJS.ProcessEnv;
-	observeState?: () => Promise<{ sourceKey: string; environmentKey: string }>;
-	onCommand?: (value: CommandObservation & { toolCallId: string | null; sourceBeforeKey: string | null; sourceAfterKey: string | null; environmentBeforeKey: string | null; environmentAfterKey: string | null }) => void;
+	onCommand?: (value: CommandObservation & { toolCallId: string | null }) => void;
 }
 
 /** Trusted host tools. Queueing and candidate ownership do not sandbox bash. */
@@ -48,8 +47,8 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 	if (process.platform === "win32") throw new Error("worker_host_platform_unsupported");
 	let unsettled = false;
 	const localBash: BashOperations = { exec(command, directory, execution) {
-		const timeout = execution.timeout ?? HARD_LIMITS.taskTimeoutMs / 1000;
-		if (!Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > 2_147_483_647) return Promise.reject(new Error("Invalid timeout"));
+		const timeout = execution.timeout;
+		if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > 2_147_483_647)) return Promise.reject(new Error("Invalid timeout"));
 		execution.signal?.throwIfAborted();
 		return new Promise((resolve, reject) => {
 			const child = spawn("bash", ["-c", command], { cwd: directory, env: execution.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -61,7 +60,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 				try { process.kill(-child.pid, "SIGKILL"); }
 				catch (caught) { if ((caught as NodeJS.ErrnoException).code !== "ESRCH") { error = new Error("worker_command_stop_failed"); unsettled = true; } }
 			};
-			const timeoutTimer = setTimeout(() => { timedOut = true; stop(); }, timeout * 1000);
+			const timeoutTimer = timeout === undefined ? undefined : setTimeout(() => { timedOut = true; stop(); }, timeout * 1000);
 			child.stdout.on("data", execution.onData);
 			child.stderr.on("data", execution.onData);
 			child.once("error", (caught) => { error = caught; });
@@ -76,7 +75,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 				}, HARD_LIMITS.killGraceMs);
 			});
 			child.once("close", (code) => {
-				clearTimeout(timeoutTimer);
+				if (timeoutTimer) clearTimeout(timeoutTimer);
 				if (closeTimer) clearTimeout(closeTimer);
 				execution.signal?.removeEventListener("abort", stop);
 				if (error) reject(error);
@@ -89,9 +88,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 			else execution.signal?.addEventListener("abort", stop, { once: true });
 		});
 	} };
-	const observeState = async () => { try { return await options.observeState?.(); } catch { return undefined; } };
 	const started = performance.now();
-	let outputBytes = 0;
 	let activeToolCallId: string | null = null;
 
 	const definitions = [
@@ -102,32 +99,21 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 			exposeSessionEnvironment: false,
 			spawnHook: (context) => ({ ...context, env: { ...workerGitEnvironment(options.env ?? context.env), TMPDIR: scratch } }),
 			operations: { async exec(command, directory, execution) {
-				if (commands.length >= HARD_LIMITS.maxPendingToolCalls) throw new Error("worker_command_limit");
-				const before = await observeState();
+				// Observation storage is bounded; execution has no cumulative command budget.
+				if (commands.length >= HARD_LIMITS.maxPendingToolCalls) commands.shift();
 				const observation: CommandObservation = { startMs: performance.now() - started, endMs: null, exitCode: null, status: "running" };
 				commands.push(observation);
-				const outputController = new AbortController();
-				const signal = AbortSignal.any([outputController.signal, ...(execution.signal ? [execution.signal] : [])]);
 				try {
-					const result = await localBash.exec(command, directory, { ...execution, signal,
-						onData(chunk) {
-							outputBytes += chunk.length;
-							if (outputBytes > HARD_LIMITS.diagnosticChildBytes) outputController.abort();
-							else execution.onData(chunk);
-						},
-					});
+					const result = await localBash.exec(command, directory, execution);
 					observation.exitCode = result.exitCode;
 					observation.status = "exited";
 					return result;
 				} catch (error) {
-					observation.status = outputController.signal.aborted ? "output-limit" : execution.signal?.aborted ? "aborted" : error instanceof Error && error.message.startsWith("timeout:") ? "timed-out" : "failed";
-					if (outputController.signal.aborted) throw new Error("worker_output_limit");
+					observation.status = execution.signal?.aborted ? "aborted" : error instanceof Error && error.message.startsWith("timeout:") ? "timed-out" : "failed";
 					throw error;
 				} finally {
 					observation.endMs = unsettled ? null : performance.now() - started;
-					const after = unsettled ? undefined : await observeState();
-					try { options.onCommand?.({ ...observation, toolCallId: activeToolCallId, sourceBeforeKey: before?.sourceKey ?? null, sourceAfterKey: after?.sourceKey ?? null,
-						environmentBeforeKey: before?.environmentKey ?? null, environmentAfterKey: after?.environmentKey ?? null }); } catch { /* Optional metadata. */ }
+					try { options.onCommand?.({ ...observation, toolCallId: activeToolCallId }); } catch { /* Optional metadata. */ }
 				}
 			} },
 		}),
@@ -249,11 +235,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 		if (!loaded.manifest || loaded.manifest.role !== "worker" || !scratch || await realpath(process.cwd()) !== loaded.manifest.root) throw new Error("managed_worker_state_invalid");
 		const root = loaded.manifest.root;
 		worker = await createWorkerTools({ cwd: root, scratch,
-			observeState: async () => {
-				const state = JSON.parse(process.env.CSHENG_SUBAGENT_WORKER_INPUTS ?? "null") as WorkerInputState;
-				const environment = await inspectWorkerInputs(root, state);
-				return { sourceKey: await workerSourceFingerprint(root, state), environmentKey: environment.environmentKey };
-			},
+
 			onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value, version: 2,
 				status: value.endMs === null ? "unknown" : value.status === "exited" ? (value.exitCode === 0 ? "succeeded" : "failed") : value.status === "aborted" ? "aborted" : value.status === "timed-out" ? "timeout" : "failed",
 			}),

@@ -2,10 +2,22 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { installedHostEnvironment } from "../scripts/installed-host-env.ts";
 import test from "node:test";
 
 const ROOT = new URL("../", import.meta.url);
+
+test("installed host environment excludes injected project bins but keeps global tool paths", () => {
+	const root = fileURLToPath(ROOT);
+	const global = "/tool-manager/pi/node_modules/.bin";
+	const source = { PATH: [join(root, "node_modules/.bin"), join(dirname(root), "node_modules/.bin"), global, "/usr/bin"].join(delimiter), HOME: "/fixture-home" };
+	const env = installedHostEnvironment(source);
+	assert.equal(env.PATH, [global, "/usr/bin"].join(delimiter));
+	assert.equal(env.HOME, source.HOME);
+	assert.notEqual(source.PATH, env.PATH);
+});
 
 function runBun(cwd: string, args: string[]): string {
 	const result = spawnSync("bun", args, {

@@ -51,7 +51,7 @@ export function deficits(state: GoalState): string[] {
 export function progressKey(state: GoalState): string {
  return digest({ goal: state.goalRevision, input: state.input.generation,
   accepted: state.acceptance.filter(j => accepted(state, j.subject)).map(j => j.subject).sort(),
-  facts: [...new Set(state.facts.filter(f => f.usable).map(f => digest([f.kind, f.result, f.basis.scope, f.basis.fingerprint, f.kind === "host" ? f.checkIdentity : undefined])))].sort(),
+  facts: [...new Set(state.facts.filter(f => f.usable).map(f => digest([f.kind, f.result, f.scope, f.kind === "host" ? f.checkIdentity : undefined])))].sort(),
   blockers: state.tasks.filter(t => t.blocker).map(t => [t.key, t.blocker!.kind]) });
 }
 export function validateGraph(state: Pick<GoalState, "requirements" | "tasks">): void {
@@ -129,7 +129,7 @@ export function judge(state: GoalState, input: Omit<GoalAcceptance, "revision">,
  state.acceptance = state.acceptance.filter(j => j.subject !== input.subject);
  if (!input.accepted) { invalidate(state, new Set([input.subject])); return; }
  const usable = input.facts.length > 0 && input.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));
- if (!usable) { diagnostics.push(`${input.subject}: passing current evidence is missing.`); return; }
+ if (!usable) { diagnostics.push(`${input.subject}: passing usable evidence is missing.`); return; }
  const task = state.tasks.find(t => input.subject === `task:${t.key}`);
  if (task?.blocker) { diagnostics.push(`${input.subject}: resolve the recorded blocker explicitly.`); return; }
  const dependencies = task ? pendingDependencies(state, task) : [];
@@ -144,7 +144,7 @@ export function complete(state: GoalState, diagnostics: string[]): void {
 /** Validate shape, safe counters and relational integrity; malformed latest snapshots are never skipped. */
 export function validateGoalState(state: GoalState): void {
  requireGoal(Check(goalStateSchema, state), "state_unavailable", "Invalid snapshot shape or bounded field.");
- requireGoal(state.version === 2 && Number.isSafeInteger(state.revision) && state.revision > 0 && Number.isSafeInteger(state.serial) && state.serial >= 0, "state_unavailable", "Invalid version/counters.");
+ requireGoal(state.version === 3 && Number.isSafeInteger(state.revision) && state.revision > 0 && Number.isSafeInteger(state.serial) && state.serial >= 0, "state_unavailable", "Invalid version/counters.");
  validateGraph(state);
  const attemptIds = new Set(state.attempts.map(a => a.id));
  const factIds = new Set(state.facts.map(f => f.id));
@@ -153,8 +153,9 @@ export function validateGoalState(state: GoalState): void {
   requireGoal(/^A[1-9][0-9]*$/.test(a.id) && Number(a.id.slice(1)) <= state.serial && a.generation <= state.input.generation, "state_unavailable", "Attempt counter or input is inconsistent.");
   if (a.status === "running") requireGoal(state.tasks.some(t => t.key === a.task && t.revision === a.revision), "state_unavailable", "Running attempt refers to obsolete task.");
  }
- for (const f of state.facts) requireGoal(f.id === `${f.attempt}:${f.key}` && f.generation <= state.input.generation && (!f.usable || f.basis.state === "current"), "state_unavailable", "Fact binding is inconsistent.");
+ for (const f of state.facts) requireGoal(f.id === `${f.attempt}:${f.key}` && f.generation <= state.input.generation, "state_unavailable", "Fact binding is inconsistent.");
  requireGoal(attemptIds.size === state.attempts.length && factIds.size === state.facts.length, "state_unavailable", "Duplicate durable identities.");
+ requireGoal((state.recoveredExecutions ?? []).every(id => state.executionPending?.includes(id)), "state_unavailable", "Recovered execution obligations must remain visible until explicitly reconciled.");
  for (const fact of state.facts) requireGoal(attemptIds.has(fact.attempt), "state_unavailable", "Fact references missing attempt.");
  for (const j of state.acceptance) requireGoal(subjectRevision(state, j.subject) !== undefined && j.facts.every(id => factIds.has(id)), "state_unavailable", "Acceptance references missing subject/fact.");
  if (state.fulfillment === "complete") requireGoal(deficits(state).length === 0, "state_unavailable", "Complete snapshot has deficits.");

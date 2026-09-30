@@ -57,7 +57,7 @@ test("real native worker reopens one history and edits the same state with host 
 		assert.equal(result.observation?.available, true);
 		assert.equal(result.observation?.entries.length, 2, "native usage is this episode, not all retained history");
 		assert.equal(result.observation?.usage.input, result.usage.input);
-		assert.equal(result.observation?.commandCoverage, "partial", "standalone fixture has no source/environment endpoint evidence");
+		assert.equal(result.observation?.commandCoverage, "complete", "command evidence describes execution, not filesystem freshness");
 		assert.equal(result.observation?.commands[0]?.status, "succeeded");
 		assert.equal(result.observation?.commands[0]?.sourceBeforeKey, null, "missing runtime input state is unavailable");
 		assert.equal(result.observation?.timing?.complete, count !== 3, "done-only thinking has no measured endpoints");
@@ -223,7 +223,7 @@ test("managed service keeps fixed inputs, replays inertly, restores history and 
 	assert.equal(f.launches(), calls);
 });
 
-test("native worker commands reuse private dependencies and Git despite inherited parent Git overrides", async (t) => {
+test("native workers prepare their own dependencies and preserve Git ownership despite parent overrides", async (t) => {
 	const f = await serviceFixture(t);
 	await writeFile(join(f.repo, ".gitignore"), "node_modules/\n");
 	await mkdir(join(f.repo, "node_modules/pkg"), { recursive: true });
@@ -239,22 +239,44 @@ test("native worker commands reuse private dependencies and Git despite inherite
 	assert.deepEqual(new Set(observation.toolNames), new Set(["read", "grep", "find", "ls", "edit", "write", "bash"]));
 	assert.match(observation.capabilityKey!, /^[a-f0-9]{64}$/);
 	for (const command of observation.commands) {
-		for (const key of [command.sourceBeforeKey, command.sourceAfterKey, command.environmentBeforeKey, command.environmentAfterKey]) assert.match(key!, /^[a-f0-9]{64}$/);
+		assert.equal(command.sourceBeforeKey, null);
+		assert.equal(command.sourceAfterKey, null);
+		assert.equal(command.environmentBeforeKey, undefined);
+		assert.equal(command.environmentAfterKey, undefined);
 	}
 	const source = join(f.store.path(first.handle), "source");
-	assert.equal((await promisify(execFile)("git", ["-C", source, "show", ":candidate.txt"])).stdout, "dependency-1");
+	assert.equal((await promisify(execFile)("git", ["-C", source, "show", ":candidate.txt"])).stdout, "local-dependency");
 	const firstEntries = (await readFile(join(f.store.path(first.handle), "native.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 	const bash = firstEntries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "bash");
 	assert.equal(bash.length, 1); assert.equal(bash[0].message.isError, false);
-	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "dependency-1");
+	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "local-dependency");
 	await writeFile(join(f.repo, "node_modules/pkg/index.js"), 'module.exports = "dependency-2"');
 	assert.equal((await service.execute({ action: "refresh", handle: first.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
 	const next = await service.execute({ action: "continue", episodes: [{ handle: first.handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture host-inputs-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded"); assert.ok(next.sessions[0]!.candidate);
-	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "dependency-2");
+	assert.equal(await readFile(join(f.store.path(first.handle), "source/candidate.txt"), "utf8"), "local-dependency");
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
 	await assert.rejects(readFile(join(f.repo, ".git/index")), { code: "ENOENT" });
 	assert.deepEqual(await readFile(join(f.repo, ".git/config")), config);
+});
+
+test("managed finalization succeeds beyond the former native-history byte budget", async (t) => {
+ const f = await serviceFixture(t);
+ const service = new ContinuationService({ ...f.dependencies, runChild: async options => {
+  const header = { type: "session", version: 3, id: "large-history", cwd: options.cwd, timestamp: new Date().toISOString() };
+  const lines = [JSON.stringify(header)];
+  for (let index = 0; index < 40; index++) lines.push(JSON.stringify({ type: "custom", customType: "synthetic-history", id: `bulk-${index}`, parentId: index ? `bulk-${index - 1}` : null, timestamp: header.timestamp, data: "x".repeat(900_000) }));
+  await writeFile(options.diagnosticSession.path, lines.join("\n") + "\n");
+  return f.dependencies.runChild(options);
+ } });
+ const result = await service.execute(createWorker, f.ctx);
+ assert.equal(result.status, "succeeded", JSON.stringify(result));
+ assert.equal(result.sessions[0]!.result!.workerToolsSettled, true);
+ assert.ok(result.sessions[0]!.candidate, "large auxiliary history cannot invalidate a completed source candidate");
+ assert.equal(result.sessions[0]!.result!.observation?.available, false, "bounded optional observation may remain unavailable");
+ const file = join(f.store.path(result.sessions[0]!.handle), "native.jsonl");
+ assert.ok((await lstat(file)).size > 32 * 1024 * 1024);
+ assert.equal((await f.store.nativeRevision(result.sessions[0]!.handle)).sessionId, "large-history");
 });
 
 test("managed cancellation drains an actual bash process group before returning", async (t) => {

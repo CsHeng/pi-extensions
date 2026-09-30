@@ -1,3 +1,4 @@
+import { nativeLines } from "./native-lines.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
@@ -142,7 +143,7 @@ const recordSchema = Type.Object({
 	candidate: Type.Optional(candidateSchema),
 	input: Type.Optional(Type.Object({ commit: gitOid, tree: gitOid }, { additionalProperties: false })),
 	inputRef: Type.Optional(Type.String({ pattern: "^refs/csheng/subagents/inputs/session_[a-f0-9-]{36}$" })),
-	workspace: Type.Optional(Type.Object({ baseline: Type.Record(Type.String(), fileStateSchema), parentBaseline: Type.Record(Type.String(), fileStateSchema), inputs: Type.Object({ version: Type.Literal(1), dependencyRoots: Type.Array(Type.Literal("node_modules"), { maxItems: 1, uniqueItems: true }), parentDependencyKey: digestSchema, dependencyKey: digestSchema, gitWorkspace: Type.Optional(gitWorkspaceSchema) }, { additionalProperties: false }) }, { additionalProperties: false })),
+	workspace: Type.Optional(Type.Object({ baseline: Type.Record(Type.String(), fileStateSchema), parentBaseline: Type.Record(Type.String(), fileStateSchema), inputs: Type.Union([Type.Object({ version: Type.Literal(1), dependencyRoots: Type.Array(Type.Literal("node_modules"), { maxItems: 1, uniqueItems: true }), parentDependencyKey: digestSchema, dependencyKey: digestSchema, gitWorkspace: Type.Optional(gitWorkspaceSchema) }, { additionalProperties: false }), Type.Object({ version: Type.Literal(2), gitWorkspace: gitWorkspaceSchema }, { additionalProperties: false })]) }, { additionalProperties: false })),
 	requests: Type.Array(Type.Object({ id: identity, fingerprint: digestSchema, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(running|complete|unknown)$" }), error: Type.Optional(Type.Object({ code: identity, detail: Type.Optional(causeSchema) }, { additionalProperties: false })), runId: Type.Optional(identity), generation: Type.Optional(identity), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), execution: Type.Optional(executionSchema) }, { additionalProperties: false }), { maxItems: MANAGED_LIMITS.maxEpisodes }),
 }, { additionalProperties: false });
 
@@ -445,29 +446,24 @@ export class ManagedSessionStore {
 		const file = await open(join(this.path(handle), "native.jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
 		try {
 			const info = await file.stat();
-			if (!info.isFile() || info.size > MANAGED_LIMITS.maxNativeBytes || (info.mode & 0o077) !== 0) throw new ManagedError("managed_native_invalid", undefined, "attributes");
-			const text = await file.readFile("utf8");
-			if (!text) return { sessionId: null, leaf: null };
-			if (!text.endsWith("\n")) throw new ManagedError("managed_native_incomplete");
-			const lines = text.trimEnd().split("\n");
-			if (lines.length > MANAGED_LIMITS.maxEntries) throw new ManagedError("managed_native_limit");
+			if (!info.isFile() || (info.mode & 0o077) !== 0) throw new ManagedError("managed_native_invalid", undefined, "attributes");
+			let index = 0;
 			let sessionId: string | null = null;
 			let leaf: string | null = null;
 			const identifiers = new Set<string>();
-			const types = new Set(["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "label", "session_info", "custom_message"]);
-			for (const [index, line] of lines.entries()) {
-				if (Buffer.byteLength(line) > MANAGED_LIMITS.maxNativeLineBytes) throw new ManagedError("managed_native_limit");
-				const entry = JSON.parse(line) as Record<string, unknown>;
-				if (!entry || typeof entry !== "object") throw new ManagedError("managed_native_invalid", undefined, "shape");
-				if (index === 0) {
+			for await (const entry of nativeLines(file)) {
+				if (index++ === 0) {
 					if (entry.type !== "session" || entry.version !== 3 || typeof entry.id !== "string" || !safeHandle(entry.id)) throw new ManagedError("managed_native_invalid", undefined, "header");
+					if (entry.cwd !== undefined && entry.cwd !== join(this.path(handle), "source")) throw new ManagedError("managed_native_invalid", undefined, "cwd");
 					sessionId = entry.id;
 				} else {
-					if (typeof entry.type !== "string" || !types.has(entry.type) || typeof entry.id !== "string" || !safeHandle(entry.id) || identifiers.has(entry.id) || (entry.parentId !== null && (typeof entry.parentId !== "string" || !identifiers.has(entry.parentId)))) throw new ManagedError("managed_native_invalid", undefined, "lineage");
+					if (typeof entry.type !== "string" || !entry.type || entry.type === "session" || typeof entry.id !== "string" || !safeHandle(entry.id) || entry.id === sessionId || identifiers.has(entry.id) || (entry.parentId !== null && (typeof entry.parentId !== "string" || !identifiers.has(entry.parentId)))) throw new ManagedError("managed_native_invalid", undefined, "lineage");
 					if (entry.type === "message" && (!entry.message || typeof entry.message !== "object" || typeof (entry.message as Record<string, unknown>).role !== "string")) throw new ManagedError("managed_native_invalid", undefined, "message");
 					identifiers.add(entry.id); leaf = entry.id;
 				}
 			}
+			const after = await file.stat();
+			if (after.size !== info.size || after.mtimeMs !== info.mtimeMs) throw new ManagedError("managed_native_invalid", undefined, "changed");
 			return { sessionId, leaf };
 		} catch (error) {
 			if (error instanceof SyntaxError) throw new ManagedError("managed_native_invalid", undefined, "parse");

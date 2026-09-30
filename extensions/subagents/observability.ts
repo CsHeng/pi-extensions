@@ -51,10 +51,6 @@ export interface NativeObservation {
 const OPAQUE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const SHA256_KEY = /^[a-f0-9]{64}$/;
 const TOOL_NAMES = new Set(["read", "grep", "find", "ls", "edit", "write", "bash", "git_read"]);
-const NATIVE_ENTRY_TYPES = new Set([
-	"message", "thinking_level_change", "model_change", "compaction",
-	"branch_summary", "custom", "label", "session_info", "custom_message",
-]);
 const COMMAND_STATUSES = new Set(["succeeded", "failed", "aborted", "timeout", "unknown"]);
 const MAX_TOOL_NAMES = 16;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
@@ -299,9 +295,7 @@ export function unavailableObservation(): NativeObservation {
 }
 
 function completeCommandEvidence(row: NativeCommandRow): boolean {
-	return !!row.toolCallId && row.status !== "unknown" && row.startMs !== null && row.endMs !== null && row.endMs >= row.startMs
-		&& row.sourceBeforeKey !== null && row.sourceAfterKey !== null
-		&& typeof row.environmentBeforeKey === "string" && typeof row.environmentAfterKey === "string";
+	return !!row.toolCallId && row.status !== "unknown" && row.startMs !== null && row.endMs !== null && row.endMs >= row.startMs;
 }
 
 export function normalizeCommandCorrelation(value: NativeObservation): NativeObservation {
@@ -353,7 +347,7 @@ function parseNativeSession(text: string): ParsedNative | undefined {
 	const body: Array<{ id: string; entry: Record<string, unknown> }> = [];
 	const seen = new Set<string>();
 	for (const entry of parsed.slice(1)) {
-		if (typeof entry.type !== "string" || !NATIVE_ENTRY_TYPES.has(entry.type) || typeof entry.id !== "string" || !OPAQUE_ID.test(entry.id) || entry.id === ownerSessionId || seen.has(entry.id)) return undefined;
+		if (typeof entry.type !== "string" || !entry.type || entry.type === "session" || typeof entry.id !== "string" || !OPAQUE_ID.test(entry.id) || entry.id === ownerSessionId || seen.has(entry.id)) return undefined;
 		if (entry.parentId !== null && (typeof entry.parentId !== "string" || !seen.has(entry.parentId))) return undefined;
 		if (entry.type === "message" && (!isRecord(entry.message) || typeof entry.message.role !== "string")) return undefined;
 		seen.add(entry.id);

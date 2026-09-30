@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
-import { existsSync } from "node:fs";
-import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { nativeLines } from "./native-lines.ts";
+import { chmod, lstat, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
@@ -22,11 +23,6 @@ export interface DiagnosticTaskSession {
 	path: string;
 	ref: string;
 	removeUnused(): Promise<void>;
-}
-export interface DiagnosticLimitResult {
-	ok: boolean;
-	code?: "diagnostic_session_limit";
-	scope?: "child" | "run";
 }
 import type { NormalizedTask } from "./graph.ts";
 import { JsonlProtocolParser } from "./protocol.ts";
@@ -50,7 +46,7 @@ export interface PiInvocation {
 	args: string[];
 }
 
-type StopCause = "aborted" | "timeout" | "diagnostic_session_limit" | "child_exit_stalled";
+type StopCause = "aborted" | "child_exit_stalled";
 
 export interface ChildRunOptions {
 	managedWorkerScratch?: string;
@@ -70,11 +66,7 @@ export interface ChildRunOptions {
 	prompt: string;
 	approveProject: boolean;
 	diagnosticSession: DiagnosticTaskSession;
-	checkDiagnosticLimits?(): Promise<DiagnosticLimitResult>;
-	onRunDiagnosticLimit?(): void;
-	abortCause?(): "aborted" | "diagnostic_session_limit";
 	signal?: AbortSignal;
-	timeoutMs?: number;
 	killGraceMs?: number;
 	settledExitGraceMs?: number;
 	invocation?: PiInvocation;
@@ -191,7 +183,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			let childStartedAt: number | undefined;
 			let killTimer: NodeJS.Timeout | undefined;
 			let settledTimer: NodeJS.Timeout | undefined;
-			let checkingLimit = false;
 
 			const signalChild = (signal: NodeJS.Signals) => {
 				try {
@@ -211,23 +202,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				}, options.killGraceMs ?? HARD_LIMITS.killGraceMs);
 				killTimer.unref();
 			};
-			const checkLimits = () => {
-				if (!options.checkDiagnosticLimits || checkingLimit || closed) return;
-				checkingLimit = true;
-				void options.checkDiagnosticLimits()
-					.then((limit) => {
-						if (!limit.ok) {
-							if (limit.scope === "run") options.onRunDiagnosticLimit?.();
-							requestStop("diagnostic_session_limit");
-						}
-					})
-					.catch(() => requestStop("diagnostic_session_limit"))
-					.finally(() => { checkingLimit = false; });
-			};
 			const activity = (snapshot: Readonly<ChildActivity>) => {
 				finalActivity = snapshot;
 				options.onActivity?.(snapshot);
-				checkLimits();
 				if (snapshot.agentSettledObserved && !settledTimer && !closed) {
 					settledTimer = setTimeout(() => requestStop("child_exit_stalled"), options.settledExitGraceMs ?? HARD_LIMITS.settledExitGraceMs);
 					settledTimer.unref();
@@ -235,11 +212,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			};
 			activitySink = activity;
 
-			const abort = () => requestStop(options.abortCause?.() ?? "aborted");
+			const abort = () => requestStop("aborted");
 			if (options.signal?.aborted) abort();
 			else options.signal?.addEventListener("abort", abort, { once: true });
-			const timeout = setTimeout(() => requestStop("timeout"), options.timeoutMs ?? HARD_LIMITS.taskTimeoutMs);
-			timeout.unref();
 
 			child.once("spawn", () => {
 				childDidStart = true;
@@ -261,7 +236,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 					childDurationMs = Math.max(0, now() - childStartedAt);
 					options.onChildSettled?.();
 				}
-				clearTimeout(timeout);
 				if (killTimer) clearTimeout(killTimer);
 				if (settledTimer) clearTimeout(settledTimer);
 				options.signal?.removeEventListener("abort", abort);
@@ -306,8 +280,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		};
 		if (spawnError) return { ...base, status: "failed", error: { code: "spawn_failure", message: spawnError.message } };
 		if (stopCause === "aborted") return { ...base, status: "aborted", error: { code: "aborted", message: "Child was cancelled." } };
-		if (stopCause === "timeout") return { ...base, status: "failed", error: { code: "timeout", message: "Child exceeded its task timeout." } };
-		if (stopCause === "diagnostic_session_limit") return { ...base, status: "failed", error: { code: "diagnostic_session_limit", message: "Child diagnostic session exceeded its storage limit." } };
 		if (stopCause === "child_exit_stalled") return { ...base, status: "failed", error: { code: "child_exit_stalled", message: "Child settled but did not close within the exit grace period." } };
 		if (exit.code !== 0) return { ...base, status: "failed", error: { code: "child_exit", message: `Child exited unsuccessfully (${exit.code ?? exit.signal ?? "unknown"}).` } };
 		if (parsed.messageCount === 0 && parsed.malformedLines > 0) return { ...base, status: "failed", error: { code: "malformed_jsonl", message: "Child produced no valid assistant message." } };
@@ -325,22 +297,23 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 
 async function workerToolsSettled(path: string, start: number): Promise<boolean> {
 	try {
-		const info = await lstat(path);
-		if (!info.isFile() || info.size > HARD_LIMITS.diagnosticChildBytes || info.size < start) return false;
-		const data = await readFile(path);
-		if (data.length !== info.size || data.at(-1) !== 10) return false;
-		let ready = false;
-		let stopped = false;
-		for (const line of data.subarray(start).toString("utf8").trimEnd().split("\n")) {
-			if (Buffer.byteLength(line) > HARD_LIMITS.maxProtocolLineBytes) return false;
-			const entry = JSON.parse(line);
-			if (entry.type !== "custom" || entry.customType !== "csheng-worker-lifecycle") continue;
-			if (entry.data?.ok !== true) return false;
-			if (entry.data.phase === "ready") ready = true;
-			else if (entry.data.phase === "stopped" && ready) stopped = true;
-			else return false;
-		}
-		return ready && stopped;
+		const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+		try {
+			const info = await file.stat();
+			if (!info.isFile() || info.size < start) return false;
+			let ready = false;
+			let stopped = false;
+			for await (const entry of nativeLines(file, start)) {
+				if (entry.type !== "custom" || entry.customType !== "csheng-worker-lifecycle") continue;
+				const data = entry.data as { ok?: unknown; phase?: unknown } | undefined;
+				if (data?.ok !== true) return false;
+				if (data.phase === "ready") ready = true;
+				else if (data.phase === "stopped" && ready) stopped = true;
+				else return false;
+			}
+			const after = await file.stat();
+			return ready && stopped && info.size === after.size && info.mtimeMs === after.mtimeMs;
+		} finally { await file.close(); }
 	} catch { return false; }
 }
 

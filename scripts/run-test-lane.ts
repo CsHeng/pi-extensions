@@ -2,15 +2,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { installedHostEnvironment } from "./installed-host-env.ts";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 // Reviewed entry inventory. A new test must be assigned before any source lane can pass.
 const source = [
-	"bun-toolchain.test.ts", "fast-gpt.test.ts", "herdr-handoff-client.test.ts",
-	"herdr-handoff-config.test.ts", "herdr-handoff-contract.test.ts", "herdr-handoff-coordinator.test.ts",
-	"herdr-handoff-envelope.test.ts", "herdr-handoff-extension.test.ts", "herdr-handoff-render.test.ts",
-	"herdr-handoff-workspace.test.ts", "installed-herdr-handoff-probe.test.ts", "installed-subagents-probe.test.ts",
+	"bun-toolchain.test.ts", "fast-gpt.test.ts", "installed-subagents-probe.test.ts",
 	"installed-workflow-probe.test.ts", "live-subagents-e2e.test.ts", "multi-skill-mentions.test.ts",
 	"package.test.ts", "prepared-input.test.ts", "publish-local-package.test.ts", "repository-boundary.test.ts",
 	"session-cost-report.test.ts", "settlement.test.ts", "status-footer.test.ts", "subagents-async-evaluator.test.ts",
@@ -22,7 +20,7 @@ const source = [
 	"subagents-guard.test.ts", "subagents-guidance-guard.test.ts", "subagents-guidance-native.test.ts",
 	"subagents-guidance.test.ts", "subagents-host-contract.test.ts", "subagents-managed-dispatch.test.ts",
 	"subagents-managed-observer.test.ts", "subagents-managed-sessions.test.ts", "subagents-native-continuation.test.ts",
-	"subagents-native-observation.test.ts", "subagents-observability.test.ts", "subagents-observation-hooks.test.ts",
+	"subagents-native-observation.test.ts", "subagents-native-evolution.test.ts", "subagents-stream-host.test.ts", "subagents-observability.test.ts", "subagents-observation-hooks.test.ts",
 	"subagents-observation-metrics.test.ts", "subagents-observer-events.test.ts", "subagents-protocol.test.ts",
 	"subagents-provenance.test.ts", "subagents-reliability.test.ts", "subagents-render.test.ts",
 	"subagents-repository-policy.test.ts", "subagents-routing.test.ts", "subagents-runner.test.ts",
@@ -38,9 +36,7 @@ const source = [
 ];
 // Conservative: a filesystem/process import or disposable fixture belongs to isolated feedback.
 const isolated = new Set([
-	"bun-toolchain.test.ts", "herdr-handoff-client.test.ts", "herdr-handoff-config.test.ts",
-	"herdr-handoff-coordinator.test.ts", "herdr-handoff-envelope.test.ts", "herdr-handoff-workspace.test.ts",
-	"installed-herdr-handoff-probe.test.ts", "installed-subagents-probe.test.ts", "installed-workflow-probe.test.ts",
+	"bun-toolchain.test.ts", "installed-subagents-probe.test.ts", "installed-workflow-probe.test.ts",
 	"multi-skill-mentions.test.ts", "package.test.ts", "publish-local-package.test.ts",
 	"repository-boundary.test.ts", "session-cost-report.test.ts", "subagents-async-git-components.test.ts",
 	"subagents-async-host.test.ts", "subagents-async-runtime.test.ts", "subagents-candidates.test.ts",
@@ -54,7 +50,7 @@ const isolated = new Set([
 	"workflow-evidence.test.ts", "workflow-goal-host.test.ts", "workflow-goal.test.ts",
 	"workflow-paths.test.ts", "workflow-progress.test.ts",
 ]);
-const piHost = new Set(["subagents-git-read-host.test.ts", "workflow-installed-host.test.ts"]);
+const piHost = new Set(["subagents-git-read-host.test.ts", "subagents-native-evolution.test.ts", "subagents-stream-host.test.ts", "workflow-installed-host.test.ts"]);
 const uiHost = new Set(["subagents-cc-tui.test.ts", "work-timing-tui.test.ts", "workflow-progress-tui.test.ts"]);
 const known = new Set(source);
 const discovered = readdirSync(join(root, "tests")).filter(name => name.endsWith(".test.ts"));
@@ -75,8 +71,10 @@ if (!["fast", "isolated", "host-optional", "host-required", "ui-required"].inclu
 	console.error("Usage: bun scripts/run-test-lane.ts fast|isolated|host-optional|host-required|ui-required");
 	process.exit(2);
 }
+const env = lane === "host-optional" || lane === "host-required" || lane === "ui-required"
+	? installedHostEnvironment() : process.env;
 if (lane === "host-required" || lane === "ui-required") {
-	const pi = spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 5000 });
+	const pi = spawnSync("pi", ["--version"], { env, encoding: "utf8", timeout: 5000 });
 	if (pi.status !== 0) { console.error("Installed Pi unavailable; required host lane cannot pass."); process.exit(1); }
 }
 if (lane === "ui-required") {
@@ -86,7 +84,7 @@ if (lane === "ui-required") {
 }
 const args = ["test", "--timeout", "120000", ...names.map(name => `./tests/${name}`)];
 if (lane === "ui-required") args.push("./tests/subagents-ui-tui.e2e.ts");
-const result = spawnSync(process.execPath, args, { cwd: root, env: process.env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+const result = spawnSync(process.execPath, args, { cwd: root, env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
 process.stdout.write(result.stdout ?? "");
 process.stderr.write(result.stderr ?? "");
 if (result.error) console.error(result.error);

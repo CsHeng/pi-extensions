@@ -36,6 +36,13 @@ test("path policy permits scoped reads and exact writes", async (t) => {
 	assert.match((await authorizePath(manifest, "write", "src/other.ts")).reason ?? "", /exact declared/);
 });
 
+test("managed workers may prepare project environments but cannot write Git administration", async (t) => {
+	const { root } = await fixture(t);
+	const manifest = parseCapability({ version: 2, root, role: "worker", readRoots: [root], writePaths: [], writeRoot: true, externalReadRoots: [] });
+	for (const path of ["node_modules/pkg/index.js", ".venv/pyvenv.cfg", "bun.lock"]) assert.equal((await authorizePath(manifest, "write", path)).allowed, true, path);
+	assert.equal((await authorizePath(manifest, "write", ".git/config")).allowed, false);
+});
+
 test("path policy rejects lexical and symlink escape", async (t) => {
 	const { root, outside, manifest } = await fixture(t);
 	assert.equal((await authorizePath(manifest, "read", "../escape")).allowed, false);

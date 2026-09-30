@@ -105,13 +105,12 @@ async function common(repo: string): Promise<string> { return realpath(resolve(r
 async function commitTree(repo: string, tree: string, parent?: string): Promise<string> {
 	return oid(await text(repo, ["commit-tree", oid(tree), ...(parent ? ["-p", oid(parent)] : [])], { input: "Managed execution checkpoint\n" }));
 }
-const excludedPath = (path: string, roots: readonly string[]) => roots.some(root => path === root || path.startsWith(`${root}/`));
-async function supportedInput(repo: string, excluded: readonly string[] = []): Promise<string[]> {
+async function supportedInput(repo: string): Promise<string[]> {
 	if ((await run(repo, ["ls-files", "--unmerged", "-z"])).stdout.length) throw new GitWorkspaceError("unresolved_index_conflict");
 	if (await text(repo, ["config", "--get", "core.sparseCheckout"], { allowed: [0, 1] }) === "true") throw new GitWorkspaceError("unsupported_sparse_checkout");
 	const stages = (await run(repo, ["ls-files", "--stage", "-z"])).stdout.toString("utf8");
 	if (stages.split("\0").some(line => line.startsWith("160000 "))) throw new GitWorkspaceError("unsupported_submodule_input");
-	const files = paths((await run(repo, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])).stdout).filter(path => !excludedPath(path, excluded));
+	const files = paths((await run(repo, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])).stdout);
 	if (files.length > 100_000) throw new GitWorkspaceError("source_entry_limit");
 	let bytes = 0;
 	const visible: string[] = [];
@@ -137,9 +136,9 @@ async function supportedInput(repo: string, excluded: readonly string[] = []): P
 }
 
 /** Captures visible tracked/non-ignored source, not staging categories or ignored dependencies. */
-export async function captureGitInput(repository: string, parent?: string, excluded: readonly "node_modules"[] = []): Promise<GitInput> {
+export async function captureGitInput(repository: string, parent?: string): Promise<GitInput> {
 	const repo = await root(repository);
-	const files = await supportedInput(repo, excluded);
+	const files = await supportedInput(repo);
 	const directory = await mkdtemp(join(tmpdir(), "csheng-git-index-"));
 	const index = join(directory, "index");
 	try {
@@ -221,7 +220,7 @@ async function changed(repo: string, before: string, after: string): Promise<str
 }
 export async function freezeGitCandidate(workspace: GitTaskWorkspace): Promise<GitCandidate> {
 	await inspectGitWorkspace(workspace);
-	const input = await captureGitInput(workspace.path, workspace.inputBase, workspace.dependencyRoots);
+	const input = await captureGitInput(workspace.path, workspace.inputBase);
 	const changedPaths = await changed(workspace.repo, workspace.inputBase, input.commit);
 	const selected = new Set(changedPaths); let bytes = 0;
 	for (const entry of (await run(workspace.repo, ["ls-tree", "-rlz", input.commit])).stdout.toString("utf8").split("\0")) {

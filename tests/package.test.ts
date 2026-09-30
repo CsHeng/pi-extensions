@@ -16,7 +16,7 @@ interface PackageManifest {
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes the eight maintained extensions and their Pi peers", async () => {
+test("package exposes the seven maintained extensions and their Pi peers", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -29,7 +29,6 @@ test("package exposes the eight maintained extensions and their Pi peers", async
 		"./extensions/multi-skill-mentions/index.ts",
 		"./extensions/fast-gpt/index.ts",
 		"./extensions/subagents/index.ts",
-		"./extensions/herdr-handoff/index.ts",
 		"./extensions/status-footer/index.ts",
 		"./extensions/work-timing/index.ts",
 		"./extensions/subagents-ui/index.ts",

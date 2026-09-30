@@ -16,16 +16,16 @@ async function fixture(): Promise<GoalState> {
  return store.current()!;
 }
 function markDone(state: GoalState, key: string) {
- const basis = { scope: ["."], fingerprint: "fixture", state: "current" as const };
+ const scope = ["."];
  const id = `A1:${key}`;
- state.facts.push({ id, key, kind: "agent", check: "fixture", result: "pass", attempt: "A1", basis, at: "fixture", generation: 0, usable: true });
+ state.facts.push({ id, key, kind: "agent", check: "fixture", result: "pass", attempt: "A1", scope, at: "fixture", generation: 0, usable: true });
  state.acceptance.push({ subject: `task:${key}`, revision: 1, facts: [id], accepted: true, rationale: "fixture" });
 }
 const view = (state: GoalState): GoalView => ({ state, deficits: [] });
 
 test("todo heading and tree show progress, running work and dependencies, never tool receipts", async () => {
  const state = await fixture(); markDone(state, "read");
- state.attempts.push({ id: "A2", task: "ui", revision: 1, generation: 0, started: "fixture", status: "running", basis: { scope: ["."], fingerprint: "fixture", state: "current" }, writes: [] });
+ state.attempts.push({ id: "A2", task: "ui", revision: 1, generation: 0, started: "fixture", status: "running", scope: ["."], writes: [] });
  const before = structuredClone(state);
  assert.deepEqual(goalRows(view(state), 120), [
   "● Tasks · 恢复任务列表 (1/3 accepted) · 1 running",

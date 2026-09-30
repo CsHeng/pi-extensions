@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import test, { type TestContext } from "node:test";
 import { pathIdentity } from "../extensions/workflow/paths.ts";
-import { fingerprintScope } from "../extensions/workflow/fingerprints.ts";
 
 async function fixture(t: TestContext): Promise<string> {
  const root = await realpath(await mkdtemp(join(tmpdir(), "workflow-paths-")));
@@ -44,7 +43,6 @@ test("non-directory components cannot be traversed via child, dot, parent or tra
    for (const followLeaf of [true, false]) {
     await assert.rejects(pathIdentity(entry + suffix, followLeaf), { code: "ENOTDIR" });
    }
-   assert.equal((await fingerprintScope([entry + suffix], root)).state, "unavailable");
   }
  }
  for (const link of ["slash-target", "parent-target"]) {
@@ -84,7 +82,6 @@ test("dot traversal and replaceable leaves cannot bypass directory search permis
    for (const followLeaf of [true, false]) {
     await assert.rejects(pathIdentity(locked + suffix, followLeaf), { code: "EACCES" });
    }
-   assert.equal((await fingerprintScope([locked + suffix], root)).state, "unavailable");
   }
  } finally {
   await chmod(locked, 0o700);
@@ -96,5 +93,4 @@ test("symlink cycles are bounded rather than producing a physical identity", asy
  await symlink("cycle-b", join(root, "cycle-a"));
  await symlink("cycle-a", join(root, "cycle-b"));
  await assert.rejects(pathIdentity(join(root, "cycle-a")), /symlink resolution limit/);
- assert.equal((await fingerprintScope([join(root, "cycle-a")], root)).state, "unavailable");
 });

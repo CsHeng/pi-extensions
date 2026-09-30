@@ -20,6 +20,31 @@ function assistant(stopReason = "stop", text = "done", errorMessage?: string) {
 	};
 }
 
+test("failed response proposals are not active executions; actual starts still fence final completion", () => {
+	for (const started of [false, true]) {
+		const parser = new JsonlProtocolParser();
+		if (started) parser.push(line({ type: "tool_execution_start", toolCallId: "abandoned", toolName: "read" }));
+		parser.push(line({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "abandoned", name: "read" }], stopReason: "error", errorMessage: "retryable" } }));
+		parser.push(line(assistant()));
+		parser.push(line({ type: "agent_settled" }));
+		assert.equal(parser.finish().reportComplete, !started);
+	}
+});
+
+test("redundant large aggregate cannot replace essential final message or framing", () => {
+	const aggregate = line({ type: "agent_end", messages: ["x".repeat(2 * 1024 * 1024)] });
+	for (const chunkSize of [4096, aggregate.length]) {
+		const parser = new JsonlProtocolParser(); parser.push(line(assistant()));
+		for (let offset = 0; offset < aggregate.length; offset += chunkSize) parser.push(aggregate.slice(offset, offset + chunkSize));
+		parser.push(line({ type: "agent_settled" }));
+		assert.equal(parser.finish().reportComplete, true);
+	}
+	const truncated = new JsonlProtocolParser(); truncated.push(line(assistant())); truncated.push(aggregate.slice(0, -1));
+	assert.equal(truncated.finish().reportComplete, false);
+	const essential = new JsonlProtocolParser(); essential.push(line(assistant("stop", "x".repeat(2 * 1024 * 1024)))); essential.push(line({ type: "agent_settled" }));
+	assert.equal(essential.finish().reportComplete, false);
+});
+
 test("fragmented and coalesced events preserve final output and usage", () => {
 	const parser = new JsonlProtocolParser();
 	const payload = line(assistant());

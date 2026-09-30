@@ -52,8 +52,8 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  const terminalTasks = new Set<string>(); const terminalRuns = new Set<string>(); const seenEvents = new Set<string>();
  registerGoalTool(pi, store, () => fenced);
  const reset = () => { epoch++; captures.clear(); executionCaptures.clear(); dispatches.clear(); pending.clear(); terminalTasks.clear(); terminalRuns.clear(); seenEvents.clear(); tracker.reset(); fenced = false; projected = undefined; };
- pi.on("session_start", async (_event, ctx) => { ui.detach(); reset(); const lease = epoch; store.replay(ctx.sessionManager.getBranch()); await store.revalidate(ctx.cwd); if (lease !== epoch) return; store.recover("Session recovery requires explicit reconciliation/resume."); ui.attach(ctx); });
- pi.on("session_tree", async (_event, ctx) => { ui.detach(); reset(); const lease = epoch; store.replay(ctx.sessionManager.getBranch()); await store.revalidate(ctx.cwd); if (lease !== epoch) return; store.recover("Branch replacement requires explicit reconciliation/resume."); ui.attach(ctx); });
+ pi.on("session_start", (_event, ctx) => { ui.detach(); reset(); store.replay(ctx.sessionManager.getBranch()); store.recover("Session recovery requires explicit reconciliation/resume."); ui.attach(ctx); });
+ pi.on("session_tree", (_event, ctx) => { ui.detach(); reset(); store.replay(ctx.sessionManager.getBranch()); store.recover("Branch replacement requires explicit reconciliation/resume."); ui.attach(ctx); });
  pi.on("session_shutdown", () => { reset(); ui.detach(); });
  pi.on("input", event => { tracker.received(event); if (event.source === "interactive" || event.source === "rpc") epoch++; });
  pi.on("before_agent_start", () => { tracker.prepare(); stopped = false; });
@@ -88,10 +88,10 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
    captures.set(event.toolCallId, value);
    const args = event.args as { action?: string };
    const state = store.current();
-   if (event.toolName === MANAGED_SESSION_TOOL_NAME && ["create", "continue"].includes(args?.action ?? "") && state && Object.keys(capture.bases).length) {
+   if (event.toolName === MANAGED_SESSION_TOOL_NAME && ["create", "continue"].includes(args?.action ?? "") && state && Object.keys(capture.scopes).length) {
     const binding = { capture: value, sessionId: ctx.sessionManager.getSessionId(), contractId: state.id, anchor: ctx.sessionManager.getLeafId() };
     // Historical association survives in the native branch; recovery never turns it into fresh proof.
-    pi.appendEntry("csheng-workflow-execution-binding", { version: 1, toolCallId: event.toolCallId, ...binding });
+    pi.appendEntry("csheng-workflow-execution-binding", { version: 2, toolCallId: event.toolCallId, ...binding });
     dispatches.set(event.toolCallId, binding);
     while (dispatches.size > 256) dispatches.delete(dispatches.keys().next().value!);
    }
@@ -121,9 +121,9 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
    });
    const first = originals[0];
    // Querying an old result is not a new execution check. Mixed or recovered bindings fail closed.
-   evidence = first && originals.every(value => value && value.owner === first.owner && value.generation === first.generation && digest(value.bases) === digest(first.bases)) ? first : { ...capture, bases: {} };
+   evidence = first && originals.every(value => value && value.owner === first.owner && value.generation === first.generation && digest(value.scopes) === digest(first.scopes)) ? first : { ...capture, scopes: {} };
   }
-  store.observe({ bases: evidence.bases, owner: evidence.owner, generation: evidence.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  store.observe({ scopes: evidence.scopes, owner: evidence.owner, generation: evidence.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
  });
  const unsubscribeExecution = pi.events.on(SUBAGENT_EXECUTION_EVENT, raw => {
   const event = raw as SubagentExecutionEvent;
@@ -146,7 +146,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
   const status = event.sessions.every(session => session.result?.status === "succeeded") ? "succeeded" : "failed";
   const host = summarizeHostObservation({ toolCallId: event.eventId, toolName: MANAGED_SESSION_TOOL_NAME, isError: status !== "succeeded", sessionId: binding.sessionId, result: { details: { action: "execution", status, sessions: event.sessions } } });
   const identity = hostCheckIdentity(MANAGED_SESSION_TOOL_NAME, { action: "execution" }, host.managed);
-  store.observe({ bases: binding.capture.bases, owner: binding.capture.owner, generation: binding.capture.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  store.observe({ scopes: binding.capture.scopes, owner: binding.capture.owner, generation: binding.capture.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
   store.executionReady(event.runId); // The executor alone owns the completion wake.
  });
  pi.on("session_shutdown", () => { unsubscribeExecution(); stopArming(); });
@@ -157,7 +157,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
   if (stopped || ctx.signal?.aborted) { store.suspend("Agent abort or provider error; no automatic recovery."); return; }
   if (fenced || !state.input.aligned) return;
   if (pending.size) {
-   const attempts = new Set([...pending.values()].flatMap(value => Object.keys(dispatches.get(value.call)?.capture.bases ?? {})));
+   const attempts = new Set([...pending.values()].flatMap(value => Object.keys(dispatches.get(value.call)?.capture.scopes ?? {})));
    const waitingTasks = new Set(state.attempts.filter(attempt => attempts.has(attempt.id)).map(attempt => attempt.task));
    const independent = state.tasks.some(task => !waitingTasks.has(task.key) && !task.blocker && !accepted(state, `task:${task.key}`) && (task.dependsOn?.every(key => accepted(state, `task:${key}`)) ?? true));
    if (!independent) { store.waitForExecutions([...pending.keys()]); return; }

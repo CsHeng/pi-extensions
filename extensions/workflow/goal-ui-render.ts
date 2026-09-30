@@ -42,6 +42,7 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
  const clip = (text: string) => truncateToWidth(text, width, "…");
  if (view.unavailable !== undefined) return [clip(theme.fg("warning", "! Tasks · state unavailable · /workflow-ui list"))];
  const s = view.state;
+ if (!s && view.legacy) return [clip(theme.fg("warning", "! Historical v2 · explicit replacement required")), ...view.legacy.tasks.slice(0, maxRows - 1).map(task => clip(`  ${clean(task.key)} ${clean(task.title)} · historical`))];
  if (!s) return [];
  const tasks = s.tasks.map(task => {
   const status = taskProgress(s, task);

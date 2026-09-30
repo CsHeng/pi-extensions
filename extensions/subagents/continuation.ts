@@ -498,7 +498,6 @@ export class ContinuationService {
 					...(worker ? { managedWorkerScratch: join(store.path(handle), "scratch"), managedWorkerInputs: record.workspace!.inputs } : {}),
 					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], externalReadPins: record.externalReadPins ?? [], ...(worker ? { writeRoot: true } : {}) },
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
-					checkDiagnosticLimits: async () => ({ ok: (await lstat(native)).size <= HARD_LIMITS.diagnosticChildBytes, code: "diagnostic_session_limit", scope: "child" }),
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
 				}).finally(() => observer?.childStopped(handle));
 				result.executionStatus = result.telemetry?.childStarted === true ? result.status : result.telemetry?.childStarted === false ? "not-started" : "unavailable";

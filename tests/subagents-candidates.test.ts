@@ -80,15 +80,15 @@ test("same-line conflicts retain both source versions and report conflict withou
  await assert.rejects(syncManagedInputs(f.store, f.record), /convergence_conflict/); assert.equal(await readFile(join(f.source, "file"), "utf8"), "worker\n"); assert.equal(await readFile(join(f.repo, "file"), "utf8"), "parent\n");
 });
 
-test("private dependency mutations remain local runtime state and explicit refresh updates parent dependency input", async t => {
+test("ignored environments remain project-owned through candidate apply and source refresh", async t => {
  const f = await setup(t, async repo => { await writeFile(join(repo, ".gitignore"), "node_modules/\n"); await mkdir(join(repo, "node_modules")); await writeFile(join(repo, "node_modules/pkg"), "one"); });
- await writeFile(join(f.source, "node_modules/pkg"), "local"); await writeFile(join(f.source, "new.txt"), "source"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate); assert.deepEqual(candidate.changedPaths, ["new.txt"]);
+ await mkdir(join(f.source, "node_modules")); await writeFile(join(f.source, "node_modules/pkg"), "local"); await writeFile(join(f.source, "new.txt"), "source"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate); assert.deepEqual(candidate.changedPaths, ["new.txt"]);
  await applyCandidate(f.store, f.record, candidate.id); assert.equal(await readFile(join(f.repo, "node_modules/pkg"), "utf8"), "one");
- await writeFile(join(f.repo, "node_modules/pkg"), "two"); await syncManagedInputs(f.store, f.record); assert.equal(await readFile(join(f.source, "node_modules/pkg"), "utf8"), "two");
+ await writeFile(join(f.repo, "node_modules/pkg"), "two"); await syncManagedInputs(f.store, f.record); assert.equal(await readFile(join(f.source, "node_modules/pkg"), "utf8"), "local");
 });
 
-test("no source change produces no candidate; new ignored runtime dependency is excluded even without parent ignore rule", async t => {
- const f = await setup(t); await mkdir(join(f.source, "node_modules")); await writeFile(join(f.source, "node_modules/state"), "local"); assert.equal(await freezeCandidate(f.store, f.record), undefined);
+test("Git project rules, not package-directory names, determine candidate source", async t => {
+ const f = await setup(t); await mkdir(join(f.source, "node_modules")); await writeFile(join(f.source, "node_modules/state"), "local"); assert.deepEqual((await freezeCandidate(f.store, f.record))?.changedPaths, ["node_modules/state"]);
 });
 
 test("candidate byte cap, incomplete reports, unknown apply state and forged candidate metadata fail closed", async t => {

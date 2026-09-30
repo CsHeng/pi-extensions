@@ -260,7 +260,7 @@ export async function authorizePath(
 		const target = resolve(capability.root, requestedPath);
 		if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
 		if (capability.writeRoot) {
-			if ([".git", "node_modules"].includes(relative(capability.root, target).split(sep)[0]!)) return { allowed: false, reason: "Managed metadata and dependencies are not source writes." };
+			if (relative(capability.root, target).split(sep)[0] === ".git") return { allowed: false, reason: "Managed Git metadata is not a source write." };
 		} else if (!capability.writePaths.includes(target)) return { allowed: false, reason: "Path is not an exact declared write file." };
 		try {
 			const physicalRoot = await realpath(capability.root);

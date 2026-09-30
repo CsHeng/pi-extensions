@@ -1,6 +1,5 @@
-/** Version two is a semantic completion contract, not an ordinary todo ledger. */
+/** Version three records provenance and explicit judgment, not disk-content certification. */
 import { Type, type Static } from "typebox";
-import type { BasisFingerprint } from "./fingerprints.ts";
 
 export const WORKFLOW_ENTRY_TYPE = "csheng-workflow-state";
 export const WORKFLOW_TOOL_NAME = "csheng_workflow";
@@ -31,6 +30,7 @@ export const goalParameters = Type.Object({
  scope: Type.Optional(Type.Array(text(500), { maxItems: 32, description: "Filesystem file/directory paths whose state the work and checks depend on, relative to cwd or explicitly authorized absolute roots. Not task descriptions, goals or summaries. Include the actual checked source paths; planned missing paths are supported." })),
  writes: Type.Optional(Type.Array(text(500), { maxItems: 32, description: "Planned filesystem write paths for overlap detection, relative to cwd or explicitly authorized absolute roots. Not objectives, summaries or permission grants; missing targets for new files are supported." })),
  attempt: Type.Optional(text(64)), summary: Type.Optional(text()),
+ reconciledExecutions: Type.Optional(Type.Array(text(128), { uniqueItems: true, description: "Resume only: recovered execution IDs whose terminal state or explicit owner disposition the main agent reconciled. Requires alignment, reason and existing authority; never cancels live execution or imports evidence." })),
  facts: Type.Optional(Type.Array(fact, { maxItems: 32 })), judgments: Type.Optional(Type.Array(judgment, { maxItems: 64 })),
  complete: Type.Optional(Type.Boolean()), blocker: Type.Optional(blocker),
  outcome: Type.Optional(enums("completed", "cancelled", "superseded")),
@@ -43,16 +43,16 @@ export interface GoalRequirement extends Static<typeof requirement> { revision: 
 export interface GoalTask extends Static<typeof task> { revision: number; blocker?: Static<typeof blocker> }
 export interface GoalAttempt {
  id: string; task: string; revision: number; generation: number; started: string;
- status: "running" | "reported" | "interrupted"; basis: BasisFingerprint; writes: string[];
+ status: "running" | "reported" | "interrupted"; scope: string[]; writes: string[];
  summary?: string;
 }
 export interface GoalFact extends GoalFactInput {
- id: string; attempt: string; basis: BasisFingerprint; at: string; generation: number;
+ id: string; attempt: string; scope: string[]; at: string; generation: number;
  usable: boolean; note?: string; checkIdentity?: string;
 }
 export interface GoalAcceptance extends GoalJudgment { revision: number }
 export interface GoalState {
- version: 2; revision: number; id: string;
+ version: 3; revision: number; id: string;
  goal: string; delivery: string; authority: string; goalRevision: number;
  fulfillment: "pending" | "complete" | "cancelled" | "superseded";
  continuation: { state: "active" | "waiting" | "suspended"; reason?: string; unblock?: string; lastProgress?: string; repeat: number; dispatched: number; waitingFor?: string[]; automaticPaused?: boolean };
@@ -60,26 +60,39 @@ export interface GoalState {
  requirements: GoalRequirement[]; tasks: GoalTask[]; attempts: GoalAttempt[]; facts: GoalFact[]; acceptance: GoalAcceptance[];
  /** Inert provenance retained when reading v2 snapshots created by the retired v1 migrator. */
  legacy?: { revision: number; id: string; goal: string };
+ replacement?: { id: string; revision: number; alignment: string; unresolvedExecutions: string[] };
  executionPending?: string[];
+ recoveredExecutions?: string[];
+ executionReconciliations?: Array<{ ids: string[]; reason: string; authority: string; alignment: string }>;
  calls: string[]; serial: number;
 }
 const integer = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const basis = Type.Object({ scope: list(text(500)), fingerprint: text(256), state: enums("current", "unavailable"), note: Type.Optional(text()) }, { additionalProperties: false });
 export const goalStateSchema = Type.Object({
- version: Type.Literal(2), revision: Type.Integer({ minimum: 1 }), id: text(128), goal: text(), delivery: text(), authority: text(), goalRevision: Type.Integer({ minimum: 1 }),
+ version: Type.Literal(3), revision: Type.Integer({ minimum: 1 }), id: text(128), goal: text(), delivery: text(), authority: text(), goalRevision: Type.Integer({ minimum: 1 }),
  fulfillment: enums("pending", "complete", "cancelled", "superseded"),
  continuation: Type.Object({ state: enums("active", "waiting", "suspended"), reason: Type.Optional(text()), unblock: Type.Optional(text()), lastProgress: Type.Optional(text(128)), repeat: integer, dispatched: integer, waitingFor: Type.Optional(Type.Array(text(128))), automaticPaused: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
  input: Type.Object({ generation: integer, aligned: Type.Boolean(), unknown: Type.Boolean() }, { additionalProperties: false }),
  requirements: Type.Array(Type.Object({ ...requirement.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }), { minItems: 1 }),
  tasks: Type.Array(Type.Object({ ...task.properties, revision: Type.Integer({ minimum: 1 }), blocker: Type.Optional(blocker) }, { additionalProperties: false })),
  // Session lifetime is not an execution budget. Retain evidence and idempotency identities without a cumulative cutoff.
- attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), basis, writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false })),
- facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), basis, at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false })),
+ attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), scope: list(text(500)), writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false })),
+ facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), scope: list(text(500)), at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false })),
  acceptance: Type.Array(Type.Object({ ...judgment.properties, revision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false })),
+ replacement: Type.Optional(Type.Object({ id: text(128), revision: integer, alignment: text(), unresolvedExecutions: Type.Array(text(128)) }, { additionalProperties: false })),
+ recoveredExecutions: Type.Optional(Type.Array(text(128))),
+ executionReconciliations: Type.Optional(Type.Array(Type.Object({ ids: Type.Array(text(128)), reason: text(), authority: text(), alignment: text() }, { additionalProperties: false }))),
  legacy: Type.Optional(Type.Object({ revision: integer, id: text(128), goal: text(4000) }, { additionalProperties: false })), executionPending: Type.Optional(Type.Array(text(128))), calls: Type.Array(text(256)), serial: integer,
 }, { additionalProperties: false });
-export interface GoalSnapshot { schemaVersion: 2; state: GoalState }
-export interface GoalView { state?: GoalState; unavailable?: string; deficits: string[] }
+// V2 is read-only historical evidence; its accepted state is never imported into V3.
+const { replacement: _replacement, recoveredExecutions: _recovered, executionReconciliations: _reconciliations, ...legacyProperties } = goalStateSchema.properties;
+export const legacyGoalStateSchema = Type.Object({ ...legacyProperties, version: Type.Literal(2),
+ attempts: Type.Array(Type.Object({ id: text(64), task: key, revision: Type.Integer({ minimum: 1 }), generation: integer, started: text(100), status: enums("running", "reported", "interrupted"), basis, writes: list(text(500)), summary: Type.Optional(text()) }, { additionalProperties: false })),
+ facts: Type.Array(Type.Object({ ...fact.properties, id: text(128), attempt: text(64), basis, at: text(100), generation: integer, usable: Type.Boolean(), note: Type.Optional(text()), checkIdentity: Type.Optional(text(128)) }, { additionalProperties: false })),
+}, { additionalProperties: false });
+export type LegacyGoalState = Static<typeof legacyGoalStateSchema>;
+export interface GoalSnapshot { schemaVersion: 3; state: GoalState }
+export interface GoalView { state?: GoalState; legacy?: LegacyGoalState; unavailable?: string; deficits: string[] }
 // This bounds repeated automatic dispatch, not the amount of legitimate work in a contract.
 export const GOAL_LIMITS = { noProgress: 2 } as const;
 export class GoalError extends Error {

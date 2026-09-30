@@ -14,7 +14,6 @@
     "multi-skill-mentions",
     "fast-gpt",
     "subagents",
-    "herdr-handoff",
     "status-footer",
     "work-timing",
     "subagents-ui"
@@ -52,7 +51,6 @@
       "./extensions/multi-skill-mentions/index.ts",
       "./extensions/fast-gpt/index.ts",
       "./extensions/subagents/index.ts",
-      "./extensions/herdr-handoff/index.ts",
       "./extensions/status-footer/index.ts",
       "./extensions/work-timing/index.ts",
       "./extensions/subagents-ui/index.ts",

@@ -108,6 +108,17 @@ test("search retains its completion barrier on cancellation with cached and fdfi
 	}
 });
 
+test("command instrumentation does not impose cumulative command or output budgets", async (t) => {
+	const { execute, worker, scratch } = await setup(t);
+	for (let index = 0; index < 1026; index++) await execute("bash", { command: ":" });
+	assert.equal(worker.commands.length, 1024, "only the in-memory observation projection is bounded");
+	const result = await execute("bash", { command: `${quote(process.execPath)} -e 'process.stdout.write("x".repeat(33 * 1024 * 1024))'` });
+	const fullOutputPath = (result.details as { fullOutputPath: string }).fullOutputPath;
+	assert.ok(fullOutputPath.startsWith(`${scratch}/`));
+	assert.ok((await readFile(fullOutputPath)).length > 32 * 1024 * 1024);
+	await execute("bash", { command: ":" });
+});
+
 test("command timeouts do not poison later tasks and native truncated output is owned by scratch", async (t) => {
 	const { scratch, execute, worker } = await setup(t);
 	await assert.rejects(execute("bash", { command: command("wait"), timeout: 0.15 }), /timed out/i);

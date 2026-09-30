@@ -71,7 +71,7 @@ test("real host makes three productive continuations on unchanged source and the
  await waitForTrace(trace, () => state(h).fulfillment === "complete");
  await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 4);
  assert.equal(state(h).continuation.dispatched, 3); assert.equal(state(h).input.generation, 0);
- assert.equal(new Set(state(h).facts.map(f => f.basis.fingerprint)).size, 1, "source never changed");
+ assert.equal(new Set(state(h).facts.map(f => JSON.stringify(f.scope))).size, 1, "source never changed");
  assert.equal(new Set(state(h).facts.map(f => f.checkIdentity)).size, 4, "real checks, not prose, established progress");
  assert.equal(h.faux.state.callCount, 17); assert.deepEqual(h.errors, []);
 });
@@ -125,7 +125,7 @@ for (const commandWait of [false, true]) test(`v2 unavailable continuation is su
  assert.equal(state(h).fulfillment, "pending"); assert.equal(state(h).continuation.state, "suspended"); assert.equal(state(h).continuation.dispatched, 0);
 });
 
-test("real host recovery revalidates a completed snapshot before mounting its projection in a new root", async t => {
+test("real host recovery preserves reported completed judgment without certifying a new root", async t => {
  const first = await createHostHarness({ mode: "print", extensions: [workflow] }); t.after(() => first.dispose());
  first.faux.setResponses([enroll(), call({ operation: "start", task: "t", scope: ["result"], writes: ["result"] }),
   fauxAssistantMessage(fauxToolCall("write", { path: "result", content: "verified" } as never)),
@@ -134,7 +134,7 @@ test("real host recovery revalidates a completed snapshot before mounting its pr
  await first.session.prompt("implement"); assert.equal(state(first).fulfillment, "complete");
  const restored = await createHostHarness({ mode: "print", sessionManager: first.session.sessionManager, extensions: [workflow], sessionStartReason: "resume" }); t.after(() => restored.dispose());
  assert.notEqual(restored.workDir, first.workDir);
- assert.equal(state(restored).fulfillment, "pending"); assert.equal(state(restored).continuation.state, "suspended");
+ assert.equal(state(restored).fulfillment, "complete"); assert.equal(state(restored).continuation.dispatched, 0);
  assert.deepEqual(restored.errors, []);
 });
 
@@ -161,7 +161,7 @@ test("real host writes two external non-Git roots and binds host evidence to the
  h.faux.setResponses([call({ operation: "amend", reason: "inspect existing authority", authority: "original fixture", alignment: "same scope" }), call({ operation: "close", outcome: "completed", reason: "recheck changed root" }), fauxAssistantMessage("not complete")]);
  await h.session.prompt("recheck");
  assert.equal(state(h).fulfillment, "pending");
- assert.notEqual(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true);
+ assert.equal(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true, "declared scope is not automatic disk certification");
  assert.deepEqual(h.errors, []);
 });
 

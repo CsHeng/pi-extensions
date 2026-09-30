@@ -16,13 +16,6 @@ const FORBIDDEN = [
 	["src", "runtime", "harness"].join("/"),
 	["integrations", "pi"].join("/"),
 ] as const;
-const HERDR_RUNTIME_FORBIDDEN = [
-	"extensions/subagents",
-	["from", "./subagents"].join(" "),
-	["net", "connect"].join("."),
-	["integrations", "pi"].join("/"),
-	["agent", "skills"].join("-"),
-] as const;
 const SUBAGENT_RUNTIME_FORBIDDEN = [
 	["pi", "subagents"].join("-"),
 	["workflow", "harness"].join("-"),
@@ -75,18 +68,4 @@ test("managed native evidence uses an explicit session without parent session-re
 	assert.doesNotMatch(store, /SessionManager\.(?:open|continueRecent|forkFrom)/);
 	assert.match(runner, /"--session"/);
 	assert.doesNotMatch(runner, /"--no-session"/);
-});
-
-test("herdr-handoff runtime stays independent of subagents, sockets, and Herdr internals", async () => {
-	const runtimeRoot = join(ROOT, "extensions", "herdr-handoff");
-	const violations: string[] = [];
-	for (const path of await maintainedTextFiles(runtimeRoot)) {
-		const text = await readFile(path, "utf8");
-		for (const token of HERDR_RUNTIME_FORBIDDEN) {
-			if (text.includes(token)) violations.push(`${relative(ROOT, path)}: ${token}`);
-		}
-	}
-	const manifest = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
-	assert.equal(manifest.dependencies?.herdr, undefined);
-	assert.deepEqual(violations, []);
 });

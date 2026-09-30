@@ -21,7 +21,6 @@ export const HARD_LIMITS = Object.freeze({
 	maxPendingToolCalls: 1024,
 	maxWaitSpans: 2048,
 	maxStderrBytes: 16 * 1024,
-	taskTimeoutMs: 15 * 60 * 1000,
 	killGraceMs: 5 * 1000,
 	heartbeatMs: 5 * 1000,
 	settledExitGraceMs: 10 * 1000,

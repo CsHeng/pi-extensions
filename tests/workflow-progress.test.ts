@@ -77,14 +77,16 @@ test("real slices remain visible before acceptance, parallel attempts and recove
  assert.match(rows(), /◇ a Task a.*reported/); assert.match(rows(), /◐ b Task b/); assert.match(rows(), /0\/2 accepted/);
  await mutate({ operation: "report", attempt: "A1", summary: "locally accepted", judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "fixture judgment" }] });
  assert.match(rows(), /1\/2 accepted/); assert.match(rows(), /✓ a Task a/);
- await writeFile(join(cwd, "a"), "changed"); await store.revalidate(cwd);
- assert.match(rows(), /0\/2 accepted/); assert.match(rows(), /↻ a Task a.*recheck/);
+ await writeFile(join(cwd, "a"), "changed");
+ assert.match(rows(), /1\/2 accepted/, "disk drift alone does not revoke judgment");
+ await mutate({ operation: "report", attempt: "A1", summary: "check relevance withdrawn", judgments: [{ subject: "task:a", facts: ["f"], accepted: false, rationale: "affected source requires recheck" }] });
+ assert.match(rows(), /0\/2 accepted/);
  await mutate({ operation: "report", task: "b", summary: "blocked", blocker: { kind: "prerequisite", reason: "test environment", unblock: "restore" } });
  assert.match(rows(), /! b Task b.*blocked/);
  await mutate({ operation: "suspend", reason: "tracker capability unavailable", condition: "explicit resume" });
  assert.match(rows(), /^! suspended/); assert.match(rows(), /tracker capability unavailable/);
  assert.ok(goalRows(store.view(), 8, 1)[0]?.startsWith("!"), "warning survives the narrowest header budget");
- const replay = createGoalStore(() => {}); replay.replay(entries); await replay.revalidate(cwd);
+ const replay = createGoalStore(() => {}); replay.replay(entries);
  assert.match(goalRows(replay.view(), 120).join("\n"), /suspended/);
  assert.equal(replay.current()!.fulfillment, "pending");
  await mutate({ operation: "resume", reason: "capability restored", authority: "same fixture" });
@@ -99,9 +101,10 @@ test("losing accepted predecessor evidence marks a reported dependent for rechec
   await mutate({ operation: "report", task, summary: "accepted", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: `task:${task}`, facts: ["f"], accepted: true, rationale: "fixture" }] });
  }
  assert.match(goalRows(store.view(), 120).join("\n"), /2\/2 accepted/);
- await writeFile(join(cwd, "a"), "new predecessor"); await store.revalidate(cwd);
+ await writeFile(join(cwd, "a"), "new predecessor");
+ await mutate({ operation: "report", attempt: "A1", summary: "correct prior check result", facts: [{ key: "f", kind: "agent", check: "changed predecessor check", result: "fail" }] });
  assert.equal(store.current()!.attempts.at(-1)!.status, "interrupted");
- assert.equal(store.current()!.facts[0]!.usable, false, "changed predecessor source invalidates its own fact");
+ assert.equal(store.current()!.facts.find(f => f.id === "A1:f")!.result, "fail", "explicit correction invalidates dependent acceptance");
  assert.equal(store.current()!.facts.at(-1)!.usable, true, "unchanged dependent source remains evidence, not accepted support for the new predecessor");
  assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/);
  await mutate({ operation: "start", task: "a", scope: ["a"] });

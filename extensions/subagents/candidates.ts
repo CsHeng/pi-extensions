@@ -34,8 +34,8 @@ export async function prepareManagedWorkspace(store: ManagedSessionStore, record
 	const gitWorkspace = await createGitTaskWorkspace(repository, sourcePath(store, record), record.input);
 	try {
 		record.workspace = { baseline: {}, parentBaseline: {}, inputs: initialWorkerInputs(gitWorkspace) };
-		await store.save(record); // Keep exact Git ownership before expensive dependency preparation.
-		const inputs = await prepareWorkerInputs(repository, gitWorkspace.path, gitWorkspace, record.task.role === "worker");
+		await store.save(record); // Persist exact Git ownership before validating it.
+		const inputs = await prepareWorkerInputs(repository, gitWorkspace.path, gitWorkspace);
 		record.workspace = { baseline: {}, parentBaseline: {}, inputs };
 		await store.save(record);
 	} catch (error) {
