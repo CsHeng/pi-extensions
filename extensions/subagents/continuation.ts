@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 import { Text } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
-import { HARD_LIMITS, emptyUsage, type EffectiveRoute, type TaskResult } from "./contracts.ts";
+import { CAPABILITY_RECOVERY_HINT, HARD_LIMITS, emptyUsage, type EffectiveRoute, type TaskResult } from "./contracts.ts";
+import { assertCanonicalExternalRoots } from "./path-policy.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
 import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, validateRepositoryTarget, RepositoryPolicyError, type RepositoryHost } from "./repository-policy.ts";
 import { getManagedRole } from "./roles.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
-import { runChild, type ChildRunOptions } from "./runner.ts";
+import { resolvePiInvocation, runChild, type ChildRunOptions } from "./runner.ts";
 import { selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, managedRepository, type ManagedRecord } from "./managed-sessions.ts";
@@ -26,7 +27,7 @@ import type { ProvenanceCore } from "./provenance.ts";
 import { registerManagedContext } from "./context.ts";
 import { ManagedObserver } from "./managed-observer.ts";
 import { OBSERVER_EVENT, type ObserverSnapshot, type ObserverTask } from "./observer-events.ts";
-import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_CHANGED_EVENT, SessionViewBuilder, parseSessionViewReply, parseSessionViewRequest, type SessionViewReply, type SessionViewRequest } from "./session-view.ts";
+import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_CHANGED_EVENT, SESSION_VIEW_QUERY_EVENT, SessionViewBuilder, parseSessionViewReply, parseSessionViewRequest, type SessionViewReply, type SessionViewRequest } from "./session-view.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
 import { registerSettlementBarrier } from "../shared/settlement.ts";
 
@@ -152,6 +153,9 @@ export class ContinuationService {
 		}
 		return this.sessionViewBuilder.build(request, { ownerSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), trusted: ctx.isProjectTrusted(), owner, ...(reason ? { reason } : {}), live: this.liveObserverTasks(), generation: this.generation });
 	}
+	sessionViewFailure(request: SessionViewRequest, ownerSessionId: string, anchor: string | null, reason: string): SessionViewReply {
+		return this.sessionViewBuilder.failure(request, { ownerSessionId, anchor, generation: this.generation }, reason);
+	}
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
 		const cause = (error as { code?: unknown })?.code ?? (error instanceof Error && error.name !== "Error" ? error.name : "unclassified");
@@ -259,6 +263,8 @@ export class ContinuationService {
 			const loaded = await this.dependencies.loadConfig();
 			if (!loaded.config) throw new ManagedError(loaded.diagnostic?.code ?? "invalid_route_config");
 			const config = loaded.config;
+			// Custom executors own their invocation; the native default must be available before admission.
+			if (this.dependencies.runChild === runChild) resolvePiInvocation([]);
 			const ownerKey = fingerprint([owner.repo, owner.parentSessionId]);
 			if (this.supervisorOwner && this.supervisorOwner !== ownerKey) throw new ManagedError("managed_owner_mismatch");
 			if (!this.supervisor) {
@@ -291,6 +297,11 @@ export class ContinuationService {
 				if (records.some(record => record.version < 3)) throw new ManagedError("legacy_session_read_only");
 				tasks = records.map(record => ({ ...record.task, id: record.handle, dependsOn: [] }));
 			}
+			const validateReadRoots = async (record: ManagedRecord): Promise<void> => {
+				try { await assertCanonicalExternalRoots({ externalReadRoots: record.task.externalReadRoots ?? [], ...(record.externalReadPins ? { externalReadPins: record.externalReadPins } : {}) }); }
+				catch { throw new ManagedError("capability_invalidated", undefined, CAPABILITY_RECOVERY_HINT); }
+			};
+			for (const record of records) if (!replays.has(record.handle)) await validateReadRoots(record);
 			const routes = records.map(record => replays.get(record.handle)?.route ?? this.route(record.task, config, ctx));
 			telemetry.replayedEpisodes = replays.size;
 			const requestId = request.requestId ?? fingerprint(request.episodes);
@@ -312,6 +323,7 @@ export class ContinuationService {
 						const expected = request.episodes?.[index]?.expectedEpisode ?? 0;
 						if (record.state !== "idle" || record.episode !== expected) throw new ManagedError(record.episode !== expected ? "stale_episode" : "session_not_idle");
 						if (record.episode >= MANAGED_LIMITS.maxEpisodes) throw new ManagedError("episode_limit");
+						await validateReadRoots(record);
 						if (record.candidate && ["applying", "partial", "unknown"].includes(record.candidate.status)) throw new ManagedError("candidate_recovery_required");
 						if ((await store.nativeRevision(record.handle)).leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 					}
@@ -579,11 +591,24 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		// Display-only request/reply: malformed or foreign requests never affect execution.
 		const request = parseSessionViewRequest(data);
 		if (!request || !context || !["tui", "rpc"].includes(context.mode)) return;
+		const ctx = context;
+		const ownerSessionId = ctx.sessionManager.getSessionId();
+		const anchor = ctx.sessionManager.getLeafId();
+		const started = performance.now();
 		void (async () => {
+			let reply: SessionViewReply;
 			try {
-				const parsed = parseSessionViewReply(await service.sessionView(request, context));
-				if (parsed.ok) pi.events.emit(SESSION_VIEW_EVENT, parsed.value);
-			} catch { /* A failed display query is invisible, not an execution failure. */ }
+				const parsed = parseSessionViewReply(await service.sessionView(request, ctx));
+				reply = parsed.ok ? parsed.value : service.sessionViewFailure(request, ownerSessionId, anchor, "core_reply_invalid");
+			} catch { reply = service.sessionViewFailure(request, ownerSessionId, anchor, "core_query_failed"); }
+			const parsed = parseSessionViewReply(reply);
+			if (!parsed.ok) return;
+			pi.events.emit(SESSION_VIEW_EVENT, parsed.value);
+			// One bounded, redacted audit per query, not per heartbeat. Never append to a new owner after a session switch.
+			if (context === ctx && ctx.sessionManager.getSessionId() === ownerSessionId && ctx.isProjectTrusted()) {
+				try { pi.appendEntry(SESSION_VIEW_QUERY_EVENT, { version: 1, source: "core", requestId: request.requestId, durationMs: Math.max(0, performance.now() - started), state: reply.history.state, ...(reply.history.reason ? { reason: reply.history.reason } : {}) }); }
+				catch { /* Optional audit failure does not alter display delivery or execution. */ }
+			}
 		})();
 	});
 	pi.on("session_start", async (_event, ctx) => { clearWake(); context = ctx; await service.reset(); });

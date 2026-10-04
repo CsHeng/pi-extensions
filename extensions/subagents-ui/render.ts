@@ -326,7 +326,7 @@ export function sessionCounts(
 	const states = summary?.states;
 	let historyLabel = "";
 	if (historyState === "loading") historyLabel = refreshing ? "history refreshing" : "history loading";
-	else if (historyState === "unavailable") historyLabel = `history unavailable${reason ? ` (${reason})` : ""}`;
+	else if (historyState === "unavailable") historyLabel = `history unavailable${reason ? ` (${reason})` : ""}${reply?.history.state === "ready" ? " · cached" : ""}`;
 	else if (reply && !reply.inventory.complete) historyLabel = "history partial";
 	return {
 		live: live.length,
@@ -414,7 +414,7 @@ export function formatHistoryNav(history: SessionViewReply["history"]): string {
 
 export function formatHistoryCollapsed(session: { kind: string; reply?: SessionViewReply; reason?: string }): string {
 	if (session.kind === "loading") return session.reply ? "▸ history refreshing · enter" : "▸ history loading · enter";
-	if (session.kind === "unavailable") return `▸ history unavailable${session.reason ? ` (${session.reason})` : ""} · enter retry`;
+	if (session.kind === "unavailable") return `▸ history unavailable${session.reason ? ` (${session.reason})` : ""}${session.reply?.history.state === "ready" ? " · cached" : ""} · enter retry`;
 	const count = session.reply?.history.totalRows ?? 0;
 	return `▸ ${count} retained agents · enter`;
 }

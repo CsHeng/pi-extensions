@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,28 @@ const guard = fileURLToPath(new URL("../extensions/subagents/child-capability-gu
 const workerGuard = fileURLToPath(new URL("../extensions/subagents/worker-tools.ts", import.meta.url));
 const invocation = process.env.CSHENG_GUIDANCE_HOST_PI === "installed" ? { command: "pi", args: ["-e", provider] } : { command: process.execPath, args: [cli, "-e", provider] };
 const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
+
+test("native blocked-tool hooks carry capability invalidation through the real stream", { timeout: 20000 }, async t => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-native-invalidated-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const child = join(base, "source"), agentDir = join(base, "agent"), root = join(base, "external.txt");
+	await mkdir(child); await mkdir(agentDir); await writeFile(root, "original");
+	const pin = await lstat(root);
+	const session = join(base, "native.jsonl"); await (await open(session, "wx", 0o600)).close();
+	const result = await runChild({
+		task: { id: "invalidated", role: "explorer", objective: "host-explorer-fixture", scope: ["."], writePaths: [], inputs: [], dependsOn: [], verification: [], resourceLocks: [], externalReadRoots: [root] },
+		role: getRole("explorer"), route, cwd: child, sourceRoot: child, inheritSkills: false,
+		guardExtensionPath: guard, capability: { version: 2, root: child, role: "explorer", readRoots: [child], writePaths: [], externalReadRoots: [root], externalReadPins: [{ dev: pin.dev, ino: pin.ino }] },
+		prompt: "host-explorer-fixture capability-invalidated-fixture", approveProject: true,
+		diagnosticSession: { path: session, ref: "fixture-invalidated", async removeUnused() {} }, invocation,
+		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_NATIVE_REPLACE_ROOT: root },
+	});
+	assert.equal(result.status, "failed", result.stderr);
+	assert.equal(result.error?.code, "capability_invalidated", JSON.stringify(result));
+	assert.equal(result.reportComplete, false);
+	const entries = (await readFile(session, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+	assert.ok(entries.some(entry => entry.type === "custom" && entry.customType === "csheng-subagent-capability-failure" && entry.data?.code === "capability_invalidated"));
+});
 
 test("native child loads bounded Skill body/reference and snapshot ancestor context; role opt-out keeps context", { timeout: 20000 }, async t => {
 	const base = await mkdtemp(join(tmpdir(), "subagent-native-guidance-"));

@@ -266,7 +266,7 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	assert.equal(handles.includes("session_corrupt0001"), false);
 	assert.equal(handles.includes("session_badmode002"), false);
 	const byHandle = new Map(inventory.entries.map((entry) => [entry.handle, entry]));
-	assert.deepEqual(byHandle.get(closed.handle), { handle: closed.handle, role: "worker", route: null, state: "closed", episode: 0, latestOutcome: "unknown", acceptedEpisodes: 0, onCurrentBranch: true, legacy: false, reportComplete: false, retained: true, usageEvidence: { episodes: [] } });
+	assert.deepEqual(byHandle.get(closed.handle), { handle: closed.handle, role: "worker", route: null, state: "closed", episode: 0, latestOutcome: "unknown", acceptedEpisodes: 0, ownerAnchor: owner.anchor, onCurrentBranch: true, legacy: false, reportComplete: false, retained: true, usageEvidence: { episodes: [] } });
 	const legacyView = byHandle.get(legacy.handle)!;
 	assert.equal(legacyView.legacy, true); assert.equal(legacyView.state, "closed"); assert.equal(legacyView.acceptedEpisodes, 1); assert.equal(legacyView.latestOutcome, "succeeded"); assert.equal(legacyView.reportComplete, true); assert.equal(legacyView.retained, true);
 	const runnerView = byHandle.get(runner.handle)!;

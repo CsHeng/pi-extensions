@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,7 @@ import {
 	SESSION_VIEW_CHANGED_EVENT,
 	SESSION_VIEW_LIMITS,
 	SESSION_VIEW_REQUEST_EVENT,
+	SESSION_VIEW_QUERY_EVENT,
 	SessionViewBuilder,
 	parseSessionViewReply,
 	parseSessionViewRequest,
@@ -369,8 +370,9 @@ test("session-view event wiring answers only strict validated requests from acti
 	const eventHandlers = new Map<string, Array<(data: unknown) => void>>();
 	const replies: unknown[] = [];
 	let changes = 0;
+	const audits: Array<{ type: string; data: Record<string, unknown> }> = [];
 	const pi = {
-		registerCommand() {}, registerTool() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {},
+		registerCommand() {}, registerTool() {}, appendEntry(type: string, data: Record<string, unknown>) { audits.push({ type, data }); }, sendMessage() {}, sendUserMessage() {},
 		getActiveTools: () => ["csheng_subagent_sessions"],
 		on(name: string, handler: (event: unknown, ctx?: unknown) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		events: {
@@ -406,6 +408,18 @@ test("session-view event wiring answers only strict validated requests from acti
 	request({ version: 1, requestId: "ui-2", page: 0 });
 	await new Promise(resolve => setTimeout(resolve, 20));
 	assert.equal(replies.length, 1, "print mode never answers display queries");
+	for (const handler of handlers.get("session_start") ?? []) await handler({}, contextFixture(repo));
+	const original = service.sessionView.bind(service);
+	service.sessionView = async () => { throw new Error("secret-root-for-redaction"); };
+	request({ version: 1, requestId: "ui-error", page: 0 }); await until(() => replies.length === 2);
+	assert.equal((replies[1] as SessionViewReply).history.reason, "core_query_failed");
+	service.sessionView = async (query, ctx) => { const reply = await original(query, ctx); if (reply.summary) reply.summary.agents = -1; return reply; };
+	request({ version: 1, requestId: "ui-invalid", page: 0 }); await until(() => replies.length === 3);
+	assert.equal((replies[2] as SessionViewReply).history.reason, "core_reply_invalid");
+	const queryAudits = audits.filter(audit => audit.type === SESSION_VIEW_QUERY_EVENT);
+	assert.equal(queryAudits.length, 3);
+	assert.ok(queryAudits.every(audit => audit.data.source === "core" && Number.isFinite(audit.data.durationMs) && Number(audit.data.durationMs) >= 0));
+	assert.doesNotMatch(JSON.stringify(queryAudits), /secret-root-for-redaction/);
 });
 
 test("late inventory reads cannot poison a newer revision and concurrent queries coalesce", async (t) => {
@@ -440,6 +454,34 @@ test("late inventory reads cannot poison a newer revision and concurrent queries
 	assert.ok(stale.revision < second.revision);
 	assert.equal(third.summary!.agents, 2);
 	assert.equal(scans, 2, "pending reads coalesce and the late result cannot replace the new cache");
+});
+
+test("thousand foreign records and changing branch leaves do not rebuild owned history or usage", async t => {
+	const { base, repo } = await rootFixture(t);
+	const original = new ManagedSessionStore(base);
+	await allocateFixture(original, repo, "owned");
+	for (let start = 0; start < 1_000; start += 25) await Promise.all(Array.from({ length: 25 }, async (_, offset) => {
+		const path = original.path(`session_foreign_${start + offset}`);
+		await mkdir(path, { mode: 0o700 });
+		await writeFile(join(path, "registry.json"), JSON.stringify({ owner: { repo, parentSessionId: "foreign-parent" }, opaqueForeignPayload: "x".repeat(8_000) }), { mode: 0o600 });
+	}));
+	let scans = 0, observations = 0;
+	const store = new Proxy(original, { get(target, key) {
+		if (key === "inventory") return async (...args: Parameters<ManagedSessionStore["inventory"]>) => { scans++; return target.inventory(...args); };
+		if (key === "recordedObservations") return async (...args: Parameters<ManagedSessionStore["recordedObservations"]>) => { observations++; return target.recordedObservations(...args); };
+		const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
+	} });
+	const builder = new SessionViewBuilder({ store }), owner = ownerOf(repo);
+	for (let index = 0; index < 30; index++) {
+		const anchor = `leaf-${index}`, onBranch = index % 2 === 0;
+		const reply = await builder.build({ version: 1, requestId: `ui-${index}`, page: 0 }, scope({ ...owner, anchor, branch: onBranch ? [...owner.branch, anchor] : [anchor] }, [], { anchor }));
+		assert.equal(reply.inventory.complete, true);
+		assert.equal(reply.inventory.unreadableRecords, 0);
+		assert.equal(reply.summary!.agents, 1);
+		assert.equal(reply.history.rows[0]!.onCurrentBranch, onBranch);
+		assert.equal(parseSessionViewReply(reply).ok, true);
+	}
+	assert.equal(scans, 1); assert.equal(observations, 1);
 });
 
 test("same-session branch changes recompute the historical branch marker", async (t) => {

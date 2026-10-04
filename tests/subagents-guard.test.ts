@@ -304,13 +304,19 @@ test("a safe rejection permits correction but lost root terminates subsequent ca
 		process.env[CHILD_MARKER_ENV] = "1";
 		process.env[CHILD_CAPABILITY_ENV] = file;
 		let handler: (event: any) => Promise<any> = async () => undefined;
-		await childGuard({ on(_name: string, value: typeof handler) { handler = value; } } as never);
+		const handlers = new Map<string, (event: any) => any>();
+		const markers: unknown[] = [];
+		await childGuard({ on(name: string, value: typeof handler) { handlers.set(name, value); }, appendEntry(_name: string, value: unknown) { markers.push(value); } } as never);
+		handler = handlers.get("tool_call")!;
 		const rejected = await handler({ toolName: "write", input: { path: "src/other.ts" } });
 		assert.equal(rejected.block, true);
 		assert.equal(rejected.terminate, false);
 		assert.equal(await handler({ toolName: "write", input: { path: "src/allowed.ts" } }), undefined);
 		await rm(root, { recursive: true });
-		assert.equal((await handler({ toolName: "read", input: { path: "src/allowed.ts" } })).terminate, true);
+		assert.equal((await handler({ toolCallId: "lost-root", toolName: "read", input: { path: "src/allowed.ts" } })).terminate, true);
+		assert.deepEqual(markers, [{ version: 1, code: "capability_invalidated" }]);
+		await handler({ toolName: "git_read", input: { operation: "status" } });
+		assert.equal(markers.length, 1);
 	} finally {
 		if (originalMarker === undefined) delete process.env[CHILD_MARKER_ENV];
 		else process.env[CHILD_MARKER_ENV] = originalMarker;

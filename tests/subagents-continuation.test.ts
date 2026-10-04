@@ -106,6 +106,56 @@ async function serviceFixture(t: test.TestContext) {
 	};
 }
 
+test("default launcher admission rejects a missing CLI before allocating or accepting an episode", async t => {
+	const f = await serviceFixture(t);
+	const native = new ContinuationService({ ...f.dependencies, runChild });
+	const script = process.argv[1];
+	try {
+		process.argv[1] = join(f.base, "removed-cli.js");
+		const denied = await native.execute({ action: "create", requestId: "no-launcher", tasks: [{ id: "read", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
+		assert.equal(denied.error?.code, "launcher_unavailable");
+		assert.equal(denied.requestTelemetry?.launchedChildren, 0);
+		await assert.rejects(lstat(f.store.root), { code: "ENOENT" });
+		if (script === undefined) delete process.argv[1]; else process.argv[1] = script;
+		const first = await f.service.execute({ action: "create", requestId: "custom-launcher", tasks: [{ id: "read", role: "explorer", objective: "scan", scope: ["."] }] }, f.ctx);
+		assert.equal(first.status, "succeeded");
+		process.argv[1] = join(f.base, "removed-cli.js");
+		const continued = await native.execute({ action: "continue", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, requestId: "no-next-launch", message: "continue" }] }, f.ctx);
+		assert.equal(continued.error?.code, "launcher_unavailable");
+		assert.equal(continued.sessions[0]!.episode, 1);
+		assert.equal(continued.sessions[0]!.state, "idle");
+		assert.equal(f.launches(), 1);
+	} finally {
+		if (script === undefined) delete process.argv[1]; else process.argv[1] = script;
+		await native.shutdown(); await f.service.shutdown();
+	}
+});
+
+test("replaced or removed external roots reject continuation before consuming an episode or launching", async (t) => {
+	for (const change of ["replace", "remove"]) {
+		const f = await serviceFixture(t);
+		const root = join(f.base, "external.txt");
+		await writeFile(root, "original");
+		const task = { id: "read-root", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [root] };
+		const first = await f.service.execute({ action: "create", requestId: `root-${change}`, tasks: [task] }, f.ctx);
+		assert.equal(first.status, "succeeded");
+		const handle = first.sessions[0]!.handle;
+		await rename(root, `${root}.old`);
+		if (change === "replace") await writeFile(root, "replacement");
+		const failed = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, requestId: "invalid-root", message: "continue" }] }, f.ctx);
+		assert.equal(failed.error?.code, "capability_invalidated");
+		assert.equal(failed.sessions[0]?.episode, 1);
+		assert.equal(failed.sessions[0]?.state, "idle");
+		assert.equal(f.launches(), 1);
+		if (change === "replace") {
+			const fresh = await f.service.execute({ action: "create", requestId: "verified-new-root", tasks: [task] }, f.ctx);
+			assert.equal(fresh.status, "succeeded");
+			assert.equal(f.launches(), 2);
+		}
+		await f.service.shutdown();
+	}
+});
+
 test("explicit close releases a slot and retained-history warnings do not block new work", async (t) => {
 	const f = await serviceFixture(t);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };

@@ -49,6 +49,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	const tui = { requestRender() {} } as TUI;
 	const ctx = {
 		mode: "tui",
+		isProjectTrusted: () => true,
 		sessionManager: {
 			getSessionId: () => "parent_session-1",
 			getLeafId: () => "leaf_entry-1",

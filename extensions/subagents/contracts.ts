@@ -4,6 +4,7 @@ import { Type } from "typebox";
 export const SUBAGENT_STATUS_COMMAND = "subagents";
 export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
 export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
+export const CHILD_CAPABILITY_FAILURE_EVENT = "csheng-subagent-capability-failure";
 export const TELEMETRY_SCHEMA_VERSION_V2 = 2 as const;
 export const TELEMETRY_SCHEMA_VERSION_V3 = 3 as const;
 export const TELEMETRY_SCHEMA_VERSION = 4 as const;
@@ -59,6 +60,7 @@ export const STABLE_TASK_ERROR_CODES = [
 	"external_read_root_not_external",
 	"duplicate_external_read_root",
 ] as const;
+export const CAPABILITY_RECOVERY_HINT = "Reading capability changed or became unavailable. Verify the intended roots and create a new session; continuing the same binding does not reauthorize replaced roots.";
 export const CHILD_CAPABILITY_MANIFEST_V1 = 1 as const;
 export const CHILD_CAPABILITY_MANIFEST_V2 = 2 as const;
 export type RoleName = (typeof ROLE_NAMES)[number];

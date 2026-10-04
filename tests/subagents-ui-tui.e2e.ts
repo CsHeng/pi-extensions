@@ -27,7 +27,7 @@ async function host(t: test.TestContext, history: boolean) {
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], tuiMode: "fullscreen" }));
 	const columns = history ? 80 : 120;
-	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
+	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
 		"-e", join(packageRoot, "extensions/subagents-ui/index.ts"), "-e", join(root, "tests/fixtures/subagents-observer-tui.ts"),
 		"--model", "observer-fixture/fixture", "--thinking", "off", "--", "observer fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `set -eu; stty cols ${columns} rows 24; exec ${args.map(quote).join(" ")}`, "/dev/null"], {

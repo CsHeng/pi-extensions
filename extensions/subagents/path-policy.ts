@@ -159,7 +159,7 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(externalReadPins ? { externalReadPins: externalReadPins as Array<{ dev: number; ino: number }> } : {}), ...(guidance ? { guidance } : {}), ...(value.writeRoot === true ? { writeRoot: true } : {}) };
 }
 
-export async function assertCanonicalExternalRoots(manifest: NormalizedChildCapability): Promise<void> {
+export async function assertCanonicalExternalRoots(manifest: Pick<NormalizedChildCapability, "externalReadRoots" | "externalReadPins">): Promise<void> {
 	for (const [index, entry] of manifest.externalReadRoots.entries()) {
 		let physical: string;
 		try {

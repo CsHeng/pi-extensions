@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { closeSync, chmodSync, mkdtempSync, openSync, rmSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { copyFile, readFile, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
-import { buildChildPrompt, runChild } from "../extensions/subagents/runner.ts";
+import { buildChildPrompt, resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;
 const DIAGNOSTIC_DIR = mkdtempSync(join(tmpdir(), "subagent-runner-diagnostics-"));
@@ -67,6 +71,38 @@ function options(mode: string, extra: Record<string, unknown> = {}) {
 		...extra,
 	} as Parameters<typeof runChild>[0];
 }
+
+test("launcher selection preserves the current runtime without silently switching to PATH pi", () => {
+	const script = fileURLToPath(import.meta.url);
+	const runtime = { executable: process.execPath, script, platform: process.platform, pid: process.pid };
+	assert.deepEqual(resolvePiInvocation(["--version"], runtime), { command: process.execPath, args: [script, "--version"] });
+	assert.throws(() => resolvePiInvocation([], { ...runtime, executable: "/missing/retired-pi", script: "/$bunfs/root/pi", platform: "darwin" }), { code: "launcher_unavailable" });
+	assert.throws(() => resolvePiInvocation([], { ...runtime, script: "/missing/cli.js" }), { code: "launcher_unavailable" });
+	if (process.platform === "linux") {
+		assert.deepEqual(resolvePiInvocation(["--version"], { ...runtime, executable: "/missing/retired-pi", script: "/$bunfs/root/pi" }), { command: `/proc/${process.pid}/exe`, args: ["--version"] });
+	}
+});
+
+test("Linux launches the retained executable inode after deletion and same-path replacement", { skip: process.platform !== "linux", timeout: 10000 }, async () => {
+	const executable = join(DIAGNOSTIC_DIR, "retired-pi");
+	await copyFile("/bin/sleep", executable);
+	const child = spawn(executable, ["30"], { stdio: "ignore" });
+	try {
+		await once(child, "spawn");
+		const runtime = { executable, script: "/$bunfs/root/pi", platform: process.platform, pid: child.pid! };
+		await rm(executable);
+		const deleted = resolvePiInvocation(["0"], runtime);
+		assert.equal(deleted.command, `/proc/${child.pid}/exe`);
+		assert.equal((await promisify(execFile)(deleted.command, deleted.args)).stdout, "");
+		await copyFile("/bin/echo", executable);
+		const replaced = resolvePiInvocation(["0"], runtime);
+		assert.equal(replaced.command, deleted.command);
+		assert.equal((await promisify(execFile)(replaced.command, replaced.args)).stdout, "");
+	} finally {
+		if (child.pid && child.exitCode === null && child.signalCode === null) { const closed = once(child, "close"); child.kill(); await closed; }
+		await rm(executable, { force: true });
+	}
+});
 
 test("child prompt renders canonical external roots without changing write or evidence blocks", () => {
 	const none = buildChildPrompt(task, "bounded input");

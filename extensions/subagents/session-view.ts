@@ -15,6 +15,7 @@ export const SESSION_VIEW_REQUEST_EVENT = "csheng.subagents.session-view.request
 export const SESSION_VIEW_EVENT = "csheng.subagents.session-view";
 /** Invalidation only; contains no owner data and prompts an open consumer to requery its current scope. */
 export const SESSION_VIEW_CHANGED_EVENT = "csheng.subagents.session-view.changed";
+export const SESSION_VIEW_QUERY_EVENT = "csheng-subagent-view-query";
 export const SESSION_VIEW_VERSION = 1 as const;
 /** Display delivery bounds; intentionally independent of open-session admission limits. */
 export const SESSION_VIEW_LIMITS = Object.freeze({ pageSize: 20, maxLiveRows: 16, maxRequestPage: 1_000_000, maxPayloadBytes: 256 * 1024 });
@@ -242,6 +243,12 @@ export class SessionViewBuilder {
 	invalidate(): void { this.revision++; }
 	/** Owner/session change: drop the retained projection entirely. */
 	reset(): void { this.invalidate(); this.cache = undefined; }
+	/** Explicit display failures retain correlation but expose no exception or storage contents. */
+	failure(request: SessionViewRequest, scope: Pick<SessionViewScope, "ownerSessionId" | "anchor" | "generation">, reason: string): SessionViewReply {
+		return { version: SESSION_VIEW_VERSION, requestId: request.requestId, ...scope, revision: this.revision,
+			inventory: { state: "unavailable", reason, complete: false, unreadableRecords: 0 }, summary: null, usage: null, live: [],
+			history: { state: "unavailable", reason, pageSize: this.limits.pageSize, page: 0, totalRows: 0, totalPages: 0, rows: [] } };
+	}
 	private async rebuild(key: string, owner: CurrentOwner, revision: number): Promise<ProjectionCache> {
 		const inventory = await this.options.store.inventory(owner);
 		if (!inventory.available) return { key, revision, inventory, usage: null, rows: new Map() };
@@ -265,7 +272,7 @@ export class SessionViewBuilder {
 		let nonLive: SessionViewHistoryRow[] = [];
 		let historyReason = gate;
 		if (gate === undefined && scope.owner !== null) {
-			const key = JSON.stringify([scope.owner.repo, scope.owner.parentSessionId, scope.owner.anchor, scope.owner.branch]);
+			const key = JSON.stringify([scope.owner.repo, scope.owner.parentSessionId]);
 			try {
 				let cache = this.cache;
 				if (!cache || cache.key !== key || cache.revision !== revision) {
@@ -289,7 +296,7 @@ export class SessionViewBuilder {
 					const liveHandles = new Set(live.map((row) => row.id));
 					nonLive = cache.inventory.entries.filter((entry) => !liveHandles.has(entry.handle)).map((entry) => ({
 						handle: entry.handle, route: entry.route, role: entry.role, state: entry.state, episode: entry.episode, latestOutcome: entry.latestOutcome,
-						acceptedEpisodes: entry.acceptedEpisodes, onCurrentBranch: entry.onCurrentBranch, legacy: entry.legacy,
+						acceptedEpisodes: entry.acceptedEpisodes, onCurrentBranch: entry.ownerAnchor === null || scope.owner!.branch.includes(entry.ownerAnchor) || scope.owner!.anchor === entry.ownerAnchor, legacy: entry.legacy,
 						reportComplete: entry.reportComplete, retained: entry.retained, recordedUsage: cache.rows.get(entry.handle)!,
 					}));
 				}

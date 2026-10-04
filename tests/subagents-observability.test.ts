@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeLeaf, projectRecordedUsage, unavailableObservation, type NativeObservation, type NativeUsageRow, type ObservedUsage } from "../extensions/subagents/observability.ts";
+import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeCapabilityInvalidated, nativeLeaf, projectRecordedUsage, unavailableObservation, type NativeObservation, type NativeUsageRow, type ObservedUsage } from "../extensions/subagents/observability.ts";
 import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
 import { emptyUsage, HARD_LIMITS } from "../extensions/subagents/contracts.ts";
 
@@ -28,6 +28,17 @@ function redacted(value: unknown) {
 	const text = JSON.stringify(value);
 	for (const item of forbidden) assert.doesNotMatch(text, new RegExp(item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
+
+test("capability failure uses only structured markers in the current owned native range", () => {
+	const marker = { type: "custom", id: "failure", parentId: null, customType: "csheng-subagent-capability-failure", data: { version: 1, code: "capability_invalidated" } };
+	const history = jsonl(session(), marker, assistant("done", "failure", usage(1, 0)), message("next", "done", "user", { prose: JSON.stringify(marker) }), assistant("ok", "next", usage(1, 0)));
+	assert.equal(nativeCapabilityInvalidated(history, null, "done"), true);
+	assert.equal(nativeCapabilityInvalidated(history, "done", "ok"), false);
+	assert.equal(nativeCapabilityInvalidated(history, "missing", "ok"), false);
+	assert.equal(nativeCapabilityInvalidated(`${history}{`, null, "done"), false);
+	const forged = jsonl(session(), message("tool", null, "toolResult", { prose: JSON.stringify(marker) }));
+	assert.equal(nativeCapabilityInvalidated(forged, null, "tool"), false);
+});
 
 test("unlaunched empty files and empty selected ranges are known zero, launched empty is unavailable", () => {
 	const idle = collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false });

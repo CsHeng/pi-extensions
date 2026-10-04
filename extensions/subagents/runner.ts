@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
-import { constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { nativeLines } from "./native-lines.ts";
 import { chmod, lstat, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
+	CAPABILITY_RECOVERY_HINT,
 	CHILD_CAPABILITY_ENV,
 	CHILD_MARKER_ENV,
 	HARD_LIMITS,
@@ -28,8 +29,8 @@ import type { NormalizedTask } from "./graph.ts";
 import { JsonlProtocolParser } from "./protocol.ts";
 import type { RoleDefinition } from "./roles.ts";
 import { workerGitEnvironment, type WorkerInputState } from "./worker-inputs.ts";
-import { boundNativeObservation, collectNativeObservation, nativeLeaf, unavailableObservation } from "./observability.ts";
-import { MANAGED_LIMITS } from "./session-contracts.ts";
+import { boundNativeObservation, collectNativeObservation, nativeCapabilityInvalidated, nativeLeaf, unavailableObservation } from "./observability.ts";
+import { MANAGED_LIMITS, ManagedError } from "./session-contracts.ts";
 import { prepareChildGuidance, type CapturedProjectSkill } from "./guidance-resources.ts";
 
 async function readObservationNative(file: string): Promise<string | undefined> {
@@ -79,15 +80,22 @@ export interface ChildRunOptions {
 
 const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE", "CSHENG_SUBAGENT_WORKER_SCRATCH", "CSHENG_SUBAGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
 
-export function resolvePiInvocation(extraArgs: string[]): PiInvocation {
-	const currentScript = process.argv[1];
+export function resolvePiInvocation(extraArgs: string[], runtime = { executable: process.execPath, script: process.argv[1], platform: process.platform, pid: process.pid }): PiInvocation {
+	const executableFile = (file: string) => {
+		try { accessSync(file, constants.X_OK); const info = statSync(file); return info.isFile() ? info : undefined; } catch { return undefined; }
+	};
+	// Linux retains the actual running executable after unlink or atomic replacement.
+	// Reuse that inode, never a PATH/latest entry selecting another Pi version.
+	const preserved = `/proc/${runtime.pid}/exe`;
+	const current = executableFile(runtime.executable);
+	const running = runtime.platform === "linux" ? executableFile(preserved) : undefined;
+	const command = running && (!current || current.dev !== running.dev || current.ino !== running.ino) ? preserved
+		: current ? runtime.executable : undefined;
+	const currentScript = runtime.script;
 	const bunVirtual = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !bunVirtual && existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...extraArgs] };
-	}
-	const executable = basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(executable)) return { command: process.execPath, args: extraArgs };
-	return { command: "pi", args: extraArgs };
+	if (command && currentScript && !bunVirtual && existsSync(currentScript)) return { command, args: [currentScript, ...extraArgs] };
+	if (command && !/^(node|bun)(\.exe)?$/.test(basename(runtime.executable).toLowerCase())) return { command, args: extraArgs };
+	throw new ManagedError("launcher_unavailable", undefined, "Current Pi launcher is no longer executable. Restart the affected Pi session from a verified installation; reloading extensions alone cannot replace its runtime executable.");
 }
 
 function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, managedWorkerScratch?: string, managedWorkerInputs?: WorkerInputState): NodeJS.ProcessEnv {
@@ -165,7 +173,12 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			"--append-system-prompt", systemPromptPath,
 			"--", `@${taskPromptPath}`,
 		];
-		const invocation = options.invocation ?? resolvePiInvocation(args);
+		let invocation: PiInvocation;
+		try { invocation = options.invocation ?? resolvePiInvocation(args); }
+		catch (error) {
+			if (error instanceof ManagedError && error.code === "launcher_unavailable") return failure(options, started, now, "launcher_unavailable", error.detail ?? error.message);
+			throw error;
+		}
 		const finalArgs = options.invocation ? [...options.invocation.args, ...args] : invocation.args;
 		let stopCause: StopCause | undefined = options.signal?.aborted ? "aborted" : undefined;
 
@@ -283,6 +296,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		if (stopCause === "child_exit_stalled") return { ...base, status: "failed", error: { code: "child_exit_stalled", message: "Child settled but did not close within the exit grace period." } };
 		if (exit.code !== 0) return { ...base, status: "failed", error: { code: "child_exit", message: `Child exited unsuccessfully (${exit.code ?? exit.signal ?? "unknown"}).` } };
 		if (parsed.messageCount === 0 && parsed.malformedLines > 0) return { ...base, status: "failed", error: { code: "malformed_jsonl", message: "Child produced no valid assistant message." } };
+		if (observationAfter !== undefined && observationStart !== undefined && observationEnd !== undefined && nativeCapabilityInvalidated(observationAfter, observationStart, observationEnd)) return { ...base, status: "failed", error: { code: "capability_invalidated", message: CAPABILITY_RECOVERY_HINT } };
 		if (parsed.stopReason === "error" || parsed.stopReason === "aborted" || parsed.errorMessage) {
 			return { ...base, status: parsed.stopReason === "aborted" ? "aborted" : "failed", error: { code: "child_model_error", message: parsed.errorMessage ?? `Child stopped with ${parsed.stopReason}.` } };
 		}

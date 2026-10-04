@@ -62,6 +62,8 @@ export interface SessionInventoryEntry {
 	latestOutcome: "succeeded" | "failed" | "aborted" | "unknown";
 	/** Distinct accepted episode identities; null when persistence cannot prove the count. */
 	acceptedEpisodes: number | null;
+	/** Retained ownership anchor for cheap per-query branch projection without rescanning storage. */
+	ownerAnchor: string | null;
 	/** False for retained records of the same session rooted at another branch anchor. */
 	onCurrentBranch: boolean;
 	/** Records older than the current managed version are limited history. */
@@ -340,6 +342,10 @@ export class ManagedSessionStore {
 		const directory = this.path(name);
 		await privateDirectory(directory, false);
 		const record = await readJson<ManagedRecord>(join(directory, "registry.json"));
+		// Filesystem privacy/canonical checks precede reading. Identifiably foreign
+		// owners need no recursive registry validation or episode/finalization work.
+		if (record?.owner && typeof record.owner.repo === "string" && typeof record.owner.parentSessionId === "string"
+			&& (record.owner.repo !== owner.repo || record.owner.parentSessionId !== owner.parentSessionId)) throw new OutOfScopeRecord();
 		this.validateRecord(name, directory, record);
 		// Intentional read-only widening: same repository and parent session, regardless of branch anchor.
 		if (record.owner.repo !== owner.repo || record.owner.parentSessionId !== owner.parentSessionId) throw new OutOfScopeRecord();
@@ -358,6 +364,7 @@ export class ManagedSessionStore {
 			route: record.route ? parseObserverRoute({ provider: record.route.provider, model: record.route.model, thinking: record.route.thinking }) ?? null : null,
 			latestOutcome: status === "succeeded" || status === "failed" || status === "aborted" ? status : "unknown",
 			acceptedEpisodes: acceptedEpisodes === record.episode ? acceptedEpisodes : null,
+			ownerAnchor: record.owner.anchor,
 			onCurrentBranch: record.owner.anchor === null || owner.branch.includes(record.owner.anchor) || owner.anchor === record.owner.anchor,
 			legacy: record.version !== MANAGED_SESSION_VERSION, reportComplete: record.result?.reportComplete === true,
 			retained: record.retained === true, usageEvidence: { episodes } };

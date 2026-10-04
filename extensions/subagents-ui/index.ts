@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { Key, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
 import {
 	OBSERVER_EVENT,
@@ -9,6 +10,7 @@ import {
 	SESSION_VIEW_CHANGED_EVENT,
 	SESSION_VIEW_EVENT,
 	SESSION_VIEW_REQUEST_EVENT,
+	SESSION_VIEW_QUERY_EVENT,
 	SESSION_VIEW_VERSION,
 	parseSessionViewReply,
 } from "../subagents/session-view.ts";
@@ -61,6 +63,8 @@ interface PendingViewRequest {
 	sentAt: number;
 	sessionId: string;
 	generation?: string;
+	/** A bounded unavailable display still accepts this correlated late reply. */
+	timedOut?: true;
 }
 
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
@@ -108,7 +112,7 @@ export function createSubagentsUiExtension(
 	options: SubagentsUiOptions = {},
 ): (pi: ExtensionAPI) => void {
 	const enableWidget = options.enableWidget === true;
-	const now = options.now ?? (() => Date.now());
+	const now = options.now ?? (() => performance.now());
 	const schedule = options.setInterval ?? defaultSetInterval;
 	const cancelTimer = options.clearInterval ?? defaultClearInterval;
 
@@ -118,6 +122,7 @@ export function createSubagentsUiExtension(
 		let latestTerminal: CachedObservation | undefined;
 		let sessionView: SessionViewState = { kind: "idle" };
 		let pending: PendingViewRequest | undefined;
+		const requestNamespace = randomUUID();
 		let requestSeq = 0;
 		let ownerEpoch = 0;
 		let coreWatch: unknown;
@@ -141,6 +146,7 @@ export function createSubagentsUiExtension(
 		};
 
 		const displayed = (): OverlaySnapshot => {
+			if (ctx && !ctx.isProjectTrusted()) return { snapshot: undefined, receivedAt: 0, session: { kind: "unavailable", reason: "project_trust_required" } };
 			let snapshot = current?.snapshot ?? latestTerminal?.snapshot;
 			let receivedAt = current?.receivedAt ?? latestTerminal?.receivedAt ?? 0;
 			const reply = sessionView.reply;
@@ -217,15 +223,20 @@ export function createSubagentsUiExtension(
 				if (!request) { stopCoreWatch(); return; }
 				if (now() - request.sentAt < CORE_VIEW_TIMEOUT_MS) return;
 				stopCoreWatch();
-				// A missing or failed core query surfaces as a bounded unavailable state, never endless loading.
-				pending = undefined;
-				sessionView = { kind: "unavailable", reason: "core_timeout" };
+				// End visible waiting, not correlation: a valid late reply may still recover.
+				request.timedOut = true;
+				if (ctx?.sessionManager.getSessionId() === request.sessionId && ctx.isProjectTrusted()) {
+					try { pi.appendEntry(SESSION_VIEW_QUERY_EVENT, { version: 1, source: "ui", requestId: request.requestId, durationMs: now() - request.sentAt, state: "timeout", cached: sessionView.reply?.history.state === "ready" }); }
+					catch { /* Optional bounded audit never changes timeout/recovery behavior. */ }
+				}
+				sessionView = { kind: "unavailable", reason: "core_timeout", ...(sessionView.reply ? { reply: sessionView.reply } : {}) };
 				publishOverlay();
 			}, CORE_VIEW_WATCH_MS);
 		}
 
 		const requestSessionView = (page: number): void => {
 			if (!tui() || !ctx || !overlay) return;
+			if (!ctx.isProjectTrusted()) { forgetPendingView(); sessionView = { kind: "unavailable", reason: "project_trust_required" }; publishOverlay(); return; }
 			const owner = readOwner(ctx);
 			if (!owner) {
 				sessionView = { kind: "unavailable", reason: "owner_unavailable" };
@@ -233,7 +244,7 @@ export function createSubagentsUiExtension(
 				return;
 			}
 			const refreshing = sessionView.reply?.history.page === page;
-			const requestId = `ui-${++requestSeq}`;
+			const requestId = `ui-${requestNamespace}-${++requestSeq}`;
 			pending = { requestId, page, epoch: ownerEpoch, sentAt: now(), sessionId: owner.sessionId,
 				...(current ? { generation: current.snapshot.generation } : {}) };
 			sessionView = { kind: "loading", ...(refreshing ? { reply: sessionView.reply, refreshing: true } : {}) };
@@ -278,6 +289,7 @@ export function createSubagentsUiExtension(
 					latestTerminal = current;
 				}
 			}
+			if (current && current.snapshot.generation !== incoming.generation) retiredGeneration = current.snapshot.generation;
 			current = { snapshot: incoming, receivedAt };
 			if (isSettled(incoming)) latestTerminal = current;
 		};
@@ -331,11 +343,14 @@ export function createSubagentsUiExtension(
 				const liveKey = () => current?.snapshot.tasks.filter(t => t.status === "running" || t.status === "pending")
 					.map(t => `${t.id}:${t.episode}:${t.status}`).sort().join("|") ?? "";
 				const before = liveKey();
+				const previousGeneration = current?.snapshot.generation ?? sessionView.reply?.generation;
 				accept(parsed.value, now());
+				const generationChanged = previousGeneration !== undefined && current !== undefined && current.snapshot.generation !== previousGeneration;
+				if (generationChanged) { forgetPendingView(); sessionView = { kind: "idle" }; }
 				renderWidget();
 				publishOverlay();
-				if (overlayOpen && before !== liveKey()) {
-					if (pending) requeryArmed = true;
+				if (overlayOpen && (before !== liveKey() || generationChanged)) {
+					if (pending && !pending.timedOut) requeryArmed = true;
 					else requestSessionView(sessionView.reply?.history.page ?? 0);
 				}
 			} catch {
@@ -350,7 +365,7 @@ export function createSubagentsUiExtension(
 				if (!parsed.ok) return;
 				const reply = parsed.value;
 				const request = pending;
-				// Only the newest request can be answered; late, foreign or stale replies are dropped.
+				// Only the newest correlated request can be answered, including its valid late reply.
 				if (!request || reply.requestId !== request.requestId) return;
 				if (request.epoch !== ownerEpoch) {
 					pending = undefined; stopCoreWatch();
@@ -358,10 +373,12 @@ export function createSubagentsUiExtension(
 					publishOverlay();
 					return;
 				}
+				if (!ctx?.isProjectTrusted()) { forgetPendingView(); sessionView = { kind: "unavailable", reason: "project_trust_required" }; publishOverlay(); return; }
 				const owner = readOwner(ctx);
 				if (!owner || reply.ownerSessionId !== owner.sessionId || reply.ownerSessionId !== request.sessionId
 					|| (reply.anchor !== null && reply.anchor !== owner.leafId && !owner.branch.includes(reply.anchor))
-					|| (request.generation !== undefined && reply.generation !== request.generation)) {
+					|| (request.generation !== undefined && reply.generation !== request.generation)
+					|| (current !== undefined && reply.generation !== current.snapshot.generation)) {
 					pending = undefined; stopCoreWatch();
 					sessionView = { kind: "unavailable", reason: "owner_changed" };
 					publishOverlay();
@@ -369,8 +386,11 @@ export function createSubagentsUiExtension(
 				}
 				pending = undefined;
 				stopCoreWatch();
-				viewObservedAt = request.sentAt;
-				sessionView = { kind: reply.history.state === "ready" ? "ready" : "unavailable", reply,
+				const cached = sessionView.reply;
+				const transient = ["history_query_failed", "core_query_failed", "core_reply_invalid"].includes(reply.history.reason ?? "");
+				const preserve = transient && cached?.history.state === "ready" && ctx?.isProjectTrusted() === true;
+				if (!preserve) viewObservedAt = request.sentAt;
+				sessionView = { kind: reply.history.state === "ready" ? "ready" : "unavailable", reply: preserve ? cached : reply,
 					...(reply.history.reason === undefined ? {} : { reason: reply.history.reason }) };
 				publishOverlay();
 				if (requeryArmed) {
@@ -386,7 +406,7 @@ export function createSubagentsUiExtension(
 			try {
 				if (!tui() || !overlayOpen) return;
 				// Coalesce lifecycle invalidations into one requery of the current scope.
-				if (pending) requeryArmed = true;
+				if (pending && !pending.timedOut) requeryArmed = true;
 				else requestSessionView(sessionView.reply?.history.page ?? 0);
 			} catch {
 				/* Display-only consumer. */

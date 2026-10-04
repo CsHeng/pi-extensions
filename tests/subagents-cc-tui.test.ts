@@ -17,7 +17,7 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	const agent = join(base, "agent"); await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
 	await writeFile(join(agent, "claude-code-style.json"), JSON.stringify({ mode, showStartupHeader: false, enableWorkingMessage: false, enableSessionReference: false, enableSubagentAutocomplete: false }));
-	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
+	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
 		"-e", join(root, "extensions/subagents-ui/index.ts"), "-e", cc,
 		"-e", join(root, "tests/fixtures/subagents-observer-tui.ts"), "--model", "observer-fixture/fixture", "--thinking", "off", "--", "observer fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `set -eu; stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {

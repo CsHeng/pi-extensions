@@ -1,4 +1,5 @@
 import { commandCorrelationKey } from "./command-correlation.ts";
+import { CHILD_CAPABILITY_FAILURE_EVENT } from "./contracts.ts";
 import { createHash } from "node:crypto";
 import { MANAGED_LIMITS } from "./session-contracts.ts";
 import { isLocalTiming, type LocalTiming } from "./telemetry.ts";
@@ -315,6 +316,15 @@ export function boundNativeObservation(value: NativeObservation): NativeObservat
 		return unavailable();
 	}
 	return value;
+}
+
+/** Only a structured guard marker in this owned append range classifies invalidation. */
+export function nativeCapabilityInvalidated(text: string, startLeaf: string | null, endLeaf: string | null): boolean {
+	const parsed = parseNativeSession(text);
+	if (!parsed || (parsed.fork && startLeaf === null)) return false;
+	const selected = selectRange(parsed.body, startLeaf, endLeaf);
+	return selected?.some(({ entry }) => entry.type === "custom" && entry.customType === CHILD_CAPABILITY_FAILURE_EVENT
+		&& isRecord(entry.data) && entry.data.version === 1 && entry.data.code === "capability_invalidated") === true;
 }
 
 export function nativeLeaf(text: string): string | null | undefined {

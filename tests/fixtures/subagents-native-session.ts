@@ -1,5 +1,6 @@
 import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { rename, writeFile } from "node:fs/promises";
 
 function explorerReadPath(input: string): string {
 	return /External read roots:\\n- (?!none(?:\\n|"|$))([^\\"]+)/.exec(input)?.[1] ?? "external.txt";
@@ -94,6 +95,11 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 				}
 				if (text !== "SYNTHETIC_SUMMARY" && (input.includes("host-worker-fixture") || input.includes("host-reviewer-fixture") || input.includes("host-explorer-fixture"))) {
 					const count = context.messages.filter((item) => item.role === "user").length;
+					if (input.includes("capability-invalidated-fixture") && process.env.CSHENG_NATIVE_REPLACE_ROOT) {
+						const root = process.env.CSHENG_NATIVE_REPLACE_ROOT;
+						await rename(root, `${root}.old`);
+						await writeFile(root, "replacement");
+					}
 					message.content = [input.includes("host-reviewer-fixture")
 						? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: "candidate.txt" } }
 						: input.includes("host-explorer-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: explorerReadPath(input) } }

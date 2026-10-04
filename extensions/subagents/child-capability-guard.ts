@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { registerObservationHooks } from "./observation-hooks.ts";
+import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
@@ -20,6 +20,10 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
 	let fatalReason = loaded.error;
+	let failureRecorded = false;
+	const recordFailure = (): void => {
+		if (!failureRecorded) { recordCapabilityInvalidation(pi); failureRecorded = true; }
+	};
 	registerObservationHooks(pi, { child: true, capabilityKey: loaded.manifest ? createHash("sha256").update(JSON.stringify(loaded.manifest)).digest("hex") : null });
 	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
 	if (loaded.manifest?.guidance) pi.on("before_agent_start", event => {
@@ -30,10 +34,15 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 
 	pi.on("tool_call", async (event) => {
 		if (!loaded.manifest || fatalReason) {
+			recordFailure();
 			return { block: true, terminate: true, reason: fatalReason ?? "Child capability is unavailable." };
 		}
 		// The typed tool checks all repository/path/revision inputs itself on every execution.
-		if (event.toolName === GIT_READ_TOOL && loaded.manifest.role !== "worker") return undefined;
+		if (event.toolName === GIT_READ_TOOL && loaded.manifest.role !== "worker") {
+			const root = await authorizePath(loaded.manifest, "read", loaded.manifest.root);
+			if (root.fatal) { fatalReason = root.reason ?? "Child capability is unavailable."; recordFailure(); return { block: true, terminate: true, reason: fatalReason }; }
+			return undefined;
+		}
 		if (!PATH_TOOLS.has(event.toolName)) {
 			return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the child capability.` };
 		}
@@ -41,7 +50,10 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 		if (path === undefined) return { block: true, terminate: false, reason: `Tool ${event.toolName} did not provide a path.` };
 		const decision = await authorizePath(loaded.manifest, event.toolName, path);
 		if (!decision.allowed) {
-			if (decision.fatal) fatalReason = decision.reason ?? "Child capability is unavailable.";
+			if (decision.fatal) {
+				fatalReason = decision.reason ?? "Child capability is unavailable.";
+				recordFailure();
+			}
 			return { block: true, terminate: decision.fatal === true, reason: decision.reason ?? "Path denied." };
 		}
 		return undefined;

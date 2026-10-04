@@ -26,6 +26,7 @@ import {
 	SESSION_VIEW_CHANGED_EVENT,
 	SESSION_VIEW_EVENT,
 	SESSION_VIEW_REQUEST_EVENT,
+	SESSION_VIEW_QUERY_EVENT,
 	parseSessionViewReply,
 	type SessionViewHistoryRow,
 	type SessionViewReply,
@@ -146,6 +147,7 @@ function context(options: {
 	const footers = options.footers ?? [];
 	return {
 		mode: options.mode ?? "tui",
+		isProjectTrusted: () => true,
 		sessionManager: options.session ?? owner(),
 		ui: {
 			setStatus(key: string, text: string | undefined) { statuses.push(key === SUBAGENTS_UI_STATUS_KEY ? text : `other:${key}`); },
@@ -447,6 +449,16 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/, "stale request answers never repaint");
 });
 
+test("wall-clock changes cannot trigger the monotonic core wait deadline", async () => {
+	const scheduler = new FakeScheduler();
+	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval() });
+	const held: { overlay?: SubagentsOverlay } = {}, ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx); await openWith(pi, ctx);
+	const original = Date.now, jumped = Date.now() + 3_600_000;
+	try { Date.now = () => jumped; scheduler.tick(); assert.match(held.overlay!.render(120).join("\n"), /history loading/); }
+	finally { Date.now = original; await pi.handlers.get("session_shutdown")?.({}, ctx); }
+});
+
 test("missing core replies surface a bounded unavailable state instead of loading forever", async () => {
 	const scheduler = new FakeScheduler();
 	let clock = 1_000;
@@ -461,10 +473,88 @@ test("missing core replies surface a bounded unavailable state instead of loadin
 	const timedOut = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(timedOut, /history unavailable \(core_timeout\)/);
 	assert.match(timedOut, /▸ history unavailable/, "unavailable history is visible, never an empty success");
+	const audits = pi.entries.filter((entry: any) => entry.customType === SESSION_VIEW_QUERY_EVENT) as Array<{ data: Record<string, unknown> }>;
+	assert.equal(audits.length, 1);
+	assert.equal(audits[0]!.data.source, "ui"); assert.equal(audits[0]!.data.state, "timeout");
+	assert.equal(audits[0]!.data.durationMs, 4_000);
 	// Enter retries through the core contract.
 	const before = requestCount(pi);
 	held.overlay?.handleInput("enter");
 	assert.ok(requestCount(pi) > before, "enter on unavailable history requeries");
+});
+
+test("a foreign observer cannot invalidate a history-only cached panel", async () => {
+	const pi = install(), held: { overlay?: SubagentsOverlay } = {}, ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx); await openWith(pi, ctx);
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId }));
+	const requests = requestCount(pi);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ parentSessionId: "foreign-session" }));
+	assert.equal(requestCount(pi), requests);
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /history loading/);
+});
+
+test("reloaded UI instances cannot collide with an earlier instance request id", async () => {
+	const first = install(), second = install();
+	for (const pi of [first, second]) { const held: { overlay?: SubagentsOverlay } = {}; const ctx = captureCtx(held); await pi.handlers.get("session_start")?.({}, ctx); await openWith(pi, ctx); }
+	assert.notEqual(lastRequest(first).requestId, lastRequest(second).requestId);
+});
+
+test("timed-out history accepts only its correlated late reply and preserves cached rows during refresh failure", async () => {
+	const scheduler = new FakeScheduler(); let clock = 1_000;
+	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval(), now: () => clock });
+	const held: { overlay?: SubagentsOverlay } = {}; const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx); await openWith(pi, ctx);
+	const first = lastRequest(pi);
+	clock += 4_000; scheduler.tick();
+	assert.match(held.overlay!.render(120).join("\n"), /core_timeout/);
+	answer(pi, sessionReply({ requestId: first.requestId }));
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /core_timeout/);
+	held.overlay!.handleInput("enter");
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	const refresh = lastRequest(pi); clock += 4_000; scheduler.tick();
+	const cached = held.overlay!.render(120).join("\n");
+	assert.match(cached, /core_timeout/); assert.match(cached, /cached/); assert.match(cached, /11111111/);
+	answer(pi, sessionReply({ requestId: first.requestId, summary: { agents: 999, acceptedEpisodes: 999, states: { idle: 999, queued: 0, running: 0, interrupted: 0, closed: 0 }, liveAgents: 0 } }));
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /999 agents/);
+	answer(pi, sessionReply({ requestId: refresh.requestId, inventory: { state: "unavailable", reason: "core_query_failed", complete: false, unreadableRecords: 0 }, summary: null, usage: null,
+		history: { state: "unavailable", reason: "core_query_failed", page: 0, pageSize: 20, totalRows: 0, totalPages: 0, rows: [] } }));
+	assert.match(held.overlay!.render(120).join("\n"), /core_query_failed/);
+	assert.match(held.overlay!.render(120).join("\n"), /11111111/);
+	let trusted = false; ctx.isProjectTrusted = () => trusted;
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /11111111/);
+	assert.match(held.overlay!.render(120).join("\n"), /project_trust_required/);
+	trusted = true;
+});
+
+test("a retired generation cannot recover a timed-out query after a new generation is observed", async () => {
+	const scheduler = new FakeScheduler(); let clock = 1_000;
+	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval(), now: () => clock });
+	const held: { overlay?: SubagentsOverlay } = {}; const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ phase: "settled", tasks: [settledTask()], activeChildren: 0, settledTasks: 1 }));
+	await openWith(pi, ctx); const old = lastRequest(pi);
+	clock += 4_000; scheduler.tick();
+	pi.events.emit(OBSERVER_EVENT, snapshot({ generation: "gen-2", runId: "run-2", phase: "settled", tasks: [settledTask()], activeChildren: 0, settledTasks: 1 }));
+	const fresh = lastRequest(pi); assert.notEqual(fresh.requestId, old.requestId);
+	answer(pi, sessionReply({ requestId: old.requestId }));
+	assert.match(held.overlay!.render(120).join("\n"), /history loading/);
+	answer(pi, sessionReply({ requestId: fresh.requestId, generation: "gen-2" }));
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /history loading/);
+});
+
+test("lifecycle invalidation after a timeout starts a new correlated query instead of waiting forever", async () => {
+	const scheduler = new FakeScheduler(); let clock = 1_000;
+	const pi = install({ setInterval: callback => scheduler.setInterval(callback), clearInterval: () => scheduler.clearInterval(), now: () => clock });
+	const held: { overlay?: SubagentsOverlay } = {}; const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx); await openWith(pi, ctx);
+	const old = lastRequest(pi); clock += 4_000; scheduler.tick();
+	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.notEqual(lastRequest(pi).requestId, old.requestId);
+	answer(pi, sessionReply({ requestId: old.requestId }));
+	assert.match(held.overlay!.render(120).join("\n"), /history loading/);
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId }));
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /history loading/);
 });
 
 test("changed events coalesce into one requery of the current page while the overlay is open", async () => {

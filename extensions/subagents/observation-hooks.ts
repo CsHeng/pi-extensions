@@ -1,8 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { HARD_LIMITS, type RunTelemetry } from "./contracts.ts";
+import { CHILD_CAPABILITY_FAILURE_EVENT, HARD_LIMITS, type RunTelemetry } from "./contracts.ts";
 import { boundNativeObservation, collectNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
 import { MANAGED_LIMITS, SUBAGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
 import { LocalTimingRecorder, monotonicNow, type LocalTiming } from "./telemetry.ts";
+
+/** Native audit is optional; inability to record must never permit a rejected tool. */
+export function recordCapabilityInvalidation(pi: Pick<ExtensionAPI, "appendEntry">): void {
+	try { pi.appendEntry(CHILD_CAPABILITY_FAILURE_EVENT, { version: 1, code: "capability_invalidated" }); } catch { /* Preserve fail-closed enforcement. */ }
+}
 
 const MAX_CUSTOM_BYTES = 64 * 1024;
 const DELEGATION_TOOLS = new Set([SUBAGENT_SESSION_TOOL_NAME]);

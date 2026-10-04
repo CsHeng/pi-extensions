@@ -14,7 +14,7 @@ import {
 import { CHILD_MARKER_ENV, HARD_LIMITS } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
 import { workerGitEnvironment } from "./worker-inputs.ts";
-import { registerObservationHooks } from "./observation-hooks.ts";
+import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
 
 export const WORKER_SCRATCH_ENV = "CSHENG_SUBAGENT_WORKER_SCRATCH";
 
@@ -227,7 +227,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 		if (event.toolName === "bash") return;
 		const input = event.input as Record<string, unknown>;
 		const decision = await authorizePath(loaded.manifest, event.toolName, typeof input.path === "string" ? input.path : ".");
-		if (decision.fatal) fatal = true;
+		if (decision.fatal) { fatal = true; recordCapabilityInvalidation(pi); }
 		if (!decision.allowed) return { block: true, terminate: decision.fatal === true, reason: decision.reason ?? "Path denied." };
 	});
 	try {
