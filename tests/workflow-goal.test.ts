@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -507,8 +508,141 @@ test("async cancellation/input fences and read-only optional UI preserve committ
  assert.equal((await f.store.mutate({ operation: "start", task: "one" }, { ...f.ctx, signal: controller.signal }, "cancelled")).code, "preparation_changed");
  assert.deepEqual(f.store.current(), before);
  const pending = f.store.mutate({ operation: "start", task: "one" }, f.ctx, "overlap"); f.store.delivered(false);
- assert.equal((await pending).code, "preparation_changed");
+ // Replay re-derives from the delivered input, so the accurate alignment gate surfaces instead of a bare conflict.
+ assert.equal((await pending).code, "alignment_required");
  const stable = f.store.current(); goalRows(f.store.view(), 3); goalRows(f.store.view(), 120); assert.deepEqual(f.store.current(), stable);
  f.store.subscribe(() => { throw new Error("UI failed"); });
  await f.run({ operation: "amend", authority: "existing", reason: "retain", alignment: "same goal" }); assert.equal(f.store.current()!.input.aligned, true);
+});
+
+test("preparation-only conflicts replay against fresh state and commit exactly once", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const before = f.snapshots.length;
+ const started = f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, f.ctx, "conflict-start");
+ f.store.pendingExecutions(["run-1"]); // commits while the start preparation awaits its scope checks
+ const result = await started;
+ assert.equal(result.ok, true, result.message);
+ assert.equal(f.snapshots.length - before, 2); // one injected bookkeeping commit + exactly one committed start
+ const state = f.store.current()!;
+ assert.deepEqual(state.executionPending, ["run-1"]);
+ assert.deepEqual(state.attempts.filter(a => a.task === "two").map(a => a.id), ["A2"]);
+ // A replayed commit keeps duplicate call ids idempotent.
+ const duplicate = await f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, f.ctx, "conflict-start");
+ assert.deepEqual(duplicate.diagnostics, ["Already recorded."]);
+});
+
+test("concurrent semantic changes surface their own accurate rejection after replay, not a conflict diagnostic", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const delivered = f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, f.ctx, "delivered-start");
+ f.store.delivered(false);
+ const deliveredResult = await delivered;
+ assert.equal(deliveredResult.code, "alignment_required");
+ assert.match(deliveredResult.message!, /alignment/); assert.ok(!deliveredResult.message!.includes("Replayed"));
+ assert.ok(f.store.current()!.attempts.every(a => a.task !== "two"));
+ const recovered = f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, f.ctx, "recovered-start");
+ f.store.recover("test recovery interrupts attempts");
+ const recoveredResult = await recovered;
+ assert.equal(recoveredResult.code, "alignment_required");
+ assert.ok(!recoveredResult.message!.includes("Replayed"));
+ assert.ok(f.store.current()!.attempts.every(a => a.status === "interrupted"));
+ assert.ok(f.store.current()!.attempts.every(a => a.task !== "two"));
+});
+
+test("parallel duplicate operations resolve without double commits; losers get the semantic rejection", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ const starts = await Promise.all(["a", "b"].map(id => f.store.mutate({ operation: "start", task: "one", scope: ["one"] }, f.ctx, `dup-start-${id}`)));
+ assert.equal(starts.filter(r => r.ok).length, 1);
+ const loser = starts.find(r => !r.ok)!;
+ assert.equal(loser.code, "running_attempt"); assert.ok(!loser.message!.includes("Replayed"));
+ const before = f.snapshots.length;
+ const reports = await Promise.all(["a", "b"].map(id => f.store.mutate(f.report("one"), f.ctx, `dup-report-${id}`)));
+ assert.equal(reports.filter(r => r.ok).length, 1);
+ const reportLoser = reports.find(r => !r.ok)!;
+ assert.equal(reportLoser.code, "unknown_attempt"); assert.ok(!reportLoser.message!.includes("Replayed"));
+ assert.equal(f.snapshots.length - before, 1);
+});
+
+test("a realistic parallel batch fully recovers through bounded replay", async t => {
+ const f = await fixture(t);
+ const keys = ["sib0", "sib1", "sib2"];
+ for (const key of keys) await writeFile(join(f.cwd, key), key);
+ await f.run({ ...enroll, requirements: keys.map(key => ({ key, outcome: key, verification: "check" })), tasks: keys.map(key => ({ key, title: key, covers: [key] })) });
+ const before = f.snapshots.length;
+ const results = await Promise.all(keys.map((key, n) => f.store.mutate({ operation: "start", task: key, scope: [key] }, f.ctx, `sib-${n}`)));
+ assert.ok(results.every(r => r.ok), results.map(r => r.message).join(" | "));
+ assert.equal(f.snapshots.length - before, keys.length);
+ const ids = f.store.current()!.attempts.map(a => a.id);
+ assert.equal(new Set(ids).size, ids.length);
+});
+
+test("a contention storm beyond the bound keeps today's rejection, now with a replay count", async t => {
+ const f = await fixture(t);
+ const keys = Array.from({ length: 8 }, (_, n) => `storm${n}`);
+ for (const key of keys) await writeFile(join(f.cwd, key), key);
+ await f.run({ ...enroll, requirements: keys.map(key => ({ key, outcome: key, verification: "check" })), tasks: keys.map(key => ({ key, title: key, covers: [key] })) });
+ const before = f.snapshots.length;
+ const results = await Promise.all(keys.map((key, n) => f.store.mutate({ operation: "start", task: key, scope: [key] }, f.ctx, `storm-${n}`)));
+ const ok = results.filter(r => r.ok), rejected = results.filter(r => !r.ok);
+ assert.equal(ok.length + rejected.length, keys.length);
+ assert.ok(ok.length >= 2 && rejected.length >= 1, `expected partial recovery and residual conflicts, got ${ok.length}/${rejected.length}`);
+ for (const r of rejected) { assert.equal(r.code, "preparation_changed"); assert.match(r.message!, /Replayed/); }
+ assert.equal(f.snapshots.length - before, ok.length);
+ const ids = f.store.current()!.attempts.map(a => a.id);
+ assert.equal(new Set(ids).size, ids.length);
+ // An exhausted start still starts cleanly once the storm drains.
+ const remaining = keys.find(key => !f.store.current()!.attempts.some(a => a.task === key))!;
+ const retry = await f.store.mutate({ operation: "start", task: remaining, scope: [remaining] }, f.ctx, "storm-retry");
+ assert.equal(retry.ok, true, retry.message);
+});
+
+test("education surfaces: start names its attempt and window; rejections teach the remedy; description leads with the rules", async t => {
+ const f = await fixture(t);
+ let tool: ToolDefinition | undefined;
+ registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
+ assert.ok(tool);
+ assert.match(tool.description, /^High-frequency rules: report names the attempt id start returned, or omits attempt only while exactly one matching attempt runs \(optionally selected by task\)/);
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ let serial = 0;
+ const runTool = async (args: Record<string, unknown>) => {
+  const response = await tool!.execute(`tool-${++serial}`, args as never, undefined, undefined, ctx);
+  return (response.content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
+ };
+ await runTool(enroll);
+ const startOut = await runTool({ operation: "start", task: "one", scope: ["one"] });
+ assert.match(startOut, /Attempt A1 is running for task one: report with attempt "A1"; host-fact checks count only while it runs, so re-run checks that predate this start\./);
+ const wrongAttempt = await runTool({ operation: "report", attempt: "A9", summary: "nothing" });
+ assert.match(wrongAttempt, /Report the exact attempt id start returned, or inspect when several attempts run\./);
+ const hostFact = await runTool({ operation: "report", summary: "claimed check", facts: [{ key: "check", kind: "host", check: "unit", result: "pass" }] });
+ assert.match(hostFact, /Re-run the check now or reference a listed current observation; checks captured before this attempt started do not qualify\./);
+ const badJudgment = await runTool({ operation: "report", summary: "honest outcome", facts: [{ key: "k", kind: "agent", check: "c", result: "pass" }], judgments: [{ subject: "task:one", facts: ["A1:nope"], accepted: true, rationale: "r" }] });
+ assert.match(badJudgment, /Reference current fact ids as attempt:key; the facts list shows what is usable\./);
+ // An idempotent start replay must not attach another call's attempt guidance.
+ const runToolWithId = async (id: string, args: Record<string, unknown>) => {
+  const response = await tool!.execute(id, args as never, undefined, undefined, ctx);
+  return (response.content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
+ };
+ await runTool({ operation: "report", attempt: "A1", summary: "first slice reported without acceptance" });
+ const created = await runToolWithId("dup-start", { operation: "start", task: "one", scope: ["one"] });
+ assert.match(created, /Attempt A2 is running for task one/);
+ await runTool({ operation: "report", attempt: "A2", summary: "second slice reported without acceptance" });
+ await runTool({ operation: "start", task: "one", scope: ["one"] });
+ const replayed = await runToolWithId("dup-start", { operation: "start", task: "one", scope: ["one"] });
+ assert.match(replayed, /Already recorded\./);
+ assert.ok(!/Attempt A\d is running/.test(replayed), "idempotent replay must not name another call's attempt");
+});
+
+test("cancellation and fencing never replay", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ let fencedReads = 0;
+ const fenced = await f.store.mutate({ operation: "start", task: "one", scope: ["one"] }, { ...f.ctx, fenced: () => { fencedReads++; return true; } }, "fenced-call");
+ assert.equal(fenced.ok, false); assert.equal(fenced.code, "preparation_changed");
+ assert.ok(!fenced.message!.includes("Replayed"));
+ assert.equal(fencedReads, 2); // one preparation only: the lease check plus the wrapper's replay guard
+ const controller = new AbortController(); controller.abort();
+ const aborted = await f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, { ...f.ctx, signal: controller.signal }, "aborted-call");
+ assert.equal(aborted.ok, false); assert.equal(aborted.code, "preparation_changed");
+ assert.ok(!aborted.message!.includes("Replayed"));
+ assert.equal(f.store.current()!.attempts.length, 0);
 });

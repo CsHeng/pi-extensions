@@ -125,7 +125,7 @@ export function judge(state: GoalState, input: Omit<GoalAcceptance, "revision">,
  const revision = subjectRevision(state, input.subject);
  requireGoal(revision !== undefined, "unknown_subject", `Unknown subject ${input.subject}.`);
  const missingFact = input.facts.find(id => !state.facts.some(f => f.id === id));
- requireGoal(!missingFact, "unknown_fact", `Judgment fact ${missingFact ?? "unknown"} is unavailable; current facts: ${state.facts.filter(f => f.usable).slice(-8).map(f => f.id).join(", ") || "none"}.`);
+ requireGoal(!missingFact, "unknown_fact", `Judgment fact ${missingFact ?? "unknown"} is unavailable; current facts: ${state.facts.filter(f => f.usable).slice(-8).map(f => f.id).join(", ") || "none"}. Reference current fact ids as attempt:key; the facts list shows what is usable.`);
  state.acceptance = state.acceptance.filter(j => j.subject !== input.subject);
  if (!input.accepted) { invalidate(state, new Set([input.subject])); return; }
  const usable = input.facts.length > 0 && input.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));

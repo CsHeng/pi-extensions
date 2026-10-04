@@ -63,7 +63,19 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   if (op.alignment) { next.input.aligned = true; }
   requireGoal(next.input.aligned, "alignment_required", "Reconcile delivered input against existing authority and supply alignment; this is not new permission.");
  }
+ const PREPARATION_LIMIT = 3;
+ /** A preparation-only lease conflict re-derives the whole operation from current state; cancellation and fencing never replay. */
  async function mutate(op: GoalOperation, ctx: GoalContext, call: string): Promise<GoalResult> {
+  for (let preparation = 1; ; preparation++) {
+   const result = await mutateOnce(op, ctx, call);
+   const conflict = !result.ok && result.code === "preparation_changed" && !ctx.signal?.aborted && !ctx.fenced?.();
+   if (!conflict || preparation >= PREPARATION_LIMIT) {
+    if (conflict && preparation > 1) result.message = `${result.message ?? ""} Replayed ${preparation - 1} preparation(s); concurrent commits continued.`;
+    return result;
+   }
+  }
+ }
+ async function mutateOnce(op: GoalOperation, ctx: GoalContext, call: string): Promise<GoalResult> {
   const diagnostics: string[] = [];
   try {
    requireGoal(Check(goalParameters, op), "invalid_request", "Malformed semantic operation.");
@@ -116,14 +128,14 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
     } else if (op.operation === "report") {
      const candidates = next.attempts.filter(a => a.status === "running" && (!op.task || a.task === op.task));
      const attempt = op.attempt ? next.attempts.find(a => a.id === op.attempt) : candidates.length === 1 ? candidates[0] : undefined;
-     requireGoal(attempt && attempt.status !== "interrupted", "unknown_attempt", `Report attempt ${op.attempt ?? "unspecified"} is not a current unambiguous attempt; available: ${next.attempts.filter(a => a.status !== "interrupted").slice(-8).map(a => a.id).join(", ") || "none"}.`);
+     requireGoal(attempt && attempt.status !== "interrupted", "unknown_attempt", `Report attempt ${op.attempt ?? "unspecified"} is not a current unambiguous attempt; available: ${next.attempts.filter(a => a.status !== "interrupted").slice(-8).map(a => a.id).join(", ") || "none"}. Report the exact attempt id start returned, or inspect when several attempts run.`);
      requireGoal(attempt.revision === next.tasks.find(t => t.key === attempt.task)?.revision, "stale_attempt", "Task meaning changed; start a current attempt.");
      requireGoal(op.summary, "invalid_report", "Report needs a truthful outcome summary.");
      attempt.status = "reported"; attempt.summary = op.summary;
      for (const input of op.facts ?? []) {
       const id = `${attempt.id}:${input.key}`;
       const observation = input.observationId ? checks.get(input.observationId) : input.kind === "host" ? [...checks.values()].reverse().find(check => check.scopes[attempt.id] && check.host.sessionId === ctx.sessionId && check.generation === attempt.generation && check.host.at >= attempt.started) : undefined;
-      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.key} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.scopes[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.host.toolCallId).join(", ") || "none"}.`);
+      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.key} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.scopes[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.host.toolCallId).join(", ") || "none"}. Re-run the check now or reference a listed current observation; checks captured before this attempt started do not qualify.`);
       const scope = input.kind === "host" ? observation?.scopes[attempt.id] : attempt.scope;
       const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.host.toolCallId, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, scope: scope ?? attempt.scope, usable: !!scope };
       if (input.kind === "host" && (observation!.generation !== attempt.generation || observation!.host.at < attempt.started)) { fact.usable = false; fact.note = "Observation belongs to another input or predates this attempt."; }
