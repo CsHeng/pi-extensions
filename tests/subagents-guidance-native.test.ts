@@ -8,6 +8,7 @@ import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { runChild } from "../extensions/subagents/runner.ts";
 import { getManagedRole, getRole } from "../extensions/subagents/roles.ts";
 import type { EffectiveRoute } from "../extensions/subagents/contracts.ts";
+import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
 
 const cli = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
 const provider = fileURLToPath(new URL("fixtures/subagents-native-session.ts", import.meta.url));
@@ -39,7 +40,7 @@ test("native append selection merges with child roles and survives session conti
 				...(worker ? { managedWorkerScratch: scratch } : {}),
 				capability: { version: 2, root: child, role: roleName, readRoots: [child], writePaths: [], externalReadRoots: [], ...(worker ? { writeRoot: true } : {}) },
 				prompt: "append-fixture", approveProject: true, diagnosticSession: { path: session, ref: "append-fixture", async removeUnused() {} }, invocation,
-				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_APPEND_EXPECT_PARTS: JSON.stringify([globalMarker, snapshotMarker, sourceMarker, role.systemPrompt, contextMarker]) },
+				env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, CSHENG_APPEND_EXPECT_PARTS: JSON.stringify([globalMarker, snapshotMarker, sourceMarker, role.systemPrompt, contextMarker]) }),
 			};
 			// A second episode restores the same native history without duplicating instructions.
 			for (let episode = 0; episode < (selection === "project" ? 2 : 1); episode++) {
@@ -64,7 +65,7 @@ test("native blocked-tool hooks carry capability invalidation through the real s
 		guardExtensionPath: guard, capability: { version: 2, root: child, role: "explorer", readRoots: [child], writePaths: [], externalReadRoots: [root], externalReadPins: [{ dev: pin.dev, ino: pin.ino }] },
 		prompt: "host-explorer-fixture capability-invalidated-fixture", approveProject: true,
 		diagnosticSession: { path: session, ref: "fixture-invalidated", async removeUnused() {} }, invocation,
-		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_NATIVE_REPLACE_ROOT: root },
+		env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, CSHENG_NATIVE_REPLACE_ROOT: root }),
 	});
 	assert.equal(result.status, "failed", result.stderr);
 	assert.equal(result.error?.code, "capability_invalidated", JSON.stringify(result));
@@ -94,7 +95,7 @@ test("native child loads bounded Skill body/reference and snapshot ancestor cont
 			guardExtensionPath: guard, capability: { version: 2, root: child, role: "explorer", readRoots: [child], writePaths: [], externalReadRoots: [] },
 			prompt: "guidance-fixture", approveProject: true, diagnosticSession: { path: session, ref: "fixture", async removeUnused() {} },
 			invocation,
-			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: guide },
+			env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: guide }),
 		});
 		assert.equal(result.status, "succeeded", `${inheritSkills}: ${result.stderr} ${result.error?.code} ${result.output}`);
 		assert.match(result.output, new RegExp(`catalog=${inheritSkills ? 1 : 0};ancestor=1;snapshot=1;managed=0;reads=${inheritSkills ? 2 : 0};reference=${inheritSkills ? 1 : 0}`));
@@ -108,7 +109,7 @@ test("native child loads bounded Skill body/reference and snapshot ancestor cont
 		capability: { version: 2, root: child, role: "worker", readRoots: [child], writePaths: [join(child, "candidate.ts")], externalReadRoots: [], writeRoot: true },
 		prompt: "guidance-worker-fixture", approveProject: true, diagnosticSession: { path: session, ref: "fixture-worker", async removeUnused() {} },
 		invocation,
-		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: guide },
+		env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: guide }),
 	});
 	assert.equal(worker.status, "succeeded", `${worker.stderr} ${worker.error?.code} ${worker.output}`);
 	assert.equal(worker.workerToolsSettled, true);
@@ -135,7 +136,7 @@ test("effective parent catalog preserves project winner and excluded global Skil
 		role: getRole("explorer"), route, cwd: child, sourceRoot: source, inheritSkills: true, parentSkills,
 		guardExtensionPath: guard, capability: { version: 2, root: child, role: "explorer", readRoots: [child], writePaths: [], externalReadRoots: [] },
 		prompt: "guidance-fixture", approveProject: true, diagnosticSession: { path: session, ref: "fixture-selection", async removeUnused() {} },
-		invocation, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: join(captured, "SKILL.md"), CSHENG_GUIDANCE_FORBIDDEN_PATH: join(excluded, "SKILL.md") },
+		invocation, env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, CSHENG_GUIDANCE_EXPECT_PATH: join(captured, "SKILL.md"), CSHENG_GUIDANCE_FORBIDDEN_PATH: join(excluded, "SKILL.md") }),
 	});
 	assert.equal(result.status, "succeeded", `${result.error?.code}: ${result.stderr}`);
 	assert.match(result.output, /catalog=1;ancestor=0;snapshot=0;managed=0;reads=2;reference=1;forbidden=0/);

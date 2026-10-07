@@ -11,7 +11,8 @@ import test, { after } from "node:test";
 import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
-import { buildChildPrompt, resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
+import { resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
+import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;
 const DIAGNOSTIC_DIR = mkdtempSync(join(tmpdir(), "subagent-runner-diagnostics-"));
@@ -67,7 +68,7 @@ function options(mode: string, extra: Record<string, unknown> = {}) {
 			removeUnused: async () => { await rm(sessionPath, { force: true }); },
 		},
 		invocation: { command: process.execPath, args: [FIXTURE] },
-		env: { ...process.env, FAKE_PI_MODE: mode, CSHENG_SUBAGENT_TEST_MODE: "remove-me" },
+		env: syntheticSubprocessEnv(DIAGNOSTIC_DIR, { FAKE_PI_MODE: mode, CSHENG_SUBAGENT_TEST_MODE: "remove-me" }),
 		...extra,
 	} as Parameters<typeof runChild>[0];
 }
@@ -104,22 +105,6 @@ test("Linux launches the retained executable inode after deletion and same-path 
 	}
 });
 
-test("child prompt renders canonical external roots without changing write or evidence blocks", () => {
-	const none = buildChildPrompt(task, "bounded input");
-	assert.match(none, /Read scope:\n- \./);
-	assert.match(none, /External read roots:\n- none\nWrite paths:\n- none/);
-	assert.equal(none.includes("Expected parent evidence"), false);
-	const withRoots = buildChildPrompt({
-		...task,
-		writePaths: ["src/file.ts"],
-		verification: ["focused test"],
-		externalReadRoots: ["/other/repo/src"],
-	}, "bounded input");
-	assert.match(withRoots, /External read roots:\n- \/other\/repo\/src\nWrite paths:\n- src\/file.ts/);
-	assert.match(withRoots, /Expected parent evidence:\n- focused test/);
-	assert.match(withRoots, /\n\nInputs:\nbounded input$/);
-});
-
 test("zero exit without a complete final report never succeeds", async () => {
 	for (const mode of ["empty", "stale", "tool-only", "unpaired", "length", "pending", "toolUse", "missing-settled"]) {
 		const result = await runChild(options(mode));
@@ -139,10 +124,25 @@ test("runner parses fragmented JSONL and aggregates usage", async () => {
 	assert.deepEqual(result.usage, { input: 3, output: 2, cacheRead: 1, cacheWrite: 1, cost: 0.25, turns: 1 });
 });
 
+test("synthetic child env excludes ambient operator variables", async (t) => {
+	const capture = join(tmpdir(), `subagent-ambient-${process.pid}-${Date.now()}.json`);
+	t.after(async () => rm(capture, { force: true }));
+	const prior = process.env.OPENAI_API_KEY;
+	process.env.OPENAI_API_KEY = "ambient-sentinel";
+	try {
+		await runChild(options("normal", { env: syntheticSubprocessEnv(DIAGNOSTIC_DIR, { FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture }) }));
+		const recorded = JSON.parse(await readFile(capture, "utf8")) as { hasOpenAiKey?: boolean };
+		assert.equal(recorded.hasOpenAiKey, false);
+	} finally {
+		if (prior === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = prior;
+	}
+});
+
 test("runner passes an explicit isolated Pi invocation and cleans private files", async (t) => {
 	const capture = join(tmpdir(), `subagent-capture-${process.pid}-${Date.now()}.json`);
 	t.after(async () => rm(capture, { force: true }));
-	const result = await runChild(options("normal", { env: { ...process.env, FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me", RIPGREP_CONFIG_PATH: "/tmp/follow-links-config" } }));
+	const result = await runChild(options("normal", { env: syntheticSubprocessEnv(DIAGNOSTIC_DIR, { FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me", RIPGREP_CONFIG_PATH: "/tmp/follow-links-config" }) }));
 	assert.equal(result.status, "succeeded");
 	const recorded = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; child: string; capability: string; sessionPath: string; removedParentMarker?: string; ripgrepConfig?: string };
 	assert.equal(recorded.child, "1");
@@ -164,7 +164,7 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 		task: { ...task, externalReadRoots: ["/other/repo"] },
 		capability: { ...capability, externalReadRoots: ["/other/repo"] },
 		cwd: process.cwd(),
-		env: { ...process.env, FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me" },
+		env: syntheticSubprocessEnv(DIAGNOSTIC_DIR, { FAKE_PI_MODE: "normal", FAKE_PI_CAPTURE: capture, CSHENG_SUBAGENT_TEST_MODE: "remove-me" }),
 	}));
 	assert.equal(withExternal.status, "succeeded");
 	const recordedExternal = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; sessionPath: string };

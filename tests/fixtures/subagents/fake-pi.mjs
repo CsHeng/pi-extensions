@@ -13,6 +13,7 @@ if (capture) {
 		capability: process.env.CSHENG_SUBAGENT_CAPABILITY,
 		removedParentMarker: process.env.CSHENG_SUBAGENT_TEST_MODE,
 		ripgrepConfig: process.env.RIPGREP_CONFIG_PATH,
+		hasOpenAiKey: process.env.OPENAI_API_KEY !== undefined,
 		sessionPath,
 	}));
 }

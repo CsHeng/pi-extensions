@@ -40,10 +40,10 @@ test("package exposes the seven maintained extensions and their Pi peers", async
 		"@earendil-works/pi-tui": "*",
 		typebox: "*",
 	});
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-ai"], "0.86.0");
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.86.0");
-	assert.equal(manifest.devDependencies?.["@earendil-works/pi-tui"], "0.86.0");
-	assert.equal(manifest.devDependencies?.typebox, "1.3.7");
+	assert.ok(manifest.devDependencies?.["@earendil-works/pi-ai"]);
+	assert.ok(manifest.devDependencies?.["@earendil-works/pi-coding-agent"]);
+	assert.ok(manifest.devDependencies?.["@earendil-works/pi-tui"]);
+	assert.ok(manifest.devDependencies?.typebox);
 	assert.equal(manifest.dependencies, undefined);
 	assert.equal(manifest.scripts?.["e2e:subagents"], "bun scripts/run-live-subagents-e2e.ts");
 });

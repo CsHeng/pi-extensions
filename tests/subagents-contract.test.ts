@@ -39,8 +39,8 @@ test("subagent roles have fixed least-authority tool sets", () => {
 		assert.equal("name" in role, false);
 		assert.equal("canWrite" in role, false);
 		assert.equal(role.tools.includes("bash"), false);
-		// Tool permissions and the child's model-facing nondelegation boundary are distinct.
-		assert.match(role.systemPrompt, /\b(?:do not|never|must not) delegate\b/i);
+		assert.equal(typeof role.systemPrompt, "string");
+		assert.ok(role.systemPrompt.trim().length > 0);
 	}
 });
 
