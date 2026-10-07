@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
 import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
+import { getRole } from "./roles.ts";
 
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
 
@@ -26,10 +27,12 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	};
 	registerObservationHooks(pi, { child: true, capabilityKey: loaded.manifest ? createHash("sha256").update(JSON.stringify(loaded.manifest)).digest("hex") : null });
 	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
-	if (loaded.manifest?.guidance) pi.on("before_agent_start", event => {
+	if (loaded.manifest) pi.on("before_agent_start", event => {
+		// Let Pi discover APPEND_SYSTEM.md before adding the child role.
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getRole(loaded.manifest!.role).systemPrompt].filter(Boolean).join("\n\n");
 		// The original project's ancestor chain replaces managed-storage ancestors; the
 		// snapshot file is already selected by the native loader's override precedence.
-		event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
+		if (loaded.manifest!.guidance) event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
 	});
 
 	pi.on("tool_call", async (event) => {

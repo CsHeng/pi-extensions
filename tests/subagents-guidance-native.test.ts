@@ -16,6 +16,41 @@ const workerGuard = fileURLToPath(new URL("../extensions/subagents/worker-tools.
 const invocation = process.env.CSHENG_GUIDANCE_HOST_PI === "installed" ? { command: "pi", args: ["-e", provider] } : { command: process.execPath, args: [cli, "-e", provider] };
 const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
 
+test("native append selection merges with child roles and survives session continuation", { timeout: 30000 }, async t => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-native-append-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const source = join(base, "project"), child = join(base, "snapshot"), agentDir = join(base, "agent"), scratch = join(base, "scratch");
+	await Promise.all([join(source, ".pi"), join(child, ".pi"), agentDir, scratch].map(path => mkdir(path, { recursive: true })));
+	const globalMarker = "GLOBAL_APPEND_FIXTURE", snapshotMarker = "SNAPSHOT_APPEND_FIXTURE", sourceMarker = "SOURCE_ONLY_APPEND_FIXTURE", contextMarker = "AGENTS_CONTEXT_FIXTURE";
+	await writeFile(join(source, ".pi", "APPEND_SYSTEM.md"), sourceMarker);
+	await writeFile(join(child, "AGENTS.md"), contextMarker);
+	for (const selection of ["none", "global", "project"]) {
+		if (selection === "global") await writeFile(join(agentDir, "APPEND_SYSTEM.md"), globalMarker);
+		if (selection === "project") await writeFile(join(child, ".pi", "APPEND_SYSTEM.md"), snapshotMarker);
+		for (const roleName of ["explorer", "worker"] as const) {
+			const worker = roleName === "worker";
+			const role = worker ? getManagedRole(roleName) : getRole(roleName);
+			const session = join(base, `${selection}-${roleName}.jsonl`);
+			await (await open(session, "wx", 0o600)).close();
+			const options: Parameters<typeof runChild>[0] = {
+				task: { id: "append", role: roleName, objective: "append-fixture", scope: ["."], writePaths: [], inputs: [], dependsOn: [], verification: [], resourceLocks: [], externalReadRoots: [] },
+				role, route, cwd: child, sourceRoot: source, inheritSkills: false,
+				guardExtensionPath: worker ? workerGuard : guard,
+				...(worker ? { managedWorkerScratch: scratch } : {}),
+				capability: { version: 2, root: child, role: roleName, readRoots: [child], writePaths: [], externalReadRoots: [], ...(worker ? { writeRoot: true } : {}) },
+				prompt: "append-fixture", approveProject: true, diagnosticSession: { path: session, ref: "append-fixture", async removeUnused() {} }, invocation,
+				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, CSHENG_APPEND_EXPECT_PARTS: JSON.stringify([globalMarker, snapshotMarker, sourceMarker, role.systemPrompt, contextMarker]) },
+			};
+			// A second episode restores the same native history without duplicating instructions.
+			for (let episode = 0; episode < (selection === "project" ? 2 : 1); episode++) {
+				const result = await runChild(options);
+				assert.equal(result.status, "succeeded", `${selection}/${roleName}: ${result.error?.code} ${result.stderr}`);
+				assert.deepEqual(JSON.parse(result.output), { counts: [Number(selection === "global"), Number(selection === "project"), 0, 1, 1], native: true });
+			}
+		}
+	}
+});
+
 test("native blocked-tool hooks carry capability invalidation through the real stream", { timeout: 20000 }, async t => {
 	const base = await mkdtemp(join(tmpdir(), "subagent-native-invalidated-"));
 	t.after(() => rm(base, { recursive: true, force: true }));

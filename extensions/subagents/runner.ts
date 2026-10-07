@@ -126,7 +126,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	const started = now();
 	const privateDir = await mkdtemp(join(tmpdir(), "csheng-subagent-"));
 	await chmod(privateDir, 0o700);
-	const systemPromptPath = join(privateDir, "role.md");
 	const taskPromptPath = join(privateDir, "task.md");
 	const capabilityPath = join(privateDir, "capability.json");
 	let stderr = "";
@@ -157,7 +156,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			? { ...options.capability, guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } }
 			: options.capability;
 		await Promise.all([
-			writeFile(systemPromptPath, options.role.systemPrompt, { encoding: "utf8", mode: 0o600 }),
 			writeFile(taskPromptPath, completePrompt, { encoding: "utf8", mode: 0o600 }),
 			writeFile(capabilityPath, JSON.stringify(capability), { encoding: "utf8", mode: 0o600 }),
 		]);
@@ -170,7 +168,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			"--model", `${options.route.provider}/${options.route.model}`,
 			"--thinking", options.route.thinking,
 			options.approveProject ? "--approve" : "--no-approve",
-			"--append-system-prompt", systemPromptPath,
 			"--", `@${taskPromptPath}`,
 		];
 		let invocation: PiInvocation;

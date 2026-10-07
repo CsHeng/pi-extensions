@@ -64,7 +64,12 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					}
 				}
 				const input = last?.role === "user" ? JSON.stringify(last.content) : "";
-				if (JSON.stringify(context.messages).includes("guidance-worker-fixture") || JSON.stringify(context.messages).includes("guidance-fixture")) {
+				if (process.env.CSHENG_APPEND_EXPECT_PARTS) {
+					const system = getCurrentSystemPrompt(context.messages);
+					const parts: string[] = JSON.parse(process.env.CSHENG_APPEND_EXPECT_PARTS);
+					message.content = [{ type: "text", text: JSON.stringify({ counts: parts.map(part => system.split(part).length - 1), native: system.includes("<tools>") && system.includes("<rules>") }) }];
+				}
+				else if (JSON.stringify(context.messages).includes("guidance-worker-fixture") || JSON.stringify(context.messages).includes("guidance-fixture")) {
 					const worker = JSON.stringify(context.messages).includes("guidance-worker-fixture");
 					const system = getCurrentSystemPrompt(context.messages);
 					const guide = process.env.CSHENG_GUIDANCE_EXPECT_PATH ?? "";

@@ -15,6 +15,7 @@ import { CHILD_MARKER_ENV, HARD_LIMITS } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
 import { workerGitEnvironment } from "./worker-inputs.ts";
 import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
+import { getManagedRole } from "./roles.ts";
 
 export const WORKER_SCRATCH_ENV = "CSHENG_SUBAGENT_WORKER_SCRATCH";
 
@@ -215,8 +216,10 @@ export type WorkerTools = Awaited<ReturnType<typeof createWorkerTools>>;
 export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
-	if (loaded.manifest?.guidance) pi.on("before_agent_start", event => {
-		event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
+	if (loaded.manifest) pi.on("before_agent_start", event => {
+		// Preserve Pi's native append-file selection and system prompt construction.
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest!.role).systemPrompt].filter(Boolean).join("\n\n");
+		if (loaded.manifest!.guidance) event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
 	});
 	let worker: WorkerTools | undefined;
 	let fatal = true;
