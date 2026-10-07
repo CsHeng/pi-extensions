@@ -380,12 +380,12 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 	assert.equal((expanded.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "live rows stay pinned under history");
 });
 
-test("live headline and tools render on the secondary line directly under each agent", () => {
+test("live route renders on the primary row while headline and tools stay on the secondary line", () => {
 	const overlay = new SubagentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({
 			tasks: [
 				task({ id: "session_00000001", headline: "Read-only C-ROUTEROS", activeTools: ["read"] }),
-				task({ id: "session_00000002", ordinal: 2, headline: "Read-only C-ADGUARD", activeTools: [] }),
+				task({ id: "session_00000002", ordinal: 2, headline: "Read-only C-ADGUARD", activeTools: [], route: null }),
 			],
 			requestedTasks: 2,
 			admittedTasks: 2,
@@ -397,9 +397,13 @@ test("live headline and tools render on the secondary line directly under each a
 	const first = text.indexOf("00000001");
 	const second = text.indexOf("00000002");
 	assert.ok(first >= 0 && second > first);
-	assert.match(text.slice(first, second), /Read-only C-ROUTEROS/);
-	assert.match(text.slice(first, second), /read/);
-	assert.match(text.slice(second), /Read-only C-ADGUARD/);
+	const firstBlock = text.slice(first, second);
+	assert.match(firstBlock, /running[^\n]*openai gpt-4\.1 thinking:off/, "route shares the primary row with status and elapsed");
+	assert.match(firstBlock, /Read-only C-ROUTEROS/);
+	assert.match(firstBlock, /read/);
+	const secondBlock = text.slice(second);
+	assert.match(secondBlock, /route unavailable/);
+	assert.match(secondBlock, /Read-only C-ADGUARD/);
 });
 
 test("detail text keeps visible spaces across zero-width separators and wrapped lines", () => {

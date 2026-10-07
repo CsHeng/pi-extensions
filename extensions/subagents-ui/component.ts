@@ -1,4 +1,4 @@
-import { Key, matchesKey, wrapTextWithAnsi, type KeyId, type TUI } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type KeyId, type TUI } from "@earendil-works/pi-tui";
 import type { ObserverSnapshot, ObserverTask } from "../subagents/observer-events.ts";
 import type { SessionViewReply } from "../subagents/session-view.ts";
 import {
@@ -13,6 +13,7 @@ import {
 	formatLiveRow,
 	formatRunningNav,
 	formatSessionCountRows,
+	formatSessionCounts,
 	formatSessionTitle,
 	formatSessionUsage,
 	historyColumns,
@@ -20,11 +21,12 @@ import {
 	overlayPanelWidth,
 	panelTextWidth,
 	panelTitleRow,
+	sessionCountMetaRows,
 	sessionCounts,
 	sessionHelpText,
 	shortLabel,
 	taskColumns,
-	wrapLiveRowText,
+	liveRowLines,
 	type OverlayRow,
 	type RowColor,
 	type ObserverFreshness,
@@ -184,7 +186,7 @@ export class SubagentsOverlay {
 		return new Map(handles.map(handle => [handle, shortLabel(handle, handles)]));
 	}
 
-	private currentRows(forWidth: boolean): OverlayRow[] {
+	private currentRows(forWidth: boolean, compactHeader = false): OverlayRow[] {
 		const now = this.now();
 		const snapshot = this.model.snapshot;
 		const freshness: ObserverFreshness = observerFreshness(snapshot?.phase, this.model.receivedAt, now, this.staleMs);
@@ -193,10 +195,10 @@ export class SubagentsOverlay {
 		const rows: OverlayRow[] = [
 			{ kind: "title", text: formatSessionTitle(reply?.ownerSessionId) },
 			{ kind: "rule", text: "" },
-			...formatSessionCountRows(counts),
+			...(compactHeader ? [formatSessionCounts(counts), ...sessionCountMetaRows(counts)] : formatSessionCountRows(counts)),
 		];
 		const usage = formatSessionUsage(reply?.usage ?? null);
-		if (usage) rows.push(usage);
+		if (usage && !compactHeader) rows.push(usage);
 		rows.push({ kind: "rule", text: "" });
 		const live = this.liveTasks();
 		if (live.length === 0 && !reply) {
@@ -268,17 +270,18 @@ export class SubagentsOverlay {
 
 	private physicalRow(row: OverlayRow, textWidth: number, panelWidth: number): string[] {
 		const colored = this.colorRow(row);
-		const wrapped = row.kind === "live" ? wrapLiveRowText(colored, textWidth) : this.wrapRow(colored, textWidth);
-		return wrapped.map(line => fillPanelRow(line, panelWidth));
+		const lines = row.kind === "live" ? liveRowLines(colored, textWidth) : this.wrapRow(colored, textWidth);
+		return lines.map(line => fillPanelRow(line, panelWidth));
 	}
 
-	private renderHeaderRows(rows: OverlayRow[], width: number, textWidth: number): string[] {
+	private renderHeaderRows(rows: OverlayRow[], width: number, textWidth: number, compactHeader: boolean): string[] {
 		const liveSectionStart = rows.findIndex(row => row.kind === "liveHeader" || row.kind === "live");
 		const headerEnd = liveSectionStart < 0 ? rows.findIndex(row => row.kind === "group") : liveSectionStart;
 		return rows.slice(0, Math.max(0, headerEnd)).flatMap(row =>
 			row.kind === "title" ? [panelTitleRow(this.colorRow(row), width)]
 				: row.kind === "rule" ? [this.panelRule(width, textWidth)]
-					: this.wrapRow(this.colorRow(row), textWidth).map(line => fillPanelRow(line, width)));
+					: row.kind === "counts" && compactHeader ? [fillPanelRow(truncateToWidth(this.colorRow(row), textWidth), width)]
+						: this.wrapRow(this.colorRow(row), textWidth).map(line => fillPanelRow(line, width)));
 	}
 
 	private liveSectionRows(rows: OverlayRow[]): OverlayRow[] {
@@ -299,72 +302,103 @@ export class SubagentsOverlay {
 		viewport: number,
 		headerLines: string[],
 		reserve: number,
-	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number; total: number } {
+	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number; total: number; complete: boolean } {
 		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
 		const pinned = section.filter(row => row.kind === "liveHeader").flatMap(physical);
 		const agents = section.filter(row => row.kind === "live");
 		const total = agents.length;
-		let offset = Math.min(this.liveOffset, Math.max(0, total - 1));
 		const budget = Math.max(0, viewport - headerLines.length - reserve);
-		let overflow = false;
-		for (let attempt = 0; attempt < 2; attempt++) {
-			const lines = [...headerLines, ...pinned];
+		const prefix = [...headerLines, ...pinned];
+		// Every identity pins before any detail shows: retry identity-only rows before windowing.
+		const startOffset = Math.min(this.liveOffset, Math.max(0, total - 1));
+		const attempts = [true, false].map(detail => this.fitLiveWindow(agents, prefix, budget, startOffset, detail, physical));
+		const fullyPinned = attempts.find(attempt => attempt.windowStart === 1 && attempt.windowEnd === total);
+		const chosen = fullyPinned
+			?? attempts.reduce((best, attempt) => (attempt.windowEnd - attempt.windowStart > best.windowEnd - best.windowStart ? attempt : best));
+		this.liveOffset = chosen.windowStart - 1;
+		const complete = total > 0 && chosen.windowStart === 1 && chosen.windowEnd === total;
+		return { lines: chosen.lines, overflow: chosen.overflow, windowStart: chosen.windowStart, windowEnd: chosen.windowEnd, total, complete };
+	}
+
+	/** One candidate layout of the live block at a given detail level; backs off a stale offset. */
+	private fitLiveWindow(
+		agents: OverlayRow[],
+		prefix: string[],
+		budget: number,
+		offset: number,
+		detail: boolean,
+		physical: (row: OverlayRow) => string[],
+	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number } {
+		for (let start = offset;; start = Math.max(0, start - 1)) {
+			const lines = [...prefix];
 			let shown = 0;
-			for (let index = offset; index < agents.length; index++) {
+			let overflow = false;
+			for (let index = start; index < agents.length; index++) {
 				const agentLines = physical(agents[index]!);
-				if (lines.length + agentLines.length > budget && shown > 0) {
-					overflow = index < agents.length || offset > 0;
+				const kept = detail ? agentLines : agentLines.slice(0, 1);
+				if (lines.length + kept.length > budget && shown > 0) {
+					overflow = index < agents.length || start > 0;
 					break;
 				}
-				if (lines.length + agentLines.length > budget && shown === 0) {
-					lines.push(...agentLines.slice(0, Math.max(1, budget - lines.length)));
-					overflow = true;
-					shown = 1;
-					break;
+				if (lines.length + kept.length > budget && shown === 0) {
+					lines.push(...kept.slice(0, Math.max(1, budget - lines.length)));
+					return { lines, overflow: true, windowStart: start + 1, windowEnd: start + 1 };
 				}
-				lines.push(...agentLines);
+				lines.push(...kept);
 				shown += 1;
 			}
-			if (shown > 0 || offset === 0) {
-				this.liveOffset = offset;
-				return { lines, overflow: overflow || offset + shown < total, windowStart: offset + 1, windowEnd: offset + shown, total };
+			if (shown > 0 || start === 0) {
+				return { lines, overflow: overflow || start + shown < agents.length, windowStart: start + 1, windowEnd: start + shown };
 			}
-			offset = Math.max(0, offset - 1);
 		}
-		this.liveOffset = offset;
-		return { lines: headerLines, overflow: total > 0, windowStart: 0, windowEnd: 0, total };
+	}
+
+	/** One full-frame candidate layout at a given header verbosity. */
+	private layoutSession(width: number, textWidth: number, viewport: number, reserve: number, compactHeader: boolean) {
+		const rows = this.currentRows(false, compactHeader);
+		const groupIndex = rows.findIndex(row => row.kind === "group");
+		const liveSection = this.liveSectionRows(rows);
+		const agentCount = liveSection.filter(row => row.kind === "live").length;
+		const header = this.renderHeaderRows(rows, width, textWidth, compactHeader);
+		const fitted = agentCount > 0 ? this.fitLiveAgents(liveSection, width, textWidth, viewport, header, reserve) : undefined;
+		return { rows, groupIndex, agentCount, header, fitted, complete: fitted?.complete ?? false };
 	}
 
 	render(width: number, height?: number): string[] {
 		if (width <= 0) return [];
 		const textWidth = panelTextWidth(width);
 		const viewport = Math.max(1, height ?? this.tui.terminal?.rows ?? 30);
-		const rows = this.currentRows(false);
+		const reserve = (this.historyOpen ? 4 : 2) + 1;
+		// Identity pinning outranks chrome: reflow with a compact header, then a minimal reserve.
+		let layout = this.layoutSession(width, textWidth, viewport, reserve, false);
+		if (layout.agentCount > 0 && !layout.complete) {
+			for (const tighterReserve of [reserve, Math.min(reserve, 3)]) {
+				const tighter = this.layoutSession(width, textWidth, viewport, tighterReserve, true);
+				if (tighter.complete
+					|| tighter.fitted!.windowEnd - tighter.fitted!.windowStart > layout.fitted!.windowEnd - layout.fitted!.windowStart) {
+					layout = tighter;
+				}
+				if (layout.complete) break;
+			}
+		}
+		const { rows, groupIndex, agentCount, header, fitted } = layout;
 		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
 		const compact = (row: OverlayRow) => fillPanelRow(this.colorRow(row), width);
-		const groupIndex = rows.findIndex(row => row.kind === "group");
-		const liveSection = this.liveSectionRows(rows);
-		const agents = liveSection.filter(row => row.kind === "live");
 		this.lastLiveOverflow = false;
 		this.lastHistoryOverflow = false;
-		let header = this.renderHeaderRows(rows, width, textWidth);
-		const reserve = (this.historyOpen ? 4 : 2) + 1;
 		const lines: string[] = [];
-		if (agents.length > 0) {
-			const fitted = this.fitLiveAgents(liveSection, width, textWidth, viewport, header, reserve);
-			header = header.slice(0, Math.min(header.length, viewport));
+		if (fitted) {
 			this.lastLiveOverflow = fitted.overflow;
 			lines.push(...fitted.lines);
 			if (this.lastLiveOverflow && lines.length < viewport) {
 				lines.push(compact(moreRow(`live ${fitted.windowStart}–${fitted.windowEnd}/${fitted.total} · ↑↓ live · ctrl+alt+f close`)));
 			}
 		} else {
-			header = header.slice(0, Math.max(0, viewport - 2));
-			lines.push(...header);
+			lines.push(...header.slice(0, Math.max(0, viewport - 2)));
 		}
 		const group = rows[groupIndex];
 		if (group && lines.length < viewport - 1) {
-			if (agents.length > 0 && lines.length < viewport - 1) lines.push(this.panelRule(width, textWidth));
+			if (agentCount > 0 && lines.length < viewport - 1) lines.push(this.panelRule(width, textWidth));
 			if (lines.length < viewport - 1) lines.push(compact(group));
 		}
 		const history = rows.filter(row => row.kind === "settled").flatMap(physical);

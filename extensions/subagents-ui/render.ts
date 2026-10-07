@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatDuration } from "../subagents/render.ts";
 import type { ObserverSnapshot, ObserverTask } from "../subagents/observer-events.ts";
 import type { SessionViewHistoryRow, SessionViewReply } from "../subagents/session-view.ts";
@@ -40,11 +40,6 @@ export interface OverlayRow {
 }
 
 export type ObserverFreshness = "empty" | "live" | "stale" | "terminal";
-
-export function wrapText(text: string, width: number): string[] {
-	if (width <= 0) return [];
-	return text.split("\n").flatMap(part => wrapTextWithAnsi(part, width));
-}
 
 /** Text area of one panel row, after the horizontal inset. */
 export function panelTextWidth(width: number): number {
@@ -153,19 +148,9 @@ function liveSecondaryLine(task: ObserverTask): string | undefined {
 	return "\n" + " ".repeat(LIVE_DETAIL_INDENT) + parts.join(" · ");
 }
 
-/** Wrap a live row; detail continuations keep the hang-indent after word wrap. */
-export function wrapLiveRowText(text: string, width: number): string[] {
-	const newline = text.indexOf("\n");
-	if (newline < 0) return wrapText(text, width);
-	const lines = wrapText(text.slice(0, newline), width);
-	const detailLines = wrapText(text.slice(newline + 1), width);
-	const indent = " ".repeat(LIVE_DETAIL_INDENT);
-	for (let index = 0; index < detailLines.length; index++) {
-		const line = detailLines[index]!;
-		if (index === 0) lines.push(line);
-		else lines.push(line.startsWith(indent) ? line : indent + line.replace(/^\s+/, ""));
-	}
-	return lines;
+/** Live rows truncate each line instead of wrapping so one agent never eats the viewport. */
+export function liveRowLines(text: string, width: number): string[] {
+	return text.split("\n").map(part => truncateToWidth(part, Math.max(0, width)));
 }
 
 function settledStatusLabel(task: ObserverTask): string {
@@ -242,13 +227,15 @@ export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, 
 	const statusColor = liveStatusColor(task, freshness);
 	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
 	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
-	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}`;
+	const route = formatRoute(task);
+	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}  ${route}`;
 	const secondary = liveSecondaryLine(task);
 	const segments: RowSegment[] = [
 		{ text: `${taskGlyph(task)} `, color: "accent" },
 		{ text: head, color: "text" },
 		{ text: status.padEnd(columns.status), color: statusColor },
-		{ text: ` ${elapsed}`, color: "text" },
+		{ text: ` ${elapsed}  `, color: "text" },
+		{ text: route, color: "dim" },
 	];
 	if (secondary) segments.push({ text: secondary, color: "dim" });
 	return { kind: "live", text: primary + (secondary ?? ""), segments };
@@ -391,18 +378,21 @@ export function formatSessionCountRows(counts: SessionCounts): OverlayRow[] {
 		{ kind: "counts", text: head, segments: [{ text: head, color: "accent" }] },
 		{ kind: "counts", text: body, segments: [{ text: body, color: "dim" }] },
 	];
+	return [...rows, ...sessionCountMetaRows(counts)];
+}
+
+/** Warning/limit rows shown under the counts; compact headers keep these above all else. */
+export function sessionCountMetaRows(counts: SessionCounts): OverlayRow[] {
 	const meta: string[] = [];
 	if (counts.historyLabel) {
 		const warning = historyLabelWarning(counts.historyLabel);
 		meta.push(warning ? `⚠ ${counts.historyLabel}` : counts.historyLabel);
 	}
 	if (counts.limitedLive) meta.push("limited live observation");
-	if (meta.length > 0) {
-		const text = meta.join(" · ");
-		const warning = meta.some(part => part.startsWith("⚠"));
-		rows.push({ kind: "counts", text, segments: [{ text, color: warning ? "borderMuted" : "dim" }] });
-	}
-	return rows;
+	if (meta.length === 0) return [];
+	const text = meta.join(" · ");
+	const warning = meta.some(part => part.startsWith("⚠"));
+	return [{ kind: "counts", text, segments: [{ text, color: warning ? "borderMuted" : "dim" }] }];
 }
 
 /** Flattened counts line for width estimation and legacy callers. */

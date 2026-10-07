@@ -123,7 +123,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	};
 	events.emit(SESSION_VIEW_EVENT, reply);
 	const text = overlay?.render(80).join("\n") ?? "";
-	assert.doesNotMatch(text, /thinking:medium/, "tertiary route details stay folded on live rows");
+	assert.match(text, /running\s+1\.0s\s+openai gpt-4\.1 thinking:medium/, "the route shares the primary row with status and elapsed");
 	assert.match(text, /Subagents · session parent…/, "the title identifies the session, never a batch or run");
 	assert.match(text, /1 live \(t1\)/);
 	assert.match(text, /2 agents · 2 episodes · 0 idle · 0 int · 1 closed/);
