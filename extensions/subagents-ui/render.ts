@@ -23,7 +23,7 @@ const CLOSE_CHIP_TRAILING_PAD = 1;
 const LIVE_DETAIL_INDENT = 4;
 
 export type OverlayRowKind =
-	| "title" | "rule" | "counts" | "live" | "liveDetail" | "gap"
+	| "title" | "rule" | "counts" | "liveHeader" | "live" | "gap"
 	| "group" | "settled" | "summary" | "more" | "help";
 
 export type RowColor = "accent" | "borderMuted" | "dim" | "text";
@@ -129,6 +129,45 @@ function liveStatusLabel(task: ObserverTask, freshness: ObserverFreshness): stri
 	return task.status === "pending" ? "queued" : task.status;
 }
 
+function liveStatusColor(task: ObserverTask, freshness: ObserverFreshness): RowColor {
+	if (freshness === "stale") return "borderMuted";
+	return task.status === "pending" ? "dim" : "accent";
+}
+
+function historyLabelWarning(label: string): boolean {
+	return label.startsWith("history unavailable") || label === "history partial";
+}
+
+const DETAIL_INVISIBLE = /[\u200B-\u200D\uFEFF\u00AD]/g;
+
+/** Headlines may carry zero-width separators; show real word spaces in the detail row. */
+export function displayDetailText(text: string): string {
+	return text.replace(DETAIL_INVISIBLE, " ");
+}
+
+function liveSecondaryLine(task: ObserverTask): string | undefined {
+	const parts: string[] = [];
+	if (task.headline) parts.push(displayDetailText(task.headline));
+	if (task.activeTools.length > 0) parts.push(task.activeTools.join(", "));
+	if (parts.length === 0) return undefined;
+	return "\n" + " ".repeat(LIVE_DETAIL_INDENT) + parts.join(" · ");
+}
+
+/** Wrap a live row; detail continuations keep the hang-indent after word wrap. */
+export function wrapLiveRowText(text: string, width: number): string[] {
+	const newline = text.indexOf("\n");
+	if (newline < 0) return wrapText(text, width);
+	const lines = wrapText(text.slice(0, newline), width);
+	const detailLines = wrapText(text.slice(newline + 1), width);
+	const indent = " ".repeat(LIVE_DETAIL_INDENT);
+	for (let index = 0; index < detailLines.length; index++) {
+		const line = detailLines[index]!;
+		if (index === 0) lines.push(line);
+		else lines.push(line.startsWith(indent) ? line : indent + line.replace(/^\s+/, ""));
+	}
+	return lines;
+}
+
 function settledStatusLabel(task: ObserverTask): string {
 	return task.status;
 }
@@ -200,26 +239,30 @@ export function taskColumns(tasks: readonly ObserverTask[], freshness: ObserverF
 
 export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, columns: TaskColumns, label?: string): OverlayRow {
 	const status = liveStatusLabel(task, freshness);
-	const tools = task.activeTools.join(",");
+	const statusColor = liveStatusColor(task, freshness);
 	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
 	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
+	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}`;
+	const secondary = liveSecondaryLine(task);
 	const segments: RowSegment[] = [
 		{ text: `${taskGlyph(task)} `, color: "accent" },
 		{ text: head, color: "text" },
-		{ text: status.padEnd(columns.status), color: "accent" },
+		{ text: status.padEnd(columns.status), color: statusColor },
 		{ text: ` ${elapsed}`, color: "text" },
 	];
-	let text = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}`;
-	if (tools) {
-		segments.push({ text: `  ${tools}`, color: "dim" });
-		text += `  ${tools}`;
-	}
-	return { kind: "live", text, segments };
+	if (secondary) segments.push({ text: secondary, color: "dim" });
+	return { kind: "live", text: primary + (secondary ?? ""), segments };
 }
 
-export function formatLiveDetail(task: ObserverTask): OverlayRow | undefined {
-	if (!task.headline) return undefined;
-	return { kind: "liveDetail", text: " ".repeat(LIVE_DETAIL_INDENT) + task.headline, segments: [{ text: " ".repeat(LIVE_DETAIL_INDENT) + task.headline, color: "dim" }] };
+/** Section label for the pinned live block; mirrors the history nav row. */
+export function formatRunningNav(agentCount: number): OverlayRow {
+	const suffix = ` · ${agentCount} agent${agentCount === 1 ? "" : "s"}`;
+	const text = `running${suffix}`;
+	return {
+		kind: "liveHeader",
+		text,
+		segments: [{ text: "running", color: "accent" }, { text: suffix, color: "dim" }],
+	};
 }
 
 export interface SettledSummary {
@@ -255,8 +298,6 @@ export function formatPanel(snapshot: ObserverSnapshot): string[] {
 	const columns = taskColumns(snapshot.tasks, "live");
 	for (const task of snapshot.tasks.filter(isLiveTask)) {
 		lines.push(formatLiveRow(task, "live", columns).text);
-		const detail = formatLiveDetail(task);
-		if (detail) lines.push(detail.text);
 	}
 	const summary = settledSummary(snapshot.tasks);
 	if (summary.count > 0) lines.push(formatGroupRow(summary, false));
@@ -342,14 +383,33 @@ export function sessionCounts(
 	};
 }
 
-export function formatSessionCounts(counts: SessionCounts): OverlayRow {
+/** Session summary as stacked rows so live count stays visually primary. */
+export function formatSessionCountRows(counts: SessionCounts): OverlayRow[] {
 	const head = counts.live > 0 ? `${counts.live} live (t${counts.liveTurns})` : "0 live";
 	const body = `${counts.agents} agents · ${counts.episodes} episodes · ${counts.idle} idle · ${counts.interrupted} int · ${counts.closed} closed`;
-	const tail = [counts.historyLabel, counts.limitedLive ? "limited live observation" : ""].filter(Boolean).join(" · ");
-	const text = [head, body, tail].filter(Boolean).join(" · ");
-	const segments: RowSegment[] = [{ text: head, color: "accent" }, { text: ` · ${body}`, color: "dim" }];
-	if (tail) segments.push({ text: ` · ${tail}`, color: "borderMuted" });
-	return { kind: "counts", text, segments };
+	const rows: OverlayRow[] = [
+		{ kind: "counts", text: head, segments: [{ text: head, color: "accent" }] },
+		{ kind: "counts", text: body, segments: [{ text: body, color: "dim" }] },
+	];
+	const meta: string[] = [];
+	if (counts.historyLabel) {
+		const warning = historyLabelWarning(counts.historyLabel);
+		meta.push(warning ? `⚠ ${counts.historyLabel}` : counts.historyLabel);
+	}
+	if (counts.limitedLive) meta.push("limited live observation");
+	if (meta.length > 0) {
+		const text = meta.join(" · ");
+		const warning = meta.some(part => part.startsWith("⚠"));
+		rows.push({ kind: "counts", text, segments: [{ text, color: warning ? "borderMuted" : "dim" }] });
+	}
+	return rows;
+}
+
+/** Flattened counts line for width estimation and legacy callers. */
+export function formatSessionCounts(counts: SessionCounts): OverlayRow {
+	const rows = formatSessionCountRows(counts);
+	const text = rows.map(row => row.text).join(" · ");
+	return { kind: "counts", text, segments: rows.flatMap(row => row.segments ?? [{ text: row.text }]) };
 }
 
 /** Stable short agent label with collision disambiguation across the visible set. */
@@ -399,22 +459,32 @@ export function formatHistoryRow(row: SessionViewHistoryRow, label: string, colu
 	const turns = row.recordedUsage.assistantTurns === null ? "?" : String(row.recordedUsage.assistantTurns);
 	const coverage = usageCoverageTag(row.recordedUsage);
 	const usage = `Σ${turns}t ↑${compactCount(row.recordedUsage.usage.input)} $${compactCost(row.recordedUsage.usage.cost)}${coverage ? `·${coverage}` : ""}`;
-	const text = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)} ${usage}`
-		+ (badges ? `  ${badges}` : "")
-		+ (row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "");
-	return { kind: "settled", text, segments: [{ text, color: "dim" }] };
+	const primary = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)}`;
+	const route = row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "";
+	const text = `${primary} ${usage}` + (badges ? `  ${badges}` : "") + route;
+	const segments: RowSegment[] = [
+		{ text: `${historyGlyph(row)} `, color: "text" },
+		{ text: `${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} `, color: "text" },
+		{ text: historyStateLabel(row).padEnd(columns.state), color: "text" },
+		{ text: ` ${row.latestOutcome.padEnd(columns.outcome)} `, color: "text" },
+		{ text: usage + (badges ? `  ${badges}` : ""), color: "dim" },
+	];
+	if (route) segments.push({ text: route, color: "dim" });
+	return { kind: "settled", text, segments };
 }
 
 /** Honest visible range and page indicator for the expanded history section. */
-export function formatHistoryNav(history: SessionViewReply["history"]): string {
+export function formatHistoryNav(history: SessionViewReply["history"]): OverlayRow {
 	const from = history.totalRows === 0 ? 0 : history.page * history.pageSize + 1;
 	const to = Math.min(history.totalRows, (history.page + 1) * history.pageSize);
-	return `history ${from}–${to} of ${history.totalRows} · page ${history.page + 1}/${Math.max(1, history.totalPages)} · pgup/pgdn`;
+	const suffix = ` ${from}–${to} of ${history.totalRows} · page ${history.page + 1}/${Math.max(1, history.totalPages)} · pgup/pgdn`;
+	const text = `history${suffix}`;
+	return { kind: "group", text, segments: [{ text: "history", color: "accent" }, { text: suffix, color: "dim" }] };
 }
 
 export function formatHistoryCollapsed(session: { kind: string; reply?: SessionViewReply; reason?: string }): string {
 	if (session.kind === "loading") return session.reply ? "▸ history refreshing · enter" : "▸ history loading · enter";
-	if (session.kind === "unavailable") return `▸ history unavailable${session.reason ? ` (${session.reason})` : ""}${session.reply?.history.state === "ready" ? " · cached" : ""} · enter retry`;
+	if (session.kind === "unavailable") return `▸ ⚠ history unavailable${session.reason ? ` (${session.reason})` : ""}${session.reply?.history.state === "ready" ? " · cached" : ""} · enter retry`;
 	const count = session.reply?.history.totalRows ?? 0;
 	return `▸ ${count} retained agents · enter`;
 }

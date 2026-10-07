@@ -125,9 +125,11 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	const text = overlay?.render(80).join("\n") ?? "";
 	assert.doesNotMatch(text, /thinking:medium/, "tertiary route details stay folded on live rows");
 	assert.match(text, /Subagents · session parent…/, "the title identifies the session, never a batch or run");
-	assert.match(text, /1 live \(t1\) · 2 agents · 2 episodes/);
+	assert.match(text, /1 live \(t1\)/);
+	assert.match(text, /2 agents · 2 episodes · 0 idle · 0 int · 1 closed/);
 	assert.match(text, /recorded Σ1 turns/);
-	assert.match(text, /● scan ep0 explorer t1\s+running\s+1\.0s  read/);
+	assert.match(text, /● scan ep0 explorer t1\s+running\s+1\.0s/);
+	assert.match(text, /scan the bounded facts · read/);
 	overlay?.handleInput("enter");
 	const history = overlay?.render(80).join("\n") ?? "";
 	assert.match(history, /■ 22222222 reviewer ep1 closed succeeded/);

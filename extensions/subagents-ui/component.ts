@@ -10,9 +10,9 @@ import {
 	formatHistoryCollapsed,
 	formatHistoryNav,
 	formatHistoryRow,
-	formatLiveDetail,
 	formatLiveRow,
-	formatSessionCounts,
+	formatRunningNav,
+	formatSessionCountRows,
 	formatSessionTitle,
 	formatSessionUsage,
 	historyColumns,
@@ -24,6 +24,7 @@ import {
 	sessionHelpText,
 	shortLabel,
 	taskColumns,
+	wrapLiveRowText,
 	type OverlayRow,
 	type RowColor,
 	type ObserverFreshness,
@@ -192,14 +193,11 @@ export class SubagentsOverlay {
 		const rows: OverlayRow[] = [
 			{ kind: "title", text: formatSessionTitle(reply?.ownerSessionId) },
 			{ kind: "rule", text: "" },
-			formatSessionCounts(counts),
+			...formatSessionCountRows(counts),
 		];
 		const usage = formatSessionUsage(reply?.usage ?? null);
 		if (usage) rows.push(usage);
 		rows.push({ kind: "rule", text: "" });
-		// Pinned live area: primary rows always precede optional detail lines, and only
-		// overflow through its own explicit, independently navigable window.
-		let liveRows: OverlayRow[] = [];
 		const live = this.liveTasks();
 		if (live.length === 0 && !reply) {
 			const text = EMPTY_OBSERVER_MESSAGE;
@@ -208,49 +206,48 @@ export class SubagentsOverlay {
 			const text = "No live agents; retained work is in history.";
 			rows.push({ kind: "summary", text, segments: [{ text, color: "dim" }] });
 		} else {
-			liveRows = this.liveRows(freshness, true);
-			rows.push(...liveRows);
+			rows.push(formatRunningNav(live.length));
+			rows.push(...this.liveRows(freshness));
+			rows.push({ kind: "rule", text: "" });
 		}
 		if (this.historyOpen) {
-			rows.push({ kind: "rule", text: "" });
 			if (!reply || reply.history.state !== "ready") {
 				const label = this.model.session.kind === "loading"
 					? (this.model.session.refreshing ? "history refreshing…" : "history loading…")
 					: this.model.session.kind === "unavailable"
-						? `history unavailable${this.model.session.reason ? ` (${this.model.session.reason})` : ""}`
+						? `⚠ history unavailable${this.model.session.reason ? ` (${this.model.session.reason})` : ""}`
 						: "history not loaded";
-				rows.push({ kind: "group", text: label, segments: [{ text: label, color: "dim" }] });
+				rows.push({ kind: "group", text: label, segments: [{ text: label, color: "borderMuted" }] });
 			} else {
-				const nav = formatHistoryNav(reply.history);
-				rows.push({ kind: "group", text: nav, segments: [{ text: nav, color: "dim" }] });
+				rows.push(formatHistoryNav(reply.history));
 				const labels = this.labels(reply.history.rows);
 				const columns = historyColumns(reply.history.rows, labels);
 				rows.push(...reply.history.rows.map(row => formatHistoryRow(row, labels.get(row.handle) ?? row.handle, columns)));
 			}
 		} else {
 			const collapsed = formatHistoryCollapsed(this.model.session);
-			rows.push({ kind: "group", text: collapsed, segments: [{ text: collapsed, color: "dim" }] });
+			const warning = collapsed.includes("⚠");
+			rows.push({
+				kind: "group",
+				text: collapsed,
+				segments: [{ text: collapsed, color: warning ? "borderMuted" : "dim" }],
+			});
 		}
 		const help: SessionHelpState = { liveOverflow: forWidth ? false : this.lastLiveOverflow, historyOpen: this.historyOpen, historyOverflow: forWidth ? false : this.lastHistoryOverflow };
 		rows.push({ kind: "help", text: sessionHelpText(help) });
 		return rows;
 	}
 
-	private liveRows(freshness: ObserverFreshness, withDetails: boolean): OverlayRow[] {
+	private liveRows(freshness: ObserverFreshness): OverlayRow[] {
 		const snapshot = this.model.snapshot;
 		if (!snapshot) return [];
 		const now = this.now();
 		const columns = taskColumns(snapshot.tasks, freshness);
-		const rows: OverlayRow[] = [];
-		for (const task of this.liveTasks()) {
+		const ids = this.liveTasks().map(row => row.id);
+		return this.liveTasks().map(task => {
 			const elapsed = displayElapsed(task.elapsedMs, this.model.receivedAt, now, freshness);
-			rows.push(formatLiveRow({ ...task, elapsedMs: elapsed }, freshness, columns, shortLabel(task.id, this.liveTasks().map(row => row.id))));
-			if (withDetails) {
-				const detail = formatLiveDetail(task);
-				if (detail) rows.push(detail);
-			}
-		}
-		return rows;
+			return formatLiveRow({ ...task, elapsedMs: elapsed }, freshness, columns, shortLabel(task.id, ids));
+		});
 	}
 
 	private colorRow(row: OverlayRow): string {
@@ -269,46 +266,114 @@ export class SubagentsOverlay {
 		return text.split("\n").flatMap(part => wrapTextWithAnsi(part, width));
 	}
 
+	private physicalRow(row: OverlayRow, textWidth: number, panelWidth: number): string[] {
+		const colored = this.colorRow(row);
+		const wrapped = row.kind === "live" ? wrapLiveRowText(colored, textWidth) : this.wrapRow(colored, textWidth);
+		return wrapped.map(line => fillPanelRow(line, panelWidth));
+	}
+
+	private renderHeaderRows(rows: OverlayRow[], width: number, textWidth: number): string[] {
+		const liveSectionStart = rows.findIndex(row => row.kind === "liveHeader" || row.kind === "live");
+		const headerEnd = liveSectionStart < 0 ? rows.findIndex(row => row.kind === "group") : liveSectionStart;
+		return rows.slice(0, Math.max(0, headerEnd)).flatMap(row =>
+			row.kind === "title" ? [panelTitleRow(this.colorRow(row), width)]
+				: row.kind === "rule" ? [this.panelRule(width, textWidth)]
+					: this.wrapRow(this.colorRow(row), textWidth).map(line => fillPanelRow(line, width)));
+	}
+
+	private liveSectionRows(rows: OverlayRow[]): OverlayRow[] {
+		const start = rows.findIndex(row => row.kind === "liveHeader");
+		const end = rows.findIndex(row => row.kind === "group");
+		if (start < 0) return rows.filter(row => row.kind === "live");
+		return rows.slice(start, end < 0 ? undefined : end).filter(row => row.kind !== "rule");
+	}
+
+	private panelRule(width: number, textWidth: number): string {
+		return fillPanelRow(this.theme?.fg("borderMuted", "─".repeat(textWidth)) ?? "─".repeat(textWidth), width);
+	}
+
+	private fitLiveAgents(
+		section: OverlayRow[],
+		width: number,
+		textWidth: number,
+		viewport: number,
+		headerLines: string[],
+		reserve: number,
+	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number; total: number } {
+		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
+		const pinned = section.filter(row => row.kind === "liveHeader").flatMap(physical);
+		const agents = section.filter(row => row.kind === "live");
+		const total = agents.length;
+		let offset = Math.min(this.liveOffset, Math.max(0, total - 1));
+		const budget = Math.max(0, viewport - headerLines.length - reserve);
+		let overflow = false;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const lines = [...headerLines, ...pinned];
+			let shown = 0;
+			for (let index = offset; index < agents.length; index++) {
+				const agentLines = physical(agents[index]!);
+				if (lines.length + agentLines.length > budget && shown > 0) {
+					overflow = index < agents.length || offset > 0;
+					break;
+				}
+				if (lines.length + agentLines.length > budget && shown === 0) {
+					lines.push(...agentLines.slice(0, Math.max(1, budget - lines.length)));
+					overflow = true;
+					shown = 1;
+					break;
+				}
+				lines.push(...agentLines);
+				shown += 1;
+			}
+			if (shown > 0 || offset === 0) {
+				this.liveOffset = offset;
+				return { lines, overflow: overflow || offset + shown < total, windowStart: offset + 1, windowEnd: offset + shown, total };
+			}
+			offset = Math.max(0, offset - 1);
+		}
+		this.liveOffset = offset;
+		return { lines: headerLines, overflow: total > 0, windowStart: 0, windowEnd: 0, total };
+	}
+
 	render(width: number, height?: number): string[] {
 		if (width <= 0) return [];
 		const textWidth = panelTextWidth(width);
 		const viewport = Math.max(1, height ?? this.tui.terminal?.rows ?? 30);
 		const rows = this.currentRows(false);
-		const physical = (row: OverlayRow) => this.wrapRow(this.colorRow(row), textWidth).map(line => fillPanelRow(line, width));
+		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
 		const compact = (row: OverlayRow) => fillPanelRow(this.colorRow(row), width);
 		const groupIndex = rows.findIndex(row => row.kind === "group");
-		const firstLive = rows.findIndex(row => row.kind === "live");
-		const headerEnd = firstLive < 0 ? groupIndex : firstLive;
-		let header = rows.slice(0, Math.max(0, headerEnd)).filter(row => row.kind !== "liveDetail").flatMap(row =>
-			row.kind === "title" ? [panelTitleRow(this.colorRow(row), width)]
-				: row.kind === "rule" ? [compact({ ...row, text: "─".repeat(textWidth) })] : physical(row));
-		const primary = rows.filter(row => row.kind === "live");
+		const liveSection = this.liveSectionRows(rows);
+		const agents = liveSection.filter(row => row.kind === "live");
 		this.lastLiveOverflow = false;
 		this.lastHistoryOverflow = false;
+		let header = this.renderHeaderRows(rows, width, textWidth);
+		const reserve = (this.historyOpen ? 4 : 2) + 1;
 		const lines: string[] = [];
-		// Primary live rows take precedence over history and optional detail. Count physical,
-		// wrapped header/history lines before budgeting, never rely on host clipping.
-		if (primary.length && header.length + primary.length + 2 > viewport) {
-			this.lastLiveOverflow = true;
-			header = header.slice(0, Math.max(0, Math.min(header.length, viewport - 3)));
-			const window = Math.max(1, viewport - header.length - 1);
-			this.liveOffset = Math.min(this.liveOffset, Math.max(0, primary.length - window));
-			lines.push(...header, ...primary.slice(this.liveOffset, this.liveOffset + window).map(compact));
-			if (lines.length < viewport) lines.push(compact(moreRow(`live ${this.liveOffset + 1}–${Math.min(primary.length, this.liveOffset + window)}/${primary.length} · ↑↓ live · ctrl+alt+f close`)));
+		if (agents.length > 0) {
+			const fitted = this.fitLiveAgents(liveSection, width, textWidth, viewport, header, reserve);
+			header = header.slice(0, Math.min(header.length, viewport));
+			this.lastLiveOverflow = fitted.overflow;
+			lines.push(...fitted.lines);
+			if (this.lastLiveOverflow && lines.length < viewport) {
+				lines.push(compact(moreRow(`live ${fitted.windowStart}–${fitted.windowEnd}/${fitted.total} · ↑↓ live · ctrl+alt+f close`)));
+			}
 		} else {
-			header = header.slice(0, Math.max(0, viewport - primary.length - 2));
-			lines.push(...header, ...primary.map(compact));
-			const detail = rows.filter(row => row.kind === "liveDetail").flatMap(physical);
-			const detailBudget = Math.max(0, viewport - lines.length - (this.historyOpen ? 4 : 2));
-			if (detail.length <= detailBudget) lines.push(...detail);
-			const group = rows[groupIndex];
-			if (group && lines.length < viewport - 1) lines.push(compact(group));
-			const history = rows.filter(row => row.kind === "settled").flatMap(physical);
-			const budget = Math.max(0, viewport - lines.length - 1);
-			this.lastHistoryOverflow = this.historyOpen && history.length > budget;
-			this.historyOffset = Math.min(this.historyOffset, Math.max(0, history.length - budget));
-			if (this.historyOpen) lines.push(...history.slice(this.historyOffset, this.historyOffset + budget));
-			if (lines.length < viewport) lines.push(compact({ kind: "help", text: sessionHelpText({ liveOverflow: false, historyOpen: this.historyOpen, historyOverflow: this.lastHistoryOverflow }) }));
+			header = header.slice(0, Math.max(0, viewport - 2));
+			lines.push(...header);
+		}
+		const group = rows[groupIndex];
+		if (group && lines.length < viewport - 1) {
+			if (agents.length > 0 && lines.length < viewport - 1) lines.push(this.panelRule(width, textWidth));
+			if (lines.length < viewport - 1) lines.push(compact(group));
+		}
+		const history = rows.filter(row => row.kind === "settled").flatMap(physical);
+		const budget = Math.max(0, viewport - lines.length - 1);
+		this.lastHistoryOverflow = this.historyOpen && history.length > budget;
+		this.historyOffset = Math.min(this.historyOffset, Math.max(0, history.length - budget));
+		if (this.historyOpen) lines.push(...history.slice(this.historyOffset, this.historyOffset + budget));
+		if (lines.length < viewport) {
+			lines.push(compact({ kind: "help", text: sessionHelpText({ liveOverflow: this.lastLiveOverflow, historyOpen: this.historyOpen, historyOverflow: this.lastHistoryOverflow }) }));
 		}
 		this.closeRange = header.length > 0 ? closeMarkerColumns(width) : undefined;
 		return this.theme ? lines.map(line => this.theme!.bg("selectedBg", line)) : lines;

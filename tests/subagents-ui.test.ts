@@ -14,6 +14,7 @@ import {
 	OBSERVER_STALE_MS,
 	compactCount,
 	formatHistoryNav,
+	formatSessionCountRows,
 	formatSessionCounts,
 	formatSessionTitle,
 	formatSessionUsage,
@@ -290,33 +291,46 @@ test("a session reply alone supplies fresh live rows and a clock", async () => {
 });
 
 test("physical layout stays bounded with wrapped counts, long history and all ten live identities", () => {
-	const tasks = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "long assignment ".repeat(30), activeTools: ["read", "bash"] }));
+	const heavyTasks = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "long assignment ".repeat(30), activeTools: ["read", "bash"] }));
+	const heavyOverlay = new SubagentsOverlay(overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({ tasks: heavyTasks })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	for (const width of [80, 40]) {
+		const frame = heavyOverlay.render(width, 24);
+		assert.ok(frame.length <= 24, `physical rows bounded at width ${width}: ${frame.length}`);
+		for (const line of frame) assert.ok(visibleWidth(line) <= width);
+	}
+	const seenLive = new Set<string>();
+	for (let index = 0; index < 100; index++) {
+		const text = heavyOverlay.render(80, 24).join("\n");
+		for (const match of text.matchAll(/(\d{8}) ep0 explorer/g)) seenLive.add(match[1]!);
+		heavyOverlay.handleInput("down");
+	}
+	assert.equal(seenLive.size, 10, "every live identity is reachable through live overflow");
+
 	const rows = Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index + 100).padStart(8, "0")}`, onCurrentBranch: false, legacy: true }));
 	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 20, totalPages: 1, rows } });
-	const overlay = new SubagentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const pinnedTasks = Array.from({ length: 2 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "" }));
+	const overlay = new SubagentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: pinnedTasks })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
 	overlay.handleInput("enter");
-	for (const width of [80, 40]) {
-		for (let index = 0; index < 100; index++) overlay.handleInput("up");
-		const seen = new Set<string>();
-		for (let index = 0; index < 100; index++) {
-			const frame = overlay.render(width);
-			assert.ok(frame.length <= 24, `physical rows bounded at width ${width}: ${frame.length}`);
-			for (const line of frame) assert.ok(visibleWidth(line) <= width);
-			const text = frame.join("\n");
-			for (let live = 0; live < 10; live++) assert.ok(text.includes(`${String(live).padStart(8, "0")} ep0`));
-			for (const match of text.matchAll(/000001\d\d/g)) seen.add(match[0]);
-			overlay.handleInput("down");
-		}
-		assert.equal(seen.size, 20, "every wrapped historical identity is reachable without moving live rows");
+	for (let index = 0; index < 100; index++) overlay.handleInput("up");
+	const seen = new Set<string>();
+	for (let index = 0; index < 100; index++) {
+		const frame = overlay.render(80, 24);
+		assert.ok(frame.length <= 24);
+		const text = frame.join("\n");
+		for (const match of text.matchAll(/000001\d\d/g)) seen.add(match[0]);
+		overlay.handleInput("down");
 	}
+	assert.equal(seen.size, 20, "every wrapped historical identity is reachable while live rows stay pinned");
 });
 
 test("session-scoped title, counts and recorded usage stay distinct from live turns", () => {
 	assert.equal(formatSessionTitle(undefined), "Subagents · session");
 	assert.equal(formatSessionTitle("parent_session-1"), "Subagents · session parent…");
 	const counts = sessionCounts(snapshot(), sessionReply(), "ready", undefined, false);
-	const row = formatSessionCounts(counts);
-	assert.match(row.text, /^1 live \(t2\) · 1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
+	const countRows = formatSessionCountRows(counts);
+	assert.equal(countRows[0]?.text, "1 live (t2)");
+	assert.match(countRows[1]?.text ?? "", /^1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
+	assert.match(formatSessionCounts(counts).text, /1 live \(t2\)/);
 	assert.equal(counts.limitedLive, false);
 	const legacy = sessionCounts(snapshot({ version: 2 }), sessionReply(), "ready", undefined, false);
 	assert.equal(legacy.limitedLive, true);
@@ -338,9 +352,9 @@ test("short agent labels disambiguate collisions and history navigation reports 
 	assert.equal(labels.get(second), "11111111-2222".slice(0, 12));
 	assert.equal(shortLabel("session_abcdef01-0000-0000-0000-000000000000"), "abcdef01");
 	const history = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: [] };
-	assert.equal(formatHistoryNav(history), "history 1–20 of 37 · page 1/2 · pgup/pgdn");
-	assert.equal(formatHistoryNav({ ...history, page: 1 }), "history 21–37 of 37 · page 2/2 · pgup/pgdn");
-	assert.equal(formatHistoryNav({ ...history, totalRows: 0, totalPages: 0 }), "history 0–0 of 0 · page 1/1 · pgup/pgdn");
+	assert.equal(formatHistoryNav(history).text, "history 1–20 of 37 · page 1/2 · pgup/pgdn");
+	assert.equal(formatHistoryNav({ ...history, page: 1 }).text, "history 21–37 of 37 · page 2/2 · pgup/pgdn");
+	assert.equal(formatHistoryNav({ ...history, totalRows: 0, totalPages: 0 }).text, "history 0–0 of 0 · page 1/1 · pgup/pgdn");
 });
 
 test("component renders pinned live rows and a collapsed history row at 80x24 with ten active", () => {
@@ -348,20 +362,57 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 	const overlay = new SubagentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply({ summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 24, queued: 0, running: 0, interrupted: 1, closed: 2 }, liveAgents: 10 }, history: { state: "ready", pageSize: 20, page: 0, totalRows: 27, totalPages: 2, rows: [] }, live: [] }) }, snapshot({ tasks: liveTasks, requestedTasks: 10, admittedTasks: 10, launchedChildren: 10, activeChildren: 10 })),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	const lines = overlay.render(80, 24);
-	assert.ok(lines.length <= 24, `panel fits 80x24, got ${lines.length}`);
+	const lines = overlay.render(80, 40);
+	assert.ok(lines.length <= 40, `panel fits 80x40, got ${lines.length}`);
 	assert.match(lines[0] ?? "", /Subagents · session parent…/);
 	const text = lines.join("\n");
 	assert.equal((text.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "all ten identified live rows stay visible");
+	assert.match(text, /running · 10 agents/);
+	assert.match(text, /task 0/, "headline stays on the agent entry, not batched at the bottom");
 	assert.match(text, /37 agents · 49 episodes/);
 	assert.match(text, /▸ 27 retained agents · enter/);
 	assert.doesNotMatch(text, /batch/, "no batch title");
 	assert.doesNotMatch(text, /run [a-z0-9]/, "no run-prefix session title");
 	// History paging never scrolls the live area away.
 	overlay.handleInput("enter");
-	const expanded = overlay.render(80, 24).join("\n");
+	const expanded = overlay.render(80, 40).join("\n");
 	assert.match(expanded, /history 1–20 of 27 · page 1\/2/);
 	assert.equal((expanded.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "live rows stay pinned under history");
+});
+
+test("live headline and tools render on the secondary line directly under each agent", () => {
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({
+			tasks: [
+				task({ id: "session_00000001", headline: "Read-only C-ROUTEROS", activeTools: ["read"] }),
+				task({ id: "session_00000002", ordinal: 2, headline: "Read-only C-ADGUARD", activeTools: [] }),
+			],
+			requestedTasks: 2,
+			admittedTasks: 2,
+			launchedChildren: 2,
+			activeChildren: 2,
+		})),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const text = overlay.render(80, 30).join("\n");
+	const first = text.indexOf("00000001");
+	const second = text.indexOf("00000002");
+	assert.ok(first >= 0 && second > first);
+	assert.match(text.slice(first, second), /Read-only C-ROUTEROS/);
+	assert.match(text.slice(first, second), /read/);
+	assert.match(text.slice(second), /Read-only C-ADGUARD/);
+});
+
+test("detail text keeps visible spaces across zero-width separators and wrapped lines", () => {
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({
+			tasks: [task({ headline: "Read-only\u200bC-ROUTEROS and more words here", activeTools: ["read", "bash"] })],
+		})),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	const text = overlay.render(80, 24).join("\n");
+	assert.match(text, /Read-only C-ROUTEROS/);
+	assert.match(text, /read, bash/);
+	const wrapped = overlay.render(36, 24).join("\n");
+	assert.match(wrapped, /Read-only C-ROUTEROS/);
 });
 
 test("history reaches every retained handle across pages with enter, pageUp and pageDown", () => {
@@ -472,7 +523,7 @@ test("missing core replies surface a bounded unavailable state instead of loadin
 	for (let tick = 0; tick < 16; tick++) { clock += 250; scheduler.tick(); }
 	const timedOut = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(timedOut, /history unavailable \(core_timeout\)/);
-	assert.match(timedOut, /▸ history unavailable/, "unavailable history is visible, never an empty success");
+	assert.match(timedOut, /▸ ⚠ history unavailable/, "unavailable history is visible, never an empty success");
 	const audits = pi.entries.filter((entry: any) => entry.customType === SESSION_VIEW_QUERY_EVENT) as Array<{ data: Record<string, unknown> }>;
 	assert.equal(audits.length, 1);
 	assert.equal(audits[0]!.data.source, "ui"); assert.equal(audits[0]!.data.state, "timeout");

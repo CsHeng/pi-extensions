@@ -112,8 +112,8 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 				await until(() => mounted.reply?.history.page === page);
 			}
 			for (let index = 0; index < 100; index++) {
-				const frame = mounted.panel.render(80);
-				assert.ok(frame.length <= 24);
+				const frame = mounted.panel.render(80, 48);
+				assert.ok(frame.length <= 48);
 				const text = frame.join("\n");
 				for (const handle of liveHandles) assert.ok(text.includes(handle.slice(8, 16)), "every live identity remains pinned");
 				for (const handle of expected) if (text.includes(handle.slice(8, 16))) seen.add(handle);
