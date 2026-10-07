@@ -102,6 +102,7 @@ test("headline projection is single-line, bounded, and drops controls", () => {
 	assert.equal(observerHeadline("search confirm the entry\nand extra"), "search confirm the entry and extra");
 	assert.equal(observerHeadline(" \n\t "), "");
 	assert.equal(observerHeadline("keep\u0007this"), "keep this");
+	assert.equal(observerHeadline("Read-only\u200bC-ROUTEROS"), "Read-only C-ROUTEROS");
 	const long = "汉".repeat(MAX_HEADLINE_BYTES);
 	const projected = observerHeadline(long);
 	assert.ok(projected.endsWith("…"));

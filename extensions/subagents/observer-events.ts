@@ -147,8 +147,11 @@ function parseActiveTools(value: unknown): string[] | undefined {
 	return tools;
 }
 
+/** Control and invisible separators that must become visible spaces in headlines. */
+const HEADLINE_SEPARATOR = /[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u00AD]+/g;
+
 export function observerHeadline(objective: string): string {
-	const collapsed = objective.replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").replace(/\s+/g, " ").trim();
+	const collapsed = objective.replace(HEADLINE_SEPARATOR, " ").replace(/\s+/g, " ").trim();
 	if (!collapsed) return "";
 	if (Buffer.byteLength(collapsed, "utf8") <= MAX_HEADLINE_BYTES) return collapsed;
 	const budget = MAX_HEADLINE_BYTES - Buffer.byteLength(HEADLINE_ELLIPSIS, "utf8");
