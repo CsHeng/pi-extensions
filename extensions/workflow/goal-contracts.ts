@@ -11,7 +11,7 @@ const requirement = Type.Object({ key, outcome: text(), verification: text(), re
 const task = Type.Object({
  key, title: text(80), covers: Type.Array(key),
  dependsOn: Type.Optional(Type.Array(key, { description: "Only task outputs actually required to start and accept this task; not display groups, phase order or every owner in a plan." })),
-}, { additionalProperties: false, description: "An independently verifiable outcome. Preserve independently deliverable plan task IDs; split different acceptance or blocker boundaries. Do not collapse independent owners into an umbrella task or track each command as a task." });
+}, { additionalProperties: false, description: "An independently verifiable required outcome. Do not project every plan row or model-inferred obligation into a task. Preserve independently deliverable plan task IDs when the obligation is real; split different acceptance or blocker boundaries. Do not collapse independent owners into an umbrella task or track each command as a task." });
 const fact = Type.Object({
  key, kind: Type.Union([Type.Literal("host"), Type.Literal("agent"), Type.Literal("user"), Type.Literal("review")]),
  check: text(500), result: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("unknown")]),

@@ -605,17 +605,21 @@ test("education surfaces: start names its attempt and window; rejections teach t
  assert.match(tool.description, /^High-frequency rules: report names the attempt id start returned, or omits attempt only while exactly one matching attempt runs \(optionally selected by task\)/);
  const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
  let serial = 0;
+ let lastDetails: { ok?: boolean; code?: string } | undefined;
  const runTool = async (args: Record<string, unknown>) => {
   const response = await tool!.execute(`tool-${++serial}`, args as never, undefined, undefined, ctx);
+  lastDetails = response.details as { ok?: boolean; code?: string };
   return (response.content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
  };
  await runTool(enroll);
- const startOut = await runTool({ operation: "start", task: "one", scope: ["one"] });
- assert.match(startOut, /Attempt A1 is running for task one: report with attempt "A1"; host-fact checks count only while it runs, so re-run checks that predate this start\./);
+ await runTool({ operation: "start", task: "one", scope: ["one"] });
+ assert.equal(lastDetails?.ok, true);
+ assert.equal(f.store.current()!.attempts.find(a => a.task === "one" && a.status === "running")?.id, "A1");
  const wrongAttempt = await runTool({ operation: "report", attempt: "A9", summary: "nothing" });
  assert.match(wrongAttempt, /Report the exact attempt id start returned, or inspect when several attempts run\./);
- const hostFact = await runTool({ operation: "report", summary: "claimed check", facts: [{ key: "check", kind: "host", check: "unit", result: "pass" }] });
- assert.match(hostFact, /Re-run the check now or reference a listed current observation; checks captured before this attempt started do not qualify\./);
+ await runTool({ operation: "report", summary: "claimed check", facts: [{ key: "check", kind: "host", check: "unit", result: "pass" }] });
+ assert.equal(lastDetails?.ok, false);
+ assert.equal(lastDetails?.code, "observation_required");
  const badJudgment = await runTool({ operation: "report", summary: "honest outcome", facts: [{ key: "k", kind: "agent", check: "c", result: "pass" }], judgments: [{ subject: "task:one", facts: ["A1:nope"], accepted: true, rationale: "r" }] });
  assert.match(badJudgment, /Reference current fact ids as attempt:key; the facts list shows what is usable\./);
  // An idempotent start replay must not attach another call's attempt guidance.

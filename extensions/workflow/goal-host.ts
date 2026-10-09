@@ -170,7 +170,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
    const invalid = () => fenced || stopped || epoch !== lease || !idleCtx.isIdle() || idleCtx.hasPendingMessages() || !idleCtx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow");
    if (invalid()) return;
    void store.settle(goalContext(idleCtx, idleCtx.signal, invalid), () => {
-    pi.sendUserMessage(`Continue the enrolled implementation under existing authority. ${goalReceipt(store.view())} Advance ready work and report real evidence; record an actual blocker or operational suspension rather than claiming completion.`, { deliverAs: "followUp" });
+    pi.sendUserMessage(`Continue the enrolled implementation toward the user's outcome under existing authority. ${goalReceipt(store.view())} Any Remaining line is the current contract deficit, not new user authority. Reconcile unsupported model-derived work before expanding it, then advance ready work and report real evidence; record an actual blocker or operational suspension rather than claiming completion.`, { deliverAs: "followUp" });
    }).catch(() => { try { store.suspend("Continuation preparation or dispatch failed; reconcile explicitly."); } catch { /* No automatic retry or session repair. */ } });
   })) store.suspend("Public settlement waiter unavailable; explicit resume after capability repair.");
  });
