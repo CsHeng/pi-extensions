@@ -6,7 +6,7 @@
 // parent model called that tool. It measures a decision, not child quality, and
 // it is never a pass/fail gate. The dated conclusion is evaluation evidence for
 // $AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/; the raw JSON artifact stays
-// under $AGENT_TMP_ROOT/extensions/ and is not committed.
+// under $TMPDIR/extensions/ and is not committed.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -366,7 +366,7 @@ Options:
   --model <ref>         parent model (default: deepseek/deepseek-flash)
   --thinking <level>    parent thinking level (default: high)
   --timeout <seconds>   per-run timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
-  --out <path>          JSON artifact path (default: $AGENT_TMP_ROOT/extensions/delegation-probe-<timestamp>.json)
+  --out <path>          JSON artifact path (default: $TMPDIR/extensions/delegation-probe-<timestamp>.json)
   --dry-run             print the plan and exit without provider calls
 
 Every cell always includes the control prompts; report sensitivity and specificity together.`;
@@ -464,8 +464,8 @@ async function main(argv: readonly string[]): Promise<void> {
 		summary,
 		runs: results,
 	};
-	const agentTmpRoot = process.env["AGENT_TMP_ROOT"];
-	if (values.out === undefined && agentTmpRoot === undefined) throw new Error("delegation_probe_requires_out_or_AGENT_TMP_ROOT");
+	const agentTmpRoot = process.env["TMPDIR"];
+	if (values.out === undefined && agentTmpRoot === undefined) throw new Error("delegation_probe_requires_out_or_TMPDIR");
 	const out = values.out ?? join(agentTmpRoot ?? tmpdir(), "extensions", `delegation-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 	await mkdir(dirname(out), { recursive: true });
 	await writeFile(out, `${JSON.stringify(artifact, null, 1)}\n`);

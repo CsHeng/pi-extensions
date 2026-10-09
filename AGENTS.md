@@ -23,7 +23,7 @@ The package exposes seven maintained extensions: `multi-skill-mentions` as an ex
 - `mise.toml`: `publish-local-package` task for the local Pi package snapshot
 - `docs/architecture/`: stable product and maintenance truth
 - `$AGENT_ARCHITECTURE_DIR/docs/`: shared boundaries, new designs/plans (including single-product changes), retained evaluation results and integration observations; never runtime input
-- `mise.toml`: source roots `AGENT_ARCHITECTURE_DIR`, `AGENT_SKILLS_DIR`, `PI_EXTENSIONS_DIR` plus `AGENT_TMP_ROOT`; consumers use these resolved values without guessing checkout layout. Retained runtime and temporary artifacts belong under `$AGENT_TMP_ROOT/extensions/`.
+- `mise.toml`: source roots `AGENT_ARCHITECTURE_DIR`, `AGENT_SKILLS_DIR`, `PI_EXTENSIONS_DIR` plus `TMPDIR`; consumers use these resolved values without guessing checkout layout. Retained runtime and temporary artifacts belong under `$TMPDIR/extensions/`.
 - Product protocols and independent check/install behavior remain here; no architecture checkout is required at runtime
 
 ## Local Package Snapshot
@@ -95,7 +95,7 @@ bash scripts/run-temporary-multi-skill-mentions-probe.sh
 bash scripts/run-installed-multi-skill-mentions-probe.sh
 ```
 
-The delegation probe lane is a measurement lane, not a gate: it runs headless `pi` against a throwaway project and a mock subagent tool to measure whether the parent model calls the tool under a selected shape and guidance level. It spends provider capacity, always includes control prompts, prints Wilson intervals with the frozen prompt-set fingerprint, and writes one JSON artifact; use `--dry-run` to inspect the plan first. Keep its dated conclusion in `$AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/` and its raw JSON artifact under `$AGENT_TMP_ROOT/extensions/`, and never add it to `bun run test`:
+The delegation probe lane is a measurement lane, not a gate: it runs headless `pi` against a throwaway project and a mock subagent tool to measure whether the parent model calls the tool under a selected shape and guidance level. It spends provider capacity, always includes control prompts, prints Wilson intervals with the frozen prompt-set fingerprint, and writes one JSON artifact; use `--dry-run` to inspect the plan first. Keep its dated conclusion in `$AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/` and its raw JSON artifact under `$TMPDIR/extensions/`, and never add it to `bun run test`:
 
 ```bash
 CSHENG_SUBAGENTS_DELEGATION_PROBE=1 bun scripts/run-delegation-probe.ts --dry-run
