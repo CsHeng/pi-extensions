@@ -4,9 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
 import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
-import { getRole } from "./roles.ts";
-
-const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
+import { getManagedRole, toolsForAccess } from "./roles.ts";
+import { isNativePathTool, isNativeShellTool } from "./native-context.ts";
 
 function requestedPath(toolName: string, input: unknown): string | undefined {
 	if (typeof input !== "object" || input === null) return undefined;
@@ -29,7 +28,7 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
 	if (loaded.manifest) pi.on("before_agent_start", event => {
 		// Let Pi discover APPEND_SYSTEM.md before adding the child role.
-		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getRole(loaded.manifest!.role).systemPrompt].filter(Boolean).join("\n\n");
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest!.role, loaded.manifest!.grants.some(grant => grant.permission === "write")).systemPrompt].filter(Boolean).join("\n\n");
 		// The original project's ancestor chain replaces managed-storage ancestors; the
 		// snapshot file is already selected by the native loader's override precedence.
 		if (loaded.manifest!.guidance) event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
@@ -41,13 +40,22 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 			return { block: true, terminate: true, reason: fatalReason ?? "Child capability is unavailable." };
 		}
 		// The typed tool checks all repository/path/revision inputs itself on every execution.
-		if (event.toolName === GIT_READ_TOOL && loaded.manifest.role !== "worker") {
-			const root = await authorizePath(loaded.manifest, "read", loaded.manifest.root);
-			if (root.fatal) { fatalReason = root.reason ?? "Child capability is unavailable."; recordFailure(); return { block: true, terminate: true, reason: fatalReason }; }
+		const granted = new Set(toolsForAccess(loaded.manifest.grants.some(grant => grant.permission === "write")));
+		if (isNativeShellTool(event.toolName)) {
+			// A read or write grant keeps the cooperative host shell; it is not a path grant.
 			return undefined;
 		}
-		if (!PATH_TOOLS.has(event.toolName)) {
-			return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the child capability.` };
+		if (event.toolName === GIT_READ_TOOL) {
+			if (!granted.has(event.toolName)) return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the granted capability.` };
+			return undefined;
+		}
+		if (!isNativePathTool(event.toolName)) {
+			// Configured extension, MCP and custom tools are eligible because the effective
+			// host catalog exposes them. This is a trusted host, not an OS sandbox.
+			return undefined;
+		}
+		if (!granted.has(event.toolName)) {
+			return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the granted capability.` };
 		}
 		const path = requestedPath(event.toolName, event.input);
 		if (path === undefined) return { block: true, terminate: false, reason: `Tool ${event.toolName} did not provide a path.` };

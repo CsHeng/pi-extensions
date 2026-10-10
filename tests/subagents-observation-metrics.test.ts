@@ -7,7 +7,7 @@ import { unavailableObservation } from "../extensions/subagents/observability.ts
 function replay(f: ReturnType<typeof observationFixture>, action = "inspect", unavailable = false) {
 	const views = structuredClone(f.sessions);
 	if (unavailable) for (const view of views) view.result.observation = unavailableObservation();
-	f.body.splice(3, 0, { type: "message", id: "replay", parentId: "tool", message: { role: "toolResult", toolName: "csheng_subagent_sessions", details: { schemaVersion: 1, action, sessions: views } } });
+	f.body.splice(3, 0, { type: "message", id: "replay", parentId: "tool", message: { role: "toolResult", toolName: "csheng_subagent_sessions", details: { schemaVersion: 4, action, sessions: views } } });
 }
 
 test("frozen three-worker consumer: thirty minutes effort, ten minutes occupied, five owned tokens/cost", () => {
@@ -19,7 +19,7 @@ test("frozen three-worker consumer: thirty minutes effort, ten minutes occupied,
 	assert.equal(metric.usage.parent.input, 2); assert.equal(metric.usage.children.input, 3); assert.equal(metric.usage.total.input, 5); assert.equal(metric.usage.total.cost, 5);
 	assert.equal(metric.outcomes.executionSucceeded, 3); assert.equal(metric.outcomes.reportComplete, 3); assert.equal(metric.outcomes.parentAccepted, null);
 	assert.equal(metric.models[0]?.usage.input, 5);
-	assert.doesNotMatch(JSON.stringify(metric), /PRIVATE|child-|handle-|candidate-|synthetic|fixture|call|parent-clock|\.txt/);
+	assert.doesNotMatch(JSON.stringify(metric), /PRIVATE|child-|Handle[0-9]|Candidate[0-9]|Worker[0-9]|synthetic|fixture|call|parent-clock|\.txt/);
 	assert.deepEqual(extractObservationMetrics(f.text()), metric);
 });
 
@@ -129,6 +129,81 @@ test("child effort, command endpoints and configured capabilities are deduplicat
 	const partial = observationFixture(); partial.sessions[0]!.result.observation.commandCoverage = "partial";
 	assert.equal(extractObservationMetrics(partial.text()).commands.durationEffortMs, null);
 	assert.equal(extractObservationMetrics(partial.text()).commands.coverage, "partial");
+});
+
+test("unsupported and legacy envelopes are excluded without poisoning current evidence", () => {
+	const f = observationFixture();
+	f.body.splice(2, 0, { type: "custom", id: "old", parentId: "before", customType: "csheng.subagents.execution.v3", data: { version: 3 } });
+	f.body.splice(3, 0, { type: "message", id: "legacy", parentId: "old", message: { role: "toolResult", toolName: "csheng_subagents", details: { legacy: true } } });
+	const metric = extractObservationMetrics(f.text());
+	assert.equal(metric.available, true);
+	assert.equal(metric.excludedRecords, 2);
+	assert.equal(metric.usage.total.cost, 5, "one historical envelope cannot make current usage unavailable");
+	assert.equal(metric.observedEpisodes, 3);
+	assert.equal(metric.outcomes.executionSucceeded, 3);
+});
+
+test("per-root destination, recovery and release project truthfully while one logical candidate counts once", () => {
+	const f = observationFixture();
+	const view = f.body[2]!.message.details.sessions[0];
+	view.candidate = { id: "Candidate0", episode: 1, status: "partial", changedPaths: ["RootOne/a.ts"], appliedPaths: ["RootOne/a.ts"],
+		roots: [
+			{ rootId: "RootOne", destination: "/redacted/one", status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+			{ rootId: "RootTwo", destination: "/redacted/two", status: "unknown", changedPaths: ["b.ts"], appliedPaths: [] },
+		] };
+	view.release = { status: "partial", remaining: ["RootTwo"] };
+	const metric = extractObservationMetrics(f.text());
+	assert.equal(metric.outcomes.candidatesApplied, 0, "a partial logical candidate is never counted as applied");
+	assert.deepEqual(metric.rootStatuses.find((root) => root.rootId === "RootOne"),
+		{ candidateId: "Candidate0", rootId: "RootOne", destination: "/redacted/one", status: "applied", recovery: "clear", release: "released" });
+	assert.deepEqual(metric.rootStatuses.find((root) => root.rootId === "RootTwo"),
+		{ candidateId: "Candidate0", rootId: "RootTwo", destination: "/redacted/two", status: "unknown", recovery: "required", release: "remaining" });
+	// A stable identity update replaces the same root rows and still counts the logical candidate once.
+	view.candidate.status = "applied";
+	for (const root of view.candidate.roots) { root.status = "applied"; root.appliedPaths = [...root.changedPaths]; }
+	view.release = { status: "complete", remaining: [] };
+	for (let repeat = 0; repeat < 2; repeat++) {
+		const applied = extractObservationMetrics(f.text());
+		assert.equal(applied.outcomes.candidatesApplied, 1);
+		assert.equal(applied.rootStatuses.length, 2, "status updates never multiply root rows");
+		assert.ok(applied.rootStatuses.every((root) => root.release === "released"));
+	}
+});
+
+test("current metric identifiers share the product contract without accepting prefixed aliases", () => {
+	const mutations: Array<(view: Record<string, any>) => void> = [
+		(view) => { view.handle = "Handle-0"; },
+		(view) => { view.candidate.id = "Candidate_0"; },
+		(view) => { view.candidate.roots = [{ rootId: "Root-One", destination: "/redacted/one", status: "applied" }]; },
+		(view) => { delete view.candidate; view.roots = [{ id: "Root-One", destination: "/redacted/one", status: "not-applied", release: "released" }]; },
+	];
+	for (const mutate of mutations) {
+		const f = observationFixture(); mutate(f.body[2]!.message.details.sessions[0]);
+		const metric = extractObservationMetrics(f.text());
+		assert.equal(metric.available, false);
+		assert.equal(metric.excludedRecords, 0, "malformed current evidence is not a historical exclusion");
+		assert.deepEqual(metric.rootStatuses, []);
+	}
+});
+
+test("no-candidate owned roots and scratch-only cleanup stay separate from per-root disposition", () => {
+	const f = observationFixture();
+	const view = f.body[2]!.message.details.sessions[0];
+	delete view.candidate;
+	// Managed view projection persisted even though no candidate was ever frozen.
+	view.roots = [
+		{ id: "rootone", destination: "/redacted/one", status: "not-applied", release: "released" },
+		{ id: "roottwo", destination: "/redacted/two", status: "not-applied", release: "released" },
+	];
+	view.release = { status: "partial", remaining: ["scratch"] };
+	const metric = extractObservationMetrics(f.text());
+	assert.equal(metric.outcomes.candidatesApplied, 0);
+	assert.deepEqual(metric.rootStatuses.map((root) => [root.candidateId, root.rootId, root.status, root.release]), [
+		[null, "rootone", "not-applied", "released"],
+		[null, "roottwo", "not-applied", "released"],
+	]);
+	// The scratch-only failure is aggregate, not repeated as a per-root failure.
+	assert.deepEqual(metric.releases, [{ candidateId: null, status: "partial", remaining: 1 }]);
 });
 
 test("applied candidates remain distinct from explicitly scoped parent acceptance", () => {

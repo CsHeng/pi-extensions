@@ -39,7 +39,7 @@ test("observer publishes actual starts, route, turns and frozen terminal values 
 	const seen: ObserverSnapshot[] = [];
 	const observer = new ManagedObserver("run", owner, "generation", [{ id: "task", role: "explorer", episode: 1, route, replayed: false, objective: "search confirm the entry\nwith extra" }], () => now, value => seen.push(value));
 	observer.begin();
-	assert.equal(seen.at(-1)?.version, 3);
+	assert.equal(seen.at(-1)?.version, 4);
 	assert.equal(seen.at(-1)?.launchedChildren, 0);
 	assert.equal(seen.at(-1)?.tasks[0]?.elapsedMs, null);
 	assert.equal(seen.at(-1)?.tasks[0]?.headline, "search confirm the entry with extra");

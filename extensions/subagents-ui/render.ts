@@ -366,7 +366,7 @@ export function sessionCounts(
 		interrupted: states ? String(states.interrupted) : "?",
 		closed: states ? String(states.closed) : "?",
 		historyLabel,
-		limitedLive: snapshot !== undefined && (reply === undefined || snapshot.version !== 3),
+		limitedLive: snapshot !== undefined && reply === undefined,
 	};
 }
 
@@ -451,7 +451,14 @@ export function formatHistoryRow(row: SessionViewHistoryRow, label: string, colu
 	const usage = `Σ${turns}t ↑${compactCount(row.recordedUsage.usage.input)} $${compactCost(row.recordedUsage.usage.cost)}${coverage ? `·${coverage}` : ""}`;
 	const primary = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)}`;
 	const route = row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "";
-	const text = `${primary} ${usage}` + (badges ? `  ${badges}` : "") + route;
+	// Bounded per-root outcome line: destination, apply status, recovery need and this root's own release fact.
+	const roots = row.roots?.length
+		? `\n  ${row.roots.map(root => `${root.id.slice(0, 8)} ${root.status}${root.recovery === "required" ? "!" : ""}/${root.release} ${truncateToWidth(root.destination, 40)}`).join(" · ")}`
+		: "";
+	// Aggregate owned-resource cleanup is separate from per-root disposition; a scratch-only failure
+	// must stay visible even when every projected root is already released.
+	const cleanup = row.release ? `\n  cleanup=${row.release.status}${row.release.remaining > 0 ? ` remaining=${row.release.remaining}` : ""}` : "";
+	const text = `${primary} ${usage}` + (badges ? `  ${badges}` : "") + route + roots + cleanup;
 	const segments: RowSegment[] = [
 		{ text: `${historyGlyph(row)} `, color: "text" },
 		{ text: `${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} `, color: "text" },
@@ -460,6 +467,8 @@ export function formatHistoryRow(row: SessionViewHistoryRow, label: string, colu
 		{ text: usage + (badges ? `  ${badges}` : ""), color: "dim" },
 	];
 	if (route) segments.push({ text: route, color: "dim" });
+	if (roots) segments.push({ text: roots, color: "dim" });
+	if (cleanup) segments.push({ text: cleanup, color: "dim" });
 	return { kind: "settled", text, segments };
 }
 

@@ -1,6 +1,10 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -42,7 +46,7 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
  t.after(async () => { release(); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context)).status, "succeeded"); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
  h.faux.setResponses([
-  managed({ action: "create", requestId: "consume", tasks: (consume === "mixed" ? ["one", "two"] : ["one"]).map(id => ({ id, role: "explorer", objective: "inspect", scope: ["."] })) }), tool("drain_children", {}),
+  managed({ action: "create", requestId: "consume", tasks: (consume === "mixed" ? ["one", "two"] : ["one"]).map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] })) }), tool("drain_children", {}),
   () => managed(consume === "join" ? { action: "join", runId: receipt.runId } : consume === "close" ? { action: "close", handle: receipt.sessions[0]!.handle, expectedEpisode: 1, disposition: "discard" } : { action: "inspect", handle: receipt.sessions[0]!.handle }),
   fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved evidence received"),
  ]);
@@ -68,7 +72,7 @@ for (const boundary of ["settlement", "compaction", "compaction-abort", "compact
  }] });
  t.after(async () => { releaseChild(); releaseBoundary(); releaseFailure(); await work?.catch(() => {}); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "boundary", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] }), fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved result received")]);
+ h.faux.setResponses([managed({ action: "create", requestId: "boundary", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved result received")]);
  work = h.session.prompt("bounded fixture");
  if (boundary !== "settlement") { await work; work = h.session.compact("owned fixture only"); }
  await until(() => entered); assert.ok(waits > 0, "outstanding work must have an early public idle waiter");
@@ -96,7 +100,7 @@ test("a completion queued behind a parent tool cannot restart an aborted real ho
  }, createTraceObserver(trace)] });
  t.after(async () => { release(); await h.session.abort(); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context)).status, "succeeded"); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "abort", tasks: [{ id: "scan", role: "explorer", objective: "inspect", scope: ["."] }] }), tool("bash", { command: "sleep 30" }), fauxAssistantMessage("must not resume after abort")]);
+ h.faux.setResponses([managed({ action: "create", requestId: "abort", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), tool("bash", { command: "sleep 30" }), fauxAssistantMessage("must not resume after abort")]);
  const running = h.session.prompt("bounded fixture"); await until(() => trace.entries.some(entry => entry.event === "tool_start" && entry.detail?.toolName === "bash"));
  release(); await until(() => terminal); await new Promise(resolve => setImmediate(resolve)); await h.session.abort(); await running;
  await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 2); assert.equal(h.session.isStreaming, false); assert.deepEqual(h.errors, []);
@@ -112,11 +116,15 @@ async function until(check: () => boolean | Promise<boolean>) {
 
 test("real RPC-mode Pi parent and native children overlap, wake, apply early and repair without rebinding a sibling run", { timeout: 45000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-native-host-"));
+ // Native children now load the configured catalog; keep it disposable and empty so the
+ // offline fixture can never pick up the real user's extensions or MCP servers.
+ const childAgentDir = join(base, "child-agent");
+ await mkdir(childAgentDir, { recursive: true });
  const store = new ManagedSessionStore(base); const events: SubagentExecutionEvent[] = []; const results: SessionActionResult[] = [];
  let service!: ContinuationService, ctx!: ExtensionContext;
  const extension = (pi: ExtensionAPI) => {
   service = registerContinuationTool(pi, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: options => runChild({ ...options,
-   env: { ...process.env, CSHENG_ASYNC_GATES: base, CSHENG_ASYNC_TASK: options.task.id },
+   env: { ...process.env, PI_CODING_AGENT_DIR: childAgentDir, CSHENG_ASYNC_GATES: base, CSHENG_ASYNC_TASK: options.task.id },
    invocation: { command: process.execPath, args: [new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url).pathname, "-e", new URL("fixtures/subagents-native-session.ts", import.meta.url).pathname, "--no-context-files"] },
   }) });
   pi.on("agent_start", (_event, context) => { ctx = context; });
@@ -142,7 +150,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  h.faux.setResponses([
   contract({ operation: "enroll", goal: "fixture implementation", delivery: "local source", authority: "offline fixture", requirements: [{ key: "r", outcome: "reviewed source", verification: "parent check" }], tasks: [{ key: "t", title: "Source work", covers: ["r"] }] }),
   contract({ operation: "start", task: "t", scope: ["dirty.txt"] }),
-  managed({ action: "create", requestId: "pair", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", scope: ["."], model: "subagent-fixture/fixture", thinking: "off" })) }),
+  managed({ action: "create", requestId: "pair", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: h.workDir }], model: "subagent-fixture/fixture", thinking: "off" })) }),
   tool("bash", { command: "printf independent > parent-progress" }),
   contract({ operation: "report", attempt: "A1", summary: "Submitted; parent made independent progress, not accepted" }), fauxAssistantMessage("waiting"),
  ]);
@@ -164,7 +172,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  await h.session.prompt("repair fast task explicitly");
  assert.equal(await readFile(join(h.workDir, "fast.txt"), "utf8"), "candidate-2");
  const after = await store.load(fast.handle, { repo: h.workDir, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) });
- assert.equal(after.workspace!.inputs.gitWorkspace!.path, before.workspace!.inputs.gitWorkspace!.path); assert.notEqual(after.nativeLeaf, before.nativeLeaf);
+ assert.equal(after.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path, before.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path); assert.notEqual(after.nativeLeaf, before.nativeLeaf);
  h.faux.setResponses([managed({ action: "join", runId }), () => apply(latest("slow")), contract({ operation: "close", outcome: "cancelled", reason: "fixture transport proof is not semantic acceptance" }), fauxAssistantMessage("done")]);
  await writeFile(join(base, "release-slow"), "go"); await until(() => state().fulfillment === "cancelled" && h.session.isStreaming === false);
  assert.equal(results.findLast(result => result.action === "join")!.sessions.find(view => view.handle === fast.handle)!.episode, 1);

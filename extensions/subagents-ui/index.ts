@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import { mintProductId } from "../subagents/identity.ts";
 import { Key, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
 import {
 	OBSERVER_EVENT,
@@ -122,8 +122,6 @@ export function createSubagentsUiExtension(
 		let latestTerminal: CachedObservation | undefined;
 		let sessionView: SessionViewState = { kind: "idle" };
 		let pending: PendingViewRequest | undefined;
-		const requestNamespace = randomUUID();
-		let requestSeq = 0;
 		let ownerEpoch = 0;
 		let coreWatch: unknown;
 		let requeryArmed = false;
@@ -152,8 +150,8 @@ export function createSubagentsUiExtension(
 			const reply = sessionView.reply;
 			if (reply && (!snapshot || viewObservedAt > receivedAt)) {
 				const tasks = reply.live;
-				snapshot = { version: 3, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
-					runId: reply.generation, revision: reply.revision, phase: tasks.length ? "running" : "settled", tasks,
+				snapshot = { version: 4, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
+					runId: null, revision: reply.revision, phase: tasks.length ? "running" : "settled", tasks,
 					requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(t => t.elapsedMs !== null).length,
 					activeChildren: tasks.filter(t => t.status === "running").length, settledTasks: 0,
 					aggregateAssistantTurns: tasks.reduce((sum, t) => sum + t.assistantTurns, 0), elapsedMs: null };
@@ -244,7 +242,7 @@ export function createSubagentsUiExtension(
 				return;
 			}
 			const refreshing = sessionView.reply?.history.page === page;
-			const requestId = `ui-${requestNamespace}-${++requestSeq}`;
+			const requestId = mintProductId();
 			pending = { requestId, page, epoch: ownerEpoch, sentAt: now(), sessionId: owner.sessionId,
 				...(current ? { generation: current.snapshot.generation } : {}) };
 			sessionView = { kind: "loading", ...(refreshing ? { reply: sessionView.reply, refreshing: true } : {}) };

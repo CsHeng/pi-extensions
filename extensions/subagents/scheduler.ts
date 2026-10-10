@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { mintProductId } from "./identity.ts";
 import {
 	HARD_LIMITS,
 	TELEMETRY_SCHEMA_VERSION,
@@ -142,7 +142,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 	const started = now();
 	const timing: RunTiming = { boundary: options.clock ? "tool-entry" : "scheduler", scheduler: { startMs: clock.offset(), endMs: null }, children: [], waits: [], complete: true };
 	const metrics = {
-		runId: options.runId ?? randomUUID(),
+		runId: options.runId ?? mintProductId(),
 		clock,
 		timing,
 		requestedTasks: options.requestedTasks ?? tasks.length,

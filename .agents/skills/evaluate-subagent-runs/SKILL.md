@@ -1,23 +1,23 @@
 ---
 name: evaluate-subagent-runs
-description: "Use for read-only evaluation of explicit Pi session JSONL files containing historical one-shot csheng_subagents results, managed csheng_subagent_sessions results, and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition."
+description: "Use for read-only evaluation of explicit Pi session JSONL files containing current-version managed csheng_subagent_sessions results and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition. Retired one-shot csheng_subagents and non-current managed envelopes are excluded, not interpreted."
 ---
 
 # Evaluate Subagent Runs
 
-Evaluate one explicitly named Pi session without changing Pi state, runtime routes, the workspace, or external files.
+Evaluate one explicitly named Pi session (or one explicit current-epoch scan) without changing Pi state, runtime routes, the workspace, or external files.
 
 ## Boundary
 
 - Accept one exact session JSONL path or session ID, or an explicit current-epoch scan that names both a sessions root and the provenance manifest.
 - Read only the selected Pi JSONL and, when explicitly supplied, one bounded parent-disposition JSON. Never read Pi SQLite, settings, credentials, logs, or unrelated sessions.
-- Emit only metric schema version four as defined in `references/metric-schema.md`.
-- Never copy prompts, objectives, raw model selectors, task IDs, child output, stderr, environment values, route-file content, or external file content.
-- Treat runtime telemetry schema two through four as authoritative for the fields they declare. Treat schema one as authoritative only for its available launch, admission, duration, and concurrency fields. Label legacy launch, width, and timing derivation as inference.
-- Never reconstruct topology, explicit model or thinking requests, or other new metrics from assistant tool arguments, prompts, or legacy prose. Report unavailable evidence as `null` per run and through `unavailableRuns` totals.
-- Report legacy mechanical dispatch-correction candidates separately. Semantic repair, takeover, and acceptance stay unavailable unless an explicit scoped parent disposition supplies them; report or apply status never implies acceptance.
-- Existing totals/roles/routes/runs remain historical `csheng_subagents-only` one-shot counters. They do not describe the registered managed tool. Use `managedDispatch` for v2/v3 invocation counts/selection independent of settled windows, with owner/invocation deduplication and explicit legacy/invalid/unassigned coverage. Use `observations` for native/managed evidence, with owner/entry and episode deduplication. Never add its usage to a referenced legacy aggregate or charge replay as new model work.
-- Do not invoke subagents, change routing, retry provider calls, or mutate a report unless an explicit new output path is provided.
+- Emit only metric artifact schema version five as defined in `references/metric-schema.md`. That artifact version is independent of the collaboration/managed envelope version (currently four) and of the session-view version (currently four).
+- Interpret a managed `csheng_subagent_sessions` envelope only when `schemaVersion` is four. The retired one-shot `csheng_subagents` tool name and any non-four managed envelope are classified shallowly and excluded before any nested field is read; they are reported as exclusions (`source.excludedRuns`, `observations.excludedRecords`, `managedDispatch.excludedRecords`), never as invalid current work. Do not add legacy inference or a compatibility adapter.
+- Never copy prompts, objectives, raw model selectors, task IDs, child output, stderr, environment values, route-file content, or external file content. The bounded per-root `destination` projection described in the schema is the only path-like field retained.
+- Report exclusions, invalid current records, and unavailable provenance as separate categories. Do not merge excluded or unavailable evidence into a known total.
+- Report logical counts once: `outcomes.candidatesApplied` counts a candidate only when it is actually `applied`; owned usage is deduplicated by owner/entry/episode; `managedDispatch` deduplicates owner/invocation. Do not multiply a count because a bundle has several repository roots.
+- Report per-root disposition (`rootStatuses`) and the aggregate release (`releases`) separately. A scratch-only partial cleanup is an aggregate release fact, never a per-root failure.
+- Never invoke subagents, change routing, retry provider calls, or mutate a report unless an explicit new output path is provided.
 
 ## Run
 
@@ -29,7 +29,7 @@ bun \
   --session <path-or-id>
 ```
 
-For current installed/configured health, require explicit inputs:
+For one explicit current-epoch scan:
 
 ```bash
 bun \
@@ -37,21 +37,25 @@ bun \
   --epoch current --sessions-root <dir> --manifest <file>
 ```
 
-For a parent-owned acceptance declaration, exact-session mode optionally accepts `--disposition <json-file>`. Follow the strict shape, owner/entry-range association, explicit-null handling, and 4 KiB bound in `references/metric-schema.md`. This is evaluation input, not a runtime approval or a whole-report acceptance claim.
+Options:
 
-Current-epoch `managedDispatch` selects v2/v3 invocations with their own matching revision pair; missing pairs remain unassigned, and legacy records retain unavailable ownership/launch evidence. Returned old episode provenance is not current-invocation provenance. Native observations still require exact-session input. V3 `managedDispatch.async` separates accepted receipts from owned persisted terminal events. Only terminal episode facts count child launches and preparation/queue/workspace/child/lifecycle timing. Deduplicate task/run terminals, foreground returns and later inspect/join; conflicting facts must fence metrics even when a later event enriches timing. Apply the same provenance and activation cutoff to task and run timing. Do not force asynchronous intervals into a parent interaction window; missing or cross-clock timing stays unavailable.
-
-Use `--sessions-root <dir>` only for a bounded fixture or explicitly selected alternate session root. Use `--output <new-file>` to create a report; the extractor refuses to overwrite an existing path.
+- `--session <path-or-id>`: exact-session input. A path (or anything containing a separator or ending in `.jsonl`) is resolved directly; a bare id is resolved under `--sessions-root` (default `~/.pi/agent/sessions`) and must match exactly one JSONL file.
+- `--sessions-root <dir>`: alternate sessions root for `--session` resolution, or the required root for `--epoch current`. Use a bounded fixture or explicitly selected root, not the whole corpus.
+- `--epoch current`: managed current-epoch mode; requires `--sessions-root` and `--manifest`. Selects matching managed invocations by their explicit epoch pair and activation cutoff. Native `observations` stay unavailable in this mode; select an exact session to inspect them.
+- `--manifest <file>`: version-one epoch manifest `{version:1, extensionEpoch, configurationEpoch, extensionActivatedAtMs, configurationActivatedAtMs}`.
+- `--disposition <json-file>`: exact-session only. One bounded parent-acceptance declaration; see the schema for the strict shape, owner/entry-range association, explicit-null handling, and 4 KiB limit.
+- `--output <new-file>`: create a report. The extractor refuses to overwrite an existing path.
+- `--help`: print usage.
 
 ## Interpret
 
-1. Confirm `source.telemetryMode`, each run's `telemetrySchemaVersion`, and nullable evidence fields before treating metrics as authoritative.
-2. Compare roles and routes using task count, actual launches, usage, duration, changed-path count, outcome, configuration `source`, and route `selectionSource`.
-3. Use requested, admitted, and launched totals distinctly. A singleton is a run with known `requestedTasks === 1`; an empty legacy rejection has unknown width.
-4. Use `mechanicalDispatchCorrectionCandidates` as a dispatch-quality signal, not as semantic repair count.
-5. Diagnose errors by stable code and run ordinal. Return to raw session content only through a separately authorized investigation; never paste it into the report.
-6. For v4, distinguish tool wall time, scheduler span, worker effort, occupied interval wall, and overlapping wait reasons; incomplete evidence stays unavailable. Do not infer provider utilization or child reasoning from process intervals.
-7. Read native `observations.available` and nullable subfields independently. Missing timing does not erase valid owned recorded usage; that usage does not prove a complete provider bill for an interrupted in-flight request. Read `managedDispatch` separately from native windows and one-shot totals. Parent/child cost is cumulative referenced owned evidence; child phase summaries are per-episode effort, not unrelated-clock union. Command coverage and endpoint changes are evidence, not proof of tests or acceptance. Configured tools/context windows are host-state observations, not final provider payload or quotas.
+1. Confirm `schemaVersion` is five, then read `source` for selection mode and excluded/unavailable coverage before treating metrics as authoritative.
+2. Use `managedDispatch` for managed transport/invocation evidence: `selectedRequests`/`excludedRequests`/`unassignedRequests`, `actions`, `errors`, and the `{ known, unavailableRequests }` launch/replay counts. Use `observations` for native/managed owned evidence. There is no legacy one-shot aggregate.
+3. Read `observations.available` and its nullable subfields independently. Missing timing does not erase valid owned recorded usage; that usage does not prove a complete provider bill for an interrupted in-flight request.
+4. Read `observations.rootStatuses` per root (`destination`, `status`, `recovery`, `release`, nullable `candidateId`) and `observations.releases` per session. A `partial` aggregate release with only `scratch` remaining keeps every root `released`; do not inflate that into per-root failures.
+5. Use `observations.outcomes.candidatesApplied` as a logical count (one per actually-applied candidate). Parent acceptance is only `observations.outcomes.parentAccepted` from an explicit `--disposition`; report or apply status never implies acceptance.
+6. For managed async evidence, `managedDispatch.async` separates accepted receipts from owned terminal events. Only terminal episode facts count child launches and phase timing; conflicting facts fence the metrics even when a later event enriches timing. Missing or cross-clock timing stays unavailable.
+7. Diagnose errors by stable code and bounded action groups. Return to raw session content only through a separately authorized investigation; never paste it into the report.
 8. Make route or cap changes only through a separately approved design and user configuration change backed by multiple representative runs.
 
 ## Verify

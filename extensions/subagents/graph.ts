@@ -1,5 +1,5 @@
-import { isAbsolute, normalize, relative, sep } from "node:path";
-import type { RepositoryTarget } from "./repository-policy.ts";
+import { AccessError, declaredScopes, normalizeAccess, type NormalizedAccessPath, type TaskRoot } from "./access.ts";
+import { isProductId } from "./identity.ts";
 import {
 	EXECUTION_PROFILES,
 	HARD_LIMITS,
@@ -19,16 +19,15 @@ import {
 const ROLE_SET = new Set<RoleName>(ROLE_NAMES);
 const EXECUTION_PROFILE_SET = new Set<ExecutionProfile>(EXECUTION_PROFILES);
 const REASONING_PROFILE_SET = new Set<ReasoningProfile>(REASONING_PROFILES);
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const SAFE_LOCK = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const SAFE_LOCK = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
 
 export interface NormalizedTask extends SubagentTask {
-	/** Admission-only physical identities; stored separately from the model-authored task. */
-	externalReadPins?: Array<{ dev: number; ino: number }>;
-	repositoryTarget?: RepositoryTarget;
+	access: Array<{ permission: "read" | "write"; scope: string[] }>;
+	grants: NormalizedAccessPath[];
+	/** Admission-only root bindings; stored separately from the model-authored task. */
+	roots?: TaskRoot[];
 	inputs: string[];
 	dependsOn: string[];
-	writePaths: string[];
 	verification: string[];
 	resourceLocks: string[];
 }
@@ -39,24 +38,6 @@ export type GraphValidation =
 
 function fail(code: string, message: string): GraphValidation {
 	return { ok: false, error: { code, message } };
-}
-
-export function normalizeRepositoryPath(value: string, allowRoot: boolean): string | undefined {
-	if (!value || value.includes("\0") || isAbsolute(value)) return undefined;
-	const normalized = normalize(value);
-	if (normalized === ".." || normalized.startsWith(`..${sep}`)) return undefined;
-	if (!allowRoot && (normalized === "." || normalized === sep)) return undefined;
-	return normalized;
-}
-
-function pathContains(root: string, child: string): boolean {
-	if (root === ".") return true;
-	const relation = relative(root, child);
-	return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-	return pathContains(left, right) || pathContains(right, left);
 }
 
 function hasDependencyPath(from: string, to: string, dependencies: ReadonlyMap<string, readonly string[]>): boolean {
@@ -80,7 +61,7 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 	const ids = new Set<string>();
 	const normalized: NormalizedTask[] = [];
 	for (const [index, task] of input.tasks.entries()) {
-		if (!SAFE_ID.test(task.id)) return fail("invalid_task_id", `Task at index ${index} has an invalid id.`);
+		if (!isProductId(task.id) || task.id.length > 64) return fail("invalid_task_id", `Task at index ${index} has an invalid id.`);
 		if (ids.has(task.id)) return fail("duplicate_task_id", `Task id ${task.id} is duplicated.`);
 		ids.add(task.id);
 		if (!ROLE_SET.has(task.role)) return fail("invalid_role", `Task ${task.id} has an unsupported role.`);
@@ -93,34 +74,23 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		if (task.reasoningProfile !== undefined && !REASONING_PROFILE_SET.has(task.reasoningProfile)) {
 			return fail("invalid_reasoning_profile", `Task ${task.id} has an unsupported reasoning profile.`);
 		}
-		if (task.repository !== undefined && (task.role !== "worker" || !isSafePathGrammar(task.repository) || !isAbsolute(task.repository))) {
-			return fail("invalid_task_repository", `Task ${task.id} repository requires an explicitly authorized absolute worker Git root.`);
-		}
 		const inputs = task.inputs ?? [];
 		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {
 			return fail("input_too_large", `Task ${task.id} inputs exceed the byte limit.`);
 		}
-		if (task.scope.length < 1 || task.scope.some((entry) => !isSafePathGrammar(entry))) {
-			return fail("invalid_scope", `Task ${task.id} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`);
+		let grants: NormalizedAccessPath[];
+		try {
+			if (!Array.isArray(task.access) || task.access.length < 1 || task.access.length > 32) throw new AccessError("invalid_access", "Access requires one through 32 rules.");
+			for (const rule of task.access) {
+				const scopes = declaredScopes(rule.scope);
+				if (scopes.length > 32 || scopes.some((entry) => !isSafePathGrammar(entry))) throw new AccessError("invalid_access", "Access scope must contain only safe path strings.");
+			}
+			grants = normalizeAccess(task.access);
+		} catch (error) {
+			const code = error instanceof AccessError ? error.code : "invalid_access";
+			return fail(code, `Task ${task.id} access is invalid. Use absolute paths; * needs an explicit finite universe.`);
 		}
-		const externalReadRoots = [...(task.externalReadRoots ?? [])];
-		if (externalReadRoots.length > HARD_LIMITS.maxExternalReadRoots) {
-			return fail("invalid_external_read_root", `Task ${task.id} exceeds the external read root limit.`);
-		}
-		if (externalReadRoots.some((entry) => !isSafePathGrammar(entry) || !isAbsolute(entry))) {
-			return fail("invalid_external_read_root", `Task ${task.id} external read root must be an absolute safe path.`);
-		}
-		const writePaths = (task.writePaths ?? []).map((entry) => isSafePathGrammar(entry) ? normalizeRepositoryPath(entry, false) : undefined);
-		if (writePaths.some((entry) => entry === undefined)) {
-			return fail("invalid_write_path", `Task ${task.id} has an unsafe write path.`);
-		}
-		const safeWrites = writePaths as string[];
-		if (task.role !== "worker" && safeWrites.length > 0) {
-			return fail("read_only_write_paths", `Read-only task ${task.id} cannot declare write paths.`);
-		}
-		if (new Set(safeWrites).size !== safeWrites.length) {
-			return fail("duplicate_write_path", `Task ${task.id} repeats a write path.`);
-		}
+		if (grants.length > 32) return fail("invalid_access", `Task ${task.id} exceeds the access path limit.`);
 		const dependsOn = task.dependsOn ?? [];
 		if (new Set(dependsOn).size !== dependsOn.length || dependsOn.includes(task.id)) {
 			return fail("invalid_dependencies", `Task ${task.id} has duplicate or self dependencies.`);
@@ -135,13 +105,12 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		}
 		normalized.push({
 			...task,
-			scope: [...task.scope],
+			access: task.access.map((rule) => ({ permission: rule.permission, scope: declaredScopes(rule.scope) })),
+			grants,
 			inputs: [...inputs],
 			dependsOn: [...dependsOn],
-			writePaths: safeWrites,
 			verification: [...(task.verification ?? [])],
 			resourceLocks: [...resourceLocks],
-			externalReadRoots,
 		});
 	}
 
@@ -157,17 +126,11 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		}
 	}
 
-	// Initial write regions are planning hints. Each managed task owns an
-	// independent Git worktree; only explicit resourceLocks serialize execution.
+	// Access grants are the capability. Explicit resourceLocks serialize shared destinations; disjoint roots overlap.
 
 	return { ok: true, tasks: normalized };
 }
 
 export function validateGraphRelationships(tasks: readonly NormalizedTask[]): GraphValidation {
-	for (const task of tasks) {
-		if (task.writePaths.some((writePath) => !task.scope.some((root) => pathContains(root, writePath)))) {
-			return fail("write_outside_scope", `Task ${task.id} declares a write outside its read scope.`);
-		}
-	}
 	return { ok: true, tasks: [...tasks] };
 }

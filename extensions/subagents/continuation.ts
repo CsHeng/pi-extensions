@@ -1,24 +1,25 @@
-import { randomUUID } from "node:crypto";
-import { lstat, readdir, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mintProductId } from "./identity.ts";
+import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Text } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
-import { CAPABILITY_RECOVERY_HINT, HARD_LIMITS, emptyUsage, type EffectiveRoute, type TaskResult } from "./contracts.ts";
-import { assertCanonicalExternalRoots } from "./path-policy.ts";
+import { CAPABILITY_RECOVERY_HINT, CHILD_CAPABILITY_MANIFEST_VERSION, CHILD_MARKER_ENV, HARD_LIMITS, emptyUsage, type ChildCapabilityManifest, type EffectiveRoute, type SubagentTask, type TaskResult } from "./contracts.ts";
+import { assertCanonicalGrants, authorizePath, loadCapability } from "./path-policy.ts";
+import { normalizeAccess } from "./access.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
 import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, validateRepositoryTarget, RepositoryPolicyError, type RepositoryHost } from "./repository-policy.ts";
 import { getManagedRole } from "./roles.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
 import { resolvePiInvocation, runChild, type ChildRunOptions } from "./runner.ts";
-import { selectedProjectSkills } from "./guidance-resources.ts";
+import { mergeChildGuidance, prepareChildGuidance, selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
-import { ManagedSessionStore, fingerprint, managedRepository, type ManagedRecord } from "./managed-sessions.ts";
-import { applyCandidate, freezeCandidate, prepareManagedWorkspace, syncManagedInputs } from "./candidates.ts";
-import { captureGitInput, discardGitWorkspace, retainGitInput, discardGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
+import { ManagedSessionStore, fingerprint, managedWriteRoots, type ManagedRecord } from "./managed-sessions.ts";
+import { applyCandidate, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
+import { captureGitInput, retainGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
-import { MANAGED_LIMITS, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
 import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
@@ -35,6 +36,8 @@ export interface ContinuationDependencies {
 	store: ManagedSessionStore;
 	loadConfig(): Promise<ConfigLoadResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
+	/** Enclosing child capability, or undefined for a main actor. Nested delegation is bounded by it. */
+	enclosingCapability?(): Promise<ChildCapabilityManifest | undefined>;
 	getParentSkills?(sourceRoot: string): readonly Skill[] | undefined;
 	repositoryHost: RepositoryHost;
 	now(): number;
@@ -57,6 +60,15 @@ interface RunBinding {
 	deliveryError?: string;
 }
 const failedTask = (record: ManagedRecord, aborted: boolean, code: string): TaskResult => ({ id: record.task.id, role: record.task.role, status: aborted ? "aborted" : "failed", executionStatus: "not-started", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable", error: { code, message: code } });
+
+/** Known child bounds do not disappear after cwd changes or packet failure.
+ * Synthetic main/SDK fixtures inject their context rather than weakening this boundary. */
+export async function defaultEnclosingCapability(): Promise<ChildCapabilityManifest | undefined> {
+	if (process.env[CHILD_MARKER_ENV] !== "1") return undefined;
+	const loaded = await loadCapability();
+	if (!loaded.manifest) throw new ManagedError("enclosing_capability_unavailable");
+	return loaded.manifest;
+}
 const activeState = (record: ManagedRecord) => record.state === "queued" || record.state === "running";
 
 /** Session-owned executor, not a model loop. Durable records never resume themselves. */
@@ -71,10 +83,9 @@ export class ContinuationService {
 	private readonly observerSnapshots = new Map<string, ObserverSnapshot>();
 	private readonly observerOwners = new Map<string, string>();
 	private observerRevision = 0;
-	private generation = randomUUID();
+	private generation = mintProductId();
 	private admission = false;
 	private stopped = false;
-	private applying = false;
 	private readonly sessionViewBuilder: SessionViewBuilder;
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
 		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
@@ -85,14 +96,15 @@ export class ContinuationService {
 		this.sessionViewBuilder.invalidate();
 		try { this.dependencies.onSessionViewChange?.(); } catch { /* Display consumers never affect execution. */ }
 	}
-	resetObserver(): void { this.generation = randomUUID(); this.observerRevision = 0; this.observerSnapshots.clear(); this.observerOwners.clear(); }
+	resetObserver(): void { this.generation = mintProductId(); this.observerRevision = 0; this.observerSnapshots.clear(); this.observerOwners.clear(); }
 	private publishObserver(snapshot: ObserverSnapshot): void {
+		if (snapshot.runId === null) return;
 		if (!this.observerSnapshots.has(snapshot.runId)) for (const row of snapshot.tasks) this.observerOwners.set(row.id, snapshot.runId);
 		this.observerSnapshots.set(snapshot.runId, snapshot);
 		const rows = new Map<string, ObserverSnapshot["tasks"][number]>();
 		for (const value of this.observerSnapshots.values()) for (const row of value.tasks) if (this.observerOwners.get(row.id) === value.runId) rows.set(row.id, row);
 		const tasks = [...rows.values()].sort((a, b) => Number(["pending", "running"].includes(b.status)) - Number(["pending", "running"].includes(a.status))).slice(0, MANAGED_LIMITS.maxSessions).map((row, index) => ({ ...row, ordinal: index + 1 }));
-		this.dependencies.onObserver?.({ ...snapshot, runId: this.generation, tasks, phase: tasks.some(row => ["pending", "running"].includes(row.status)) ? "running" : "settled", requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(row => row.elapsedMs !== null).length, activeChildren: tasks.filter(row => row.executionPhase === "child-execution" && row.status === "running").length, settledTasks: tasks.filter(row => !["pending", "running"].includes(row.status)).length, aggregateAssistantTurns: tasks.reduce((sum, row) => sum + row.assistantTurns, 0) });
+		this.dependencies.onObserver?.({ ...snapshot, runId: null, tasks, phase: tasks.some(row => ["pending", "running"].includes(row.status)) ? "running" : "settled", requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(row => row.elapsedMs !== null).length, activeChildren: tasks.filter(row => row.executionPhase === "child-execution" && row.status === "running").length, settledTasks: tasks.filter(row => !["pending", "running"].includes(row.status)).length, aggregateAssistantTurns: tasks.reduce((sum, row) => sum + row.assistantTurns, 0) });
 	}
 	async reset(): Promise<void> {
 		await this.shutdown(); this.supervisor = undefined; this.supervisorOwner = undefined;
@@ -159,13 +171,13 @@ export class ContinuationService {
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
 		const cause = (error as { code?: unknown })?.code ?? (error instanceof Error && error.name !== "Error" ? error.name : "unclassified");
-		return { schemaVersion: 3, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
+		return { schemaVersion: MANAGED_SESSION_VERSION, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
 	}
 	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void, toolCallId = "direct"): Promise<SessionActionResult> {
 		const rawAction = raw && typeof raw === "object" ? (raw as { action?: unknown }).action : undefined;
 		let action: SessionActionResult["action"] = typeof rawAction === "string" && ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"].includes(rawAction) ? rawAction as SessionRequest["action"] : null;
 		let request: SessionRequest | undefined;
-		const telemetry: ManagedRequestTelemetry = { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), invocationId: randomUUID(), startedAtMs: Date.now(), durationMs: null, extensionEpoch: null, configurationEpoch: null, requestedTasks: null, admittedTasks: null, launchedChildren: 0, replayedEpisodes: 0 };
+		const telemetry: ManagedRequestTelemetry = { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), invocationId: mintProductId(), startedAtMs: Date.now(), durationMs: null, extensionEpoch: null, configurationEpoch: null, requestedTasks: null, admittedTasks: null, launchedChildren: 0, replayedEpisodes: 0 };
 		try {
 			request = parseSessionRequest(raw); action = request.action;
 			telemetry.requestedTasks = request.tasks?.length ?? request.episodes?.length ?? null;
@@ -189,7 +201,7 @@ export class ContinuationService {
 		const store = this.dependencies.store;
 		if (request.action === "inspect") {
 			if (request.runId) return this.runResult(request.runId, request.action, owner);
-			return { schemaVersion: 3, action: request.action, status: "succeeded", sessions: request.handle ? [store.view(await store.load(request.handle, owner))] : await store.list(owner) };
+			return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: "succeeded", sessions: request.handle ? [store.view(await store.load(request.handle, owner))] : await store.list(owner) };
 		}
 		if (request.action === "join" || request.action === "cancel") {
 			const binding = this.binding(request.runId!, owner);
@@ -198,34 +210,25 @@ export class ContinuationService {
 			return { ...(await this.runResult(request.runId!, "cancel", owner)), cancelOutcome: typeof outcome === "string" ? outcome : String(outcome) };
 		}
 		if (["apply", "close", "refresh"].includes(request.action)) {
-			if (request.action === "apply" && this.applying) throw new ManagedError("managed_apply_active");
-			if (request.action === "apply") this.applying = true;
 			try {
 				const view = await store.withSession(request.handle!, owner, async record => {
 					if (record.episode !== request.expectedEpisode) throw new ManagedError("stale_episode");
 					if (activeState(record)) throw new ManagedError("session_not_idle");
-					if (record.version < 3 && request.action !== "close") throw new ManagedError("legacy_session_read_only");
+					if (record.version !== MANAGED_SESSION_VERSION) throw new ManagedError("unsupported_contract");
 					if (request.action === "apply" || request.action === "refresh") {
 						if (record.state !== "idle") throw new ManagedError("session_not_idle");
+						await this.constrainNestedAccess([record.task]);
 						if (request.action === "apply") await applyCandidate(store, record, request.candidateId!);
 						else { await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
 					} else {
-						if (record.state === "closed" && record.retained !== (request.disposition !== "discard")) throw new ManagedError("close_disposition_conflict");
-						if (request.disposition === "discard" && record.state !== "closed") {
-							await validateRepositoryTarget(record.repositoryTarget);
-							const workspace = record.workspace?.inputs.gitWorkspace;
-							if (workspace) { await discardGitWorkspace(workspace); delete record.workspace; await store.save(record); }
-							if (record.inputRef && record.input) { await discardGitInput(managedRepository(record), record.inputRef, record.input); delete record.inputRef; await store.save(record); }
-							for (const name of await readdir(store.path(record.handle))) {
-								if (["source", "scratch"].includes(name) || /^candidate_[a-zA-Z0-9_-]+$/.test(name) || /^inputs_(?:old_)?[0-9a-f-]{36}$/.test(name)) await rm(join(store.path(record.handle), name), { recursive: true, force: true });
-							}
-						}
-						record.state = "closed"; record.retained = request.disposition !== "discard"; await store.save(record);
+						if (record.state === "closed" && record.retained === false && request.disposition !== "discard") throw new ManagedError("close_disposition_conflict");
+						if (request.disposition === "discard") await releaseManagedResources(store, record);
+						record.state = "closed"; record.retained = request.disposition !== "discard" || record.release?.status === "partial"; await store.save(record);
 					}
 					return store.view(record);
 				});
-				return { schemaVersion: 3, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
-			} finally { if (request.action === "apply") this.applying = false; this.invalidateSessionView(); }
+				return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
+			} finally { this.invalidateSessionView(); }
 		}
 		if (this.stopped) throw new ManagedError("supervisor_closed");
 		if (this.admission) throw new ManagedError("managed_admission_active");
@@ -246,7 +249,7 @@ export class ContinuationService {
 			} else {
 				const replayed = await Promise.all(request.episodes!.map(async episode => {
 					const record = await store.load(episode.handle, owner);
-					if (record.version < 3) throw new ManagedError("legacy_session_read_only");
+					if (record.version !== MANAGED_SESSION_VERSION) throw new ManagedError("unsupported_contract");
 					const prior = record.requests.find(operation => operation.id === episode.requestId);
 					if (!prior) return undefined;
 					if (prior.fingerprint !== fingerprint([episode.expectedEpisode, episode.message])) throw new ManagedError("request_id_conflict");
@@ -257,7 +260,7 @@ export class ContinuationService {
 				if (replayed.every(view => view !== undefined)) {
 					telemetry.replayedEpisodes = replayed.filter(view => view.execution).length;
 					const record = await store.load(request.episodes![0]!.handle, owner); const prior = record.requests.find(operation => operation.id === request.episodes![0]!.requestId)!;
-					return { schemaVersion: 3, action: request.action, kind: "execution", ...(prior.runId ? { runId: prior.runId } : {}), ...(prior.generation ? { generation: prior.generation } : {}), status: replayed.every(view => view.result.status === "succeeded") ? "succeeded" : "failed", sessions: replayed };
+					return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, kind: "execution", ...(prior.runId ? { runId: prior.runId } : {}), ...(prior.generation ? { generation: prior.generation } : {}), status: replayed.every(view => view.result.status === "succeeded") ? "succeeded" : "failed", sessions: replayed };
 				}
 			}
 			const loaded = await this.dependencies.loadConfig();
@@ -282,11 +285,11 @@ export class ContinuationService {
 			let records: ManagedRecord[];
 			let tasks: NormalizedTask[];
 			if (graph?.ok) {
+				await this.constrainNestedAccess(graph.tasks);
 				const admission = await admitRepositoryTasks(owner.repo, graph.tasks, this.dependencies.repositoryHost);
 				if (!admission.ok) throw new ManagedError(admission.error.code);
 				const related = validateGraphRelationships(admission.tasks); if (!related.ok) throw new ManagedError(related.error.code);
 				tasks = admission.tasks;
-				if (tasks.some(task => task.role === "worker" && (task.scope.length !== 1 || task.scope[0] !== "."))) throw new ManagedError("full_worker_scope_required");
 				// Resolve every requested route before creating any persistent task.
 				for (const task of tasks) this.route(task, config, ctx);
 				const allocation = await store.allocate(owner, request.requestId!, tasks, digest);
@@ -294,11 +297,16 @@ export class ContinuationService {
 				records = allocation.records;
 			} else {
 				records = await Promise.all(request.episodes!.map(episode => store.load(episode.handle, owner)));
-				if (records.some(record => record.version < 3)) throw new ManagedError("legacy_session_read_only");
-				tasks = records.map(record => ({ ...record.task, id: record.handle, dependsOn: [] }));
+				if (records.some(record => record.version !== MANAGED_SESSION_VERSION)) throw new ManagedError("unsupported_contract");
+				tasks = records.map(record => {
+					const parsed = validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] });
+					if (!parsed.ok) throw new ManagedError(parsed.error.code);
+					return { ...parsed.tasks[0]!, id: record.handle, dependsOn: [] };
+				});
 			}
+			if (!graph?.ok) await this.constrainNestedAccess(records.filter(record => !replays.has(record.handle)).map(record => record.task));
 			const validateReadRoots = async (record: ManagedRecord): Promise<void> => {
-				try { await assertCanonicalExternalRoots({ externalReadRoots: record.task.externalReadRoots ?? [], ...(record.externalReadPins ? { externalReadPins: record.externalReadPins } : {}) }); }
+				try { await assertCanonicalGrants({ grants: record.roots.filter(root => root.permission === "read").flatMap(root => (root.pins ?? []).map(pin => ({ permission: "read" as const, path: pin.path, pin: { dev: pin.dev, ino: pin.ino } }))) }); }
 				catch { throw new ManagedError("capability_invalidated", undefined, CAPABILITY_RECOVERY_HINT); }
 			};
 			for (const record of records) if (!replays.has(record.handle)) await validateReadRoots(record);
@@ -313,9 +321,10 @@ export class ContinuationService {
 					const inputs = new Map<string, Awaited<ReturnType<typeof captureGitInput>>>();
 					for (const record of records) {
 						if (replays.has(record.handle)) continue;
-						await validateRepositoryTarget(record.repositoryTarget);
-						const repository = managedRepository(record);
-						if (!record.workspace && !record.input && !inputs.has(repository)) inputs.set(repository, await captureGitInput(repository));
+						for (const root of managedWriteRoots(record)) {
+							await validateRepositoryTarget(root.target);
+							if (!root.inputs && !root.input && !inputs.has(root.source)) inputs.set(root.source, await captureGitInput(root.source));
+						}
 					}
 					preparationSignal.throwIfAborted();
 					for (const [index, record] of records.entries()) {
@@ -334,19 +343,21 @@ export class ContinuationService {
 							if (current.state !== "idle" || current.episode !== record.episode) throw new ManagedError("session_not_idle");
 							if (current.candidate && ["applying", "partial", "unknown"].includes(current.candidate.status)) throw new ManagedError("candidate_recovery_required");
 							if ((await store.nativeRevision(current.handle)).leaf !== current.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
-							await validateRepositoryTarget(current.repositoryTarget);
-							const repository = managedRepository(current); const input = inputs.get(repository);
-							if (!current.workspace) {
-								if (!current.input && input) { current.input = input; current.inputRef = await retainGitInput(repository, current.handle, input); }
-								else if (current.input && current.inputRef) await inspectGitInput(repository, current.inputRef, current.input);
-								else throw new ManagedError("managed_input_ref_missing");
+							for (const root of managedWriteRoots(current)) {
+								await validateRepositoryTarget(root.target);
+								const input = inputs.get(root.source);
+								if (!root.inputs) {
+									if (!root.input && input) { root.input = input; root.inputRef = await retainGitInput(root.source, root.id, input); }
+									else if (root.input && root.inputRef) await inspectGitInput(root.source, root.inputRef, root.input);
+									else throw new ManagedError("managed_input_ref_missing");
+								}
 							}
 							current.episode++; current.state = "queued"; delete current.result; delete current.candidate;
 							current.route = routes[index]!;
 							current.inheritSkills = config.roles[current.task.role].inheritSkills;
-							if (current.projectSkills === undefined) {
-								const parentSkills = repository === owner.repo ? this.dependencies.getParentSkills?.(repository) : undefined;
-								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(repository, parentSkills);
+							if (current.projectSkills === undefined && current.roots.some(root => root.source === owner.repo)) {
+								const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
+								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(owner.repo, parentSkills);
 							}
 							current.dispatch = { ...identity, toolCallId, taskId: tasks[index]!.id };
 							current.requests.push({ id: request.episodes?.[index]?.requestId ?? fingerprint([requestId, current.task.id]), fingerprint: request.episodes?.[index] ? fingerprint([request.episodes[index]!.expectedEpisode, request.episodes[index]!.message]) : digest, episode: current.episode, state: "running", runId: identity.runId, generation: identity.generation });
@@ -355,7 +366,7 @@ export class ContinuationService {
 							this.bindings.get(identity.runId)!.views.set(current.handle, store.view(current));
 						});
 					}
-					const response: SessionActionResult = { schemaVersion: 3, action: request.action, status: "accepted", kind: "submission", ...identity, sessions: records.map(record => store.view(record)) };
+					const response: SessionActionResult = { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: "accepted", kind: "submission", ...identity, sessions: records.map(record => store.view(record)) };
 					if (request.action === "create") await store.completeBatch(owner, request.requestId!, response);
 					return records;
 					} finally { this.invalidateSessionView(); }
@@ -363,7 +374,7 @@ export class ContinuationService {
 				execute: (prepared, execution) => this.run(request, owner, prepared, tasks, execution, telemetry, ctx, replays, onProgress),
 			}, signal);
 			runId = receipt.runId;
-			if (!foreground) return { schemaVersion: 3, action: request.action, status: "accepted", kind: "submission", runId, generation: receipt.generation, sessions: records.map(record => store.view(record)) };
+			if (!foreground) return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: "accepted", kind: "submission", runId, generation: receipt.generation, sessions: records.map(record => store.view(record)) };
 		} finally { this.admission = false; }
 		const abort = () => { this.supervisor!.cancel(runId!); };
 		signal?.addEventListener("abort", abort, { once: true });
@@ -371,6 +382,16 @@ export class ContinuationService {
 		try { await this.supervisor!.join(runId!); }
 		finally { signal?.removeEventListener("abort", abort); }
 		return this.runResult(runId!, request.action, owner);
+	}
+	/** A child may request only what its own enclosing grants already cover; a main actor is unrestricted. */
+	private async constrainNestedAccess(tasks: readonly Pick<SubagentTask, "id" | "access">[]): Promise<void> {
+		const enclosing = await this.dependencies.enclosingCapability?.();
+		if (!enclosing) return;
+		for (const task of tasks) for (const requested of normalizeAccess(task.access)) {
+			// Reuse physical range/identity checks, not merely lexical prefix coverage.
+			const decision = await authorizePath(enclosing, requested.permission, requested.path);
+			if (!decision.allowed) throw new ManagedError("nested_access_denied", undefined, `Task ${task.id} requests access outside the enclosing child capability.`);
+		}
 	}
 	private binding(runId: string, owner: CurrentOwner): RunBinding {
 		const binding = this.bindings.get(runId);
@@ -389,7 +410,7 @@ export class ContinuationService {
 		const sessions = await Promise.all(binding.records.map(record => this.boundView(binding, record)));
 		const view = this.supervisor!.inspect(runId)[0]!;
 		const running = ["preparing", "queued", "running"].includes(view.phase);
-		return { schemaVersion: 3, action, kind: running ? "submission" : "execution", status: binding.deliveryError || view.phase === "failed" ? "failed" : running ? "accepted" : view.phase === "cancelled" ? "aborted" : sessions.every(session => session.result?.status === "succeeded") ? "succeeded" : sessions.some(session => session.result?.status === "succeeded") ? "partial" : "failed", runId, generation: view.generation, sessions, ...(binding.deliveryError ? { error: { code: binding.deliveryError } } : {}) };
+		return { schemaVersion: MANAGED_SESSION_VERSION, action, kind: running ? "submission" : "execution", status: binding.deliveryError || view.phase === "failed" ? "failed" : running ? "accepted" : view.phase === "cancelled" ? "aborted" : sessions.every(session => session.result?.status === "succeeded") ? "succeeded" : sessions.some(session => session.result?.status === "succeeded") ? "partial" : "failed", runId, generation: view.generation, sessions, ...(binding.deliveryError ? { error: { code: binding.deliveryError } } : {}) };
 	}
 	private async publish(event: ExecutionEvent): Promise<void> {
 		const binding = this.bindings.get(event.runId); if (!binding) return;
@@ -409,7 +430,7 @@ export class ContinuationService {
 			return this.boundView(binding, record);
 		}));
 		const run = this.supervisor?.inspect(event.runId)[0];
-		const value: SubagentExecutionEvent = { version: 3, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
+		const value: SubagentExecutionEvent = { version: 4, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
 			...(run && Number.isFinite(run.submittedAt) ? { timing: { clockKey: createRunClock(this.dependencies.now).clockKey, submittedAtMs: run.submittedAt, preparedAtMs: run.preparedAt, finishedAtMs: event.task?.finishedAt ?? run.finishedAt, ...(event.task ? { queuedAtMs: event.task.queuedAt, startedAtMs: event.task.startedAt } : {}) } } : {}),
 			...(!event.task && binding.runObservation ? { runObservation: binding.runObservation } : {}),
 		};
@@ -436,7 +457,7 @@ export class ContinuationService {
 					const replay = replays.get(record.handle);
 					if (replay) return Promise.resolve({ ...replay.result!, id: task.id, usage: emptyUsage(), durationMs: 0, telemetry: { childStarted: false, queueMs: 0, workspaceMs: 0, childMs: 0, convergenceMs: 0 } });
 					return execution.runTask({ ...task, signal: episodeSignal }, sharedSignal => {
-					const message = request.episodes?.[index]?.message ?? [...record.task.inputs, ...predecessors.map(result => `Predecessor ${result.id} (${result.status}):\n${result.output || "(no output)"}`)].join("\n\n");
+					const message = request.episodes?.[index]?.message ?? [...(record.task.inputs ?? []), ...predecessors.map(result => `Predecessor ${result.id} (${result.status}):\n${result.output || "(no output)"}`)].join("\n\n");
 					return this.episode(record.handle, owner, message, AbortSignal.any([episodeSignal, sharedSignal]), lifecycle, telemetry, observer, () => binding.control!.enterConvergence(task.id)).then(result => ({ ...result, id: task.id }));
 					});
 				},
@@ -466,7 +487,7 @@ export class ContinuationService {
 				}
 			}
 			if (persistenceLost) binding.deliveryError = "result_persistence_failed";
-			const response: SessionActionResult = { schemaVersion: 3, action: request.action, kind: "execution", runId: execution.runId, generation: this.supervisor!.currentGeneration, status: persistenceLost ? "failed" : scheduled.status, sessions: await Promise.all(binding.records.map(record => this.boundView(binding, record))), ...(persistenceLost ? { error: { code: "result_persistence_failed" } } : {}) };
+			const response: SessionActionResult = { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, kind: "execution", runId: execution.runId, generation: this.supervisor!.currentGeneration, status: persistenceLost ? "failed" : scheduled.status, sessions: await Promise.all(binding.records.map(record => this.boundView(binding, record))), ...(persistenceLost ? { error: { code: "result_persistence_failed" } } : {}) };
 			if (request.action === "create" && !persistenceLost) await store.completeBatch(owner, request.requestId!, response);
 			try {
 				const observed = structuredClone(scheduled.telemetry);
@@ -479,7 +500,7 @@ export class ContinuationService {
 			return response;
 		} finally { if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
 	}
-	private route(task: NormalizedTask, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
+	private route(task: Pick<NormalizedTask, "role" | "model" | "thinking" | "executionProfile" | "reasoningProfile">, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
 		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
 		const result = resolveRoute(task.role, config, context, task); if (!result.ok) throw new ManagedError(result.error.code); return result.route;
 	}
@@ -491,7 +512,7 @@ export class ContinuationService {
 			let finalizationPending = false;
 			let finalizationStage: "native-validation" | "candidate-freeze" | "result-save" = "native-validation";
 			try {
-				if (record.version !== 3 || record.state !== "queued") throw new ManagedError("session_not_queued");
+				if (record.version !== MANAGED_SESSION_VERSION || record.state !== "queued") throw new ManagedError("session_not_queued");
 				signal.throwIfAborted();
 				if (Buffer.byteLength(message) + Buffer.byteLength(record.task.objective) > HARD_LIMITS.maxPromptBytes) throw new ManagedError("prompt_too_large");
 				const preparationStarted = this.dependencies.now();
@@ -500,15 +521,71 @@ export class ContinuationService {
 				record.state = "running";
 				record.execution = { startedAtMs: Date.now(), ...(record.inheritSkills === undefined ? {} : { inheritSkills: record.inheritSkills }), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
 				operation.execution = record.execution; await store.save(record);
-				const worker = record.task.role === "worker";
-				if ((record.task.externalReadRoots?.length ?? 0) !== (record.externalReadPins?.length ?? 0)) throw new ManagedError("external_read_root_unavailable");
-				const repository = managedRepository(record);
-				const parentSkills = repository === owner.repo ? this.dependencies.getParentSkills?.(repository) : undefined;
-				const cwd = join(store.path(handle), "source"); const native = join(store.path(handle), "native.jsonl");
-				const result = await this.dependencies.runChild({ task: record.task, role: getManagedRole(record.task.role), route: record.route!, cwd, sourceRoot: repository, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), prompt: message, approveProject: true, signal, managedProcessGroup: true,
-					guardExtensionPath: fileURLToPath(new URL(worker ? "./worker-tools.ts" : "./child-capability-guard.ts", import.meta.url)),
-					...(worker ? { managedWorkerScratch: join(store.path(handle), "scratch"), managedWorkerInputs: record.workspace!.inputs } : {}),
-					capability: { version: 2, root: cwd, role: record.task.role, readRoots: record.task.scope.map(file => resolve(cwd, file)), writePaths: record.task.writePaths.map(file => resolve(cwd, file)), externalReadRoots: record.task.externalReadRoots ?? [], externalReadPins: record.externalReadPins ?? [], ...(worker ? { writeRoot: true } : {}) },
+				const writes = managedWriteRoots(record);
+				const sourceRoot = writes[0]?.source ?? record.roots[0]?.source ?? owner.repo;
+				const parentSkills = sourceRoot === owner.repo ? this.dependencies.getParentSkills?.(sourceRoot) : undefined;
+				const cwd = writes.length === 1 && writes[0]?.inputs?.gitWorkspace ? writes[0].inputs.gitWorkspace.path : join(store.path(handle), "roots");
+				const scratch = join(store.path(handle), "scratch");
+				await mkdir(cwd, { recursive: true });
+				await mkdir(scratch, { recursive: true });
+				const native = join(store.path(handle), "native.jsonl");
+				const parsed = validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] });
+				if (!parsed.ok) throw new ManagedError(parsed.error.code);
+				const preparedBySource = new Map(record.roots.flatMap(root => root.inputs?.gitWorkspace ? [[root.source, root.inputs.gitWorkspace.path] as const] : []));
+				const preparedPin = async (path: string): Promise<{ dev: number; ino: number } | undefined> => {
+					try { const info = await lstat(path); return info.isFile() || info.isDirectory() ? { dev: info.dev, ino: info.ino } : undefined; }
+					catch { return undefined; }
+				};
+				// A writable or missing selector binds to its nearest existing prepared directory,
+				// never to a mutable leaf, so an authorized create/delete/atomic replacement keeps work.
+				const preparedAnchor = async (path: string): Promise<{ path: string; dev: number; ino: number } | undefined> => {
+					let current = path;
+					for (;;) {
+						const info = await lstat(current).catch(() => undefined);
+						if (info?.isDirectory()) return { path: current, dev: info.dev, ino: info.ino };
+						const parent = dirname(current);
+						if (parent === current) return undefined;
+						current = parent;
+					}
+				};
+				// One truthful source -> prepared resolution for grants, roots and guidance: a same-repo
+				// auxiliary read root reuses the writable worktree instead of advertising the live checkout.
+				const preparedPathFor = (root: (typeof record.roots)[number]): string => root.inputs?.gitWorkspace?.path ?? preparedBySource.get(root.source) ?? root.source;
+				const grants: ChildCapabilityManifest["grants"] = [];
+				for (const root of record.roots) {
+					const prepared = root.inputs?.gitWorkspace?.path ?? preparedBySource.get(root.source);
+					if (root.permission === "write" && prepared) {
+						for (const relative of root.paths) {
+							const path = relative === "." || relative === "" ? prepared : join(prepared, relative);
+							const anchor = await preparedAnchor(path);
+							grants.push({ permission: "write", path, ...(anchor ? { anchor } : {}) });
+						}
+					} else for (const relative of root.paths) {
+						const mapped = root.git && prepared && !relative.startsWith("/");
+						const path = mapped ? (relative === "." || relative === "" ? prepared : join(prepared, relative)) : root.git && !relative.startsWith("/") ? join(root.source, relative) : relative;
+						// A prepared read range is bound to the prepared file's own identity; a direct
+						// source or external read keeps its admission (source) pin instead.
+						const pin = mapped ? await preparedPin(path) : root.pins?.find(candidate => candidate.path === path || candidate.path === join(root.source, relative));
+						grants.push({ permission: "read", path, ...(pin ? { pin: { dev: pin.dev, ino: pin.ino } } : {}) });
+					}
+				}
+				const guidanceParts = [];
+				const guidanceSeen = new Set<string>();
+				for (const root of record.roots.filter(item => item.git)) {
+					const prepared = preparedPathFor(root);
+					const key = `${root.source}\0${prepared}`;
+					if (guidanceSeen.has(key)) continue;
+					guidanceSeen.add(key);
+					const ownRoot = root.source === owner.repo;
+					const skills = ownRoot ? this.dependencies.getParentSkills?.(root.source) : undefined;
+					guidanceParts.push(await prepareChildGuidance(root.source, prepared, record.inheritSkills ?? true, undefined, undefined, skills, ownRoot ? record.projectSkills : undefined));
+				}
+				const preparedGuidance = guidanceParts.length ? mergeChildGuidance(guidanceParts) : undefined;
+				const capability: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: record.task.role, cwd, grants, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission })) };
+				const result = await this.dependencies.runChild({ task: { ...parsed.tasks[0]!, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission, git: root.git, paths: root.paths })) }, role: getManagedRole(record.task.role, writes.length > 0), route: record.route!, cwd, sourceRoot, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), ...(preparedGuidance ? { preparedGuidance } : {}), prompt: message, approveProject: true, signal, managedProcessGroup: true,
+					guardExtensionPath: fileURLToPath(new URL("./worker-tools.ts", import.meta.url)),
+					managedWorkerScratch: scratch, ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
+					capability,
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
 				}).finally(() => observer?.childStopped(handle));
@@ -516,9 +593,10 @@ export class ContinuationService {
 				childResult = result;
 				if (result.telemetry) result.telemetry.workspaceMs = workspaceMs;
 				record.result = result; record.nativeLeaf = (await store.nativeRevision(handle)).leaf;
-				record.state = worker && result.workerToolsSettled !== true ? "interrupted" : "idle";
+				const requiresToolSettlement = writes.length > 0;
+				record.state = requiresToolSettlement && result.workerToolsSettled !== true ? "interrupted" : "idle";
 				if (record.state === "interrupted" && result.status === "succeeded") record.result = { ...result, status: "failed", finalization: { status: "failed", stage: "candidate-freeze", code: "worker_tools_unsettled" }, error: { code: "worker_tools_unsettled", message: "Worker tools did not settle." } };
-				if (worker && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
+				if (writes.length > 0 && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
 					if (!enterConvergence()) record.result = { ...result, status: "aborted", executionStatus: result.status, finalization: { status: "failed", stage: "candidate-freeze", code: "aborted" }, error: { code: "aborted", message: "aborted" } };
 					else { finalizationStage = "candidate-freeze"; await freezeCandidate(store, record); result.changedPaths = record.candidate?.changedPaths ?? []; }
 				}
@@ -573,7 +651,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 			dispatching = true;
 			// No provider-triggering message is queued while the parent is busy. The public
 			// waiter crosses settlement first; receipt/record fences are checked at delivery.
-			pi.sendMessage({ customType: SUBAGENT_EXECUTION_EVENT, content: wakeContent(events), display: false, details: { version: 3 } }, { triggerTurn: true });
+			pi.sendMessage({ customType: SUBAGENT_EXECUTION_EVENT, content: wakeContent(events), display: false, details: { version: 4 } }, { triggerTurn: true });
 			for (const event of events) service.acknowledge(event);
 		} catch { dispatching = false; /* Notification failure never erases stored execution evidence or starts a retry loop. */ }
 		finally { flushing = false; if (pendingWake.size && !dispatching) requestWake(); }
@@ -638,7 +716,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	pi.on("tool_result", event => {
 		if (event.toolName !== SUBAGENT_SESSION_TOOL_NAME) return;
 		const details = event.details as SessionActionResult | undefined;
-		if (details && [1, 2, 3].includes(details.schemaVersion)) return { isError: !["accepted", "succeeded"].includes(details.status) };
+		if (details && details.schemaVersion === MANAGED_SESSION_VERSION) return { isError: !["accepted", "succeeded"].includes(details.status) };
 	});
 	pi.on("session_shutdown", async () => { clearWake(); context = undefined; await service.shutdown(); });
 	registerManagedContext(pi, ctx => service.contextIndex(ctx));

@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, readdir, readFile } from "node:fs/promises";
@@ -47,16 +51,17 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 	await mkdir(join(base, "agent"), { mode: 0o700 });
 	const store = new ManagedSessionStore(join(base, "agent"));
 	const owner = { repo, parentSessionId: "composed-parent", anchor: "anchor", branch: ["anchor"] };
-	const graph = validateGraphStructure({ tasks: [{ id: "seed", role: "explorer", scope: ["."], objective: "synthetic history" }] });
-	assert.ok(graph.ok);
 	const seeded: string[] = [];
 	for (let index = 0; index < 27; index++) {
-		const record = (await store.allocate(owner, `seed-${index}`, graph.tasks)).records[0]!;
+		const graph = validateGraphStructure({ tasks: [{ id: `seed${index}`, role: "explorer", access: [{ permission: "read", scope: "/tmp/scope" }], objective: "synthetic history" }] });
+		assert.ok(graph.ok);
+		if (!graph.ok) throw new Error("fixture");
+		const record = (await store.allocate(owner, `seed${index}`, graph.tasks)).records[0]!;
 		seeded.push(record.handle);
 		record.episode = index < 12 ? 2 : 1;
 		record.state = "closed";
 		for (let episode = 1; episode <= record.episode; episode++) {
-			record.requests.push({ id: `episode-${episode}`, fingerprint: "a".repeat(64), episode, state: "complete" });
+			record.requests.push({ id: `episode${episode}`, fingerprint: "a".repeat(64), episode, state: "complete" });
 			await store.saveObservation(record.handle, episode, observation(`seed-${index}`, `entry-${episode}`));
 		}
 		await store.save(record);
@@ -95,7 +100,7 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 	const mounted = mount();
 	t.after(async () => { release(); await mounted.event("session_shutdown"); });
 	await mounted.event("session_start");
-	const created = await mounted.service.execute({ action: "create", requestId: "ten-live", tasks: Array.from({ length: 10 }, (_, index) => ({ id: `live-${index}`, role: "explorer", objective: "synthetic live", scope: ["."] })) }, mounted.ctx);
+	const created = await mounted.service.execute({ action: "create", requestId: "tenlive", tasks: Array.from({ length: 10 }, (_, index) => ({ id: `live${index}`, role: "explorer", objective: "synthetic live", access: [{ permission: "read", scope: "/tmp/scope" }] })) }, mounted.ctx);
 	assert.equal(created.status, "accepted");
 	await until(() => mounted.service.liveObserverTasks().length === 10);
 	await mounted.open();
@@ -115,8 +120,8 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 				const frame = mounted.panel.render(80, 48);
 				assert.ok(frame.length <= 48);
 				const text = frame.join("\n");
-				for (const handle of liveHandles) assert.ok(text.includes(handle.slice(8, 16)), "every live identity remains pinned");
-				for (const handle of expected) if (text.includes(handle.slice(8, 16))) seen.add(handle);
+				for (const handle of liveHandles) assert.ok(text.includes(handle.slice(0, 8)), "every live identity remains pinned");
+				for (const handle of expected) if (text.includes(handle.slice(0, 8))) seen.add(handle);
 				mounted.panel.handleInput("down");
 			}
 		}

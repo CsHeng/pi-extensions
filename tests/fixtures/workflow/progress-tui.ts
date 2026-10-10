@@ -6,17 +6,24 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 /** Synthetic provider drives the real workflow tool and real installed TUI; no provider I/O. */
 export default function progressFixture(pi: ExtensionAPI): void {
  const dir = process.env.PI_CODING_AGENT_DIR!;
- const facts = [{ key: "f", kind: "agent", check: "synthetic fixture", result: "pass" }];
- const judgment = (subject: string) => ({ subject, facts: ["f"], accepted: true, rationale: "synthetic fixture judgment" });
+ const facts = [{ id: "f", kind: "agent", check: "synthetic fixture", result: "pass" }];
+ const judgment = (subject: string) => ({ target: subject === "delivery" ? { kind: "delivery" } : { kind: subject.startsWith("requirement:") ? "requirement" : "task", id: subject.split(":")[1] }, facts: ["f"], accepted: true, rationale: "synthetic fixture judgment" });
+ const attempts: Record<string, string> = {};
+ pi.on("tool_execution_end", event => {
+  if (event.toolName !== "csheng_workflow") return;
+  const text = JSON.stringify(event.result ?? "");
+  const match = /Attempt ([a-z0-9]+) is running for task ([ab])/.exec(text);
+  if (match) attempts[match[2]!] = match[1]!;
+ });
  const actions = [
   { operation: "enroll", goal: "PROGRESS_FIXTURE", delivery: "fixture", authority: "isolated fixture", requirements: [{ key: "r", outcome: "fixture", verification: "fixture" }], tasks: [{ key: "a", title: "STRIKE_DONE_A", covers: ["r"] }, { key: "b", title: "STRIKE_DONE_B", covers: ["r"] }] },
   { operation: "start", task: "a", scope: ["a"], writes: ["a"] },
   { operation: "report", task: "a", summary: "reported before acceptance" },
-  { operation: "report", attempt: "A1", summary: "local acceptance", facts, judgments: [judgment("task:a")] },
+  () => ({ operation: "report", attempt: attempts.a, summary: "local acceptance", facts, judgments: [judgment("task:a")] }),
   { operation: "suspend", reason: "TRACKING_PAUSED_FIXTURE", condition: "explicit fixture resume" },
   { operation: "resume", reason: "fixture ready", authority: "same fixture" },
   { operation: "start", task: "b", scope: ["b"], writes: ["b"] },
-  { operation: "report", task: "b", summary: "final fixture acceptance", facts, judgments: [judgment("task:b"), judgment("requirement:r"), judgment("delivery")], complete: true },
+  { operation: "report", task: "b", summary: "final fixture acceptance", facts: [{ id: "g", kind: "agent", check: "synthetic fixture", result: "pass" }], judgments: ["task:b", "requirement:r", "delivery"].map(subject => ({ target: subject === "delivery" ? { kind: "delivery" } : { kind: subject.startsWith("requirement:") ? "requirement" : "task", id: subject.split(":")[1] }, facts: ["g"], accepted: true, rationale: "synthetic fixture judgment" })), complete: true },
  ];
  let turn = 0;
  pi.on("session_start", async () => { await appendFile(join(dir, "starts"), "start\n"); });
@@ -27,12 +34,13 @@ export default function progressFixture(pi: ExtensionAPI): void {
   streamSimple(model) {
    const stream = createAssistantMessageEventStream();
    void (async () => {
-    const action = actions[turn++];
+    const next = actions[turn++];
+    const action = typeof next === "function" ? next() : next;
     const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: action ? "toolUse" : "stop", content: [], usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     stream.push({ type: "start", partial: message });
     await new Promise(resolve => setTimeout(resolve, 200));
     if (action) {
-     const toolCall = { type: "toolCall" as const, id: `progress-${turn}`, name: "csheng_workflow", arguments: action };
+     const toolCall = { type: "toolCall" as const, id: `progress-${turn}`, name: "csheng_workflow", arguments: action as never };
      message.content = [toolCall];
      stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
      stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(action), partial: message });

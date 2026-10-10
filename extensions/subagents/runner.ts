@@ -32,6 +32,7 @@ import { workerGitEnvironment, type WorkerInputState } from "./worker-inputs.ts"
 import { boundNativeObservation, collectNativeObservation, nativeCapabilityInvalidated, nativeLeaf, unavailableObservation } from "./observability.ts";
 import { MANAGED_LIMITS, ManagedError } from "./session-contracts.ts";
 import { prepareChildGuidance, type CapturedProjectSkill } from "./guidance-resources.ts";
+import { readOnlyToolArgs } from "./native-context.ts";
 
 async function readObservationNative(file: string): Promise<string | undefined> {
 	try {
@@ -57,6 +58,7 @@ export interface ChildRunOptions {
 	inheritSkills?: boolean;
 	parentSkills?: readonly Skill[];
 	projectSkills?: readonly CapturedProjectSkill[];
+	preparedGuidance?: import("./guidance-resources.ts").ChildGuidance;
 	managedProcessGroup?: boolean;
 	task: NormalizedTask;
 	role: RoleDefinition;
@@ -114,11 +116,45 @@ function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, man
 	return managedWorkerScratch ? workerGitEnvironment(env) : env;
 }
 
+export interface PiArgsOptions {
+	/** Absolute path to the prepared task prompt included as @file. */
+	taskPromptPath: string;
+	sessionPath: string;
+	guardExtensionPath: string;
+	route: EffectiveRoute;
+	skillPaths?: readonly string[];
+	capability: ChildCapabilityManifest;
+	approveProject: boolean;
+}
+
+/**
+ * Native print/JSON child arguments.
+ *
+ * The child is a normal Pi process: discovered/configured/built-in extensions and MCP
+ * servers load, so the effective configured host catalog decides tool availability.
+ * The explicit guard extension still loads and enforces the capability manifest. An
+ * explicit read-only grant removes the mutating builtins from the declared catalog.
+ * The selected model/thinking invocation is preserved and never rewritten.
+ */
+export function buildPiArgs(options: PiArgsOptions): string[] {
+	const write = options.capability.grants.some((grant) => grant.permission === "write");
+	return [
+		"--mode", "json", "-p", "--session", options.sessionPath,
+		"-e", options.guardExtensionPath,
+		"--no-skills", ...(options.skillPaths?.flatMap(path => ["--skill", path]) ?? []), "--no-prompt-templates",
+		...readOnlyToolArgs(write),
+		"--model", `${options.route.provider}/${options.route.model}`,
+		"--thinking", options.route.thinking,
+		options.approveProject ? "--approve" : "--no-approve",
+		"--", `@${options.taskPromptPath}`,
+	];
+}
+
 export function buildChildPrompt(task: NormalizedTask, prompt: string, advisoryWrites = false): string {
 	const verification = task.verification.length > 0 ? `\nExpected parent evidence:\n- ${task.verification.join("\n- ")}` : "";
-	const externalRoots = task.externalReadRoots ?? [];
-	const external = externalRoots.length > 0 ? externalRoots.join("\n- ") : "none";
-	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nRead scope:\n- ${task.scope.join("\n- ")}\nExternal read roots:\n- ${external}\n${advisoryWrites ? "Initial write regions (advisory)" : "Write paths"}:\n- ${task.writePaths.length > 0 ? task.writePaths.join("\n- ") : advisoryWrites ? "not predicted; stay within the task root and objective" : "none"}${verification}\n\nInputs:\n${prompt}`;
+	const grants = task.grants.map((grant) => `${grant.permission} ${grant.path}`).join("\n- ");
+	const roots = (task.roots ?? []).map((root) => `${root.permission} ${root.source} -> ${root.path}`).join("\n- ") || "resolved at execution";
+	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nAccess grants:\n- ${grants || "none"}\nPrepared mapping:\n- ${roots}\n${advisoryWrites ? "Write tools may change only the listed write grants. Use those prepared paths, not the primary checkout." : "This session has no write grant."}${verification}\n\nInputs:\n${prompt}`;
 }
 
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
@@ -147,12 +183,12 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const observationBefore = await readObservationNative(options.diagnosticSession.path);
 		const observationStart = observationBefore === undefined ? undefined : nativeLeaf(observationBefore);
 		const nativeStartBytes = options.managedWorkerScratch ? (await lstat(options.diagnosticSession.path)).size : 0;
-		const completePrompt = buildChildPrompt(options.task, options.prompt, "writeRoot" in options.capability && options.capability.writeRoot === true);
+		const completePrompt = buildChildPrompt(options.task, options.prompt, options.capability.grants.some((grant) => grant.permission === "write"));
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}
-		const guidance = options.sourceRoot ? await prepareChildGuidance(options.sourceRoot, options.cwd, options.inheritSkills ?? true, options.env?.PI_CODING_AGENT_DIR, options.env?.HOME ?? homedir(), options.parentSkills, options.projectSkills) : undefined;
-		const capability = guidance && options.capability.version === 2
+		const guidance = options.preparedGuidance ?? (options.sourceRoot ? await prepareChildGuidance(options.sourceRoot, options.cwd, options.inheritSkills ?? true, options.env?.PI_CODING_AGENT_DIR, options.env?.HOME ?? homedir(), options.parentSkills, options.projectSkills) : undefined);
+		const capability = guidance && options.capability.version === 4
 			? { ...options.capability, guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } }
 			: options.capability;
 		await Promise.all([
@@ -160,16 +196,15 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			writeFile(capabilityPath, JSON.stringify(capability), { encoding: "utf8", mode: 0o600 }),
 		]);
 
-		const args = [
-			"--mode", "json", "-p", "--session", options.diagnosticSession.path,
-			"--no-extensions", "-e", options.guardExtensionPath,
-			"--no-skills", ...(guidance?.skillPaths.flatMap(path => ["--skill", path]) ?? []), "--no-prompt-templates",
-			"--tools", options.role.tools.join(","),
-			"--model", `${options.route.provider}/${options.route.model}`,
-			"--thinking", options.route.thinking,
-			options.approveProject ? "--approve" : "--no-approve",
-			"--", `@${taskPromptPath}`,
-		];
+		const args = buildPiArgs({
+			taskPromptPath,
+			sessionPath: options.diagnosticSession.path,
+			guardExtensionPath: options.guardExtensionPath,
+			route: options.route,
+			...(guidance ? { skillPaths: guidance.skillPaths } : {}),
+			capability,
+			approveProject: options.approveProject,
+		});
 		let invocation: PiInvocation;
 		try { invocation = options.invocation ?? resolvePiInvocation(args); }
 		catch (error) {
@@ -314,10 +349,18 @@ async function workerToolsSettled(path: string, start: number): Promise<boolean>
 			if (!info.isFile() || info.size < start) return false;
 			let ready = false;
 			let stopped = false;
+			// The toolkit lifecycle only certifies operations it owns. A configured same-name
+			// native override keeps its own implementation, so ready/stopped must declare the
+			// exact owned set and never imply that an opaque implementation's processes settled.
+			let owned: readonly string[] | undefined;
 			for await (const entry of nativeLines(file, start)) {
 				if (entry.type !== "custom" || entry.customType !== "csheng-worker-lifecycle") continue;
-				const data = entry.data as { ok?: unknown; phase?: unknown } | undefined;
+				const data = entry.data as { ok?: unknown; phase?: unknown; owned?: unknown } | undefined;
 				if (data?.ok !== true) return false;
+				if (!Array.isArray(data.owned) || data.owned.length > 64 || data.owned.some(name => typeof name !== "string" || name.length === 0 || name.length > 64)) return false;
+				const declared = [...data.owned].sort();
+				if (owned === undefined) owned = declared;
+				else if (owned.length !== declared.length || owned.some((name, index) => name !== declared[index])) return false;
 				if (data.phase === "ready") ready = true;
 				else if (data.phase === "stopped" && ready) stopped = true;
 				else return false;

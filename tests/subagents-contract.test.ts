@@ -1,10 +1,13 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
 	CHILD_ACTIVITY_PHASES,
-	CHILD_CAPABILITY_MANIFEST_V1,
-	CHILD_CAPABILITY_MANIFEST_V2,
+	CHILD_CAPABILITY_MANIFEST_VERSION,
 	HARD_LIMITS,
 	PROFILE_FALLBACKS,
 	ROLE_NAMES,
@@ -20,8 +23,7 @@ import {
 	truncateUtf8,
 } from "../extensions/subagents/contracts.ts";
 import type {
-	ChildCapabilityManifestV1,
-	ChildCapabilityManifestV2,
+	ChildCapabilityManifest,
 	EffectiveRouteV2,
 	NormalizedChildCapability,
 	RunTelemetryV2,
@@ -32,13 +34,14 @@ import { SubagentSessionToolSchema } from "../extensions/subagents/session-contr
 
 test("subagent roles have fixed least-authority tool sets", () => {
 	assert.deepEqual(ROLE_NAMES, ["explorer", "reviewer", "worker"]);
-	assert.deepEqual(ROLES.explorer.tools, ["read", "grep", "find", "ls", "git_read"]);
-	assert.deepEqual(ROLES.reviewer.tools, ["read", "grep", "find", "ls", "git_read"]);
-	assert.deepEqual(ROLES.worker.tools, ["read", "grep", "find", "ls", "edit", "write"]);
+	assert.deepEqual(ROLES.explorer.tools, ["read", "grep", "find", "ls", "git_read", "bash"]);
+	assert.deepEqual(ROLES.reviewer.tools, ["read", "grep", "find", "ls", "git_read", "bash"]);
+	assert.ok(ROLES.worker.tools.includes("bash"));
+	assert.ok(ROLES.worker.tools.includes("edit"));
 	for (const role of Object.values(ROLES)) {
 		assert.equal("name" in role, false);
 		assert.equal("canWrite" in role, false);
-		assert.equal(role.tools.includes("bash"), false);
+		assert.equal(role.tools.includes("bash"), true);
 		assert.equal(typeof role.systemPrompt, "string");
 		assert.ok(role.systemPrompt.trim().length > 0);
 	}
@@ -60,7 +63,7 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		id: "scan",
 		role: "explorer",
 		objective: "Find evidence",
-		scope: ["src"],
+		access: [{ permission: "read", scope: "/tmp/src" }],
 		executionProfile: "fast",
 		reasoningProfile: "light",
 	};
@@ -70,11 +73,10 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		id: "write",
 		role: "worker",
 		objective: "Apply the bounded change",
-		scope: ["."],
+		access: [{ permission: "read", scope: "/tmp/scope" }],
 		inputs: ["Approved task"],
 		dependsOn: ["scan"],
-		writePaths: ["src/file.ts"],
-		verification: ["focused test"],
+				verification: ["focused test"],
 		resourceLocks: ["src/file.ts"],
 		executionProfile: "balanced",
 		reasoningProfile: "standard",
@@ -90,32 +92,15 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 	assert.equal(Check(SubagentTaskSchema, { ...valid, executionProfile: "extreme" }), false);
 	assert.equal(Check(SubagentTaskSchema, { ...valid, thinking: "extreme" }), false);
 	assert.equal(Check(SubagentTaskSchema, { ...valid, model: "provider/model", unknown: true }), false);
-	assert.equal(Check(SubagentTaskSchema, { ...valid, externalReadRoots: [] }), true);
-	for (const count of [0, 1, 8]) {
-		assert.equal(Check(SubagentTaskSchema, {
-			...valid,
-			externalReadRoots: Array.from({ length: count }, (_, index) => `/external/root-${index}`),
-		}), true);
-	}
-	assert.equal(Check(SubagentTaskSchema, {
-		id: "review",
-		role: "reviewer",
-		objective: "Review evidence",
-		scope: ["."],
-		externalReadRoots: Array.from({ length: 8 }, (_, index) => `/external/root-${index}`),
-	}), true);
-	assert.equal(Check(SubagentTaskSchema, {
-		...valid,
-		externalReadRoots: Array.from({ length: 9 }, (_, index) => `/external/root-${index}`),
-	}), false);
-	assert.equal(Check(SubagentTaskSchema, { ...valid, externalReadRoots: [""] }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, externalReadRoots: [] }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, scope: ["."], writePaths: ["a"], repository: "/tmp/repo" }), false);
 	assert.equal(Check(SubagentSessionToolSchema, createRequest([valid])), true);
 	assert.equal(Check(SubagentSessionToolSchema, createRequest([])), false);
 	assert.equal(Check(SubagentSessionToolSchema, createRequest(Array.from({ length: HARD_LIMITS.maxTasks + 1 }, (_, index) => ({
 		id: `t${index}`,
 		role: "explorer",
 		objective: "x",
-		scope: ["."],
+		access: [{ permission: "read", scope: "/tmp/scope" }],
 	})))), false);
 });
 
@@ -129,9 +114,7 @@ test("model-facing capability fields retain descriptions without freezing prose"
 	for (const description of [
 		toolProperties.tasks?.description,
 		taskProperties.dependsOn?.description,
-		taskProperties.scope?.description,
-		taskProperties.writePaths?.description,
-		taskProperties.externalReadRoots?.description,
+		taskProperties.access?.description,
 		taskProperties.model?.description,
 		taskProperties.thinking?.description,
 	]) {
@@ -179,8 +162,10 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 	assert.equal(routeEvidence.selectionSource, "explicit-task");
 	assert.equal(routeEvidence.source, "user-config");
 	assert.deepEqual(STABLE_TASK_ERROR_CODES, [
-		"invalid_scope",
-		"worker_write_paths_required",
+		"invalid_access",
+		"unbounded_scope",
+		"non_git_write_unsupported",
+		"unsupported_contract",
 		"model_not_found",
 		"model_unavailable",
 		"ambiguous_model",
@@ -192,12 +177,6 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		"diagnostic_session_limit",
 		"child_exit_stalled",
 		"repository_root_unavailable",
-		"scope_outside_repository",
-		"external_read_roots_forbidden",
-		"invalid_external_read_root",
-		"external_read_root_unavailable",
-		"external_read_root_not_external",
-		"duplicate_external_read_root",
 	]);
 	assert.equal("pathCount" in telemetry, false);
 	assert.equal("externalReadRootCount" in telemetry, false);
@@ -243,8 +222,7 @@ test("telemetry schema v3 adds start time, provenance, and optional effective ca
 test("path grammar and private capability manifests are exact and additive", () => {
 	assert.equal(HARD_LIMITS.maxExternalReadRoots, 8);
 	assert.equal(HARD_LIMITS.maxPathBytes, 4096);
-	assert.equal(CHILD_CAPABILITY_MANIFEST_V1, 1);
-	assert.equal(CHILD_CAPABILITY_MANIFEST_V2, 2);
+	assert.equal(CHILD_CAPABILITY_MANIFEST_VERSION, 4);
 	assert.equal(isSafePathGrammar("src/file.ts"), true);
 	assert.equal(isSafePathGrammar("."), true);
 	assert.equal(isSafePathGrammar(""), false);
@@ -255,34 +233,15 @@ test("path grammar and private capability manifests are exact and additive", () 
 	assert.equal(isSafePathGrammar("bad\u2029path"), false);
 	assert.equal(isSafePathGrammar("x".repeat(HARD_LIMITS.maxPathBytes)), true);
 	assert.equal(isSafePathGrammar("x".repeat(HARD_LIMITS.maxPathBytes + 1)), false);
-	const v1: ChildCapabilityManifestV1 = {
-		version: 1,
-		root: "/repo",
+	const runtime: ChildCapabilityManifest = {
+		version: CHILD_CAPABILITY_MANIFEST_VERSION,
 		role: "explorer",
-		readRoots: ["/repo"],
-		writePaths: [],
+		cwd: "/repo",
+		grants: [{ permission: "read", path: "/repo" }],
+		roots: [],
 	};
-	const v2: ChildCapabilityManifestV2 = {
-		version: 2,
-		root: "/repo",
-		role: "reviewer",
-		readRoots: ["/repo"],
-		writePaths: [],
-		externalReadRoots: ["/other"],
-	};
-	const runtime: NormalizedChildCapability = {
-		version: 2,
-		root: "/repo",
-		role: "explorer",
-		readRoots: ["/repo"],
-		writePaths: [],
-		externalReadRoots: [],
-	};
-	assert.equal(v1.version, CHILD_CAPABILITY_MANIFEST_V1);
-	assert.equal(v2.version, CHILD_CAPABILITY_MANIFEST_V2);
-	assert.equal("externalReadRoots" in v1, false);
-	assert.deepEqual(runtime.externalReadRoots, []);
-	assert.equal(runtime.version, 2);
+	assert.equal(runtime.version, 4);
+	assert.equal(runtime.grants[0]?.permission, "read");
 });
 
 test("diagnostic and activity contracts are bounded and additive", () => {

@@ -8,7 +8,7 @@ export function registerGoalUi(pi: ExtensionAPI, store: GoalStore) {
  const render = () => {
   if (!ctx || ctx.mode !== "tui" || !ctx.hasUI || failed) return;
   const view = store.view();
-  const hasContract = view.state !== undefined || view.legacy !== undefined || view.unavailable !== undefined;
+  const hasContract = view.state !== undefined || view.unavailable !== undefined;
   try {
    ctx.ui.setWidget("csheng-workflow", visible && hasContract ? (tui) => ({
     render: (width: number) => [...goalRows(store.view(), Math.min(width, 120), Math.min(12, Math.max(1, Math.floor((tui?.terminal.rows || 36) / 3))), ctx?.ui.theme), ""],

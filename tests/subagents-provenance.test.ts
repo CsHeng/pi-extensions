@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseConfigSources, readConfigSources } from "../extensions/subagents/config.ts";
-import { createProvenance, fingerprintConfig, fingerprintSources } from "../extensions/subagents/provenance.ts";
+import { createProvenance, fingerprintConfig, fingerprintSources, PROVENANCE_DIR, PROVENANCE_MANIFEST } from "../extensions/subagents/provenance.ts";
 
 test("identical source and configuration fingerprints reuse opaque epochs", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-provenance-"));
@@ -15,7 +15,7 @@ test("identical source and configuration fingerprints reuse opaque epochs", asyn
 	let now = 1_000;
 	const first = createProvenance({
 		now: () => now,
-		randomId: () => "epoch-a",
+		randomId: () => "EpochA",
 		agentDir: root,
 		sourceRoot,
 	});
@@ -28,7 +28,7 @@ test("identical source and configuration fingerprints reuse opaque epochs", asyn
 	now = 2_000;
 	const second = createProvenance({
 		now: () => now,
-		randomId: () => "epoch-b",
+		randomId: () => "EpochB",
 		agentDir: root,
 		sourceRoot,
 	});
@@ -69,6 +69,24 @@ test("reloaded content transitions mint epochs while disk edits cannot relabel a
 	assert.equal(third.extensionEpoch, "three");
 });
 
+test("current epoch IDs are alphanumeric and do not reuse or rewrite the retired cache", async t => {
+	const root = await mkdtemp(join(tmpdir(), "subagent-provenance-cut-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const directory = join(root, PROVENANCE_DIR); await mkdir(directory, { mode: 0o700 });
+	const old = join(directory, "current.json"); const bytes = '{"legacy":"not current evidence"}';
+	await writeFile(old, bytes, { mode: 0o600 });
+	const core = createProvenance({ agentDir: root, listSourceFiles: async () => [{ name: "a.ts", bytes: Buffer.from("current") }] });
+	const source = await core.observeExtension();
+	const configuration = await core.observeConfiguration({ packageBytes: Buffer.from("{}") });
+	assert.equal(source.available && configuration.available, true);
+	if (!source.available || !configuration.available) return;
+	assert.match(source.extensionEpoch, /^[A-Za-z0-9]+$/);
+	assert.match(configuration.configurationEpoch, /^[A-Za-z0-9]+$/);
+	assert.equal(configuration.extensionEpoch, source.extensionEpoch);
+	assert.equal(await readFile(old, "utf8"), bytes);
+	assert.equal(JSON.parse(await readFile(join(directory, PROVENANCE_MANIFEST), "utf8")).configurationEpoch, configuration.configurationEpoch);
+});
+
 test("config source snapshots keep parse bytes identical to the fingerprint input", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-config-source-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
@@ -103,6 +121,6 @@ test("a superseded core does not overwrite a newer extension epoch after a confi
 	assert.equal((await newer.observeExtension()).available, true);
 	const changed = await older.observeConfiguration({ packageBytes: Buffer.from("2") });
 	assert.equal(changed.available, false);
-	const manifest = JSON.parse(await readFile(join(root, "subagent-provenance", "current.json"), "utf8")) as { extensionEpoch: string };
+	const manifest = JSON.parse(await readFile(join(root, PROVENANCE_DIR, PROVENANCE_MANIFEST), "utf8")) as { extensionEpoch: string };
 	assert.equal(manifest.extensionEpoch, "new");
 });

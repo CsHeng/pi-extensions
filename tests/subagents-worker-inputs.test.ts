@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate } from "../extensions/subagents/git-workspace.ts";
-import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs } from "../extensions/subagents/worker-inputs.ts";
+import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs, workerGitEnvironment, type WorkerInputState } from "../extensions/subagents/worker-inputs.ts";
 const exec = promisify(execFile);
 async function fixture(t: TestContext) {
 	const directory = await realpath(await mkdtemp(join(tmpdir(), "worker-inputs-")));
@@ -46,18 +46,31 @@ test("dispatch, inspect, refresh and freeze never traverse or copy ignored envir
 	assert.equal("dependencyKey" in state, false);
 });
 
-test("parent dependencies are not copied; local environments and legacy inert metadata survive refresh", async (t) => {
+test("parent dependencies are not copied; local environments survive current input refresh", async (t) => {
 	const f = await fixture(t);
 	await mkdir(join(f.repo, "node_modules")); await writeFile(join(f.repo, "node_modules/parent"), "not copied");
 	const state = await prepareWorkerInputs(f.repo, f.source, f.workspace);
 	await assert.rejects(lstat(join(f.source, "node_modules")), { code: "ENOENT" });
 	await mkdir(join(f.source, "node_modules")); await writeFile(join(f.source, "node_modules/local"), "retained");
-	const legacy = { version: 1 as const, dependencyRoots: ["node_modules" as const], dependencyKey: "a".repeat(64), parentDependencyKey: "b".repeat(64), gitWorkspace: { ...f.workspace, dependencyRoots: ["node_modules" as const] } };
-	await inspectWorkerInputs(f.source, legacy);
-	const next = await refreshWorkerInputs(f.repo, f.source, legacy);
+	await inspectWorkerInputs(f.source, state);
+	const next = await refreshWorkerInputs(f.repo, f.source, state);
 	assert.equal(next.version, 2);
 	assert.equal(await readFile(join(f.source, "node_modules/local"), "utf8"), "retained");
 	assert.equal(state.gitWorkspace?.path, f.source);
+});
+
+test("superseded worker input is rejected without reading its legacy payload", async () => {
+ let reads = 0;
+ const old = { version: 1, get gitWorkspace() { reads++; throw new Error("must not read old input"); } } as unknown as WorkerInputState;
+ await assert.rejects(inspectWorkerInputs("/unused", old), { code: "unsupported_worker_inputs" });
+ assert.equal(reads, 0);
+});
+
+test("worker shell environment does not impose pathspec magic on Git check-ignore", async t => {
+ const f = await fixture(t);
+ const env = workerGitEnvironment({ ...process.env, GIT_LITERAL_PATHSPECS: "1" });
+ assert.equal(env.GIT_LITERAL_PATHSPECS, undefined);
+ await exec("git", ["-C", f.repo, "check-ignore", "-q", "--", "node_modules/package"], { env });
 });
 
 test("worktree identity checks still reject root or Git administration replacement", async (t) => {

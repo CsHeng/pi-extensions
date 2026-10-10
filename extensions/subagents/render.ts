@@ -143,8 +143,15 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 			status: session.candidate.status,
 			changedCount: session.candidate.changedPaths.length,
 			appliedCount: session.candidate.appliedPaths.length,
+			roots: session.candidate.roots.slice(0, 32).map(root => ({ id: boundScalar(root.rootId), destination: boundScalar(root.destination), status: root.status,
+				recovery: ["applying", "partial", "unknown"].includes(root.status) ? "required" : "none",
+				changed: root.changedPaths.length, applied: root.appliedPaths.length })),
 		};
 	}
+	if (session.release) payload.release = { status: session.release.status, remaining: session.release.remaining.slice(0, 32).map(boundScalar) };
+	// Owned-root projection independent of candidate presence, including each root's own release fact.
+	if (session.roots) payload.roots = session.roots.slice(0, 32).map(root => ({ id: boundScalar(root.id), destination: boundScalar(root.destination), status: root.status,
+		recovery: root.recovery ?? "none", release: root.release }));
 	payload.nativeUsage = nativeUsageSummary(session.result);
 	return payload;
 }
@@ -215,9 +222,22 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 			if (session.result.stopReason !== undefined) parts.push(`stopReason=${boundScalar(session.result.stopReason)}`);
 			if (session.result.error) parts.push(`result-error=${boundScalar(session.result.error.code)}`);
 		}
+		const owned = new Map((session.roots ?? []).map(root => [root.id, root]));
 		if (session.candidate) {
 			parts.push(`candidate=${boundScalar(session.candidate.id)} apply=${session.candidate.status} changed=${session.candidate.changedPaths.length} applied=${session.candidate.appliedPaths.length}`);
+			for (const root of session.candidate.roots) {
+				const recovery = ["applying", "partial", "unknown"].includes(root.status) ? " recovery=required" : "";
+				const release = owned.get(root.rootId)?.release;
+				parts.push(`root=${boundScalar(root.rootId)} destination=${boundScalar(root.destination)} status=${root.status}${recovery} changed=${root.changedPaths.length} applied=${root.appliedPaths.length}${release ? ` release=${release}` : ""}`);
+			}
+		} else if (session.roots) {
+			// No candidate was frozen: still surface each owned root's disposition.
+			for (const root of session.roots) {
+				const recovery = root.recovery === "required" ? " recovery=required" : "";
+				parts.push(`root=${boundScalar(root.id)} destination=${boundScalar(root.destination)} status=${root.status}${recovery} release=${root.release}`);
+			}
 		}
+		if (session.release) parts.push(`release=${session.release.status} remaining=${session.release.remaining.join(",") || "none"}`);
 		const native = nativeUsageSummary(session.result);
 		parts.push(native.recorded
 			? `native-usage recorded input=${native.input} output=${native.output}`

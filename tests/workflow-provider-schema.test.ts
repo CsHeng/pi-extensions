@@ -68,6 +68,7 @@ test("workflow rejects retired v1 operations and migration fields before mutatio
 		{ operation: "open", expectedRevision: 0 },
 		{ operation: "pause", expectedRevision: 1 },
 		{ operation: "inspect", expectedRevision: 1 },
+		{ operation: "inspect", subject: "task:t" },
 		{ ...enroll, migrateLegacy: true },
 		{ operation: "start", taskId: "T-1" },
 	]) {

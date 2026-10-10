@@ -20,7 +20,7 @@ export function taskProgress(state: GoalState, task: GoalTask): Progress {
  if (attempts.some(a => a.status === "running")) return "running";
  if (accepted(state, `task:${task.key}`)) return "done";
  const latest = attempts.at(-1);
- const judgment = state.acceptance.find(j => j.subject === `task:${task.key}`);
+ const judgment = state.acceptance.find(j => j.target.kind === "task" && j.target.id === task.key);
  // Starting a dependent task required accepted predecessors. Losing one revokes that work's basis.
  if (latest && task.dependsOn?.some(dep => !accepted(state, `task:${dep}`))) return "recheck";
  if (latest?.status === "interrupted" || judgment?.accepted || (latest && state.facts.some(f => f.attempt === latest.id && !f.usable))
@@ -42,7 +42,6 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
  const clip = (text: string) => truncateToWidth(text, width, "…");
  if (view.unavailable !== undefined) return [clip(theme.fg("warning", "! Tasks · state unavailable · /workflow-ui list"))];
  const s = view.state;
- if (!s && view.legacy) return [clip(theme.fg("warning", "! Historical v2 · explicit replacement required")), ...view.legacy.tasks.slice(0, maxRows - 1).map(task => clip(`  ${clean(task.key)} ${clean(task.title)} · historical`))];
  if (!s) return [];
  const tasks = s.tasks.map(task => {
   const status = taskProgress(s, task);

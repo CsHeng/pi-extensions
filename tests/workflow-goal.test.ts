@@ -20,12 +20,21 @@ async function fixture(t: test.TestContext) {
  let serial = 0;
  const ctx: GoalContext = { cwd, now: "2026-09-18T00:00:00.000Z", sessionId: "fixture" };
  const run = async (op: GoalOperation) => { const result = await store.mutate(op, ctx, `call-${++serial}`); assert.equal(result.ok, true, result.message); return result; };
- const observe = async (id: string, error = false) => {
+ const observe = async (label: string, error = false) => {
+  const id = label.toLowerCase().replace(/[^a-z0-9]/g, "") || "observation";
   const capture = await store.capture(cwd);
-  store.observe({ ...capture, host: { toolCallId: id, toolName: "bash", sessionId: "fixture", at: ctx.now, isError: error, exitCode: error ? 1 : 0 } });
+  store.observe({ id, ...capture, host: { toolCallId: label, toolName: "bash", sessionId: "fixture", at: ctx.now, isError: error, exitCode: error ? 1 : 0 } });
+  return id;
  };
- const report = (task: string, observationId?: string, complete = false): GoalOperation => ({ operation: "report", summary: "Executed check and evaluated result", facts: [{ key: "check", kind: observationId ? "host" : "agent", check: "unit test", result: "pass", ...(observationId ? { observationId } : {}) }], judgments: [`task:${task}`, `requirement:${task}`, ...(complete ? ["delivery"] : [])].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "Covers this subject" })), complete });
- return { store, ctx, run, observe, report, snapshots, cwd, failWrites: () => { failWrites = true; } };
+ const attemptOf = (task: string, index = 0) => {
+  const matches = store.current()!.attempts.filter(item => item.task === task);
+  const selected = index < 0 ? matches.at(index) : matches[index];
+  if (!selected) throw new Error(`missing attempt ${task}#${index}`);
+  return selected.id;
+ };
+ let factSerial = 0;
+ const report = (task: string, observationId?: string, complete = false): GoalOperation => { const id = `check${++factSerial}`; return { operation: "report", summary: "Executed check and evaluated result", facts: [{ id, kind: observationId ? "host" : "agent", check: "unit test", result: "pass", ...(observationId ? { observationId } : {}) }], judgments: [`task:${task}`, `requirement:${task}`, ...(complete ? ["delivery"] : [])].map((subject): NonNullable<GoalOperation["judgments"]>[number] => ({ target: subject === "delivery" ? { kind: "delivery" } : { kind: subject.startsWith("requirement:") ? "requirement" : "task", id: subject.split(":")[1]! }, accepted: true, facts: [id], rationale: "Covers this subject" })), complete }; };
+ return { store, ctx, run, observe, report, attemptOf, snapshots, cwd, failWrites: () => { failWrites = true; } };
 }
 
 test("strict enrollment is explicit; normal slice is start + compound report; all obligations gate close", async t => {
@@ -39,6 +48,32 @@ test("strict enrollment is explicit; normal slice is start + compound report; al
  const final = await f.run(f.report("two", undefined, true));
  assert.equal(final.view.state?.fulfillment, "complete");
  assert.equal(f.snapshots.length, 5);
+});
+
+test("mixed-case fact and observation IDs remain exact through report and replay", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const capture = await f.store.capture(f.cwd);
+ assert.equal(f.store.observe({ id: "ObservationA1", ...capture, host: { toolCallId: "native.Call_1", toolName: "bash", sessionId: "fixture", at: f.ctx.now, isError: false, exitCode: 0 } }), "ObservationA1");
+ await f.run({ operation: "report", task: "one", summary: "Exact case is identity", facts: [{ id: "FactR2a", kind: "host", observationId: "ObservationA1", check: "case preservation", result: "pass" }], judgments: [{ target: { kind: "task", id: "one" }, facts: ["FactR2a"], accepted: true, rationale: "Exact declared reference" }] });
+ assert.equal(f.store.current()!.facts[0]!.id, "FactR2a");
+ assert.equal(f.store.current()!.facts[0]!.observationId, "ObservationA1");
+ const replay = createGoalStore(() => {}); replay.replay(f.snapshots);
+ assert.equal(replay.current()!.facts[0]!.id, "FactR2a");
+ assert.equal(replay.current()!.acceptance[0]!.facts[0], "FactR2a");
+});
+
+test("negative judgment revokes acceptance while an overlapping independent writer is running", async t => {
+ const f = await fixture(t);
+ await f.run({ ...enroll, tasks: [...enroll.tasks!, { key: "three", title: "Reassess evidence", covers: ["one"] }] });
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ await f.run(f.report("one"));
+ assert.equal(accepted(f.store.current()!, "task:one"), true);
+ await f.run({ operation: "start", task: "two", scope: ["one"], writes: ["one"] });
+ await f.run({ operation: "start", task: "three", scope: ["one"] });
+ await f.run({ operation: "report", task: "three", summary: "Withdraw premature acceptance", facts: [{ id: "ChangedState", kind: "agent", check: "An unmet original requirement was identified", result: "fail" }], judgments: [{ target: { kind: "task", id: "one" }, facts: ["ChangedState"], accepted: false, rationale: "A rejection cannot certify overlapping work" }] });
+ assert.equal(accepted(f.store.current()!, "task:one"), false);
+ assert.equal(f.store.current()!.attempts.find(a => a.task === "two")!.status, "running");
 });
 
 test("legitimate long contracts outlive cumulative record and snapshot ceilings", async t => {
@@ -57,7 +92,7 @@ test("legitimate long contracts outlive cumulative record and snapshot ceilings"
  for (let i = 0; i < 260; i++) {
   await advance({ operation: "start", task: "one", scope: ["one"] });
   await advance({ operation: "report", summary: "A useful independently recorded investigation", facts: Array.from({ length: 1 }, (_, n) => ({
-   key: `check${n}`, kind: "agent" as const, check: `case ${i}/${n}`, result: "pass" as const, artifacts: ["x".repeat(500), "y".repeat(500), "z".repeat(500), "w".repeat(500)],
+   id: `case${i}`, kind: "agent" as const, check: `case ${i}/${n}`, result: "pass" as const, artifacts: ["x".repeat(500), "y".repeat(500), "z".repeat(500), "w".repeat(500)],
   })) });
   if (i === 31 || i === 259) samples.push({ attempts: i + 1, facts: f.store.current()!.facts.length,
    snapshotBytes: Buffer.byteLength(JSON.stringify(f.snapshots.at(-1)!.data)), appendedBytes, elapsedMs: Math.round(performance.now() - started) });
@@ -73,7 +108,8 @@ test("legitimate long contracts outlive cumulative record and snapshot ceilings"
  // Idempotency must not expire merely because another 128 operations occurred.
  const before = f.store.current(); await f.store.mutate(enroll, f.ctx, "call-1"); assert.deepEqual(f.store.current(), before);
  await advance({ operation: "start", task: "one", scope: ["one"] });
- await advance({ operation: "report", summary: "judge still-current early evidence", judgments: ["task:one", "requirement:one"].map(subject => ({ subject, facts: ["A1:check0"], accepted: true, rationale: "same source and supported obligation" })) });
+ const early = f.store.current()!.facts[0]!.id;
+ await advance({ operation: "report", summary: "judge still-current early evidence", judgments: ["task:one", "requirement:one"].map(subject => ({ target: subject === "delivery" ? { kind: "delivery" as const } : { kind: subject.startsWith("requirement:") ? "requirement" as const : "task" as const, id: subject.split(":")[1]! }, facts: [early], accepted: true, rationale: "same source and supported obligation" })) });
  await advance({ operation: "start", task: "two", scope: ["two"] });
  await advance(f.report("two", undefined, true)); assert.equal(f.store.current()!.fulfillment, "complete");
  t.diagnostic(`synthetic growth (not a performance gate): ${JSON.stringify(samples)}`);
@@ -126,7 +162,7 @@ test("dependency rejection names only missing predecessors and leaves independen
  assert.equal(f.snapshots.length, count); assert.deepEqual(f.store.current(), before);
  assert.match(goalReceipt(rejected.view), /Ready: two, independent/);
  const state = structuredClone(before!); const diagnostics: string[] = [];
- judge(state, { subject: "task:joined", facts: ["A1:check"], accepted: true, rationale: "cannot bypass missing predecessor" }, diagnostics);
+ judge(state, { target: { kind: "task", id: "joined" }, facts: [state.facts.find(fact => fact.check === "unit test")!.id], accepted: true, rationale: "cannot bypass missing predecessor" }, diagnostics);
  assert.equal(accepted(state, "task:joined"), false); assert.match(diagnostics.join("\n"), /predecessors: two\./);
  await f.run({ operation: "start", task: "independent", scope: ["one"] });
  assert.equal(f.store.current()!.attempts.at(-1)!.task, "independent");
@@ -157,15 +193,15 @@ for (const broadFoundation of [false, true]) test(`foundation declarations ${bro
   tasks: keys.map(key => ({ key, title: key, covers: [key], ...(key === "foundation" ? {} : { dependsOn: ["foundation"] }) })),
  });
  await f.run({ operation: "start", task: "foundation", scope: broadFoundation ? ["schema", "one", "two"] : ["schema"] });
- await f.observe("foundation-check"); await f.run(f.report("foundation", "foundation-check"));
+ const foundationCheck = await f.observe("foundation-check"); await f.run(f.report("foundation", foundationCheck));
  await f.run({ operation: "start", task: "two", scope: ["schema", "two"] });
- await f.observe("sibling-check"); await f.run(f.report("two", "sibling-check"));
+ const siblingCheck = await f.observe("sibling-check"); await f.run(f.report("two", siblingCheck));
  await f.run({ operation: "start", task: "one", scope: ["schema", "one"], writes: ["one"] });
  await writeFile(join(f.cwd, "one"), "consumer-only edit"); await f.run({ operation: "inspect" });
  assert.equal(accepted(f.store.current()!, "task:foundation"), true);
  assert.equal(accepted(f.store.current()!, "task:two"), true);
  assert.equal(f.store.current()!.attempts.at(-1)!.status, "running");
- await f.observe("consumer-check"); await f.run(f.report("one", "consumer-check"));
+ const consumerCheck = await f.observe("consumer-check"); await f.run(f.report("one", consumerCheck));
  assert.equal(accepted(f.store.current()!, "task:one"), true);
  await writeFile(join(f.cwd, "schema"), "changed shared interface"); await f.run({ operation: "inspect" });
  for (const key of keys) assert.equal(accepted(f.store.current()!, `task:${key}`), true);
@@ -181,7 +217,7 @@ test("model-visible inspect exposes captured observation before a fact is report
   { cwd: f.cwd, sessionManager: { getSessionId: () => f.ctx.sessionId } });
  const text = result.content[0].text as string;
  const receipt = JSON.parse(text.split("\n").find(line => line.startsWith('{"contractId"'))!);
- assert.deepEqual(receipt.observations.map((item: { id: string }) => item.id), ["captured-first", "captured-second"]);
+ assert.deepEqual(receipt.observations.map((item: { id: string }) => item.id), ["capturedfirst", "capturedsecond"]);
  const report = await f.run(f.report("one", receipt.observations[0].id));
  assert.equal(accepted(report.view.state!, "task:one"), true);
 });
@@ -217,14 +253,14 @@ test("honest check-time basis supports edits then verification; fake success/fai
  const f = await fixture(t); await f.run(enroll);
  await f.run({ operation: "start", task: "one", scope: ["one"], writes: ["one"] });
  await writeFile(join(f.cwd, "one"), "edited");
- await f.observe("check-fail", true);
- const failed = await f.run(f.report("one", "check-fail"));
+ const failedCheck = await f.observe("check-fail", true);
+ const failed = await f.run(f.report("one", failedCheck));
  assert.equal(accepted(failed.view.state!, "task:one"), false); assert.ok(failed.diagnostics.length);
- const bad = await f.store.mutate({ ...f.report("one", "fabricated"), attempt: "A1" }, f.ctx, "bad");
+ const bad = await f.store.mutate({ ...f.report("one", "fabricated"), attempt: f.attemptOf("one") }, f.ctx, "bad");
  assert.equal(bad.code, "observation_required");
  // Correct a stable fact after a new real check; reported attempts need a new execution boundary.
- await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.observe("check-pass");
- const success = await f.run(f.report("one", "check-pass"));
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); const passed = await f.observe("check-pass");
+ const success = await f.run(f.report("one", passed));
  assert.equal(accepted(success.view.state!, "task:one"), true);
  assert.equal(success.view.state!.facts.at(-1)!.kind, "host");
 });
@@ -232,10 +268,58 @@ test("honest check-time basis supports edits then verification; fake success/fai
 test("duplicate reports/corrections are bounded and do not create fake progress", async t => {
  const f = await fixture(t); await f.run(enroll); await f.run({ operation: "start", task: "one", scope: ["one"] });
  await f.run(f.report("one")); const progress = progressKey(f.store.current()!);
- const op = { ...f.report("one"), attempt: "A1" };
+ const factId = f.store.current()!.facts[0]!.id;
+ const op = { operation: "report" as const, attempt: f.attemptOf("one"), summary: "repeat", facts: [{ id: factId, kind: "agent" as const, check: "unit test", result: "pass" as const }], judgments: [] };
  await f.run(op); assert.equal(f.store.current()!.facts.length, 1); assert.equal(progressKey(f.store.current()!), progress);
- await f.run({ ...op, facts: [{ key: "check", kind: "agent", check: "corrected failure", result: "fail" }], judgments: [] });
+ await f.run({ ...op, facts: [{ id: factId, kind: "agent", check: "corrected failure", result: "fail" }], judgments: [] });
  assert.equal(f.store.current()!.facts.length, 1); assert.equal(accepted(f.store.current()!, "task:one"), false);
+});
+
+test("in-report duplicate ids and cross-attempt redeclaration reject atomically; exact reuse keeps provenance", async t => {
+ const f = await fixture(t); await f.run(enroll);
+ await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const beforeDuplicate = structuredClone(f.store.current());
+ const duplicate = await f.store.mutate({ operation: "report", summary: "ambiguous evidence", facts: [
+  { id: "dup", kind: "agent", check: "first", result: "pass" },
+  { id: "dup", kind: "agent", check: "second", result: "pass" },
+ ], judgments: [] }, f.ctx, "duplicate-fact");
+ assert.equal(duplicate.code, "duplicate_fact");
+ assert.deepEqual(f.store.current(), beforeDuplicate, "a rejected report commits no attempt status, fact or snapshot");
+ const first = await f.run(f.report("one"));
+ assert.equal(accepted(first.view.state!, "task:one"), true, "declaration and judgment commit in one report");
+ const declared = structuredClone(first.view.state!.facts[0]!);
+ await f.run({ operation: "start", task: "two", scope: ["two"] });
+ const beforeRedeclare = structuredClone(f.store.current());
+ const redeclare = await f.store.mutate({ operation: "report", task: "two", summary: "redeclare another attempt's fact", facts: [{ id: declared.id, kind: "agent", check: "changed", result: "fail" }] }, f.ctx, "redeclare-fact");
+ assert.equal(redeclare.code, "fact_id_conflict");
+ assert.deepEqual(f.store.current(), beforeRedeclare);
+ const cited = await f.run({ operation: "report", task: "two", summary: "reuse the earlier verified fact", judgments: [{ target: { kind: "task", id: "two" }, facts: [declared.id], accepted: true, rationale: "the earlier source evidence still applies" }] });
+ assert.equal(cited.view.state!.facts.length, 1, "citing an existing id is a reference, not a redeclaration");
+ assert.deepEqual(cited.view.state!.facts[0], declared, "reuse preserves the original provenance");
+ assert.equal(accepted(cited.view.state!, "task:two"), true);
+});
+
+test("enrolled task and requirement keys remain the same domain in structured judgments", async t => {
+ const f = await fixture(t);
+ await f.run({ operation: "enroll", goal: "Mixed-case keys", delivery: "source", authority: "fixture", requirements: [{ key: "P1", outcome: "first", verification: "check" }], tasks: [{ key: "build-api", title: "Build API", covers: ["P1"] }] });
+ await f.run({ operation: "start", task: "build-api", scope: ["one"] });
+ const result = await f.run({ operation: "report", summary: "judge the enrolled mixed-case keys", facts: [{ id: "check", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ target: { kind: "task", id: "build-api" }, facts: ["check"], accepted: true, rationale: "fixture" }, { target: { kind: "requirement", id: "P1" }, facts: ["check"], accepted: true, rationale: "fixture" }] });
+ assert.equal(accepted(result.view.state!, "task:build-api"), true);
+ assert.equal(accepted(result.view.state!, "requirement:P1"), true);
+});
+
+test("host facts bind the owned observation id while native transport correlation stays internal", async t => {
+ const f = await fixture(t); await f.run(enroll); await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const nativeToolCallId = `bash-${"z".repeat(300)}`;
+ const capture = await f.store.capture(f.cwd);
+ const owned = f.store.observe({ ...capture, host: { toolCallId: nativeToolCallId, toolName: "bash", sessionId: f.ctx.sessionId, at: f.ctx.now, isError: false, exitCode: 0 } });
+ assert.match(owned, /^[a-z0-9]+$/);
+ const available = f.store.availableObservations(f.ctx.sessionId);
+ assert.equal(available.length, 1);
+ assert.equal(available[0]!.id, owned, "outward evidence exposes the owned observation id");
+ assert.doesNotMatch(JSON.stringify(available), /z{20}/, "the native tool-call id is never surfaced to the model");
+ const reported = await f.run({ operation: "report", summary: "certify the captured check", facts: [{ id: "proof", kind: "host", check: "captured check", result: "pass" }], judgments: ["task:one", "requirement:one"].map(subject => ({ target: subject.startsWith("requirement:") ? { kind: "requirement" as const, id: subject.split(":")[1]! } : { kind: "task" as const, id: subject.split(":")[1]! }, facts: ["proof"], accepted: true, rationale: "owned observation proves the slice" })) });
+ assert.equal(reported.view.state!.facts.find(fact => fact.id === "proof")!.observationId, owned);
 });
 
 test("same-file drift leaves evidence relevance to explicit judgment", async t => {
@@ -259,7 +343,7 @@ test("source aliases remain declarations rather than content certification", asy
 
 test("amended verification needs new judgment, not erased evidence or a relabeled old observation", async t => {
  const f = await fixture(t); await f.run(enroll);
- await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.observe("original-check"); await f.run(f.report("one", "original-check"));
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); const originalCheck = await f.observe("original-check"); await f.run(f.report("one", originalCheck));
  const original = structuredClone(f.store.current()!.facts[0]!);
  await f.run({ operation: "amend", reason: "clarify the oracle meaning", authority: "same intent", requirements: [{ ...enroll.requirements![0]!, verification: "the same check proves the clarified boundary" }, enroll.requirements![1]!] });
  assert.equal(f.store.current()!.attempts[0]!.status, "interrupted");
@@ -268,16 +352,16 @@ test("amended verification needs new judgment, not erased evidence or a relabele
  assert.equal((await f.store.mutate({ ...f.report("one"), attempt: "A1" }, f.ctx, "late-old-writer")).code, "unknown_attempt");
  await f.run({ operation: "start", task: "one", scope: ["one"] });
  const result = await f.run({ operation: "report", summary: "explicitly rejudge the original fact for the clarified requirement",
-  facts: [{ key: "not-a-fresh-check", kind: "host", check: "must not relabel old execution", observationId: "original-check", result: "pass" }],
-  judgments: ["task:one", "requirement:one"].map(subject => ({ subject, facts: ["A1:check"], accepted: true, rationale: "original actual check supports the clarified obligation; no new execution claimed" })),
+  facts: [{ id: "notafresh", kind: "host" as const, check: "must not relabel old execution", observationId: originalCheck, result: "pass" as const }],
+  judgments: ["task:one", "requirement:one"].map(subject => ({ target: subject.startsWith("requirement:") ? { kind: "requirement" as const, id: subject.split(":")[1]! } : { kind: "task" as const, id: subject.split(":")[1]! }, facts: [original.id], accepted: true, rationale: "original actual check supports the clarified obligation; no new execution claimed" })),
  });
- assert.equal(result.view.state!.facts.find(fact => fact.id === "A2:not-a-fresh-check")!.usable, false);
+ assert.equal(result.view.state!.facts.find(fact => fact.id === "notafresh")!.usable, false);
  assert.equal(accepted(result.view.state!, "requirement:one"), true); assert.equal(accepted(result.view.state!, "task:one"), true);
  await writeFile(join(f.cwd, "one"), "real oracle input changed");
  await f.run({ operation: "inspect" });
  assert.equal(f.store.current()!.facts[0]!.usable, true); assert.equal(accepted(f.store.current()!, "task:one"), true);
  // The main agent may explicitly withdraw a judgment after observing a relevant change.
- await f.run({ operation: "report", attempt: "A2", summary: "relevant source changed", judgments: [{ subject: "task:one", facts: ["A1:check"], accepted: false, rationale: "affected verification required" }] });
+ await f.run({ operation: "report", attempt: f.attemptOf("one", -1), summary: "relevant source changed", judgments: [{ target: { kind: "task", id: "one" }, facts: [f.store.current()!.facts.find(fact => fact.check === "unit test")!.id], accepted: false, rationale: "affected verification required" }] });
  assert.equal(accepted(f.store.current()!, "task:one"), false);
 });
 
@@ -287,7 +371,8 @@ test("task and dependency presentation order is not changed meaning", async t =>
  await f.run({ ...enroll, tasks });
  for (const task of ["one", "two"]) { await f.run({ operation: "start", task, scope: [task] }); await f.run(f.report(task)); }
  await f.run({ operation: "start", task: "join", scope: ["one", "two"] });
- await f.run({ operation: "report", summary: "joined", judgments: [{ subject: "task:join", facts: ["A1:check", "A2:check"], accepted: true, rationale: "actual inputs" }] });
+ const proof = f.store.current()!.facts.filter(fact => fact.check === "unit test").map(fact => fact.id);
+ await f.run({ operation: "report", summary: "joined", judgments: [{ target: { kind: "task", id: "join" }, facts: proof, accepted: true, rationale: "actual inputs" }] });
  const before = f.store.current()!;
  await f.run({ operation: "amend", reason: "presentation only", authority: "existing", tasks: [...tasks].reverse().map(task => ({ ...task, title: `Clearer ${task.title}`, covers: [...task.covers].reverse(), ...(task.dependsOn ? { dependsOn: [...task.dependsOn].reverse() } : {}) })) });
  assert.deepEqual(f.store.current()!.acceptance, before.acceptance); assert.deepEqual(f.store.current()!.facts, before.facts);
@@ -302,26 +387,26 @@ for (const aggregateAccepted of [false, true]) test(`splitting an ${aggregateAcc
   { key: "join", title: "Local consumer", covers: ["two"], dependsOn: ["owners"] },
  ] });
  await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
- const proof = structuredClone(f.store.current()!.acceptance.find(j => j.subject === "task:one"));
+ const proof = structuredClone(f.store.current()!.acceptance.find(j => j.target.kind === "task" && j.target.id === "one"));
  await f.run({ operation: "start", task: "owners", scope: ["two"] });
- await f.run({ operation: "report", summary: "aggregate slice", facts: [{ key: "f", kind: "agent", check: "aggregate evidence", result: "pass" }], judgments: [{ subject: "task:owners", facts: ["f"], accepted: aggregateAccepted, rationale: "fixture" }] });
+ await f.run({ operation: "report", summary: "aggregate slice", facts: [{ id: "f", kind: "agent", check: "aggregate evidence", result: "pass" }], judgments: [{ target: { kind: "task", id: "owners" }, facts: ["f"], accepted: aggregateAccepted, rationale: "fixture" }] });
  await f.run({ operation: "amend", reason: "Separate independent blocker and acceptance boundaries", authority: "same approved outcomes", tasks: [foundation,
   { key: "local", title: "Local source", covers: ["two"] },
   { key: "peer", title: "External peer verification", covers: ["two"] },
   { key: "join", title: "Local consumer", covers: ["two"], dependsOn: ["local"] },
  ] });
  const split = f.store.current()!;
- assert.deepEqual(split.acceptance.find(j => j.subject === "task:one"), proof);
- assert.equal(accepted(split, "task:one"), true); assert.equal(split.facts.find(f => f.id === "A1:check")!.usable, true);
+ assert.deepEqual(split.acceptance.find(j => j.target.kind === "task" && j.target.id === "one"), proof);
+ assert.equal(accepted(split, "task:one"), true); assert.equal(split.facts.find(f => f.check === "unit test")!.usable, true);
  for (const key of ["owners", "local", "peer", "join"]) assert.equal(accepted(split, `task:${key}`), false);
  assert.equal(split.attempts.find(a => a.task === "owners")!.status, "interrupted");
- assert.equal(split.facts.find(f => f.id === "A2:f")!.usable, true, "a decomposition change is not source invalidation");
+ assert.equal(split.facts.find(f => f.id === "f")!.usable, true, "a decomposition change is not source invalidation");
  const replay = createGoalStore(() => {}); replay.replay(f.snapshots);
  assert.equal(replay.view().unavailable, undefined); assert.deepEqual(replay.current(), split);
  await f.run({ operation: "start", task: "peer", scope: ["two"] });
  await f.run({ operation: "report", summary: "fixture absent", blocker: { kind: "capability", reason: "pinned peer missing", unblock: "peer provided" } });
  await f.run({ operation: "start", task: "local", scope: ["two"] });
- const judged = await f.run({ operation: "report", summary: "review original local-source evidence against the separated local obligation", judgments: [{ subject: "task:local", facts: ["A2:f"], accepted: true, rationale: "still-current source evidence suffices for this local result, not the blocked peer" }] });
+ const judged = await f.run({ operation: "report", summary: "review original local-source evidence against the separated local obligation", judgments: [{ target: { kind: "task", id: "local" }, facts: ["f"], accepted: true, rationale: "still-current source evidence suffices for this local result, not the blocked peer" }] });
  assert.equal(accepted(judged.view.state!, "task:local"), true);
  await f.run({ operation: "start", task: "join", scope: ["two"] });
  assert.equal(f.store.current()!.attempts.at(-1)!.task, "join");
@@ -349,7 +434,7 @@ test("overlapping writer including canonical aliases prevents acceptance", async
  const f = await fixture(t); await f.run(enroll);
  await f.run({ operation: "start", task: "one", scope: ["./one"] });
  await f.run({ operation: "start", task: "two", scope: ["two"], writes: [join(f.cwd, "one")] });
- const result = await f.run({ ...f.report("one"), attempt: "A1" });
+ const result = await f.run({ ...f.report("one"), attempt: f.attemptOf("one") });
  assert.ok(result.diagnostics.some(d => d.includes("overlapping writer"))); assert.equal(accepted(f.store.current()!, "task:one"), false);
  assert.deepEqual(await canonicalScope(["./one", join(f.cwd, "one")], f.cwd), [join(f.cwd, "one")]);
  await symlink(tmpdir(), join(f.cwd, "escape"));
@@ -385,7 +470,7 @@ test("productive continuation repeats; churn and changed wording cannot renew no
  await f.store.settle(f.ctx, () => count++);
  await f.run({ operation: "start", task: "two", scope: ["two"] }); await f.run(f.report("two"));
  await f.store.settle(f.ctx, () => count++); assert.equal(count, 3);
- await f.run({ operation: "report", attempt: "A2", summary: "new prose without work" });
+ await f.run({ operation: "report", attempt: f.attemptOf("two"), summary: "new prose without work" });
  await f.store.settle(f.ctx, () => count++); await f.store.settle(f.ctx, () => count++);
  assert.equal(count, 4); assert.equal(f.store.current()!.continuation.state, "active"); assert.equal(f.store.current()!.continuation.automaticPaused, true); assert.equal(f.store.current()!.fulfillment, "pending");
 });
@@ -405,8 +490,8 @@ test("automatic anti-spin pause leaves authorized exploration executable without
  await f.run({ operation: "resume", reason: "explicit user continuation", authority: "same" }); await settle();
  assert.equal(dispatches, 2); assert.equal(f.store.current()!.continuation.automaticPaused, true);
  // A normal host run can investigate without another resume; failures and more necessary tasks can be useful progress.
- await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.observe("diagnostic-failure", true);
- await f.run({ operation: "report", summary: "found a real missing prerequisite", facts: [{ key: "diagnostic", kind: "host", check: "real failed diagnostic", observationId: "diagnostic-failure", result: "fail" }] });
+ await f.run({ operation: "start", task: "one", scope: ["one"] }); const diagnosticFailure = await f.observe("diagnostic-failure", true);
+ await f.run({ operation: "report", summary: "found a real missing prerequisite", facts: [{ id: "diagnostic", kind: "host", check: "real failed diagnostic", observationId: diagnosticFailure, result: "fail" }] });
  await f.run({ operation: "amend", reason: "discovered necessary investigation", authority: "same outcome", tasks: [...enroll.tasks!, { key: "investigate", title: "Investigate", covers: ["one"] }] });
  await settle(); assert.equal(dispatches, 3); assert.equal(f.store.current()!.continuation.automaticPaused, undefined);
  assert.equal(f.store.current()!.acceptance.length, 0); assert.equal(f.store.current()!.tasks.length, 3);
@@ -432,7 +517,7 @@ test("unsupported v1 snapshots fail closed without migration, fallback or histor
   const history = [...before, old]; const unchanged = structuredClone(history);
   f.store.replay(history); f.store.recover("restart");
   assert.equal(f.store.current(), undefined);
-  assert.match(f.store.view().unavailable!, /Unsupported latest workflow snapshot/);
+  assert.equal(f.store.view().unavailable, "unsupported_contract");
   assert.match(goalReceipt(f.store.view()), /unavailable/);
   assert.doesNotMatch(goalReceipt(f.store.view()), /migrateLegacy/);
   assert.match(goalRows(f.store.view(), 120).join("\n"), /state unavailable/);
@@ -442,18 +527,14 @@ test("unsupported v1 snapshots fail closed without migration, fallback or histor
   assert.deepEqual(history, unchanged); assert.deepEqual(f.snapshots, before);
  }
  // Navigating to a v2 or empty branch is not an automatic history repair.
- f.store.replay(before); assert.equal(f.store.current()?.version, 3);
- f.store.replay([]); await f.run(enroll); assert.equal(f.store.current()?.version, 3);
+ f.store.replay(before); assert.equal(f.store.current()?.version, 4);
+ f.store.replay([]); await f.run(enroll); assert.equal(f.store.current()?.version, 4);
 });
 
-test("v3 snapshots keep inert historical migration provenance without loading a v1 reader", async t => {
+test("superseded v3 snapshots are excluded shallowly without reading their payload", async t => {
  const f = await fixture(t); await f.run(enroll);
- const state = f.store.current()!;
- state.legacy = { revision: 4, id: "old-workset", goal: "Previous goal" };
- f.store.replay([{ type: "custom", customType: "csheng-workflow-state", data: { schemaVersion: 3, state } }]);
- assert.equal(f.store.view().unavailable, undefined); assert.deepEqual(f.store.current()!.legacy, state.legacy);
- await f.run({ operation: "start", task: "one", scope: ["one"] });
- assert.deepEqual(f.store.current()!.legacy, state.legacy);
+ f.store.replay([{ type: "custom", customType: "csheng-workflow-state", data: { schemaVersion: 3, state: { legacyShape: "not the current payload" } } }]);
+ assert.equal(f.store.view().unavailable, "unsupported_contract"); assert.equal(f.store.current(), undefined);
 });
 
 test("recovered pending executions remain visible across new dispatch and explicit reconciliation permits completion", async t => {
@@ -472,12 +553,13 @@ test("recovered pending executions remain visible across new dispatch and explic
  assert.deepEqual(replay.current()!.executionPending, ["new-run"]);
  assert.deepEqual(replay.current()!.facts, f.store.current()!.facts, "reconciliation imports no execution facts");
  replay.pendingExecutions([]);
- const result = await replay.mutate({ operation: "report", attempt: "A2", summary: "explicit delivery judgment", judgments: [{ subject: "delivery", facts: ["A1:check", "A2:check"], accepted: true, rationale: "both outcomes verified; recovered execution disposition recorded" }], complete: true }, f.ctx, "complete");
+ const proof = replay.current()!.facts.filter(fact => fact.check === "unit test").map(fact => fact.id);
+ const result = await replay.mutate({ operation: "report", attempt: replay.current()!.attempts.find(item => item.task === "two")!.id, summary: "explicit delivery judgment", judgments: [{ target: { kind: "delivery" }, facts: proof, accepted: true, rationale: "both outcomes verified; recovered execution disposition recorded" }], complete: true }, f.ctx, "complete");
  assert.equal(result.ok, true, result.message); assert.equal(replay.current()!.fulfillment, "complete");
  assert.deepEqual(replay.current()!.executionReconciliations?.[0]?.ids, ["old-run"]);
 });
 
-test("v2 history is read-only and explicitly replaced without importing acceptance or hiding executions", async t => {
+test("v2 history is excluded shallowly without importing acceptance, hiding executions or rewriting history", async t => {
  const f = await fixture(t); await f.run(enroll);
  await f.run({ operation: "start", task: "one", scope: ["one"] }); await f.run(f.report("one"));
  await f.run({ operation: "start", task: "two", scope: ["two"] });
@@ -487,19 +569,10 @@ test("v2 history is read-only and explicitly replaced without importing acceptan
  const before = structuredClone(history); const appended: any[] = [];
  const replay = createGoalStore((customType, data) => appended.push({ type: "custom", customType, data }));
  replay.replay(history); replay.recover("restart");
- assert.equal(replay.current(), undefined); assert.equal(replay.view().legacy?.requirements.length, 2);
- assert.deepEqual(replay.view().legacy?.executionPending, ["run-old"]);
- assert.match(goalReceipt(replay.view()), /run-old/);
+ assert.equal(replay.current(), undefined);
+ assert.equal(replay.view().unavailable, "unsupported_contract");
  assert.deepEqual(history, before); assert.equal(appended.length, 0);
- let dispatched = false; await replay.settle(f.ctx, () => { dispatched = true; }); assert.equal(dispatched, false);
- assert.equal((await replay.mutate(enroll, f.ctx, "implicit")).code, "legacy_replacement_required");
- const replaced = await replay.mutate({ ...enroll, alignment: "Reconcile both old outcomes; run-old remains historical unresolved evidence and requires owner disposition outside this replacement." }, f.ctx, "replace");
- assert.equal(replaced.ok, true, replaced.message);
- assert.equal(replay.current()!.version, 3); assert.deepEqual(replay.current()!.facts, []); assert.deepEqual(replay.current()!.acceptance, []);
- assert.deepEqual(replay.current()!.replacement?.unresolvedExecutions, ["run-old", "A2"]);
- assert.equal(replay.current()!.replacement?.id, old.id);
- assert.deepEqual(history, before);
- const again = createGoalStore(() => {}); again.replay([...history, ...appended]); assert.equal(again.current()?.id, replay.current()!.id); assert.equal(again.view().legacy, undefined);
+ assert.equal((await replay.mutate(enroll, f.ctx, "implicit")).code, "state_unavailable");
 });
 
 test("async cancellation/input fences and read-only optional UI preserve committed state", async t => {
@@ -526,7 +599,8 @@ test("preparation-only conflicts replay against fresh state and commit exactly o
  assert.equal(f.snapshots.length - before, 2); // one injected bookkeeping commit + exactly one committed start
  const state = f.store.current()!;
  assert.deepEqual(state.executionPending, ["run-1"]);
- assert.deepEqual(state.attempts.filter(a => a.task === "two").map(a => a.id), ["A2"]);
+ assert.match(state.attempts.find(a => a.task === "two")!.id, /^[a-z0-9]+$/);
+ assert.notEqual(state.attempts.find(a => a.task === "two")!.id, state.attempts.find(a => a.task === "one")!.id);
  // A replayed commit keeps duplicate call ids idempotent.
  const duplicate = await f.store.mutate({ operation: "start", task: "two", scope: ["two"] }, f.ctx, "conflict-start");
  assert.deepEqual(duplicate.diagnostics, ["Already recorded."]);
@@ -614,27 +688,65 @@ test("education surfaces: start names its attempt and window; rejections teach t
  await runTool(enroll);
  await runTool({ operation: "start", task: "one", scope: ["one"] });
  assert.equal(lastDetails?.ok, true);
- assert.equal(f.store.current()!.attempts.find(a => a.task === "one" && a.status === "running")?.id, "A1");
+ const firstAttempt = f.store.current()!.attempts.find(a => a.task === "one" && a.status === "running")!.id;
+ assert.match(firstAttempt, /^[a-z0-9]+$/);
  const wrongAttempt = await runTool({ operation: "report", attempt: "A9", summary: "nothing" });
  assert.match(wrongAttempt, /Report the exact attempt id start returned, or inspect when several attempts run\./);
- await runTool({ operation: "report", summary: "claimed check", facts: [{ key: "check", kind: "host", check: "unit", result: "pass" }] });
+ await runTool({ operation: "report", summary: "claimed check", facts: [{ id: "check", kind: "host", check: "unit", result: "pass" }] });
  assert.equal(lastDetails?.ok, false);
  assert.equal(lastDetails?.code, "observation_required");
- const badJudgment = await runTool({ operation: "report", summary: "honest outcome", facts: [{ key: "k", kind: "agent", check: "c", result: "pass" }], judgments: [{ subject: "task:one", facts: ["A1:nope"], accepted: true, rationale: "r" }] });
- assert.match(badJudgment, /Reference current fact ids as attempt:key; the facts list shows what is usable\./);
+ const badJudgment = await runTool({ operation: "report", summary: "honest outcome", facts: [{ id: "k", kind: "agent", check: "c", result: "pass" }], judgments: [{ target: { kind: "task", id: "one" }, facts: ["nope"], accepted: true, rationale: "r" }] });
+ assert.match(badJudgment, /Pass the fact id unchanged/);
  // An idempotent start replay must not attach another call's attempt guidance.
  const runToolWithId = async (id: string, args: Record<string, unknown>) => {
   const response = await tool!.execute(id, args as never, undefined, undefined, ctx);
   return (response.content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
  };
- await runTool({ operation: "report", attempt: "A1", summary: "first slice reported without acceptance" });
+ await runTool({ operation: "report", attempt: firstAttempt, summary: "first slice reported without acceptance" });
  const created = await runToolWithId("dup-start", { operation: "start", task: "one", scope: ["one"] });
- assert.match(created, /Attempt A2 is running for task one/);
- await runTool({ operation: "report", attempt: "A2", summary: "second slice reported without acceptance" });
+ const secondAttempt = f.store.current()!.attempts.find(a => a.status === "running")!.id;
+ assert.match(created, new RegExp(`Attempt ${secondAttempt} is running for task one`));
+ await runTool({ operation: "report", attempt: secondAttempt, summary: "second slice reported without acceptance" });
  await runTool({ operation: "start", task: "one", scope: ["one"] });
  const replayed = await runToolWithId("dup-start", { operation: "start", task: "one", scope: ["one"] });
  assert.match(replayed, /Already recorded\./);
  assert.ok(!/Attempt A\d is running/.test(replayed), "idempotent replay must not name another call's attempt");
+});
+
+test("bounded inspection recovery advertises the selectors inspect actually accepts", async t => {
+ const f = await fixture(t);
+ const long = "x".repeat(2000);
+ const requirements = Array.from({ length: 12 }, (_, i) => ({ key: `r${i}`, outcome: long, verification: long }));
+ await f.run({ ...enroll, requirements, tasks: requirements.map(r => ({ key: r.key, title: r.key, covers: [r.key] })) });
+ let tool: ToolDefinition | undefined;
+ registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
+ assert.ok(tool);
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ const inspect = async (id: string, args: Record<string, unknown>) => ((await tool!.execute(id, args as never, undefined, undefined, ctx)).content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
+ const bounded = await inspect("bounded-inspect", { operation: "inspect" });
+ assert.ok(Buffer.byteLength(bounded, "utf8") < Buffer.byteLength(JSON.stringify(f.store.current()), "utf8"), "the oversized inspection is bounded without hiding individual selectors");
+ const task = await inspect("task-target", { operation: "inspect", target: { kind: "task", id: "r3" } });
+ assert.match(task, /"key":"r3"/); assert.doesNotMatch(task, /"missing"/);
+ const requirement = await inspect("requirement-target", { operation: "inspect", target: { kind: "requirement", id: "r3" } });
+ assert.match(requirement, /"key":"r3"/); assert.doesNotMatch(requirement, /"missing"/);
+});
+
+test("structured inspect selects delivery, fact and attempt records and rejects the retired subject grammar", async t => {
+ const f = await fixture(t); await f.run(enroll); await f.run({ operation: "start", task: "one", scope: ["one"] });
+ const reported = await f.run(f.report("one"));
+ const factId = reported.view.state!.facts[0]!.id;
+ const attemptId = f.attemptOf("one");
+ let tool: ToolDefinition | undefined;
+ registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
+ assert.ok(tool);
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ const inspect = async (args: Record<string, unknown>) => ((await tool!.execute("inspect", { operation: "inspect", ...args } as never, undefined, undefined, ctx)).content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
+ assert.match(await inspect({ target: { kind: "delivery" } }), /"delivery"/);
+ assert.match(await inspect({ fact: factId }), new RegExp(`"id":"${factId}"`));
+ assert.match(await inspect({ attempt: attemptId }), new RegExp(`"id":"${attemptId}"`));
+ assert.ok((await inspect({ target: { kind: "task", id: "absent" } })).includes('"missing":"task \\"absent\\""'));
+ // The retired public subject-string grammar is rejected before mutation, not aliased.
+ assert.match(await inspect({ subject: "task:one" }), /invalid_request/);
 });
 
 test("cancellation and fencing never replay", async t => {

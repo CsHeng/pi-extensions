@@ -20,7 +20,7 @@ export const PROBE_SHAPES: readonly ProbeShape[] = ["production", "flat", "agent
 export const PROBE_GUIDANCE_LEVELS: readonly ProbeGuidance[] = ["off", "balanced", "aggressive"];
 
 /** The flat shape is derived from the production task object, not copied, so it cannot drift from the real fields. */
-export const FLAT_SHAPE_PARAMETERS = Type.Pick(SubagentTaskSchema, ["objective", "role", "repository", "scope", "inputs", "writePaths", "verification"]);
+export const FLAT_SHAPE_PARAMETERS = Type.Pick(SubagentTaskSchema, ["objective", "role", "access", "inputs", "verification"]);
 
 /** External reference shape only; it corresponds to no production contract and is never derived. */
 export const AGENT_SHAPE_PARAMETERS = Type.Object({

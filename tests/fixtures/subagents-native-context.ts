@@ -26,9 +26,9 @@ export default function nativeContextFixture(pi: ExtensionAPI): void {
 	} });
 	if (mode === "disabled") pi.on("session_start", () => { pi.setActiveTools([]); });
 	if (mode === "seed") pi.on("agent_settled", async (_event, ctx) => {
-		const graph = validateGraphStructure({ tasks: [{ id: "fixture", role: "explorer", objective: "PRIVATE_INDEX_PROSE", scope: ["."] }] });
+		const graph = validateGraphStructure({ tasks: [{ id: "fixture", role: "explorer", objective: "PRIVATE_INDEX_PROSE", access: [{ permission: "read", scope: "/tmp/scope" }] }] });
 		if (!graph.ok) throw new Error("fixture");
-		await store.allocate({ repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map((entry) => entry.id) }, "fixture-index", graph.tasks);
+		await store.allocate({ repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map((entry) => entry.id) }, "fixtureindex", graph.tasks);
 	});
 	if (mode === "late-remove") pi.on("before_provider_request", (event) => {
 		const payload = event.payload as { tools: Array<{ name: string }>; messages: unknown[] };

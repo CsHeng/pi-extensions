@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -108,6 +112,7 @@ function successful(task: { id: string; role: TaskResult["role"] }): TaskResult 
 		changedPaths: [],
 		convergence: "not-applicable",
 		reportComplete: true,
+		workerToolsSettled: true,
 	};
 }
 
@@ -121,6 +126,7 @@ async function registered(t: test.TestContext, overrides: Partial<SubagentDepend
 	const state = harness();
 	createSubagentsExtension({
 		store,
+		enclosingCapability: async () => undefined, // This fixture is a synthetic main, not its invoking test process.
 		loadConfig: async () => ({ config: defaultConfig() }),
 		createProvenance: () => ({
 			observeExtension: async () => ({ available: false as const }),
@@ -172,13 +178,13 @@ test("terminal notices coalesce behind the public waiter; joined results neither
 	state.pi.sendUserMessage = (message: string) => { const [name, token] = message.slice(1).split(" "); waiter = state.commands.get(name!).handler(token, ctx); };
 	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
 	let updates = 0;
-	const receipt = await state.tool.execute("dispatch", createInput("wake", ["fast", "slow"].map(id => ({ id, role: "explorer", objective: "inspect", scope: ["."] }))), undefined, () => { updates++; }, ctx);
+	const receipt = await state.tool.execute("dispatch", createInput("wake", ["fast", "slow"].map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }))), undefined, () => { updates++; }, ctx);
 	assert.equal(receipt.details.status, "accepted"); releaseFast(); await terminal; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0);
 	releaseSlow(); await state.tool.execute("join", { action: "join", runId: receipt.details.runId }, undefined, undefined, ctx);
 	idle = true; releaseIdle(); await waiter; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0); assert.equal(updates, 0);
 	idle = false; idleWait = new Promise<void>(resolve => { releaseIdle = resolve; });
 	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
-	const next = await state.tool.execute("next", createInput("next-wake", [{ id: "next", role: "explorer", objective: "inspect", scope: ["."] }]), undefined, undefined, ctx);
+	const next = await state.tool.execute("next", createInput("nextwake", [{ id: "next", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, ctx);
 	await nextDone; await new Promise(resolve => setImmediate(resolve)); idle = true; releaseIdle(); await waiter; await notice;
 	assert.equal(sent.length, 1); assert.ok(sent[0].content.includes(next.details.sessions[0].handle));
 	for (const view of receipt.details.sessions) assert.ok(!sent[0].content.includes(view.handle));
@@ -222,7 +228,7 @@ test("status and managed create route across all accessible models without readi
 	await state.commands.get("subagents").handler("", ctx);
 	assert.match(ctx.notifications[0]?.message ?? "", /explorer=synthetic\/outside-cycle:low/);
 	const result = await state.tool.execute("all-models", {
-		...createInput("all-models", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]),
+		...createInput("allmodels", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]),
 		mode: "foreground",
 	}, undefined, undefined, ctx);
 	assert.equal(result.details.status, "succeeded", JSON.stringify(result.details));
@@ -251,7 +257,7 @@ test("untrusted projects fail before a child or repository probe starts", async 
 			async lstat() { probes += 1; throw new Error("probed"); },
 		},
 	});
-	const result = await state.tool.execute("call", createInput("trust", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context(false));
+	const result = await state.tool.execute("call", createInput("trust", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, context(false));
 	const details = detailsOf(result);
 	assert.equal("isError" in result, false);
 	assert.match(result.content[0].text, /project_trust_required/);
@@ -274,8 +280,8 @@ test("trusted graph inherits the parent route, approves the child, and passes pr
 	});
 	const updates: string[] = [];
 	const result = await state.tool.execute("call", createInput("graph", [
-		{ id: "a", role: "explorer", objective: "a", scope: ["."] },
-		{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "b", role: "reviewer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["a"] },
 	]), undefined, (update: any) => updates.push(update.content[0].text), context());
 	const details = detailsOf(result);
 	assert.equal(details.status, "succeeded");
@@ -298,7 +304,7 @@ test("child activity reaches host progress before settlement without leaking dia
 		},
 	});
 	const updates: string[] = [];
-	const result = await state.tool.execute("call", createInput("progress", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, (update: any) => updates.push(update.content[0].text), context());
+	const result = await state.tool.execute("call", createInput("progress", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, (update: any) => updates.push(update.content[0].text), context());
 	assert.equal(detailsOf(result).status, "succeeded");
 	assert.ok(updates.some((message) => /turns=1 tool=read/.test(message)));
 	assert.ok(updates.every((message) => !/subagent-sessions|private|jsonl/.test(message)));
@@ -317,7 +323,7 @@ test("request duration spans configuration admission and child work", async (t) 
 			return successful(options.task);
 		},
 	});
-	const details = detailsOf(await state.tool.execute("clock", createInput("clock", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	const details = detailsOf(await state.tool.execute("clock", createInput("clock", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, context()));
 	assert.equal(details.status, "succeeded");
 	assert.ok((details.requestTelemetry?.durationMs ?? 0) >= 40);
 	assert.equal(details.requestTelemetry?.launchedChildren, 1);
@@ -336,8 +342,8 @@ test("a failed predecessor does not launch its dependent", async (t) => {
 		},
 	});
 	const details = detailsOf(await state.tool.execute("call", createInput("blocked", [
-		{ id: "first", role: "explorer", objective: "first", scope: ["."] },
-		{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["first"] },
+		{ id: "first", role: "explorer", objective: "first", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "blocked", role: "reviewer", objective: "blocked", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["first"] },
 	]), undefined, undefined, context()));
 	assert.equal(details.status, "failed");
 	assert.deepEqual(launched, ["first"]);
@@ -371,7 +377,7 @@ test("task semantic profiles are projected into route resolution without plan co
 		id: "scan",
 		role: "explorer",
 		objective: "scan",
-		scope: ["."],
+		access: [{ permission: "read", scope: "/tmp/scope" }],
 		executionProfile: "deep",
 		reasoningProfile: "deep",
 	}]), undefined, undefined, context(true, [parentModel, deepModel])));
@@ -395,8 +401,8 @@ test("mixed explicit and default routes keep selection sources on the managed re
 		},
 	});
 	const details = detailsOf(await state.tool.execute("call", createInput("routes", [
-		{ id: "explicit", role: "explorer", objective: "scan", scope: ["."], model: "Explicit 4.6", thinking: "high" },
-		{ id: "default", role: "reviewer", objective: "review", scope: ["."] },
+		{ id: "explicit", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }], model: "Explicit 4.6", thinking: "high" },
+		{ id: "default", role: "reviewer", objective: "review", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]), undefined, undefined, context(true, [parentModel, explicitModel])));
 	assert.equal(details.status, "succeeded");
 	assert.equal(seen.size, 2);
@@ -425,9 +431,9 @@ test("explicit route success and failure leave the user route file byte-identica
 		},
 	});
 	const ctx = context(true, [parentModel, explicitModel]);
-	const success = detailsOf(await state.tool.execute("success", createInput("explicit", [{ id: "explicit", role: "explorer", objective: "scan", scope: ["."], model: "Explicit 4.6", thinking: "high" }]), undefined, undefined, ctx));
+	const success = detailsOf(await state.tool.execute("success", createInput("explicit", [{ id: "explicit", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }], model: "Explicit 4.6", thinking: "high" }]), undefined, undefined, ctx));
 	assert.equal(success.sessions[0]?.result?.route?.selectionSource, "explicit-task");
-	const failure = detailsOf(await state.tool.execute("failure", createInput("missing", [{ id: "missing", role: "explorer", objective: "scan", scope: ["."], model: "missing-model", thinking: "high" }]), undefined, undefined, ctx));
+	const failure = detailsOf(await state.tool.execute("failure", createInput("missing", [{ id: "missing", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }], model: "missing-model", thinking: "high" }]), undefined, undefined, ctx));
 	assert.equal(failure.error?.code, "model_not_found");
 	assert.equal(failure.requestTelemetry?.launchedChildren, 0);
 	assert.equal(calls, 1);
@@ -448,8 +454,8 @@ test("rejected graphs fail before configuration or child launch", async (t) => {
 		},
 	});
 	const details = detailsOf(await state.tool.execute("call", createInput("cycle", [
-		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
-		{ id: "b", role: "reviewer", objective: "b", scope: ["."], dependsOn: ["a"] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["b"] },
+		{ id: "b", role: "reviewer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["a"] },
 	]), undefined, undefined, context()));
 	assert.equal(details.error?.code, "dependency_cycle");
 	assert.equal(details.requestTelemetry?.launchedChildren, 0);
@@ -473,7 +479,7 @@ test("a concurrent duplicate submission returns its receipt without launching an
 			return { ...successful(options.task), route: options.route };
 		},
 	});
-	const input = createInput("busy", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]);
+	const input = createInput("busy", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]);
 	const first = state.tool.execute("first", input, undefined, undefined, context());
 	await childStarted;
 	const second = detailsOf(await state.tool.execute("second", input, undefined, undefined, context()));
@@ -542,7 +548,7 @@ test("session shutdown waits for the aborted run before a later create", async (
 			});
 		},
 	});
-	const execution = state.tool.execute("call", createInput("abort", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context());
+	const execution = state.tool.execute("call", createInput("abort", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, context());
 	await started;
 
 	let shutdownSettled = false;
@@ -556,10 +562,10 @@ test("session shutdown waits for the aborted run before a later create", async (
 	assert.equal(shutdownSettled, true);
 	assert.equal(result.status, "aborted");
 
-	const closed = detailsOf(await state.tool.execute("closed", createInput("closed", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	const closed = detailsOf(await state.tool.execute("closed", createInput("closed", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, context()));
 	assert.equal(closed.error?.code, "supervisor_closed");
 	for (const handler of state.handlers.get("session_start") ?? []) await handler({}, context());
-	const next = detailsOf(await state.tool.execute("next", createInput("next", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), undefined, undefined, context()));
+	const next = detailsOf(await state.tool.execute("next", createInput("next", [{ id: "scannext", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, context()));
 	assert.equal(next.status, "succeeded");
 	assert.equal(childRuns, 2);
 });
@@ -579,9 +585,10 @@ async function gitPair(t: test.TestContext): Promise<{ current: string; sibling:
 	return { current, sibling, siblingFile: await realpath(siblingFile) };
 }
 
-test("current-repository absolute and returning-parent scope reach children in canonical form", async (t) => {
+test("absolute access grants reach children without a relative scope rewrite", async (t) => {
 	const { current } = await gitPair(t);
 	const gitRoot = await realpath(current);
+	const tracked = join(gitRoot, "src", "tracked.ts");
 	const seen: any[] = [];
 	const { state } = await registered(t, {
 		runChild: async (options) => {
@@ -595,23 +602,23 @@ test("current-repository absolute and returning-parent scope reach children in c
 		id: "scan",
 		role: "explorer",
 		objective: "scan",
-		scope: [gitRoot, join(gitRoot, "src"), `../${basename(current)}/src/tracked.ts`],
+		access: [{ permission: "read", scope: [gitRoot, tracked] }],
 	}]), undefined, undefined, context(true, [parentModel], current)));
-	assert.equal(details.status, "succeeded");
-	assert.deepEqual(seen[0]?.task.scope, [".", "src", "src/tracked.ts"]);
-	assert.notEqual(seen[0]?.cwd, gitRoot);
-	assert.equal(seen[0]?.capability.root, seen[0]?.cwd);
-	assert.equal(await readFile(join(seen[0]!.cwd, "src/tracked.ts"), "utf8"), "tracked\n");
-	assert.equal(seen[0]?.capability.version, 2);
-	assert.deepEqual(seen[0]?.capability.externalReadRoots, []);
+	assert.equal(details.status, "succeeded", JSON.stringify(details.error ?? details.sessions[0]?.result?.error));
+	assert.equal(seen[0]?.task.scope, undefined);
+	assert.equal(seen[0]?.capability.version, 4);
+	assert.equal(seen[0]?.capability.externalReadRoots, undefined);
+	assert.ok(seen[0]?.capability.grants.some((grant: { path: string }) => grant.path === tracked));
+	assert.equal(await readFile(tracked, "utf8"), "tracked\n");
 });
 
-test("narrow worker scope is refused as repo-wide managed worker authority", async (t) => {
+test("narrow write grant is admitted without widening to the repository", async (t) => {
 	const { current } = await gitPair(t);
-	let childCalls = 0;
+	const target = join(await realpath(current), "src", "new.ts");
+	const seen: any[] = [];
 	const { state } = await registered(t, {
 		runChild: async (options) => {
-			childCalls += 1;
+			seen.push(options);
 			return successful(options.task);
 		},
 	});
@@ -619,23 +626,21 @@ test("narrow worker scope is refused as repo-wide managed worker authority", asy
 		id: "write",
 		role: "worker",
 		objective: "write",
-		scope: ["src/new.ts"],
-		writePaths: ["src/new.ts"],
+		access: [{ permission: "write", scope: target }],
 	}]), undefined, undefined, context(true, [parentModel], current)));
-	assert.equal(details.error?.code, "full_worker_scope_required");
-	assert.equal(details.requestTelemetry?.launchedChildren, 0);
-	assert.equal(childCalls, 0);
+	assert.equal(details.status, "succeeded", JSON.stringify(details.error ?? details.sessions[0]?.result?.error));
+	const write = seen[0]?.capability.grants.find((grant: { permission: string }) => grant.permission === "write");
+	assert.ok(write);
+	assert.notEqual(write.path, await realpath(current));
 });
 
 test("sibling, non-Git, unsafe, and invalid external roots fail without child work", async (t) => {
 	const { current, sibling } = await gitPair(t);
 	const plain = await mkdtemp(join(tmpdir(), "subagent-ext-plain-"));
 	t.after(async () => rm(plain, { recursive: true, force: true }));
-	for (const [cwd, tasks, code, configBeforeAdmit] of [
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: [sibling] }], "scope_outside_repository", true],
-		[plain, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }], "repository_root_unavailable", false],
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["bad\0path"] }], "invalid_scope", false],
-		[current, [{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [join(current, "src")] }], "external_read_root_not_external", true],
+	for (const [cwd, tasks, code, configBeforeAdmit, requestId] of [
+		[current, [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "bad\0path" }] }], "invalid_access", false, "badpath"],
+		[current, [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }], externalReadRoots: [join(current, "src")] }], "invalid_session_request", false, "removedfield"],
 	] as const) {
 		let configCalls = 0;
 		let childCalls = 0;
@@ -649,7 +654,7 @@ test("sibling, non-Git, unsafe, and invalid external roots fail without child wo
 				return successful(options.task);
 			},
 		});
-		const result = await state.tool.execute("call", createInput(`admit-${code}`, [...tasks]), undefined, undefined, context(true, [parentModel], cwd));
+		const result = await state.tool.execute("call", createInput(requestId, [...tasks]), undefined, undefined, context(true, [parentModel], cwd));
 		const details = detailsOf(result);
 		assert.equal(details.error?.code, code, code);
 		assert.equal(details.requestTelemetry?.launchedChildren, 0);
@@ -673,10 +678,10 @@ test("projected prompt bounds reject the whole batch before config or launch", a
 			return successful(options.task);
 		},
 	});
-	const predecessors = Array.from({ length: 8 }, (_, index) => ({ id: `p${index}`, role: "explorer" as const, objective: "p", scope: ["."] }));
+	const predecessors = Array.from({ length: 8 }, (_, index) => ({ id: `p${index}`, role: "explorer" as const, objective: "p", access: [{ permission: "read", scope: "/tmp/scope" }] }));
 	const details = detailsOf(await state.tool.execute("call", createInput("prompt", [
 		...predecessors,
-		{ id: "oversized", role: "reviewer", objective: "review", scope: ["."], dependsOn: predecessors.map((task) => task.id) },
+		{ id: "oversized", role: "reviewer", objective: "review", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: predecessors.map((task) => task.id) },
 	]), undefined, undefined, context()));
 	assert.equal(details.error?.code, "prompt_too_large");
 	assert.ok(8 * HARD_LIMITS.maxPredecessorOutputBytes + "review".length > HARD_LIMITS.maxPromptBytes);
@@ -703,17 +708,16 @@ test("explorer and reviewer external roots reach only task and capability fields
 		},
 	});
 	const result = await state.tool.execute("call", createInput("external", [
-		{ id: "scan", role: "explorer", objective: "scan", scope: ["."], externalReadRoots: [siblingFile] },
-		{ id: "review", role: "reviewer", objective: "review", scope: ["src"], externalReadRoots: [siblingFile] },
+		{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: ["/tmp/scope", siblingFile] }] },
+		{ id: "review", role: "reviewer", objective: "review", access: [{ permission: "read", scope: ["/tmp/src", siblingFile] }] },
 	]), undefined, (update: any) => updates.push(update.content[0].text), context(true, [parentModel], current));
 	const details = detailsOf(result);
 	assert.equal(details.status, "succeeded", JSON.stringify(details.sessions.map(view => ({ error: view.requestError, resultError: view.result?.error }))));
-	assert.deepEqual(seen[0]?.task.externalReadRoots, [siblingFile]);
-	assert.deepEqual(seen[0]?.capability.externalReadRoots, [siblingFile]);
-	assert.notEqual(seen[0]?.cwd, await realpath(current));
-	assert.equal(seen[0]?.capability.root, seen[0]?.cwd);
-	assert.deepEqual(seen[0]?.capability.writePaths, []);
-	assert.deepEqual(seen[1]?.task.externalReadRoots, [siblingFile]);
+	assert.equal(seen[0]?.task.externalReadRoots, undefined);
+	assert.equal(seen[0]?.capability.externalReadRoots, undefined);
+	assert.ok(seen[0]?.capability.grants.some((grant: { path: string }) => grant.path === siblingFile));
+	assert.equal(seen[0]?.capability.grants.some((grant: { permission: string }) => grant.permission === "write"), false);
+	assert.ok(seen[1]?.capability.grants.some((grant: { path: string }) => grant.path === siblingFile));
 	assert.ok(updates.every((message) => !message.includes(siblingFile)));
 	assert.equal(JSON.stringify(details.requestTelemetry).includes(siblingFile), false);
 	assert.equal(details.sessions[0]?.result?.output, `echo:${siblingFile}`);
@@ -726,7 +730,7 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 		return { ...successful(options.task), route: options.route };
 	} });
 	const ctx = { ...context(), mode: "tui" };
-	const input = { ...createInput("observer", [{ id: "scan", role: "explorer", objective: "scan", scope: ["."] }]), mode: "foreground" };
+	const input = { ...createInput("observer", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), mode: "foreground" };
 	const first = await state.tool.execute("call", input, undefined, undefined, ctx);
 	assert.equal(first.details.status, "succeeded");
 	assert.ok(snapshots.some(value => value.activeChildren === 1));
@@ -739,18 +743,18 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	const replay = await state.tool.execute("replay", input, undefined, undefined, ctx);
 	assert.equal(replay.details.requestTelemetry.launchedChildren, 0);
 	assert.equal(snapshots.length, length);
-	const second = await state.tool.execute("second", { ...createInput("second", [{ id: "other", role: "reviewer", objective: "other", scope: ["."] }]), mode: "foreground" }, undefined, undefined, ctx);
+	const second = await state.tool.execute("second", { ...createInput("second", [{ id: "other", role: "reviewer", objective: "other", access: [{ permission: "read", scope: "/tmp/scope" }] }]), mode: "foreground" }, undefined, undefined, ctx);
 	assert.equal(second.details.status, "succeeded");
 	assert.ok(snapshots[length]!.revision > snapshots[length - 1]!.revision, "revisions must increase across runs in one generation");
 	assert.equal(snapshots[length]!.generation, snapshots[0]!.generation);
 	const handle = first.details.sessions[0]!.handle;
-	const episode = { handle, requestId: "episode-two", expectedEpisode: 1, message: "second scan" };
+	const episode = { handle, requestId: "episodetwo", expectedEpisode: 1, message: "second scan" };
 	const two = await state.tool.execute("two", { action: "continue", mode: "foreground", episodes: [episode] }, undefined, undefined, ctx);
 	assert.equal(two.details.status, "succeeded");
-	const three = await state.tool.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, requestId: "episode-three", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
+	const three = await state.tool.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, requestId: "episodethree", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
 	assert.equal(three.details.status, "succeeded");
 	const mixedStart = snapshots.length;
-	const mixed = await state.tool.execute("mixed", { action: "continue", mode: "foreground", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "other-two", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
+	const mixed = await state.tool.execute("mixed", { action: "continue", mode: "foreground", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "othertwo", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
 	assert.equal(mixed.details.status, "succeeded");
 	assert.equal(mixed.details.requestTelemetry.launchedChildren, 1);
 	for (const snapshot of snapshots.slice(mixedStart)) {
@@ -762,21 +766,22 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 
 test("worker explicit external read roots reach the child without an external write grant", async (t) => {
 	const { current, siblingFile } = await gitPair(t);
-	let childCalls = 0;
+	const seen: any[] = [];
 	const { state } = await registered(t, {
 		runChild: async (options) => {
-			childCalls += 1;
+			seen.push(options);
 			return successful(options.task);
 		},
 	});
-	const details = detailsOf(await state.tool.execute("call", createInput("worker-external", [{
+	const details = detailsOf(await state.tool.execute("call", createInput("workerexternal", [{
 		id: "write",
 		role: "worker",
 		objective: "write",
-		scope: ["."],
-		writePaths: ["src/tracked.ts"],
-		externalReadRoots: [siblingFile],
+		access: [{ permission: "write", scope: await realpath(current) }, { permission: "read", scope: siblingFile }],
 	}]), undefined, undefined, context(true, [parentModel], current)));
-	assert.notEqual(details.error?.code, "external_read_roots_forbidden");
-	assert.equal(childCalls, 1);
+	assert.equal(details.status, "succeeded", JSON.stringify(details.error ?? details.sessions[0]?.result?.error));
+	assert.equal(seen.length, 1);
+	assert.ok(seen[0]?.capability.grants.some((grant: { permission: string }) => grant.permission === "write"));
+	assert.ok(seen[0]?.capability.grants.some((grant: { permission: string; path: string }) => grant.permission === "read" && grant.path === siblingFile));
+	assert.equal(seen[0]?.capability.grants.some((grant: { permission: string; path: string }) => grant.permission === "write" && grant.path === siblingFile), false);
 });

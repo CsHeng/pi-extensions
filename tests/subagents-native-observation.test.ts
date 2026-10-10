@@ -34,6 +34,17 @@ for (const installed of [false, true]) test(`native ${installed ? "installed" : 
 	assert.ok(toolMessages.every(message => message.usage === undefined), "no native billing forwarding on fresh calls or replay");
 	const results = toolMessages.map(message => message.details);
 	assert.equal(results.length, 3); assert.ok(results.every((result) => result.status === "succeeded"));
+	for (const result of results) {
+		for (const id of [result.runId, result.generation, result.requestTelemetry.invocationId, ...result.sessions.map((view: { handle: string }) => view.handle)]) assert.match(id, /^[A-Za-z0-9]+$/);
+		for (const epoch of [result.requestTelemetry.extensionEpoch, result.requestTelemetry.configurationEpoch]) if (epoch !== null) assert.match(epoch, /^[A-Za-z0-9]+$/);
+	}
+	for (const entry of entries.filter(entry => entry.customType === "csheng.subagents.execution.v4")) {
+		assert.match(entry.data.eventId, /^[A-Za-z0-9]+$/);
+		assert.ok(results.some(result => result.runId === entry.data.runId && result.generation === entry.data.generation), "execution identities are copied, not reconstructed");
+	}
+	assert.equal(parents[0]!.runs[0]!.telemetry.runId, results[0].runId);
+	assert.equal(parents[2]!.runs[0]!.telemetry.runId, results[2].runId);
+	assert.match(parents[0]!.timing.clockKey, /^[A-Za-z0-9]+$/);
 	const children: NativeObservation[] = results.map((result) => result.sessions[0].result.observation);
 	for (const parent of parents) {
 		assert.equal(isNativeObservation(parent.native), true); assert.equal(parent.native.available, true);

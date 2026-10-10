@@ -17,7 +17,7 @@ async function fixture(t: test.TestContext) {
  let serial = 0;
  const run = async (op: GoalOperation) => { const result = await store.mutate(op, ctx, `cross-${++serial}`); assert.equal(result.ok, true, result.message); return result; };
  await run({ operation: "enroll", goal: "Cross-repository change", delivery: "local installation", authority: "explicit fixture", requirements: [{ key: "a", outcome: "skills", verification: "check" }, { key: "b", outcome: "extensions", verification: "check" }], tasks: [{ key: "a", title: "Skills", covers: ["a"] }, { key: "b", title: "Extensions", covers: ["b"] }] });
- const report = (key: string): GoalOperation => ({ operation: "report", task: key, summary: "Observed fixture verification", facts: [{ key: "check", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: `task:${key}`, facts: ["check"], accepted: true, rationale: "verified" }] });
+ const report = (key: string): GoalOperation => ({ operation: "report", task: key, summary: "Observed fixture verification", facts: [{ id: "check", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ target: { kind: "task", id: key }, facts: ["check"], accepted: true, rationale: "verified" }] });
  return { cwd, skills, extensions, installed, store, run, report };
 }
 

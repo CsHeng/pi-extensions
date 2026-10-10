@@ -1,9 +1,10 @@
 import type { SessionView } from "../subagents/session-contracts.ts";
 
 /** Execution transport only: never a verification judgment or a workflow command. */
-export const SUBAGENT_EXECUTION_EVENT = "csheng.subagents.execution.v3";
+export const SUBAGENT_EXECUTION_EVENT = "csheng.subagents.execution.v4";
+export const SUBAGENT_EXECUTION_EVENT_V3 = "csheng.subagents.execution.v3";
 export interface SubagentExecutionEvent {
-	version: 3;
+	version: 4;
 	eventId: string;
 	kind: "task-terminal" | "run-terminal";
 	runId: string;

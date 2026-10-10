@@ -106,8 +106,8 @@ function snapshot(overrides: Partial<ObserverSnapshot> = {}): ObserverSnapshot {
 		version: OBSERVER_VERSION,
 		parentSessionId: "parent_session-1",
 		anchor: "leaf_entry-1",
-		generation: "gen-1",
-		runId: "run-1",
+		generation: "Gen1",
+		runId: "Run1",
 		revision: 0,
 		phase: "running",
 		requestedTasks: 1,
@@ -225,11 +225,11 @@ function historyRow(overrides: Partial<SessionViewHistoryRow> = {}): SessionView
 
 function sessionReply(overrides: Partial<SessionViewReply> = {}): SessionViewReply {
 	return {
-		version: 1,
+		version: 4,
 		requestId: "ui-1",
 		ownerSessionId: "parent_session-1",
 		anchor: "leaf_entry-1",
-		generation: "gen-1",
+		generation: "Gen1",
 		revision: 1,
 		inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 		summary: { agents: 1, acceptedEpisodes: 1, states: { idle: 1, queued: 0, running: 0, interrupted: 0, closed: 0 }, liveAgents: 0 },
@@ -282,11 +282,11 @@ test("a session reply alone supplies fresh live rows and a clock", async () => {
 	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
 	await openWith(pi, ctx);
-	const reply = sessionReply({ requestId: lastRequest(pi).requestId, live: [task({ id: "reply-live", episode: 3 })], summary: { agents: 1, acceptedEpisodes: 3, liveAgents: 1, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 0 } } });
+	const reply = sessionReply({ requestId: lastRequest(pi).requestId, live: [task({ id: "ReplyLive", episode: 3 })], summary: { agents: 1, acceptedEpisodes: 3, liveAgents: 1, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 0 } } });
 	pi.events.emit(SESSION_VIEW_EVENT, reply);
 	const text = held.overlay!.render(80).join("\n");
 	assert.match(text, /1 live/);
-	assert.match(text, /reply-li ep3 explorer/);
+	assert.match(text, /ReplyLiv ep3 explorer/);
 	await pi.handlers.get("session_shutdown")?.({}, ctx);
 });
 
@@ -332,9 +332,9 @@ test("session-scoped title, counts and recorded usage stay distinct from live tu
 	assert.match(countRows[1]?.text ?? "", /^1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
 	assert.match(formatSessionCounts(counts).text, /1 live \(t2\)/);
 	assert.equal(counts.limitedLive, false);
-	const legacy = sessionCounts(snapshot({ version: 2 }), sessionReply(), "ready", undefined, false);
-	assert.equal(legacy.limitedLive, true);
-	assert.match(formatSessionCounts(legacy).text, /limited live observation/);
+	const awaitingHistory = sessionCounts(snapshot(), undefined, "ready", undefined, false);
+	assert.equal(awaitingHistory.limitedLive, true);
+	assert.match(formatSessionCounts(awaitingHistory).text, /limited live observation/);
 	const usage = formatSessionUsage(usageProjection());
 	assert.match(usage?.text ?? "", /^recorded Σ537 turns · ↑12k ↓2\.0k · \$1\.25$/);
 	assert.match(formatSessionUsage(usageProjection({ status: "incomplete", usage: { input: 100, output: null, cacheRead: 0, cacheWrite: 0, totalTokens: null, cost: null }, assistantTurns: 12 }))?.text ?? "", /partial/);
@@ -419,6 +419,51 @@ test("detail text keeps visible spaces across zero-width separators and wrapped 
 	assert.match(wrapped, /Read-only C-ROUTEROS/);
 });
 
+test("themed overlay renders bounded per-root destination, apply, recovery and release outcomes", () => {
+	const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
+	const reply = sessionReply({
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({
+			state: "closed", retained: true,
+			roots: [
+				{ id: "rootone", destination: "/work/alpha", status: "applied", release: "released" },
+				{ id: "roottwo", destination: "/work/beta", status: "unknown", recovery: "required", release: "remaining" },
+			],
+			release: { status: "partial", remaining: 1 },
+		})] },
+	});
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply }),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
+	overlay.handleInput("enter");
+	const text = overlay.render(120, 30).join("\n");
+	assert.match(text, /rootone applied\/released \/work\/alpha/, "a released root keeps its own apply and release facts in the themed panel");
+	assert.match(text, /roottwo unknown!\/remaining \/work\/beta/, "an unreleased root shows its recovery need and remaining release");
+});
+
+test("themed overlay keeps scratch-only cleanup failure separate from fully released roots", () => {
+	const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
+	const reply = sessionReply({
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({
+			state: "closed", retained: true,
+			// A never-frozen candidate: no applied root, yet every owned root was released.
+			roots: [
+				{ id: "rootone", destination: "/work/alpha", status: "not-applied", release: "released" },
+				{ id: "roottwo", destination: "/work/beta", status: "not-applied", release: "released" },
+			],
+			release: { status: "partial", remaining: 1 },
+		})] },
+	});
+	const overlay = new SubagentsOverlay(
+		overlayModel({ kind: "ready", reply }),
+		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
+	overlay.handleInput("enter");
+	const text = overlay.render(120, 30).join("\n");
+	assert.match(text, /rootone not-applied\/released \/work\/alpha/);
+	assert.match(text, /roottwo not-applied\/released \/work\/beta/);
+	assert.doesNotMatch(text, /not-applied\/partial/, "a session-scratch failure is never repeated as a per-root failure");
+	assert.match(text, /cleanup=partial remaining=1/, "the aggregate cleanup failure stays visible in the themed panel");
+});
+
 test("history reaches every retained handle across pages with enter, pageUp and pageDown", () => {
 	const handles = Array.from({ length: 37 }, (_, index) => `session_${String(index + 10).padStart(8, "0")}-${String(index).padStart(4, "0")}-4000-8000-${String(index).padStart(12, "0")}`);
 	const page = (index: number): SessionViewReply => sessionReply({
@@ -473,9 +518,9 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	pi.events.emit(OBSERVER_EVENT, snapshot());
 	await openWith(pi, ctx);
 	const first = lastRequest(pi);
-	assert.equal(first.version, 1);
+	assert.equal(first.version, 4);
 	assert.equal(first.page, 0);
-	assert.match(first.requestId, /^ui-/);
+	assert.match(first.requestId, /^[A-Za-z0-9]+$/);
 	// A late reply for an older request cannot replace the pending one.
 	answer(pi, sessionReply({ requestId: "ui-stale" }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/);
@@ -590,11 +635,11 @@ test("a retired generation cannot recover a timed-out query after a new generati
 	pi.events.emit(OBSERVER_EVENT, snapshot({ phase: "settled", tasks: [settledTask()], activeChildren: 0, settledTasks: 1 }));
 	await openWith(pi, ctx); const old = lastRequest(pi);
 	clock += 4_000; scheduler.tick();
-	pi.events.emit(OBSERVER_EVENT, snapshot({ generation: "gen-2", runId: "run-2", phase: "settled", tasks: [settledTask()], activeChildren: 0, settledTasks: 1 }));
+	pi.events.emit(OBSERVER_EVENT, snapshot({ generation: "Gen2", runId: "Run2", phase: "settled", tasks: [settledTask()], activeChildren: 0, settledTasks: 1 }));
 	const fresh = lastRequest(pi); assert.notEqual(fresh.requestId, old.requestId);
 	answer(pi, sessionReply({ requestId: old.requestId }));
 	assert.match(held.overlay!.render(120).join("\n"), /history loading/);
-	answer(pi, sessionReply({ requestId: fresh.requestId, generation: "gen-2" }));
+	answer(pi, sessionReply({ requestId: fresh.requestId, generation: "Gen2" }));
 	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /history loading/);
 });
 
@@ -651,19 +696,19 @@ test("live transitions move a handle between live and history without double cou
 	const ctx = captureCtx(held);
 	await pi.handlers.get("session_start")?.({}, ctx);
 	let observerRevision = 0;
-	const observer = new ManagedObserver("run-live", { repo: "/fixture", parentSessionId: "parent_session-1", anchor: "leaf_entry-1", branch: ["leaf_entry-1"] }, "gen-1",
-		[{ id: "session_live0000000000000000000000001", role: "explorer", episode: 1, replayed: false }], () => 1_000,
+	const observer = new ManagedObserver("RunLive", { repo: "/fixture", parentSessionId: "parent_session-1", anchor: "leaf_entry-1", branch: ["leaf_entry-1"] }, "Gen1",
+		[{ id: "LiveHandle1", role: "explorer", episode: 1, replayed: false }], () => 1_000,
 		value => pi.events.emit(OBSERVER_EVENT, value), () => ++observerRevision);
 	observer.begin();
 	await openWith(pi, ctx);
 	const request = lastRequest(pi);
-	observer.childStarted("session_live0000000000000000000000001");
+	observer.childStarted("LiveHandle1");
 	answer(pi, sessionReply({ requestId: request.requestId }));
 	const liveText = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(liveText, /1 live \(t0\)/);
 	assert.match(liveText, /● \S+ ep\d+ explorer/);
 	// The live handle leaves the history section; settled work returns to it.
-	observer.childStopped("session_live0000000000000000000000001");
+	observer.childStopped("LiveHandle1");
 	observer.finish(false, false);
 	const settledText = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(settledText, /No live agents; retained work is in history\./);

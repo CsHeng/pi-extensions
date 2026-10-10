@@ -1,353 +1,186 @@
 import assert from "node:assert/strict";
-import { createFindToolDefinition, createGrepToolDefinition } from "@earendil-works/pi-coding-agent";
-import { chmod, lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, type ChildCapabilityManifest } from "../extensions/subagents/contracts.ts";
-import childGuard from "../extensions/subagents/child-capability-guard.ts";
-import { assertCanonicalExternalRoots, authorizePath, loadCapability, parseCapability } from "../extensions/subagents/path-policy.ts";
+import { CHILD_CAPABILITY_MANIFEST_VERSION, type ChildCapabilityManifest } from "../extensions/subagents/contracts.ts";
+import { authorizePath, parseCapability } from "../extensions/subagents/path-policy.ts";
+import { getManagedRole, toolsForAccess } from "../extensions/subagents/roles.ts";
+import { isNativePathTool, isNativeShellTool, readOnlyToolArgs } from "../extensions/subagents/native-context.ts";
 
 async function fixture(t: test.TestContext) {
 	const root = await mkdtemp(join(tmpdir(), "subagent-guard-"));
 	const outside = await mkdtemp(join(tmpdir(), "subagent-outside-"));
-	t.after(async () => {
-		await rm(root, { recursive: true, force: true });
-		await rm(outside, { recursive: true, force: true });
-	});
+	t.after(async () => { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
 	await mkdir(join(root, "src"));
 	await writeFile(join(root, "src", "allowed.ts"), "old");
 	await writeFile(join(outside, "secret"), "secret");
-	const manifest: ChildCapabilityManifest = {
-		version: 1,
-		root,
-		role: "worker",
-		readRoots: [join(root, "src")],
-		writePaths: [join(root, "src", "allowed.ts"), join(root, "src", "new.ts")],
-	};
-	return { root, outside, manifest };
+	const read: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "reviewer", cwd: root, grants: [{ permission: "read", path: root }], roots: [] };
+	const write: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "explorer", cwd: root, grants: [{ permission: "write", path: root }], roots: [] };
+	return { root, outside, read, write };
 }
 
-test("path policy permits scoped reads and exact writes", async (t) => {
-	const { manifest } = await fixture(t);
-	assert.equal((await authorizePath(manifest, "read", "src/allowed.ts")).allowed, true);
-	assert.equal((await authorizePath(manifest, "edit", "src/allowed.ts")).allowed, true);
+test("the same grant exposes the same tools regardless of purpose label", () => {
+	assert.deepEqual(toolsForAccess(false), ["read", "grep", "find", "ls", "git_read", "bash"]);
+	assert.ok(toolsForAccess(true).includes("edit"));
+	assert.ok(toolsForAccess(true).includes("bash"));
+});
+
+test("native operation hints depend on access, not the role label", () => {
+	for (const role of ["explorer", "reviewer", "worker"] as const) {
+		assert.deepEqual(getManagedRole(role, false).tools, toolsForAccess(false));
+		assert.deepEqual(getManagedRole(role, true).tools, toolsForAccess(true));
+	}
+});
+
+test("native path/shell classification and read-only selection are shared", () => {
+	for (const tool of ["read", "grep", "find", "ls", "edit", "write"]) assert.equal(isNativePathTool(tool), true, tool);
+	assert.equal(isNativePathTool("bash"), false);
+	assert.equal(isNativePathTool("fixture_custom"), false);
+	for (const tool of ["bash", "powershell"]) assert.equal(isNativeShellTool(tool), true, tool);
+	assert.equal(isNativeShellTool("read"), false);
+	// Read-only intent removes only the mutating builtins; a write grant adds no ceiling.
+	assert.deepEqual(readOnlyToolArgs(false), ["--exclude-tools", "edit,write"]);
+	assert.deepEqual(readOnlyToolArgs(true), []);
+});
+
+test("read grants do not become write grants and write grants stay inside the path", async (t) => {
+	const { root, outside, read, write } = await fixture(t);
+	assert.equal((await authorizePath(read, "read", join(root, "src", "allowed.ts"))).allowed, true);
+	assert.equal((await authorizePath(read, "edit", join(root, "src", "allowed.ts"))).allowed, false);
+	assert.equal((await authorizePath(write, "edit", join(root, "src", "allowed.ts"))).allowed, true);
+	assert.equal((await authorizePath(write, "write", join(outside, "secret"))).allowed, false);
+	assert.equal((await authorizePath(write, "write", join(root, ".git", "config"))).allowed, false);
+});
+
+test("unsupported capability versions are rejected without normalization", () => {
+	assert.throws(() => parseCapability({ version: 2, root: "/repo", role: "worker", readRoots: ["/repo"], writePaths: [], externalReadRoots: [] }), /unsupported version/);
+	assert.throws(() => parseCapability({ version: 1, root: "/repo", role: "explorer", readRoots: ["/repo"], writePaths: [] }), /unsupported version/);
+});
+
+test("an authorized missing file or directory is created without granting its siblings", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-guard-missing-"));
+	const outside = await mkdtemp(join(tmpdir(), "subagent-guard-missing-outside-"));
+	t.after(async () => { await rm(base, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
+	await mkdir(join(base, "src"));
+	const src = await lstat(join(base, "src"));
+	const baseInfo = await lstat(base);
+	const manifest: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "worker", cwd: base, grants: [
+		{ permission: "write", path: join(base, "src", "new.ts"), anchor: { path: join(base, "src"), dev: src.dev, ino: src.ino } },
+		{ permission: "write", path: join(base, "build"), anchor: { path: base, dev: baseInfo.dev, ino: baseInfo.ino } },
+	], roots: [] };
+	assert.equal((await authorizePath(manifest, "write", join(base, "src", "new.ts"))).allowed, true);
 	assert.equal((await authorizePath(manifest, "write", "src/new.ts")).allowed, true);
-	assert.match((await authorizePath(manifest, "write", "src/other.ts")).reason ?? "", /exact declared/);
+	assert.equal((await authorizePath(manifest, "write", join(base, "build", "out.ts"))).allowed, true);
+	assert.equal((await authorizePath(manifest, "write", join(base, "src", "other.ts"))).allowed, false);
+	assert.equal((await authorizePath(manifest, "write", join(base, "src"))).allowed, false);
+	assert.equal((await authorizePath(manifest, "write", join(outside, "secret"))).allowed, false);
+	await writeFile(join(base, "src", "new.ts"), "created");
+	assert.equal((await authorizePath(manifest, "read", join(base, "src", "new.ts"))).allowed, true);
+	// A persisted existing-parent anchor rejects a replacement directory at the same pathname.
+	await rename(join(base, "src"), join(base, "src-old"));
+	await mkdir(join(base, "src"));
+	const replaced = await authorizePath(manifest, "write", join(base, "src", "new.ts"));
+	assert.equal(replaced.allowed, false);
+	assert.equal(replaced.fatal, true);
 });
 
-test("managed workers may prepare project environments but cannot write Git administration", async (t) => {
-	const { root } = await fixture(t);
-	const manifest = parseCapability({ version: 2, root, role: "worker", readRoots: [root], writePaths: [], writeRoot: true, externalReadRoots: [] });
-	for (const path of ["node_modules/pkg/index.js", ".venv/pyvenv.cfg", "bun.lock"]) assert.equal((await authorizePath(manifest, "write", path)).allowed, true, path);
-	assert.equal((await authorizePath(manifest, "write", ".git/config")).allowed, false);
+test("a stable prepared parent allows an authorized writable leaf to be created, replaced or deleted", async (t) => {
+	const parent = await mkdtemp(join(tmpdir(), "subagent-guard-parent-"));
+	const outside = await mkdtemp(join(tmpdir(), "subagent-guard-parent-outside-"));
+	t.after(async () => { await rm(parent, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
+	await writeFile(join(outside, "secret"), "secret");
+	const prepared = join(parent, "prepared"); await mkdir(prepared);
+	const a = join(prepared, "a.ts"); await writeFile(a, "original");
+	const anchorInfo = await lstat(prepared);
+	const manifest: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "worker", cwd: prepared, grants: [{ permission: "write", path: a, anchor: { path: prepared, dev: anchorInfo.dev, ino: anchorInfo.ino } }], roots: [] };
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, true);
+	assert.equal((await authorizePath(manifest, "read", a)).allowed, true);
+	await rm(a);
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, true, "an authorized new leaf is created under the stable parent");
+	await writeFile(a, "recreated");
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, true);
+	await rm(a); await writeFile(a, "replaced");
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, true, "an atomic same-path replacement is not an identity failure");
+	// A symlink at the writable leaf still cannot escape the stable parent.
+	await rm(a); await symlink(join(outside, "secret"), a);
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, false);
+	assert.equal((await authorizePath(manifest, "read", a)).allowed, false);
+	// Replacing the stable parent itself is a capability change.
+	await rm(a);
+	await rename(prepared, join(parent, "moved")); await mkdir(prepared);
+	const replaced = await authorizePath(manifest, "write", a);
+	assert.equal(replaced.allowed, false);
+	assert.equal(replaced.fatal, true);
 });
 
-test("path policy rejects lexical and symlink escape", async (t) => {
-	const { root, outside, manifest } = await fixture(t);
-	assert.equal((await authorizePath(manifest, "read", "../escape")).allowed, false);
-	assert.equal((await authorizePath(manifest, "read", join(outside, "secret"))).allowed, false);
-	await symlink(outside, join(root, "src", "linked"));
-	assert.equal((await authorizePath(manifest, "read", "src/linked/secret")).allowed, false);
-
-	await symlink(join(root, "src", "allowed.ts"), join(root, "src", "write-link"));
-	const linkedManifest = { ...manifest, writePaths: [...manifest.writePaths, join(root, "src", "write-link")] };
-	assert.match((await authorizePath(linkedManifest, "write", "src/write-link")).reason ?? "", /symlinks/);
-});
-
-test("replacing a canonical root ancestor is fatal even when the replacement root is a directory", async (t) => {
-	const base = await mkdtemp(join(tmpdir(), "subagent-root-identity-"));
+test("a writable selector anchor does not grant sibling reads through a replaced leaf", async t => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-read-anchor-"));
 	t.after(() => rm(base, { recursive: true, force: true }));
-	const parent = join(base, "parent");
-	const root = join(parent, "repo");
-	await mkdir(root, { recursive: true });
-	const manifest: ChildCapabilityManifest = { version: 1, root, role: "worker", readRoots: [root], writePaths: [join(root, "file")] };
-	await mkdir(join(base, "outside", "repo"), { recursive: true });
-	await rename(parent, join(base, "preserved"));
-	await symlink(join(base, "outside"), parent);
-	for (const tool of ["read", "write"]) {
-		const result = await authorizePath(manifest, tool, "file");
-		assert.equal(result.allowed, false);
-		assert.equal(result.fatal, true);
+	await writeFile(join(base, "selected"), "allowed"); await writeFile(join(base, "private"), "not granted");
+	const info = await lstat(base);
+	const manifest: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "worker", cwd: base, grants: [{ permission: "write", path: join(base, "selected"), anchor: { path: base, dev: info.dev, ino: info.ino } }], roots: [] };
+	await rm(join(base, "selected"));
+	assert.equal((await authorizePath(manifest, "read", "selected")).allowed, true, "a declared missing leaf is still in range; existence is not authority");
+	await symlink("private", join(base, "selected"));
+	assert.equal((await authorizePath(manifest, "read", "selected")).allowed, false);
+	assert.equal((await authorizePath(manifest, "write", "selected")).allowed, false);
+	await mkdir(join(base, "directory")); await writeFile(join(base, "directory", "owned"), "allowed");
+	await symlink("owned", join(base, "directory", "internal"));
+	manifest.grants[0]!.path = join(base, "directory");
+	assert.equal((await authorizePath(manifest, "read", "directory/internal")).allowed, true, "an internal alias remains within the declared directory grant");
+	await symlink("../private", join(base, "directory", "external"));
+	assert.equal((await authorizePath(manifest, "read", "directory/external")).allowed, false);
+});
+
+test("a replaced ancestor above the child cwd is rejected for reads and writes", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-guard-ancestor-"));
+	const outside = await mkdtemp(join(tmpdir(), "subagent-guard-ancestor-outside-"));
+	t.after(async () => { await rm(base, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); });
+	const real = join(base, "real");
+	const cwd = join(real, "child");
+	await mkdir(cwd, { recursive: true });
+	await writeFile(join(cwd, "a.txt"), "original");
+	await mkdir(join(outside, "child"), { recursive: true });
+	await writeFile(join(outside, "child", "a.txt"), "external");
+	await writeFile(join(outside, "child", "new.ts"), "external-new");
+	const childInfo = await lstat(cwd);
+	const manifest: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "worker", cwd, grants: [
+		{ permission: "write", path: join(cwd, "a.txt"), anchor: { path: cwd, dev: childInfo.dev, ino: childInfo.ino } },
+		{ permission: "write", path: join(cwd, "new.ts"), anchor: { path: cwd, dev: childInfo.dev, ino: childInfo.ino } },
+	], roots: [] };
+	assert.equal((await authorizePath(manifest, "read", join(cwd, "a.txt"))).allowed, true);
+	assert.equal((await authorizePath(manifest, "write", join(cwd, "new.ts"))).allowed, true);
+	await rename(real, join(base, "moved"));
+	await symlink(outside, real);
+	for (const [tool, path] of [["read", join(cwd, "a.txt")], ["write", join(cwd, "a.txt")], ["write", join(cwd, "new.ts")]] as const) {
+		const denied = await authorizePath(manifest, tool, path);
+		assert.equal(denied.allowed, false, `${tool} ${path}`);
+		assert.equal(denied.fatal, true, `${tool} ${path}`);
 	}
 });
 
-test("read-only role cannot gain write capability", async (t) => {
-	const { root } = await fixture(t);
-	assert.throws(() => parseCapability({ version: 1, root, role: "reviewer", readRoots: [root], writePaths: [join(root, "x")] }), /read-only/);
-	const reviewer: ChildCapabilityManifest = { version: 1, root, role: "reviewer", readRoots: [root], writePaths: [] };
-	assert.match((await authorizePath(reviewer, "write", "x")).reason ?? "", /not allowed/);
-});
-
-test("capability loader requires a private regular manifest", async (t) => {
-	const { root, manifest } = await fixture(t);
-	const file = join(root, "capability.json");
-	await writeFile(file, JSON.stringify(manifest), { mode: 0o644 });
-	assert.match((await loadCapability({ [CHILD_CAPABILITY_ENV]: file })).error ?? "", /permissions/);
-	await chmod(file, 0o600);
-	assert.equal((await loadCapability({ [CHILD_CAPABILITY_ENV]: file })).manifest?.role, "worker");
-});
-
-test("exact v1 manifests normalize without external roots and reject widened v1 objects", async (t) => {
-	const { root, manifest } = await fixture(t);
-	const parsed = parseCapability(manifest);
-	assert.equal(parsed.version, 2);
-	assert.deepEqual(parsed.externalReadRoots, []);
-	assert.throws(() => parseCapability({ ...manifest, externalReadRoots: [] }), /v1 cannot contain external/);
-	assert.throws(() => parseCapability({ ...manifest, unexpected: true }), /unknown fields/);
-	assert.throws(() => parseCapability({ ...manifest, version: 3 }), /invalid version/);
-});
-
-test("v2 manifests parse internal and external roots and reject relative or symlink aliases", async (t) => {
-	const { root, outside } = await fixture(t);
-	const externalFile = join(outside, "secret");
-	const parsed = parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [externalFile],
-	});
-	assert.equal(parsed.version, 2);
-	assert.deepEqual(parsed.externalReadRoots, [externalFile]);
-	assert.throws(() => parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [externalFile],
-		unexpected: true,
-	}), /unknown fields/);
-	assert.throws(() => parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: ["../outside"],
-	}), /absolute and canonical/);
-	assert.throws(() => parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [`${outside}/nested/../secret`],
-	}), /absolute and canonical/);
-
-	const alias = join(outside, "alias-secret");
-	await symlink(externalFile, alias);
-	const aliased = parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [alias],
-	});
-	await assert.rejects(assertCanonicalExternalRoots(aliased), /absolute and canonical/);
-
-	assert.deepEqual(parseCapability({
-		version: 2,
-		root,
-		role: "worker",
-		readRoots: [join(root, "src")],
-		writePaths: [join(root, "src", "allowed.ts")],
-		externalReadRoots: [externalFile],
-	}).externalReadRoots, [externalFile]);
-	assert.throws(() => parseCapability({
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [root],
-		writePaths: [join(root, "x")],
-		externalReadRoots: [],
-	}), /read-only/);
-});
-
-test("declared external file and directory reads work through each read-only tool", async (t) => {
-	const { root, outside } = await fixture(t);
-	const externalDir = join(outside, "lib");
-	await mkdir(externalDir);
-	const externalFile = join(externalDir, "note.ts");
-	await writeFile(externalFile, "note");
-	const manifest: ChildCapabilityManifest = {
-		version: 2,
-		root,
-		role: "explorer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [externalFile, externalDir],
-	};
-	for (const tool of ["read", "grep", "find", "ls"]) {
-		assert.equal((await authorizePath(manifest, tool, externalFile)).allowed, true, tool);
-		assert.equal((await authorizePath(manifest, tool, externalDir)).allowed, true, tool);
-	}
-	assert.equal((await authorizePath(manifest, "read", join(externalDir, "note.ts"))).allowed, true);
-});
-
-test("component names beginning with two dots remain contained", async (t) => {
-	const { root, outside } = await fixture(t);
-	const internalDir = join(root, "src", "..config");
-	const externalDir = join(outside, "..config");
-	await mkdir(internalDir);
-	await mkdir(externalDir);
-	const internalFile = join(internalDir, "local.ts");
-	const externalFile = join(externalDir, "external.ts");
-	await writeFile(internalFile, "local");
-	await writeFile(externalFile, "external");
-	const reviewer: ChildCapabilityManifest = {
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [outside],
-	};
-	assert.equal((await authorizePath(reviewer, "read", "src/..config/local.ts")).allowed, true);
-	assert.equal((await authorizePath(reviewer, "read", externalFile)).allowed, true);
-});
-
-test("undeclared, sibling, and relative traversal cannot select an external root", async (t) => {
-	const { root, outside, manifest } = await fixture(t);
-	const externalFile = join(outside, "secret");
-	const reviewer: ChildCapabilityManifest = {
-		version: 2,
-		root,
-		role: "reviewer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [externalFile],
-	};
-	assert.equal((await authorizePath(reviewer, "read", join(outside, "other"))).allowed, false);
-	assert.equal((await authorizePath(reviewer, "read", outside)).allowed, false);
-	assert.equal((await authorizePath(reviewer, "read", relative(root, externalFile))).allowed, false);
-	assert.equal((await authorizePath(manifest, "read", externalFile)).allowed, false);
-	assert.match((await authorizePath(reviewer, "write", externalFile)).reason ?? "", /not allowed/);
-	assert.equal((await authorizePath({ ...manifest, version: 2, externalReadRoots: [] }, "edit", externalFile)).allowed, false);
-});
-
-test("recursive search admits safe roots despite escaping descendants but explicit link access is denied", async (t) => {
-	const { root, outside } = await fixture(t);
-	const externalDir = join(outside, "ext");
-	const hidden = await mkdtemp(join(tmpdir(), "subagent-hidden-"));
-	t.after(async () => rm(hidden, { recursive: true, force: true }));
-	await mkdir(externalDir);
-	await writeFile(join(externalDir, "ok.ts"), "ok");
-	await writeFile(join(hidden, "leak"), "leak");
-	await symlink(join(hidden, "leak"), join(root, "src", "leak-link"));
-	await symlink(join(hidden, "leak"), join(externalDir, "leak-link"));
-	const explorer: ChildCapabilityManifest = {
-		version: 2,
-		root,
-		role: "explorer",
-		readRoots: [join(root, "src")],
-		writePaths: [],
-		externalReadRoots: [externalDir],
-	};
-	assert.equal((await authorizePath(explorer, "read", "src/allowed.ts")).allowed, true);
-	assert.equal((await authorizePath(explorer, "read", "src/leak-link")).allowed, false);
-	assert.equal((await authorizePath(explorer, "grep", "src")).allowed, true);
-	assert.equal((await authorizePath(explorer, "find", "src")).allowed, true);
-	assert.equal((await authorizePath(explorer, "ls", "src")).allowed, true);
-	assert.equal((await authorizePath(explorer, "read", join(externalDir, "ok.ts"))).allowed, true);
-	assert.equal((await authorizePath(explorer, "read", join(externalDir, "leak-link"))).allowed, false);
-	assert.equal((await authorizePath(explorer, "grep", externalDir)).allowed, true);
-	assert.equal((await authorizePath(explorer, "find", externalDir)).allowed, true);
-	assert.equal((await authorizePath(explorer, "ls", externalDir)).allowed, true);
-	assert.equal((await authorizePath(explorer, "read", join(externalDir, "missing.ts"))).allowed, true);
-});
-
-test("pinned external read identity rejects a same-path replacement", async (t) => {
- const { root, outside } = await fixture(t);
- const info = await lstat(outside);
- const manifest: ChildCapabilityManifest = { version: 2, root, role: "worker", readRoots: [root], writePaths: [], writeRoot: true,
-  externalReadRoots: [outside], externalReadPins: [{ dev: info.dev, ino: info.ino }] };
- assert.equal((await authorizePath(manifest, "read", join(outside, "secret"))).allowed, true);
- await rename(outside, `${outside}-old`);
- t.after(() => rm(`${outside}-old`, { recursive: true, force: true }));
- await mkdir(outside); await writeFile(join(outside, "secret"), "new unauthorized content");
- const changed = await authorizePath(manifest, "read", join(outside, "secret"));
- assert.equal(changed.allowed, false); assert.equal(changed.fatal, true);
-});
-
-test("native grep and find see safe markers but do not traverse escaping links", async (t) => {
- const { root, outside } = await fixture(t);
- const safe = join(root, "src", "safe-marker.txt");
- const leaked = join(outside, "leak-marker.txt");
- await writeFile(safe, "unique-safe-marker"); await writeFile(leaked, "unique-external-marker");
- await symlink(outside, join(root, "src", "escaped"));
- const manifest: ChildCapabilityManifest = { version: 2, root, role: "explorer", readRoots: [join(root, "src")], writePaths: [], externalReadRoots: [] };
- assert.equal((await authorizePath(manifest, "grep", "src")).allowed, true);
- assert.equal((await authorizePath(manifest, "find", "src")).allowed, true);
- const grep = createGrepToolDefinition(root); const find = createFindToolDefinition(root);
- const searchRoot = join(root, "src");
- const present = await grep.execute("safe", { pattern: "unique-safe-marker", path: searchRoot }, undefined, undefined, undefined as never);
- assert.match(JSON.stringify(present.content), /safe-marker/);
- const absent = await grep.execute("external", { pattern: "unique-external-marker", path: searchRoot }, undefined, undefined, undefined as never);
- assert.doesNotMatch(JSON.stringify(absent.content), /unique-external-marker/);
- const matches = await find.execute("find", { pattern: "*marker.txt", path: searchRoot }, undefined, undefined, undefined as never);
- assert.match(JSON.stringify(matches.content), /safe-marker/);
- assert.doesNotMatch(JSON.stringify(matches.content), /leak-marker/);
- assert.equal((await authorizePath(manifest, "read", join(root, "src", "escaped", "leak-marker.txt"))).allowed, false);
-});
-
-test("a safe rejection permits correction but lost root terminates subsequent calls", async (t) => {
-	const { root, manifest } = await fixture(t);
-	const file = join(root, "capability.json");
-	await writeFile(file, JSON.stringify(manifest), { mode: 0o600 });
-	const originalMarker = process.env[CHILD_MARKER_ENV];
-	const originalCapability = process.env[CHILD_CAPABILITY_ENV];
-	try {
-		process.env[CHILD_MARKER_ENV] = "1";
-		process.env[CHILD_CAPABILITY_ENV] = file;
-		let handler: (event: any) => Promise<any> = async () => undefined;
-		const handlers = new Map<string, (event: any) => any>();
-		const markers: unknown[] = [];
-		await childGuard({ on(name: string, value: typeof handler) { handlers.set(name, value); }, appendEntry(_name: string, value: unknown) { markers.push(value); } } as never);
-		handler = handlers.get("tool_call")!;
-		const rejected = await handler({ toolName: "write", input: { path: "src/other.ts" } });
-		assert.equal(rejected.block, true);
-		assert.equal(rejected.terminate, false);
-		assert.equal(await handler({ toolName: "write", input: { path: "src/allowed.ts" } }), undefined);
-		await rm(root, { recursive: true });
-		assert.equal((await handler({ toolCallId: "lost-root", toolName: "read", input: { path: "src/allowed.ts" } })).terminate, true);
-		assert.deepEqual(markers, [{ version: 1, code: "capability_invalidated" }]);
-		await handler({ toolName: "git_read", input: { operation: "status" } });
-		assert.equal(markers.length, 1);
-	} finally {
-		if (originalMarker === undefined) delete process.env[CHILD_MARKER_ENV];
-		else process.env[CHILD_MARKER_ENV] = originalMarker;
-		if (originalCapability === undefined) delete process.env[CHILD_CAPABILITY_ENV];
-		else process.env[CHILD_CAPABILITY_ENV] = originalCapability;
-	}
-});
-
-test("guard is inert outside a marked child and blocks invalid marked children", async () => {
-	const originalMarker = process.env[CHILD_MARKER_ENV];
-	const originalCapability = process.env[CHILD_CAPABILITY_ENV];
-	try {
-		delete process.env[CHILD_MARKER_ENV];
-		const handlers = new Map<string, (event: any) => unknown>();
-		const pi = { on(name: string, handler: (event: any) => unknown) { handlers.set(name, handler); } };
-		await childGuard(pi as never);
-		assert.equal(handlers.size, 0);
-
-		process.env[CHILD_MARKER_ENV] = "1";
-		delete process.env[CHILD_CAPABILITY_ENV];
-		await childGuard(pi as never);
-		assert.ok(handlers.has("tool_call"));
-		assert.deepEqual(await handlers.get("tool_call")?.({ toolName: "read", input: { path: "." } }), {
-			block: true,
-			terminate: true,
-			reason: "child capability manifest is missing",
-		});
-	} finally {
-		if (originalMarker === undefined) delete process.env[CHILD_MARKER_ENV];
-		else process.env[CHILD_MARKER_ENV] = originalMarker;
-		if (originalCapability === undefined) delete process.env[CHILD_CAPABILITY_ENV];
-		else process.env[CHILD_CAPABILITY_ENV] = originalCapability;
-	}
+test("a read-only evidence pin is not imposed on an overlapping writable leaf", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-guard-overlap-"));
+	t.after(async () => { await rm(base, { recursive: true, force: true }); });
+	const a = join(base, "a.ts"); await writeFile(a, "original");
+	const aInfo = await lstat(a);
+	const baseInfo = await lstat(base);
+	const manifest: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: "worker", cwd: base, grants: [
+		{ permission: "read", path: a, pin: { dev: aInfo.dev, ino: aInfo.ino } },
+		{ permission: "write", path: a, anchor: { path: base, dev: baseInfo.dev, ino: baseInfo.ino } },
+	], roots: [] };
+	await writeFile(join(base, "a2.ts"), "replaced");
+	await rename(join(base, "a2.ts"), a);
+	assert.equal((await authorizePath(manifest, "read", a)).allowed, true, "the writable anchor owns the path and ignores a stale read pin");
+	assert.equal((await authorizePath(manifest, "write", a)).allowed, true);
+	const z = join(base, "z.ts"); await writeFile(z, "z");
+	const zInfo = await lstat(z);
+	const readOnly: ChildCapabilityManifest = { ...manifest, grants: [{ permission: "read", path: z, pin: { dev: zInfo.dev, ino: zInfo.ino } }] };
+	assert.equal((await authorizePath(readOnly, "read", z)).allowed, true);
+	await writeFile(join(base, "z2.ts"), "changed");
+	await rename(join(base, "z2.ts"), z);
+	const denied = await authorizePath(readOnly, "read", z);
+	assert.equal(denied.allowed, false);
+	assert.equal(denied.fatal, true);
 });

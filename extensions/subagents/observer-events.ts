@@ -9,9 +9,10 @@ import {
 	type ThinkingLevel,
 } from "./contracts.ts";
 
-export const OBSERVER_EVENT = "csheng.subagents.observer.v2";
-export const OBSERVER_LEGACY_VERSION = 2 as const;
-export const OBSERVER_VERSION = 3 as const;
+import { isProductId } from "./identity.ts";
+
+export const OBSERVER_EVENT = "csheng.subagents.observer.v4";
+export const OBSERVER_VERSION = 4 as const;
 export const OBSERVER_PHASES = ["accepted", "running", "settling", "settled"] as const;
 export const MAX_HEADLINE_BYTES = 240;
 export const MAX_ACTIVE_TOOLS = 16;
@@ -23,11 +24,10 @@ const SNAPSHOT_KEYS = [
 	"requestedTasks", "admittedTasks", "launchedChildren", "activeChildren", "settledTasks",
 	"aggregateAssistantTurns", "elapsedMs", "tasks",
 ] as const;
-const TASK_KEYS_V2 = [
+const TASK_KEYS = [
 	"id", "ordinal", "role", "episode", "status", "executionPhase", "route",
-	"assistantTurns", "elapsedMs", "replayed",
+	"assistantTurns", "elapsedMs", "replayed", "headline", "activeTools",
 ] as const;
-const TASK_KEYS_V3 = [...TASK_KEYS_V2, "headline", "activeTools"] as const;
 const ROUTE_KEYS = ["provider", "model", "thinking"] as const;
 const ROLE_SET = new Set<string>(ROLE_NAMES);
 const PHASE_SET = new Set<string>(OBSERVER_PHASES);
@@ -41,7 +41,7 @@ const SENSITIVE_KEY = /prompt|objective|output|stderr|path|model|selector|creden
 const MAX_ROUTE_BYTES = 512;
 const HEADLINE_ELLIPSIS = "…";
 
-export type ObserverSnapshotVersion = typeof OBSERVER_LEGACY_VERSION | typeof OBSERVER_VERSION;
+export type ObserverSnapshotVersion = typeof OBSERVER_VERSION;
 export type ObserverPhase = (typeof OBSERVER_PHASES)[number];
 export type ObserverParse<T> = { ok: true; value: T } | { ok: false };
 
@@ -65,7 +65,8 @@ export interface ObserverSnapshot {
 	parentSessionId: string;
 	anchor: string | null;
 	generation: string;
-	runId: string;
+	/** Null for an aggregate current scope, which is not a single execution run. */
+	runId: string | null;
 	revision: number;
 	phase: ObserverPhase;
 	requestedTasks: number;
@@ -184,9 +185,11 @@ export function observerTools(tools: readonly string[] | undefined): string[] {
 	return out;
 }
 
-function parseTask(value: unknown, version: ObserverSnapshotVersion): ObserverTask | undefined {
-	if (!isRecord(value) || !keysExact(value, version === OBSERVER_VERSION ? TASK_KEYS_V3 : TASK_KEYS_V2)) return undefined;
-	if (!opaqueId(value.id) || !nonNegativeInt(value.ordinal) || value.ordinal < 1 || value.ordinal > HARD_LIMITS.maxTasks) {
+function productId(value: unknown): value is string { return typeof value === "string" && isProductId(value); }
+
+function parseTask(value: unknown): ObserverTask | undefined {
+	if (!isRecord(value) || !keysExact(value, TASK_KEYS)) return undefined;
+	if (!productId(value.id) || !nonNegativeInt(value.ordinal) || value.ordinal < 1 || value.ordinal > HARD_LIMITS.maxTasks) {
 		return undefined;
 	}
 	if (!ROLE_SET.has(value.role as string) || !STATUS_SET.has(value.status as string) || !EXECUTION_SET.has(value.executionPhase as string)) {
@@ -198,8 +201,8 @@ function parseTask(value: unknown, version: ObserverSnapshotVersion): ObserverTa
 	if (typeof value.replayed !== "boolean") return undefined;
 	const route = parseObserverRoute(value.route);
 	if (route === undefined) return undefined;
-	const headline = version === OBSERVER_VERSION ? parseHeadline(value.headline) : "";
-	const activeTools = version === OBSERVER_VERSION ? parseActiveTools(value.activeTools) : [];
+	const headline = parseHeadline(value.headline);
+	const activeTools = parseActiveTools(value.activeTools);
 	if (headline === undefined || activeTools === undefined) return undefined;
 	return {
 		id: value.id,
@@ -218,13 +221,13 @@ function parseTask(value: unknown, version: ObserverSnapshotVersion): ObserverTa
 }
 
 function snapshotVersion(value: unknown): ObserverSnapshotVersion | undefined {
-	if (value === OBSERVER_VERSION || value === OBSERVER_LEGACY_VERSION) return value;
+	if (value === OBSERVER_VERSION) return value;
 	return undefined;
 }
 
 /** Strict consumer-side validation of one current-version observer task row. */
 export function parseObserverTask(value: unknown): ObserverTask | undefined {
-	return parseTask(value, OBSERVER_VERSION);
+	return parseTask(value);
 }
 
 export function parseObserverSnapshot(value: unknown): ObserverParse<ObserverSnapshot> {
@@ -232,7 +235,7 @@ export function parseObserverSnapshot(value: unknown): ObserverParse<ObserverSna
 	const version = snapshotVersion(value.version);
 	if (version === undefined) return { ok: false };
 	if (!opaqueId(value.parentSessionId) || (value.anchor !== null && !opaqueId(value.anchor))) return { ok: false };
-	if (!opaqueId(value.generation) || !opaqueId(value.runId) || !nonNegativeInt(value.revision) || !PHASE_SET.has(value.phase as string)) {
+	if (!productId(value.generation) || (value.runId !== null && !productId(value.runId)) || !nonNegativeInt(value.revision) || !PHASE_SET.has(value.phase as string)) {
 		return { ok: false };
 	}
 	const requestedTasks = value.requestedTasks;
@@ -264,7 +267,7 @@ export function parseObserverSnapshot(value: unknown): ObserverParse<ObserverSna
 	const ids = new Set<string>();
 	const ordinals = new Set<number>();
 	for (const entry of value.tasks) {
-		const task = parseTask(entry, version);
+		const task = parseTask(entry);
 		if (!task || ids.has(task.id) || ordinals.has(task.ordinal)) return { ok: false };
 		ids.add(task.id);
 		ordinals.add(task.ordinal);

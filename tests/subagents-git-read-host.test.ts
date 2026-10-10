@@ -20,7 +20,7 @@ test("installed native readonly child discovers git_read, reads history and refu
  await git("add", "."); await git("commit", "-qm", "fixture"); const head = await git("rev-parse", "HEAD");
  await writeFile(join(repo, "src/a"), "current fixture\n");
  const before = { index: await readFile(join(repo, ".git/index")), source: await readFile(join(repo, "src/a")) };
- const manifest = join(base, "capability.json"); await writeFile(manifest, JSON.stringify({ version: 2, role: "reviewer", root: repo, readRoots: [join(repo, "src")], writePaths: [], externalReadRoots: [] }), { mode: 0o600 });
+ const manifest = join(base, "capability.json"); await writeFile(manifest, JSON.stringify({ version: 4, role: "reviewer", cwd: repo, grants: [{ permission: "read", path: join(repo, "src") }], roots: [] }), { mode: 0o600 });
  const inputs = join(base, "queries.json"); await writeFile(inputs, JSON.stringify([
   { operation: "show", repository: "src", paths: ["src/a"], head },
   { operation: "show", repository: "src", paths: ["private"], head },

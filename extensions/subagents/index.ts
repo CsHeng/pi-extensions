@@ -6,7 +6,7 @@ import { SUBAGENT_STATUS_COMMAND } from "./contracts.ts";
 import { createProvenance, type ProvenanceCore } from "./provenance.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
 import { registerObservationHooks } from "./observation-hooks.ts";
-import { registerContinuationTool, type ContinuationDependencies } from "./continuation.ts";
+import { defaultEnclosingCapability, registerContinuationTool, type ContinuationDependencies } from "./continuation.ts";
 import { SUBAGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
 
 export interface SubagentDependencies extends Partial<ContinuationDependencies> {
@@ -26,7 +26,7 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 		const observations = registerObservationHooks(pi, dependencies.now ? { now: dependencies.now } : {});
 		let parentSkills: Skill[] | undefined;
 		let parentSkillCwd: string | undefined;
-		registerContinuationTool(pi, { ...dependencies, loadConfig: config, provenance, onRun: observations.recordRun,
+		registerContinuationTool(pi, { ...dependencies, enclosingCapability: dependencies.enclosingCapability ?? defaultEnclosingCapability, loadConfig: config, provenance, onRun: observations.recordRun,
 			getParentSkills: sourceRoot => {
 				if (!parentSkillCwd) return undefined;
 				const path = relative(sourceRoot, parentSkillCwd);

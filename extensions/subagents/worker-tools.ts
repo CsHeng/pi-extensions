@@ -13,9 +13,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CHILD_MARKER_ENV, HARD_LIMITS } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
+import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
 import { workerGitEnvironment } from "./worker-inputs.ts";
 import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
-import { getManagedRole } from "./roles.ts";
+import { getManagedRole, toolsForAccess } from "./roles.ts";
+import { isNativePathTool, isNativeShellTool } from "./native-context.ts";
 
 export const WORKER_SCRATCH_ENV = "CSHENG_SUBAGENT_WORKER_SCRATCH";
 
@@ -212,40 +214,84 @@ async function requireExistingSearchTool(name: "rg" | "fd"): Promise<void> {
 
 export type WorkerTools = Awaited<ReturnType<typeof createWorkerTools>>;
 
+/**
+ * Native names the effective configured catalog already owns. Pi builds builtin tools
+ * first and then lets extension/sdk tools replace them, so a non-builtin source means an
+ * ordinary configured extension (or MCP/SDK caller) provides that name. The worker kit
+ * must not claim those names: CLI extensions load before configured ones and first
+ * registration wins, so claiming them would shadow the user's implementation.
+ */
+function configuredToolNames(pi: Pick<ExtensionAPI, "getAllTools">): ReadonlySet<string> {
+	const names = new Set<string>();
+	for (const tool of pi.getAllTools()) if (tool.sourceInfo?.source !== "builtin") names.add(tool.name);
+	return names;
+}
+
 /** Explicitly loaded only by a managed worker print process, never the parent. */
 export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
-	if (loaded.manifest) pi.on("before_agent_start", event => {
-		// Preserve Pi's native append-file selection and system prompt construction.
-		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest!.role).systemPrompt].filter(Boolean).join("\n\n");
-		if (loaded.manifest!.guidance) event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;
-	});
 	let worker: WorkerTools | undefined;
 	let fatal = true;
-	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("csheng-worker-lifecycle", { phase, ok });
-	pi.on("session_start", () => { marker("ready", !fatal); });
+	let initialized = false;
+	// The lifecycle entry names the operations this toolkit actually owns. FIFO and command
+	// evidence only ever describe these; an opaque configured implementation is not
+	// certified as drained merely because the toolkit lifecycle settled.
+	let ownedTools: string[] = [];
+	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("csheng-worker-lifecycle", { phase, ok, owned: [...ownedTools] });
+	// CLI extensions run session_start before configured extensions, so ownership cannot
+	// be decided there. before_agent_start runs only after every session_start handler,
+	// including configured same-name registrations. The kit then claims only builtin names.
+	const initialize = async (): Promise<void> => {
+		try {
+			const scratch = process.env[WORKER_SCRATCH_ENV];
+			if (!loaded.manifest || !scratch || await realpath(process.cwd()) !== loaded.manifest.cwd) throw new Error("managed_worker_state_invalid");
+			const root = loaded.manifest.cwd;
+			worker = await createWorkerTools({ cwd: root, scratch,
+				onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value, version: 2,
+					status: value.endMs === null ? "unknown" : value.status === "exited" ? (value.exitCode === 0 ? "succeeded" : "failed") : value.status === "aborted" ? "aborted" : value.status === "timed-out" ? "timeout" : "failed",
+				}),
+			});
+			const allowed = new Set(toolsForAccess(loaded.manifest.grants.some(grant => grant.permission === "write")));
+			const configured = configuredToolNames(pi);
+			const owned = worker.tools.filter(tool => allowed.has(tool.name) && !configured.has(tool.name));
+			for (const tool of owned) pi.registerTool(tool);
+			ownedTools = owned.map(tool => tool.name);
+			if (allowed.has(GIT_READ_TOOL) && !configured.has(GIT_READ_TOOL)) { registerGitRead(pi, loaded.manifest); ownedTools.push(GIT_READ_TOOL); }
+			// This registration is post-load, so Pi's refresh does not reactivate a name that
+			// already existed as a builtin (grep/find/ls). Activate the owned tools explicitly.
+			pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ownedTools])]);
+			fatal = false;
+		} catch { /* The startup entry records unavailable state without a fallback. */ }
+	};
+	pi.on("before_agent_start", async event => {
+		if (!initialized) { initialized = true; await initialize(); }
+		marker("ready", !fatal);
+		if (!loaded.manifest) return;
+		// Preserve Pi's native append-file selection and system prompt construction.
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest.role, loaded.manifest.grants.some(grant => grant.permission === "write")).systemPrompt].filter(Boolean).join("\n\n");
+		if (loaded.manifest.guidance) event.systemPromptOptions.contextFiles = loaded.manifest.guidance.contextFiles;
+	});
 	pi.on("tool_call", async (event) => {
 		if (fatal || !loaded.manifest) return { block: true, terminate: true, reason: "Managed worker state is unavailable." };
-		if (event.toolName === "bash") return;
+		if (isNativeShellTool(event.toolName)) return;
+		// The typed Git tool authorizes its repository selector and every requested path
+		// itself. A native single-path check would authorize the child cwd (git_read has no
+		// `path`) and reject valid scoped history queries, so only its grant membership is
+		// checked here and the typed implementation remains authoritative.
+		if (event.toolName === GIT_READ_TOOL) {
+			if (!toolsForAccess(loaded.manifest.grants.some(grant => grant.permission === "write")).includes(event.toolName)) return { block: true, terminate: false, reason: `Tool ${event.toolName} is outside the granted capability.` };
+			return;
+		}
+		// Configured extension, MCP and custom tools are eligible because the effective host
+		// catalog exposes them; only the native path tools remain subject to the manifest.
+		if (!isNativePathTool(event.toolName)) return;
 		const input = event.input as Record<string, unknown>;
 		const decision = await authorizePath(loaded.manifest, event.toolName, typeof input.path === "string" ? input.path : ".");
 		if (decision.fatal) { fatal = true; recordCapabilityInvalidation(pi); }
 		if (!decision.allowed) return { block: true, terminate: decision.fatal === true, reason: decision.reason ?? "Path denied." };
+		if (decision.resolvedPath && typeof input.path === "string") input.path = decision.resolvedPath;
 	});
-	try {
-		const scratch = process.env[WORKER_SCRATCH_ENV];
-		if (!loaded.manifest || loaded.manifest.role !== "worker" || !scratch || await realpath(process.cwd()) !== loaded.manifest.root) throw new Error("managed_worker_state_invalid");
-		const root = loaded.manifest.root;
-		worker = await createWorkerTools({ cwd: root, scratch,
-
-			onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value, version: 2,
-				status: value.endMs === null ? "unknown" : value.status === "exited" ? (value.exitCode === 0 ? "succeeded" : "failed") : value.status === "aborted" ? "aborted" : value.status === "timed-out" ? "timeout" : "failed",
-			}),
-		});
-		for (const tool of worker.tools) pi.registerTool(tool);
-		fatal = false;
-	} catch { /* The session-start entry records unavailable state without a fallback. */ }
 	pi.on("agent_settled", async () => {
 		try { if (!worker) throw new Error("unavailable"); await worker.shutdown(); marker("stopped", true); }
 		catch { fatal = true; marker("stopped", false); }

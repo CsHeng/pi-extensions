@@ -64,7 +64,7 @@ describe("child native guidance bridge", () => {
 		await writeFile(join(agentDir, "sibling-secret"), "private");
 		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"));
 		assert.ok(guidance.skillPaths.includes(namedMd));
-		const manifest = { version: 2 as const, root: child, role: "explorer" as const, readRoots: [child], writePaths: [], externalReadRoots: [],
+		const manifest = { version: 4 as const, cwd: child, role: "explorer" as const, grants: [{ permission: "read" as const, path: child }], roots: [],
 			guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } };
 		assert.equal((await authorizePath(manifest, "read", join(namedMd, "SKILL.md"))).allowed, true);
 		assert.equal((await authorizePath(manifest, "read", join(agentDir, "sibling-secret"))).allowed, false);
@@ -75,7 +75,7 @@ describe("child native guidance bridge", () => {
 		await writeFile(join(agentDir, "skills", "adjacent.txt"), "adjacent reference");
 		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"));
 		assert.ok(guidance.skillPaths.includes(join(agentDir, "skills", "standalone.md")));
-		const manifest = { version: 2 as const, root: child, role: "worker" as const, readRoots: [child], writePaths: [], externalReadRoots: [], writeRoot: true as const,
+		const manifest = { version: 4 as const, cwd: child, role: "worker" as const, grants: [{ permission: "write" as const, path: child }], roots: [],
 			guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } };
 		assert.equal((await authorizePath(manifest, "read", join(agentDir, "skills", "adjacent.txt"))).allowed, true);
 		assert.equal((await authorizePath(manifest, "write", join(agentDir, "skills", "adjacent.txt"))).allowed, false);

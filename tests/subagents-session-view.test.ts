@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -74,7 +78,7 @@ async function rootFixture(t: test.TestContext) {
 }
 
 async function allocateFixture(store: ManagedSessionStore, repo: string, requestId: string, tasks = 1) {
-	const graph = validateGraphStructure({ tasks: Array.from({ length: tasks }, (_, index) => ({ id: `task-${index}`, role: "explorer", objective: "scan", scope: ["."] })) });
+	const graph = validateGraphStructure({ tasks: Array.from({ length: tasks }, (_, index) => ({ id: `${requestId}t${index}`, role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] })) });
 	if (!graph.ok) throw new Error("fixture");
 	return store.allocate({ repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, requestId, graph.tasks);
 }
@@ -85,14 +89,19 @@ test("session-view requests and replies validate strictly and reject foreign sha
 	const record = (await allocateFixture(store, repo, "a")).records[0]!;
 	await store.withSession(record.handle, { repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async current => { current.episode = 1; current.requests.push({ id: "r1", fingerprint: "a".repeat(64), episode: 1, state: "complete" }); await store.save(current); });
 	const builder = new SessionViewBuilder({ store });
-	assert.deepEqual(parseSessionViewRequest({ version: 1, requestId: "ui-1", page: 0 }), { version: 1, requestId: "ui-1", page: 0 });
-	for (const bad of [undefined, null, "x", [], { version: 2, requestId: "ui-1", page: 0 }, { version: 1, requestId: "ui-1" }, { version: 1, requestId: "ui-1", page: 0, extra: true },
-		{ version: 1, requestId: "bad id", page: 0 }, { version: 1, requestId: "ui-1", page: -1 }, { version: 1, requestId: "ui-1", page: 1.5 },
-		{ version: 1, requestId: "ui-1", page: SESSION_VIEW_LIMITS.maxRequestPage + 1 }]) {
+	assert.deepEqual(parseSessionViewRequest({ version: 4, requestId: "ui-1", page: 0 }), { version: 4, requestId: "ui-1", page: 0 });
+	for (const bad of [undefined, null, "x", [], { version: 2, requestId: "ui-1", page: 0 }, { version: 4, requestId: "ui-1" }, { version: 4, requestId: "ui-1", page: 0, extra: true },
+		{ version: 4, requestId: "bad id", page: 0 }, { version: 4, requestId: "ui-1", page: -1 }, { version: 4, requestId: "ui-1", page: 1.5 },
+		{ version: 4, requestId: "ui-1", page: SESSION_VIEW_LIMITS.maxRequestPage + 1 }]) {
 		assert.equal(parseSessionViewRequest(bad), undefined, JSON.stringify(bad));
 	}
-	const reply = await builder.build({ version: 1, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
+	const reply = await builder.build({ version: 4, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(parseSessionViewReply(reply).ok, true);
+	let legacyReads = 0;
+	const unsupported = Object.defineProperty({ ...reply, version: 1 }, "history", { enumerable: true, get() { legacyReads++; throw new Error("legacy body must not be read"); } });
+	assert.equal(parseSessionViewReply(unsupported).ok, false);
+	assert.equal(legacyReads, 0);
+	assert.equal(parseSessionViewRequest({ version: 1, requestId: "old", page: 0 }), undefined);
 	assert.equal(reply.history.rows.length, 1);
 	for (const [mutate, label] of [
 		[(value: SessionViewReply) => { (value as unknown as Record<string, unknown>).extra = 1; }, "extra key"],
@@ -124,10 +133,10 @@ test("live pages reject settled or duplicate identities and retain safe route de
 		current.route = { provider: "fixture", model: "safe-model", thinking: "high" } as NonNullable<typeof current.route>;
 		await store.save(current);
 	});
-	const reply = await new SessionViewBuilder({ store }).build({ version: 1, requestId: "ui-identity", page: 0 }, scope(ownerOf(repo)));
+	const reply = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-identity", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(reply.history.rows[0]!.route?.model, "safe-model");
 	assert.equal(parseSessionViewReply(reply).ok, true);
-	const live = { id: "session_live", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
+	const live = { id: "LiveHandle", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
 	const withLive = { ...reply, live: [live], summary: { ...reply.summary!, liveAgents: 1 } };
 	assert.equal(parseSessionViewReply(withLive).ok, true);
 	assert.equal(parseSessionViewReply({ ...withLive, live: [{ ...live, status: "succeeded" }] }).ok, false);
@@ -137,12 +146,69 @@ test("live pages reject settled or duplicate identities and retain safe route de
 	assert.equal(parseSessionViewReply(unsafe).ok, false);
 });
 
+test("retained projection carries per-root destination, apply, recovery and release facts", async (t) => {
+	const { base, repo } = await rootFixture(t);
+	const store = new ManagedSessionStore(base);
+	const owner = ownerOf(repo);
+	const second = join(base, "repo-two");
+	await mkdir(second);
+	await exec("git", ["init", "-q", second]);
+	const target = (source: string) => ({ declared: source, root: source, identities: [
+		{ path: source, dev: 1, ino: 1 }, { path: source, dev: 1, ino: 1 }, { path: source, dev: 1, ino: 1 }] });
+	const partial = (await allocateFixture(store, repo, "roots")).records[0]!;
+	await store.withSession(partial.handle, owner, async record => {
+		record.episode = 1; record.state = "closed";
+		record.requests.push({ id: "r1", fingerprint: "a".repeat(64), episode: 1, state: "complete" });
+		record.roots = [
+			{ id: "rootone", source: repo, permission: "write", git: true, paths: ["."], target: target(repo), released: true },
+			{ id: "roottwo", source: second, permission: "write", git: true, paths: ["."], target: target(second) },
+		];
+		record.candidate = { id: "cand1", episode: 1, status: "partial", changedPaths: ["rootone/a.ts"], appliedPaths: ["rootone/a.ts"], roots: [
+			{ rootId: "rootone", destination: repo, status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+			{ rootId: "roottwo", destination: second, status: "unknown", changedPaths: ["b.ts"], appliedPaths: [] },
+		] };
+		record.release = { status: "partial", remaining: ["roottwo"] };
+		await store.save(record);
+	});
+	// A record whose candidate was never frozen still reports every owned root's release fact.
+	const releaseOnly = (await allocateFixture(store, repo, "roots2")).records[0]!;
+	await store.withSession(releaseOnly.handle, owner, async record => {
+		record.state = "closed";
+		record.roots = [{ id: "rootthree", source: repo, permission: "write", git: true, paths: ["."], target: target(repo), released: true }];
+		record.release = { status: "complete", remaining: [] };
+		await store.save(record);
+	});
+	const reply = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-roots", page: 0 }, scope(owner));
+	assert.equal(parseSessionViewReply(reply).ok, true);
+	const rows = new Map(reply.history.rows.map(row => [row.handle, row]));
+	const bounded = (path: string) => path.slice(0, 128);
+	assert.deepEqual(rows.get(partial.handle)!.roots, [
+		{ id: "rootone", destination: bounded(repo), status: "applied", release: "released" },
+		{ id: "roottwo", destination: bounded(second), status: "unknown", recovery: "required", release: "remaining" },
+	]);
+	assert.deepEqual(rows.get(partial.handle)!.release, { status: "partial", remaining: 1 });
+	assert.deepEqual(rows.get(releaseOnly.handle)!.roots, [{ id: "rootthree", destination: bounded(repo), status: "not-applied", release: "released" }]);
+	assert.ok(rows.get(releaseOnly.handle)!.roots!.every(root => root.destination.length <= 128), "per-root destinations stay bounded");
+	assert.deepEqual(rows.get(releaseOnly.handle)!.release, { status: "complete", remaining: 0 });
+	// The ordinary tool-result session view carries the same owned-root mapping without a candidate.
+	const ordinary = await store.withSession(releaseOnly.handle, owner, async record => store.view(record));
+	assert.deepEqual(ordinary.roots, [{ id: "rootthree", destination: bounded(repo), status: "not-applied", release: "released" }]);
+	assert.deepEqual(ordinary.release, { status: "complete", remaining: [] });
+	// The strict reader rejects fabricated or unbounded per-root shapes.
+	const bogusStatus = structuredClone(reply);
+	bogusStatus.history.rows.find(row => row.handle === partial.handle)!.roots![1]!.status = "bogus";
+	assert.equal(parseSessionViewReply(bogusStatus).ok, false);
+	const extraKey = structuredClone(reply);
+	(extraKey.history.rows.find(row => row.handle === partial.handle)!.roots![0] as unknown as Record<string, unknown>).secret = "x";
+	assert.equal(parseSessionViewReply(extraKey).ok, false);
+});
+
 test("builder pages every retained handle beyond admission limits with page-independent live rows and totals", async (t) => {
 	const { base, repo } = await rootFixture(t);
 	const store = new ManagedSessionStore(base);
 	const handles: string[] = [];
 	for (let round = 0; round < 5; round++) {
-		const records = (await allocateFixture(store, repo, `batch-${round}`, 3)).records;
+		const records = (await allocateFixture(store, repo, `batch${round}`, 3)).records;
 		handles.push(...records.map((record) => record.handle));
 		for (const record of records) await store.withSession(record.handle, { repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async current => { current.state = "closed"; current.retained = true; await store.save(current); });
 	}
@@ -150,11 +216,11 @@ test("builder pages every retained handle beyond admission limits with page-inde
 	const liveRow = { id: handles[0]!, ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 1, elapsedMs: 5, replayed: false, headline: "live", activeTools: [] };
 	const builder = new SessionViewBuilder({ store, limits: { pageSize: 4 } });
 	const replies: SessionViewReply[] = [];
-	for (let page = 0; page < 4; page++) replies.push(await builder.build({ version: 1, requestId: `ui-${page}`, page }, scope(ownerOf(repo), [liveRow])));
+	for (let page = 0; page < 4; page++) replies.push(await builder.build({ version: 4, requestId: `ui-${page}`, page }, scope(ownerOf(repo), [liveRow])));
 	const paged = replies.flatMap((reply) => reply.history.rows.map((row) => row.handle));
 	assert.equal(new Set(paged).size, paged.length, "no handle appears twice across pages");
 	assert.deepEqual(new Set(paged), new Set(handles.filter((handle) => handle !== liveRow.id)), "paging reaches every non-live handle exactly once");
-	const clamped = await builder.build({ version: 1, requestId: "ui-clamp", page: 99 }, scope(ownerOf(repo), [liveRow]));
+	const clamped = await builder.build({ version: 4, requestId: "ui-clamp", page: 99 }, scope(ownerOf(repo), [liveRow]));
 	assert.deepEqual(clamped.history.rows.map((row) => row.handle), replies[3]!.history.rows.map((row) => row.handle), "out-of-range pages clamp to the last page");
 	const [first, ...rest] = replies;
 	assert.ok(first);
@@ -176,21 +242,21 @@ test("builder gates untrusted or unresolved owners and keeps fresh live rows usa
 	const { base, repo } = await rootFixture(t);
 	const store = new ManagedSessionStore(base);
 	const builder = new SessionViewBuilder({ store });
-	const liveRow = { id: "session_live0000000000000000000000001", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
-	const untrusted = await builder.build({ version: 1, requestId: "ui-1", page: 0 }, { ...scope(ownerOf(repo), [liveRow]), trusted: false });
+	const liveRow = { id: "LiveHandle1", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
+	const untrusted = await builder.build({ version: 4, requestId: "ui-1", page: 0 }, { ...scope(ownerOf(repo), [liveRow]), trusted: false });
 	assert.deepEqual(untrusted.history, { state: "unavailable", reason: "project_trust_required", pageSize: SESSION_VIEW_LIMITS.pageSize, page: 0, totalRows: 0, totalPages: 0, rows: [] });
 	assert.equal(untrusted.summary, null);
 	assert.equal(untrusted.inventory.state, "unavailable");
 	assert.equal(untrusted.live.length, 0, "untrusted queries do not expose retained live observations");
 	assert.equal(parseSessionViewReply(untrusted).ok, true);
-	const unresolved = await builder.build({ version: 1, requestId: "ui-2", page: 0 }, scope(null, [liveRow], { reason: "repository_root_unavailable" }));
+	const unresolved = await builder.build({ version: 4, requestId: "ui-2", page: 0 }, scope(null, [liveRow], { reason: "repository_root_unavailable" }));
 	assert.equal(unresolved.history.reason, "repository_root_unavailable");
 	assert.equal(unresolved.live.length, 1);
 	const linked = new ManagedSessionStore(join(base, "linked"));
 	await mkdir(join(base, "linked"), { mode: 0o700 });
 	await mkdir(join(base, "real"), { mode: 0o700 });
 	await symlink(join(base, "real"), linked.root);
-	const unavailable = await new SessionViewBuilder({ store: linked }).build({ version: 1, requestId: "ui-3", page: 0 }, scope(ownerOf(repo), [liveRow]));
+	const unavailable = await new SessionViewBuilder({ store: linked }).build({ version: 4, requestId: "ui-3", page: 0 }, scope(ownerOf(repo), [liveRow]));
 	assert.equal(unavailable.history.state, "unavailable");
 	assert.equal(unavailable.history.reason, "managed_storage_invalid");
 	assert.equal(unavailable.live.length, 1);
@@ -205,18 +271,18 @@ test("retained projection is cached; paging and re-render never rescan history o
 	const { store, counts } = countingStore(real);
 	const builder = new SessionViewBuilder({ store });
 	const view = scope(ownerOf(repo));
-	await builder.build({ version: 1, requestId: "ui-0", page: 0 }, view);
+	await builder.build({ version: 4, requestId: "ui-0", page: 0 }, view);
 	assert.equal(counts.inventory, 1);
 	assert.equal(counts.recordedObservations, 1);
-	await builder.build({ version: 1, requestId: "ui-1", page: 1 }, view);
-	await builder.build({ version: 1, requestId: "ui-2", page: 0 }, view); // ordinary re-render/heartbeat
+	await builder.build({ version: 4, requestId: "ui-1", page: 1 }, view);
+	await builder.build({ version: 4, requestId: "ui-2", page: 0 }, view); // ordinary re-render/heartbeat
 	assert.equal(counts.inventory, 1, "cached pages do not rescan registries");
 	assert.equal(counts.recordedObservations, 1, "cached pages do not rescan observations");
 	builder.invalidate(); // lifecycle transition only
-	await builder.build({ version: 1, requestId: "ui-3", page: 0 }, view);
+	await builder.build({ version: 4, requestId: "ui-3", page: 0 }, view);
 	assert.equal(counts.inventory, 2);
 	builder.reset(); // session/tree change drops the retained projection
-	await builder.build({ version: 1, requestId: "ui-4", page: 0 }, view);
+	await builder.build({ version: 4, requestId: "ui-4", page: 0 }, view);
 	assert.equal(counts.inventory, 3);
 });
 
@@ -236,7 +302,7 @@ test("recorded usage surfaces per-row and session totals with honest coverage", 
 	await store.saveObservation(first.handle, 1, observation("child-1", [usageRow("child-1", "a1", 4, 0.5)]));
 	await store.saveObservation(first.handle, 2, observation("child-1", [usageRow("child-1", "a2", 6, 0.25)]));
 	await store.saveObservation(second.handle, 1, observation("child-2", [usageRow("child-2", "a1", 3, 0.125)]));
-	const reply = await new SessionViewBuilder({ store }).build({ version: 1, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
+	const reply = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(reply.usage!.status, "incomplete");
 	assert.deepEqual(reply.usage!.usage, { input: 13, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 16, cost: 0.875 });
 	assert.equal(reply.usage!.assistantTurns, 3);
@@ -260,13 +326,13 @@ test("payload bounds degrade visibly instead of faking an empty success", async 
 	const record = (await allocateFixture(store, repo, "a")).records[0]!;
 	await store.withSession(record.handle, owner, async current => { current.episode = 1; current.requests.push({ id: "r1", fingerprint: "a".repeat(64), episode: 1, state: "complete" }); await store.save(current); });
 	await store.saveObservation(record.handle, 1, observation("child-1", [usageRow("child-1", "a1", 4, 0.5)]));
-	const degraded = await new SessionViewBuilder({ store, limits: { maxPayloadBytes: 1400 } }).build({ version: 1, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
+	const degraded = await new SessionViewBuilder({ store, limits: { maxPayloadBytes: 1400 } }).build({ version: 4, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(degraded.history.reason, "payload_limit");
 	assert.equal(degraded.history.state, "unavailable", "an undeliverable page is not an empty ready page");
 	assert.deepEqual(degraded.history.rows, []);
 	assert.equal(degraded.summary!.agents, 1);
 	assert.equal(parseSessionViewReply(degraded).ok, true);
-	const minimal = await new SessionViewBuilder({ store, limits: { maxPayloadBytes: 64 } }).build({ version: 1, requestId: "ui-2", page: 0 }, scope(ownerOf(repo)));
+	const minimal = await new SessionViewBuilder({ store, limits: { maxPayloadBytes: 64 } }).build({ version: 4, requestId: "ui-2", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(minimal.history.state, "unavailable");
 	assert.equal(minimal.history.reason, "payload_limit");
 	assert.equal(minimal.live.length, 0);
@@ -294,8 +360,8 @@ async function serviceFixture(t: test.TestContext) {
 test("core lifecycle integrates inventory, invalidation, live/history transition and stale persisted running", async (t) => {
 	const f = await serviceFixture(t);
 	const ctx = contextFixture(f.repo);
-	const query = (page = 0) => f.service.sessionView({ version: 1, requestId: `ui-${page}-${f.counts.inventory}`, page }, ctx);
-	const created = await f.service.execute({ action: "create", requestId: "run-1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", scope: ["."] }] }, ctx);
+	const query = (page = 0) => f.service.sessionView({ version: 4, requestId: `ui-${page}-${f.counts.inventory}`, page }, ctx);
+	const created = await f.service.execute({ action: "create", requestId: "run1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
 	assert.equal(created.status, "succeeded");
 	const handle = created.sessions[0]!.handle;
 	let reply = await query();
@@ -311,15 +377,15 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(row.acceptedEpisodes, 1);
 	assert.equal(row.recordedUsage.assistantTurns, 1);
 	// A stale persisted running state without a fresh core-owned observation is history, never live.
-	const stale = (await f.service.execute({ action: "create", requestId: "run-2", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", scope: ["."] }] }, ctx)).sessions[0]!.handle;
+	const stale = (await f.service.execute({ action: "create", requestId: "run2", mode: "foreground", tasks: [{ id: "taskb", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx)).sessions[0]!.handle;
 	await f.store.withSession(stale, { repo: f.repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async record => { record.state = "running"; await f.store.save(record); });
-	const reloaded = await new SessionViewBuilder({ store: f.store }).build({ version: 1, requestId: "ui-reload", page: 0 }, scope(ownerOf(f.repo)));
+	const reloaded = await new SessionViewBuilder({ store: f.store }).build({ version: 4, requestId: "ui-reload", page: 0 }, scope(ownerOf(f.repo)));
 	assert.equal(reloaded.live.length, 0);
 	assert.equal(reloaded.history.rows.find(entry => entry.handle === stale)!.state, "running");
 	assert.equal(reloaded.summary!.states.running, 1);
 	// Live work moves its handle out of history and settles back without double counting.
 	f.holdChild();
-	const asyncRun = await f.service.execute({ action: "create", requestId: "run-3", tasks: [{ id: "task", role: "explorer", objective: "scan", scope: ["."] }] }, ctx);
+	const asyncRun = await f.service.execute({ action: "create", requestId: "run3", tasks: [{ id: "taskc", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
 	assert.equal(asyncRun.status, "accepted");
 	const liveHandle = asyncRun.sessions[0]!.handle;
 	await until(() => f.service.liveObserverTasks().length === 1);
@@ -347,7 +413,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(reply.usage!.usage.input, 20);
 	// Replay reuses committed evidence without rewriting or rescanning it.
 	const scans = f.counts.inventory;
-	const replay = await f.service.execute({ action: "create", requestId: "run-1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", scope: ["."] }] }, ctx);
+	const replay = await f.service.execute({ action: "create", requestId: "run1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
 	assert.equal(replay.status, "succeeded");
 	reply = await query();
 	assert.equal(f.counts.inventory, scans, "replay is not an invalidation");
@@ -383,16 +449,16 @@ test("session-view event wiring answers only strict validated requests from acti
 	const service = registerContinuationTool(pi, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => ({ id: options.task.id, role: options.task.role, status: "succeeded", output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable", reportComplete: true }) });
 	t.after(async () => { await service.shutdown(); await rm(base, { recursive: true, force: true }); });
 	const request = (data: unknown) => { for (const handler of eventHandlers.get(SESSION_VIEW_REQUEST_EVENT) ?? []) handler(data); };
-	request({ version: 1, requestId: "early", page: 0 });
+	request({ version: 4, requestId: "early", page: 0 });
 	await new Promise(resolve => setTimeout(resolve, 20));
 	assert.equal(replies.length, 0, "requests without a session context stay unanswered");
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, contextFixture(repo));
 	request({ version: 2, requestId: "bad", page: 0 });
-	request({ version: 1, requestId: "bad id", page: 0 });
+	request({ version: 4, requestId: "bad id", page: 0 });
 	request("garbage");
 	await new Promise(resolve => setTimeout(resolve, 20));
 	assert.equal(replies.length, 0, "malformed requests stay unanswered");
-	request({ version: 1, requestId: "ui-1", page: 9 });
+	request({ version: 4, requestId: "ui-1", page: 9 });
 	await until(() => replies.length === 1);
 	const parsed = parseSessionViewReply(replies[0]);
 	assert.equal(parsed.ok, true);
@@ -405,16 +471,16 @@ test("session-view event wiring answers only strict validated requests from acti
 	await service.execute({ action: "close", handle: allocated.handle, expectedEpisode: 0, disposition: "retain" }, contextFixture(repo));
 	assert.ok(changes > 0, "closing emits an invalidation even without a live observer heartbeat");
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, contextFixture(repo, "print"));
-	request({ version: 1, requestId: "ui-2", page: 0 });
+	request({ version: 4, requestId: "ui-2", page: 0 });
 	await new Promise(resolve => setTimeout(resolve, 20));
 	assert.equal(replies.length, 1, "print mode never answers display queries");
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, contextFixture(repo));
 	const original = service.sessionView.bind(service);
 	service.sessionView = async () => { throw new Error("secret-root-for-redaction"); };
-	request({ version: 1, requestId: "ui-error", page: 0 }); await until(() => replies.length === 2);
+	request({ version: 4, requestId: "ui-error", page: 0 }); await until(() => replies.length === 2);
 	assert.equal((replies[1] as SessionViewReply).history.reason, "core_query_failed");
 	service.sessionView = async (query, ctx) => { const reply = await original(query, ctx); if (reply.summary) reply.summary.agents = -1; return reply; };
-	request({ version: 1, requestId: "ui-invalid", page: 0 }); await until(() => replies.length === 3);
+	request({ version: 4, requestId: "ui-invalid", page: 0 }); await until(() => replies.length === 3);
 	assert.equal((replies[2] as SessionViewReply).history.reason, "core_reply_invalid");
 	const queryAudits = audits.filter(audit => audit.type === SESSION_VIEW_QUERY_EVENT);
 	assert.equal(queryAudits.length, 3);
@@ -440,16 +506,16 @@ test("late inventory reads cannot poison a newer revision and concurrent queries
 		return typeof value === "function" ? value.bind(target) : value;
 	} });
 	const builder = new SessionViewBuilder({ store });
-	const first = builder.build({ version: 1, requestId: "first", page: 0 }, scope(ownerOf(repo)));
+	const first = builder.build({ version: 4, requestId: "first", page: 0 }, scope(ownerOf(repo)));
 	await until(() => captured);
-	const concurrent = builder.build({ version: 1, requestId: "same-revision", page: 0 }, scope(ownerOf(repo)));
+	const concurrent = builder.build({ version: 4, requestId: "same-revision", page: 0 }, scope(ownerOf(repo)));
 	await allocateFixture(original, repo, "second");
 	builder.invalidate();
-	const second = await builder.build({ version: 1, requestId: "second", page: 0 }, scope(ownerOf(repo)));
+	const second = await builder.build({ version: 4, requestId: "second", page: 0 }, scope(ownerOf(repo)));
 	release();
 	const stale = await first;
 	await concurrent;
-	const third = await builder.build({ version: 1, requestId: "third", page: 0 }, scope(ownerOf(repo)));
+	const third = await builder.build({ version: 4, requestId: "third", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(stale.summary!.agents, 1);
 	assert.ok(stale.revision < second.revision);
 	assert.equal(third.summary!.agents, 2);
@@ -461,7 +527,7 @@ test("thousand foreign records and changing branch leaves do not rebuild owned h
 	const original = new ManagedSessionStore(base);
 	await allocateFixture(original, repo, "owned");
 	for (let start = 0; start < 1_000; start += 25) await Promise.all(Array.from({ length: 25 }, async (_, offset) => {
-		const path = original.path(`session_foreign_${start + offset}`);
+		const path = original.path(`foreign${start + offset}`);
 		await mkdir(path, { mode: 0o700 });
 		await writeFile(join(path, "registry.json"), JSON.stringify({ owner: { repo, parentSessionId: "foreign-parent" }, opaqueForeignPayload: "x".repeat(8_000) }), { mode: 0o600 });
 	}));
@@ -474,7 +540,7 @@ test("thousand foreign records and changing branch leaves do not rebuild owned h
 	const builder = new SessionViewBuilder({ store }), owner = ownerOf(repo);
 	for (let index = 0; index < 30; index++) {
 		const anchor = `leaf-${index}`, onBranch = index % 2 === 0;
-		const reply = await builder.build({ version: 1, requestId: `ui-${index}`, page: 0 }, scope({ ...owner, anchor, branch: onBranch ? [...owner.branch, anchor] : [anchor] }, [], { anchor }));
+		const reply = await builder.build({ version: 4, requestId: `ui-${index}`, page: 0 }, scope({ ...owner, anchor, branch: onBranch ? [...owner.branch, anchor] : [anchor] }, [], { anchor }));
 		assert.equal(reply.inventory.complete, true);
 		assert.equal(reply.inventory.unreadableRecords, 0);
 		assert.equal(reply.summary!.agents, 1);
@@ -489,9 +555,9 @@ test("same-session branch changes recompute the historical branch marker", async
 	const store = new ManagedSessionStore(base);
 	await allocateFixture(store, repo, "first");
 	const builder = new SessionViewBuilder({ store });
-	const first = await builder.build({ version: 1, requestId: "first", page: 0 }, scope(ownerOf(repo)));
+	const first = await builder.build({ version: 4, requestId: "first", page: 0 }, scope(ownerOf(repo)));
 	const otherOwner = { ...ownerOf(repo), anchor: "other", branch: ["other"] };
-	const second = await builder.build({ version: 1, requestId: "second", page: 0 }, scope(otherOwner, [], { anchor: "other" }));
+	const second = await builder.build({ version: 4, requestId: "second", page: 0 }, scope(otherOwner, [], { anchor: "other" }));
 	assert.equal(first.history.rows[0]!.onCurrentBranch, true);
 	assert.equal(second.history.rows[0]!.onCurrentBranch, false);
 });
@@ -501,9 +567,9 @@ test("owner and session transitions keep retained projections scoped and stale r
 	const store = new ManagedSessionStore(base);
 	await allocateFixture(store, repo, "a");
 	const builder = new SessionViewBuilder({ store });
-	const first = await builder.build({ version: 1, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
+	const first = await builder.build({ version: 4, requestId: "ui-1", page: 0 }, scope(ownerOf(repo)));
 	builder.reset();
-	const forked = await builder.build({ version: 1, requestId: "ui-1", page: 0 }, scope(ownerOf(repo, "forked-session"), [], { ownerSessionId: "forked-session", generation: "generation-2" }));
+	const forked = await builder.build({ version: 4, requestId: "ui-1", page: 0 }, scope(ownerOf(repo, "forked-session"), [], { ownerSessionId: "forked-session", generation: "generation-2" }));
 	assert.notEqual(forked.ownerSessionId, first.ownerSessionId);
 	assert.notEqual(forked.generation, first.generation);
 	assert.ok(forked.revision > first.revision);

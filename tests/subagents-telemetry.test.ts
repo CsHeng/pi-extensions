@@ -7,6 +7,7 @@ test("clock identity is shared only for one source and preserves real zero", () 
 	const source = () => 100;
 	const a = createRunClock(source); const b = createRunClock(source); const c = createRunClock(() => 100);
 	assert.equal(a.clockKey, b.clockKey); assert.notEqual(a.clockKey, c.clockKey);
+	assert.match(a.clockKey, /^[A-Za-z0-9]+$/);
 	const recorder = new LocalTimingRecorder(source); recorder.start("localTool", "a"); recorder.end("localTool", "a");
 	const timing = recorder.finish();
 	assert.equal(timing.clockKey, a.clockKey); assert.equal(timing.originMs, 100); assert.equal(timing.complete, true);

@@ -3,7 +3,6 @@ import test from "node:test";
 import {
 	MAX_HEADLINE_BYTES,
 	OBSERVER_EVENT,
-	OBSERVER_LEGACY_VERSION,
 	OBSERVER_VERSION,
 	observerHeadline,
 	observerTools,
@@ -34,8 +33,8 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 		version: OBSERVER_VERSION,
 		parentSessionId: "parent_session-1",
 		anchor: "leaf_entry-1",
-		generation: "gen-1",
-		runId: "run-1",
+		generation: "Gen1",
+		runId: "Run1",
 		revision: 0,
 		phase: "running",
 		requestedTasks: 2,
@@ -51,17 +50,23 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 test("observer event name and version are exact", () => {
-	assert.equal(OBSERVER_EVENT, "csheng.subagents.observer.v2");
-	assert.equal(OBSERVER_VERSION, 3);
-	assert.equal(OBSERVER_LEGACY_VERSION, 2);
+	assert.equal(OBSERVER_EVENT, "csheng.subagents.observer.v4");
+	assert.equal(OBSERVER_VERSION, 4);
 });
 
-test("snapshots accept the frozen v3 allowlist including native parent punctuation and null route", () => {
+test("snapshots keep native parent punctuation and a real run id, while an aggregate has no run", () => {
 	const parsed = parseObserverSnapshot(snapshot());
 	assert.equal(parsed.ok, true);
 	if (!parsed.ok) return;
 	const value: ObserverSnapshot = parsed.value;
-	assert.equal(value.version, 3);
+	assert.equal(value.version, 4);
+	assert.equal(value.runId, "Run1");
+	const aggregate = parseObserverSnapshot(snapshot({ runId: null }));
+	assert.equal(aggregate.ok, true);
+	if (!aggregate.ok) return;
+	assert.equal(aggregate.value.runId, null);
+	assert.equal(parseObserverSnapshot(snapshot({ generation: "gen-1" })).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({ runId: "run-1" })).ok, false);
 	assert.equal(value.parentSessionId, "parent_session-1");
 	assert.equal(value.anchor, "leaf_entry-1");
 	assert.equal(value.tasks[0]?.route?.model, "gpt-4.1");
@@ -83,19 +88,15 @@ test("snapshots accept the frozen v3 allowlist including native parent punctuati
 	assert.equal(parseObserverSnapshot(snapshot({ anchor: null })).ok, true);
 });
 
-test("parser still accepts frozen v2 rows without headline or tools", () => {
-	const { headline, activeTools, ...legacyTask } = task();
+test("older snapshot versions and rows missing current fields are rejected without a default adapter", () => {
+	const { headline, activeTools, ...withoutCurrentFields } = task();
 	void headline; void activeTools;
-	const parsed = parseObserverSnapshot(snapshot({
-		version: OBSERVER_LEGACY_VERSION,
-		tasks: [legacyTask],
-	}));
-	assert.equal(parsed.ok, true);
-	if (!parsed.ok) return;
-	assert.equal(parsed.value.version, 2);
-	assert.equal(parsed.value.tasks[0]?.headline, "");
-	assert.deepEqual(parsed.value.tasks[0]?.activeTools, []);
-	assert.equal(parseObserverSnapshot(snapshot({ version: OBSERVER_LEGACY_VERSION })).ok, false);
+	for (const version of [1, 2, 3]) {
+		assert.equal(parseObserverSnapshot(snapshot({ version })).ok, false);
+		assert.equal(parseObserverSnapshot(snapshot({ version, tasks: [withoutCurrentFields] })).ok, false);
+	}
+	// A current-version snapshot still requires the full current row shape.
+	assert.equal(parseObserverSnapshot(snapshot({ tasks: [withoutCurrentFields] })).ok, false);
 });
 
 test("headline projection is single-line, bounded, and drops controls", () => {

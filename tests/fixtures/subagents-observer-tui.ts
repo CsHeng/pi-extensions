@@ -13,7 +13,7 @@ import { projectRecordedUsage, type RecordedUsageHandleInput } from "../../exten
 export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void> {
 	const agent = process.env.PI_CODING_AGENT_DIR!;
 	const historyFixture = process.env.CSHENG_UI_HISTORY_FIXTURE === "1";
-	const records = Array.from({ length: historyFixture ? 37 : 1 }, (_, index) => ({ handle: `session_ui${String(index).padStart(6, "0")}`, episode: historyFixture && index < 12 ? 2 : 1 }));
+	const records = Array.from({ length: historyFixture ? 37 : 1 }, (_, index) => ({ handle: `ui${String(index).padStart(6, "0")}`, episode: historyFixture && index < 12 ? 2 : 1 }));
 	let latest: ObserverSnapshot | undefined;
 	pi.events.on(SESSION_VIEW_REQUEST_EVENT, data => {
 		const request = parseSessionViewRequest(data);
@@ -28,7 +28,7 @@ export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void
 		const history = records.filter(record => !liveIds.has(record.handle));
 		const pages = Math.ceil(history.length / 20);
 		const page = Math.min(request.page, Math.max(0, pages - 1));
-		const reply: SessionViewReply = { version: 1, requestId: request.requestId, ownerSessionId: latest.parentSessionId, anchor: latest.anchor,
+		const reply: SessionViewReply = { version: 4, requestId: request.requestId, ownerSessionId: latest.parentSessionId, anchor: latest.anchor,
 			generation: latest.generation, revision: latest.revision, inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 			summary: { agents: records.length, acceptedEpisodes: records.reduce((sum, record) => sum + record.episode, 0), liveAgents: live.length, states: { idle: 0, queued: 0, running: live.length, interrupted: 0, closed: history.length } },
 			live, usage: projectRecordedUsage(records.map(input)), history: { state: "ready", pageSize: 20, page, totalRows: history.length, totalPages: pages,
@@ -55,7 +55,7 @@ export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void
 		async execute(_id, _args, signal, update, ctx) {
 			const start = performance.now();
 			const active = records.slice(0, historyFixture ? 10 : 1);
-			const observer = new ManagedObserver("fixture-run", { repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) }, "fixture-generation",
+			const observer = new ManagedObserver("FixtureRun", { repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) }, "FixtureGeneration",
 				active.map(record => ({ id: record.handle, role: "reviewer", episode: record.episode, replayed: false, objective: "review fixture", route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } as EffectiveRoute })),
 				() => performance.now() - start, snapshot => { latest = snapshot; pi.events.emit(OBSERVER_EVENT, snapshot); });
 			observer.begin();

@@ -5,7 +5,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isSafePathGrammar, truncateUtf8, type NormalizedChildCapability } from "./contracts.ts";
-import { authorizePath, parseCapability } from "./path-policy.ts";
+import { assertCanonicalGrants, authorizePath, parseCapability } from "./path-policy.ts";
 import { runReadGit } from "./git-workspace.ts";
 
 export const GIT_READ_TOOL = "git_read";
@@ -47,8 +47,8 @@ function names(output: Buffer): string[] {
 async function authorizeFile(cap: NormalizedChildCapability, repo: string, path: string): Promise<void> {
  requireRead(safePath(path), "invalid_path");
  const target = resolve(repo, path);
- const grants = [...cap.readRoots, ...cap.externalReadRoots];
- requireRead(contains(repo, target) && grants.some(root => contains(root, target)), "read_scope_denied");
+ const grants = cap.grants.map(grant => grant.path);
+ requireRead(grants.some(root => contains(root, target)), "read_scope_denied");
  let parent = dirname(target);
  if (target === repo) parent = repo;
  while (!(await exists(parent))) { const next = dirname(parent); requireRead(next !== parent, "read_scope_denied"); parent = next; }
@@ -88,7 +88,12 @@ async function metadata(repo: string, git: (args: string[], allowed?: number[]) 
 export async function queryGitRead(manifest: NormalizedChildCapability, input: unknown, signal?: AbortSignal): Promise<GitReadResult> {
  try {
   const cap = parseCapability(manifest);
-  requireRead(cap.role === "reviewer" || cap.role === "explorer", "role_denied");
+  requireRead(cap.grants.length > 0, "read_scope_denied");
+  // Reuse the shared grant-identity authorization before any Git process starts, so a
+  // replaced writable-selector anchor (or a stale read pin) fails as a scope denial
+  // rather than reading through the substituted root. The historical lexical path check
+  // below stays because `show`/`log` legitimately name deleted leaves.
+  try { await assertCanonicalGrants(cap); } catch { throw new QueryError("read_scope_denied"); }
   requireRead(Check(gitReadParameters, input), "invalid_request");
   const q = input as Query;
   requireRead(q.operation === "diff" || q.layer === undefined, "invalid_request");
@@ -96,9 +101,15 @@ export async function queryGitRead(manifest: NormalizedChildCapability, input: u
   requireRead(q.operation !== "status" || q.head === undefined, "invalid_request");
   requireRead(q.operation === "show" || q.offset === undefined, "invalid_request");
   requireRead(q.operation === "show" || q.operation === "log" || q.limit === undefined, "invalid_request");
-  const selector = resolve(cap.root, q.repository);
+  const selector = isAbsolute(q.repository) ? resolve(q.repository) : resolve(cap.cwd, q.repository);
   requireRead(!selector.split(sep).includes(".git"), "read_scope_denied");
-  requireRead((await authorizePath(cap, "read", selector)).allowed, "read_scope_denied");
+  let selectorAllowed = (await authorizePath(cap, "read", selector)).allowed;
+  // A repository selector may enclose a file-only grant, but lexical enclosure
+  // never overrides a physical scope denial or a substituted grant root.
+  if (!selectorAllowed) for (const grant of cap.grants.filter(grant => contains(selector, grant.path))) {
+   if ((await authorizePath(cap, "read", grant.path)).allowed) { selectorAllowed = true; break; }
+  }
+  requireRead(selectorAllowed, "read_scope_denied");
   const selected = (await lstat(selector)).isDirectory() ? selector : dirname(selector);
   const rootResult = await runReadGit(selected, ["rev-parse", "--show-toplevel"], { signal });
   const repo = await realpath(rootResult.stdout.toString().trim());
@@ -184,7 +195,7 @@ export async function queryGitRead(manifest: NormalizedChildCapability, input: u
 }
 
 export function registerGitRead(pi: ExtensionAPI, capability: NormalizedChildCapability): void {
- if (!["explorer", "reviewer"].includes(capability.role)) return;
+ if (!capability.grants.some(grant => grant.permission === "read" || grant.permission === "write")) return;
  pi.registerTool({ name: GIT_READ_TOOL, label: "Scoped Git read", parameters: gitReadParameters,
   description: "Read Git only within granted repository paths. Operations: status; diff with explicit commits base/head or layer index/worktree; show one path at head; log at head (default HEAD). repository must be a readable path within the intended Git owner; paths are literal owner-relative paths. Full commit IDs or ordinary ref names only, no shell, arbitrary Git flags or revision expressions. Results name resolved identities and completeness; incomplete/changed input is not a complete review. offset/limit page show lines; limit bounds log records. No writes, fetch, hooks, filters or role escalation.",
   async execute(_id, params, signal) { const result = await queryGitRead(capability, params, signal); return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, ...(!result.ok ? { isError: true } : {}) }; },

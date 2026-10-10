@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { mintProductId } from "./identity.ts";
 import { HARD_LIMITS, type RunTiming, type TimeSpan } from "./contracts.ts";
 
 export const monotonicNow = () => performance.now();
@@ -6,7 +6,7 @@ const clockKeys = new WeakMap<() => number, string>();
 
 /** One parent-process monotonic clock. Wall timestamps are correlation only. */
 export function createRunClock(source: () => number = monotonicNow) {
-	if (!clockKeys.has(source)) clockKeys.set(source, randomUUID());
+	if (!clockKeys.has(source)) clockKeys.set(source, mintProductId());
 	const clockKey = clockKeys.get(source)!;
 	const sample = () => { try { return source(); } catch { return Number.NaN; } };
 	const started = sample();

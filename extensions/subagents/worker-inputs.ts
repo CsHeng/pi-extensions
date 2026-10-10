@@ -1,18 +1,11 @@
 import { inspectGitWorkspace, type GitTaskWorkspace } from "./git-workspace.ts";
 import { ManagedError } from "./session-contracts.ts";
 
-/** V1 environment fields are inert compatibility data, never recaptured. */
-export type WorkerInputState = {
-	version: 1;
-	dependencyRoots: Array<"node_modules">;
-	parentDependencyKey: string;
-	dependencyKey: string;
-	gitWorkspace?: GitTaskWorkspace;
-} | { version: 2; gitWorkspace: GitTaskWorkspace };
+export type WorkerInputState = { version: 2; gitWorkspace: GitTaskWorkspace };
 
 export function workerGitEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
 	const env = Object.fromEntries(Object.entries(source).filter(([name]) => !name.startsWith("GIT_")));
-	return { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_LITERAL_PATHSPECS: "1" };
+	return { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 }
 
 export function initialWorkerInputs(gitWorkspace: GitTaskWorkspace): WorkerInputState {
@@ -21,6 +14,7 @@ export function initialWorkerInputs(gitWorkspace: GitTaskWorkspace): WorkerInput
 
 /** Source/worktree ownership only. Language tools own ignored environments. */
 export async function inspectWorkerInputs(source: string, state: WorkerInputState): Promise<void> {
+	if (state.version !== 2) throw new ManagedError("unsupported_worker_inputs");
 	if (!state.gitWorkspace || state.gitWorkspace.path !== source) throw new ManagedError("managed_workspace_mismatch");
 	await inspectGitWorkspace(state.gitWorkspace);
 }
@@ -34,5 +28,5 @@ export async function prepareWorkerInputs(repo: string, source: string, gitWorks
 
 export async function refreshWorkerInputs(repo: string, source: string, previous: WorkerInputState): Promise<WorkerInputState> {
 	await inspectWorkerInputs(source, previous);
-	return prepareWorkerInputs(repo, source, previous.gitWorkspace!);
+	return prepareWorkerInputs(repo, source, previous.gitWorkspace);
 }

@@ -10,12 +10,18 @@ import { hostCheckIdentity } from "../extensions/workflow/goal-host.ts";
 import { goalParameters, type GoalState } from "../extensions/workflow/goal-contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace, type HostHarness } from "./fixtures/workflow/host-fixture.ts";
 const call = (args: unknown) => fauxAssistantMessage(fauxToolCall("csheng_workflow", args as never));
+const targetOf = (subject: string) => subject === "delivery" ? { kind: "delivery" as const } : { kind: subject.startsWith("requirement:") ? "requirement" as const : "task" as const, id: subject.split(":")[1] };
+const observationAt = (h: HostHarness) => {
+ const entry = h.session.sessionManager.getBranch().findLast(item => item.type === "custom" && item.customType === "csheng-workflow-observation") as { data?: { id?: string } } | undefined;
+ if (!entry?.data?.id) throw new Error("missing product observation id");
+ return entry.data.id;
+};
 const enroll = () => call({ operation: "enroll", goal: "Authorized implementation", delivery: "source", authority: "user request", requirements: [{ key: "r", outcome: "result", verification: "check" }], tasks: [{ key: "t", title: "Implement", covers: ["r"] }] });
 const state = (h: HostHarness): GoalState => (h.session.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "csheng-workflow-state") as { data: { state: GoalState } }).data.state;
 
 test("actual provider schema exposes only semantic operations, no revision or batch bookkeeping", () => {
  const schema = JSON.stringify(goalParameters); assert.equal(schema.includes("expectedRevision"), false); assert.equal(schema.includes('"batch"'), false);
- validateToolArguments({ name: "csheng_workflow", parameters: goalParameters } as never, { id: "test", name: "csheng_workflow", type: "toolCall", arguments: { operation: "report", summary: "check failed", facts: [{ key: "c", kind: "agent", check: "test", result: "fail" }] } });
+ validateToolArguments({ name: "csheng_workflow", parameters: goalParameters } as never, { id: "test", name: "csheng_workflow", type: "toolCall", arguments: { operation: "report", summary: "check failed", facts: [{ id: "c", kind: "agent", check: "test", result: "fail" }] } });
  assert.throws(() => validateToolArguments({ name: "csheng_workflow", parameters: goalParameters } as never, { id: "test", name: "csheng_workflow", type: "toolCall", arguments: { operation: "open", expectedRevision: 0 } }));
 });
 
@@ -36,7 +42,7 @@ for (const terminal of ["complete", "suspended"] as const) test(`ordinary questi
   if (typeof message === "string" && message.startsWith("/csheng-workflow-wait ")) waits.push(message);
   pi.sendUserMessage(message, options);
  } })] }); t.after(() => h.dispose());
- const finish = [call({ operation: "start", task: "t", scope: ["planned"] }), call({ operation: "report", summary: "verified fixture", facts: [{ key: "c", kind: "agent", check: "fixture assertion", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["c"], rationale: "fixture" })), complete: true })];
+ const finish = [call({ operation: "start", task: "t", scope: ["planned"] }), call({ operation: "report", summary: "verified fixture", facts: [{ id: "c", kind: "agent", check: "fixture assertion", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ target: targetOf(subject), accepted: true, facts: ["c"], rationale: "fixture" })), complete: true })];
  h.faux.setResponses([enroll(), ...(terminal === "complete" ? finish : [call({ operation: "suspend", reason: "user pause", condition: "user resumes" })]), fauxAssistantMessage("stopped")]);
  await h.session.prompt("implement"); assert.equal(waits.length, 1);
  h.faux.setResponses([fauxAssistantMessage("answer only")]); await h.session.prompt("explain a term"); assert.equal(waits.length, 1);
@@ -63,8 +69,8 @@ test("real host makes three productive continuations on unchanged source and the
  for (let i = 1; i <= 4; i++) {
   responses.push(call({ operation: "start", task: "t", scope: ["unchanged-source"] }));
   responses.push(fauxAssistantMessage(fauxToolCall("bash", { command: `printf 'diagnostic-${i}'` } as never)));
-  responses.push(call({ operation: "report", summary: `Substantive diagnostic ${i}`, facts: [{ key: "check", kind: "host", check: "same model-authored label", result: "pass" }],
-   ...(i === 4 ? { judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["A1:check", "A2:check", "A3:check", "check"], rationale: "All four distinct checks verified" })), complete: true } : {}) }));
+  responses.push((() => call({ operation: "report", summary: `Substantive diagnostic ${i}`, facts: [{ id: `check${i}`, kind: "host", check: "same model-authored label", result: "pass", observationId: observationAt(h) }],
+   ...(i === 4 ? { judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ target: targetOf(subject), accepted: true, facts: ["check1", "check2", "check3", "check4"], rationale: "All four distinct checks verified" })), complete: true } : {}) })) as never);
   responses.push(fauxAssistantMessage(i === 4 ? "complete" : "premature settlement"));
  }
  h.faux.setResponses(responses); await h.session.prompt("implement");
@@ -87,12 +93,12 @@ test("real host limits repeated automatic dispatch but permits ordinary diagnost
  h.faux.setResponses([
   call({ operation: "start", task: "t", scope: ["source"], alignment: "continue existing authorized work after the dispatch guard" }),
   fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'identified missing prerequisite'; exit 1" } as never)),
-  call({ operation: "report", summary: "useful failed diagnostic", facts: [{ key: "diagnostic", kind: "host", check: "prerequisite diagnosis", result: "fail" }] }),
+  () => call({ operation: "report", summary: "useful failed diagnostic", facts: [{ id: "diagnostic", kind: "host", check: "prerequisite diagnosis", result: "fail", observationId: observationAt(h) }] }),
   fauxAssistantMessage("diagnosis complete, work remains"),
   call({ operation: "start", task: "t", scope: ["source"] }),
   fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'verified repaired boundary'" } as never)),
-  call({ operation: "report", summary: "verified", facts: [{ key: "check", kind: "host", check: "repair verification", result: "pass" }],
-   judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "current passing verification" })), complete: true }),
+  () => call({ operation: "report", summary: "verified", facts: [{ id: "check", kind: "host", check: "repair verification", result: "pass", observationId: observationAt(h) }],
+   judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ target: targetOf(subject), accepted: true, facts: ["check"], rationale: "current passing verification" })), complete: true }),
   fauxAssistantMessage("complete"),
  ]);
  await h.session.prompt("Continue the same authorized task with a concrete diagnostic");
@@ -130,7 +136,7 @@ test("real host recovery preserves reported completed judgment without certifyin
  first.faux.setResponses([enroll(), call({ operation: "start", task: "t", scope: ["result"], writes: ["result"] }),
   fauxAssistantMessage(fauxToolCall("write", { path: "result", content: "verified" } as never)),
   fauxAssistantMessage(fauxToolCall("read", { path: "result" } as never)),
-  call({ operation: "report", summary: "verified", facts: [{ key: "c", kind: "host", check: "read", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, facts: ["c"], accepted: true, rationale: "verified" })), complete: true }), fauxAssistantMessage("complete")]);
+  call({ operation: "report", summary: "verified", facts: [{ id: "c", kind: "host", check: "read", result: "pass" }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ target: subject === "delivery" ? { kind: "delivery" } : { kind: subject.split(":")[0], id: subject.split(":")[1] }, facts: ["c"], accepted: true, rationale: "verified" })), complete: true }), fauxAssistantMessage("complete")]);
  await first.session.prompt("implement"); assert.equal(state(first).fulfillment, "complete");
  const restored = await createHostHarness({ mode: "print", sessionManager: first.session.sessionManager, extensions: [workflow], sessionStartReason: "resume" }); t.after(() => restored.dispose());
  assert.notEqual(restored.workDir, first.workDir);
@@ -151,17 +157,17 @@ test("real host writes two external non-Git roots and binds host evidence to the
   fauxAssistantMessage(fauxToolCall("write", { path: skills, content: "source" } as never)),
   fauxAssistantMessage(fauxToolCall("write", { path: installation, content: "installed" } as never)),
   fauxAssistantMessage(fauxToolCall("read", { path: installation } as never)),
-  call({ operation: "report", summary: "Read explicit external installation", facts: [{ key: "check", kind: "host", check: "fixture output", result: "pass" }], judgments: ["task:t", "requirement:r"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "verified fixture" })) }),
+  () => call({ operation: "report", summary: "Read explicit external installation", facts: [{ id: "check", kind: "host", check: "fixture output", result: "pass", observationId: observationAt(h) }], judgments: ["task:t", "requirement:r"].map(subject => ({ target: targetOf(subject), accepted: true, facts: ["check"], rationale: "verified fixture" })) }),
   call({ operation: "suspend", reason: "fixture will test source drift", condition: "source changed" }), fauxAssistantMessage("verified")]);
  await h.session.prompt("implement across explicitly authorized external roots");
  assert.equal(await readFile(skills, "utf8"), "source"); assert.equal(await readFile(installation, "utf8"), "installed");
- assert.equal(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true);
+ assert.equal(state(h).acceptance.find(item => item.target.kind === "task" && item.target.id === "t")?.accepted, true);
  assert.equal(state(h).facts[0]?.kind, "host");
  await writeFile(skills, "changed source");
  h.faux.setResponses([call({ operation: "amend", reason: "inspect existing authority", authority: "original fixture", alignment: "same scope" }), call({ operation: "close", outcome: "completed", reason: "recheck changed root" }), fauxAssistantMessage("not complete")]);
  await h.session.prompt("recheck");
  assert.equal(state(h).fulfillment, "pending");
- assert.equal(state(h).acceptance.find(item => item.subject === "task:t")?.accepted, true, "declared scope is not automatic disk certification");
+ assert.equal(state(h).acceptance.find(item => item.target.kind === "task" && item.target.id === "t")?.accepted, true, "declared scope is not automatic disk certification");
  assert.deepEqual(h.errors, []);
 });
 
@@ -172,7 +178,7 @@ test("real tool observation captures check-time basis after write; report accept
  h.faux.setResponses([enroll(), call({ operation: "start", task: "t", scope: ["result"], writes: ["result"] }),
   fauxAssistantMessage(fauxToolCall("write", { path: "result", content: "verified" } as never)),
   fauxAssistantMessage(fauxToolCall("read", { path: "result" } as never)),
-  () => call({ operation: "report", summary: "Read actual changed result", facts: [{ key: "check", kind: "host", check: "read result", result: "pass", observationId: checkId }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ subject, accepted: true, facts: ["check"], rationale: "verified" })), complete: true }),
+  () => call({ operation: "report", summary: "Read actual changed result", facts: [{ id: "check", kind: "host", check: "read result", result: "pass", observationId: observationAt(h) }], judgments: ["task:t", "requirement:r", "delivery"].map(subject => ({ target: targetOf(subject), accepted: true, facts: ["check"], rationale: "verified" })), complete: true }),
   fauxAssistantMessage("done")]);
  await h.session.prompt("implement"); assert.equal(state(h).fulfillment, "complete"); assert.ok(checkId); assert.deepEqual(h.errors, []);
 });

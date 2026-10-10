@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { closeSync, chmodSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { copyFile, readFile, rm } from "node:fs/promises";
@@ -11,7 +15,7 @@ import test, { after } from "node:test";
 import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
 import type { NormalizedTask } from "../extensions/subagents/graph.ts";
 import { getRole } from "../extensions/subagents/roles.ts";
-import { resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
+import { buildPiArgs, resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
 import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;
@@ -33,21 +37,19 @@ const task: NormalizedTask = {
 	id: "scan",
 	role: "explorer",
 	objective: "Find facts",
-	scope: ["."],
+	access: [{ permission: "read", scope: ["/tmp/scope"] }],
 	inputs: [],
 	dependsOn: [],
-	writePaths: [],
-	verification: [],
+		verification: [],
 	resourceLocks: [],
-	externalReadRoots: [],
+	grants: [],
 };
 const capability: ChildCapabilityManifest = {
-	version: 2,
-	root: process.cwd(),
+	version: 4,
+	cwd: process.cwd(),
 	role: "explorer",
-	readRoots: [process.cwd()],
-	writePaths: [],
-	externalReadRoots: [],
+	grants: [{ permission: "read", path: process.cwd() }],
+	roots: [],
 };
 
 function options(mode: string, extra: Record<string, unknown> = {}) {
@@ -105,6 +107,37 @@ test("Linux launches the retained executable inode after deletion and same-path 
 	}
 });
 
+test("native child args keep the configured catalog and express read-only intent without a role allowlist", () => {
+	const baseArgs = {
+		taskPromptPath: "/tmp/task.md",
+		sessionPath: "/tmp/native.jsonl",
+		guardExtensionPath: "/tmp/guard.ts",
+		route,
+		approveProject: true,
+	};
+	const readOnly = buildPiArgs({ ...baseArgs, capability: { ...capability, grants: [{ permission: "read", path: process.cwd() }] } });
+	// No identity-based extension ban and no fixed builtin allowlist.
+	assert.equal(readOnly.includes("--no-extensions"), false);
+	assert.equal(readOnly.includes("--tools"), false);
+	assert.deepEqual(readOnly.slice(readOnly.indexOf("--exclude-tools"), readOnly.indexOf("--exclude-tools") + 2), ["--exclude-tools", "edit,write"]);
+	// The selected invocation model/thinking and the guard extension are preserved.
+	assert.equal(readOnly[readOnly.indexOf("--model") + 1], "synthetic/child");
+	assert.equal(readOnly[readOnly.indexOf("--thinking") + 1], "low");
+	assert.deepEqual(readOnly.slice(readOnly.indexOf("-e"), readOnly.indexOf("-e") + 2), ["-e", "/tmp/guard.ts"]);
+
+	const writable = buildPiArgs({ ...baseArgs, capability: { ...capability, grants: [{ permission: "write", path: process.cwd() }] } });
+	assert.equal(writable.includes("--exclude-tools"), false);
+	assert.equal(writable.includes("--tools"), false);
+	assert.equal(writable.includes("--no-extensions"), false);
+	// Purpose labels do not change the native invocation; capability grants do.
+	for (const label of ["explorer", "reviewer", "worker"] as const) {
+		const role = getRole(label);
+		assert.deepEqual(buildPiArgs({ ...baseArgs, capability: { ...capability, role: label, grants: [{ permission: "read", path: process.cwd() }] } }), readOnly);
+		assert.deepEqual(buildPiArgs({ ...baseArgs, capability: { ...capability, role: label, grants: [{ permission: "write", path: process.cwd() }] } }), writable);
+		assert.ok(role.systemPrompt.length > 0);
+	}
+});
+
 test("zero exit without a complete final report never succeeds", async () => {
 	for (const mode of ["empty", "stale", "tool-only", "unpaired", "length", "pending", "toolUse", "missing-settled"]) {
 		const result = await runChild(options(mode));
@@ -148,7 +181,6 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	assert.equal(recorded.child, "1");
 	assert.equal(recorded.removedParentMarker, undefined);
 	assert.equal(recorded.ripgrepConfig, undefined);
-	assert.ok(recorded.args.includes("--no-extensions"));
 	assert.ok(recorded.args.includes("--session"));
 	assert.equal(recorded.args.includes("--no-session"), false);
 	assert.equal(recorded.sessionPath, recorded.args[recorded.args.indexOf("--session") + 1]);
@@ -157,7 +189,11 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	assert.ok(recorded.args.includes("--approve"));
 	assert.ok(recorded.args.includes("synthetic/child"));
 	assert.ok(recorded.args.includes("low"));
-	assert.ok(recorded.args.includes("read,grep,find,ls,git_read"));
+	// The child is a normal Pi process: the effective configured catalog decides tools.
+	// No identity-based extension ban and no fixed role allowlist remain.
+	assert.equal(recorded.args.includes("--no-extensions"), false);
+	assert.equal(recorded.args.includes("--tools"), false);
+	assert.deepEqual(recorded.args.slice(recorded.args.indexOf("--exclude-tools"), recorded.args.indexOf("--exclude-tools") + 2), ["--exclude-tools", "edit,write"]);
 	await assert.rejects(readFile(recorded.capability, "utf8"), /ENOENT/);
 
 	const withExternal = await runChild(options("normal", {
@@ -168,7 +204,9 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	}));
 	assert.equal(withExternal.status, "succeeded");
 	const recordedExternal = JSON.parse(await readFile(capture, "utf8")) as { args: string[]; sessionPath: string };
-	assert.ok(recordedExternal.args.includes("read,grep,find,ls,git_read"));
+	assert.equal(recordedExternal.args.includes("--no-extensions"), false);
+	assert.equal(recordedExternal.args.includes("--tools"), false);
+	assert.ok(recordedExternal.args.includes("--exclude-tools"));
 	assert.ok(recordedExternal.args.includes("--approve"));
 	assert.ok(recordedExternal.args.includes("synthetic/child"));
 	assert.ok(recordedExternal.args.includes("low"));

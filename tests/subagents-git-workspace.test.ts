@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, readFile, rename, rm, chmod, symlink, readlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyGitCandidate, captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate, refreshGitInputs, inspectGitWorkspace, type GitTaskWorkspace } from "../extensions/subagents/git-workspace.ts";
+import { applyGitCandidate, captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate, planGitApply, refreshGitInputs, inspectGitWorkspace, type GitTaskWorkspace } from "../extensions/subagents/git-workspace.ts";
 const exec = promisify(execFile);
 const env = () => ({ PATH: process.env.PATH, HOME: "/nonexistent", LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@localhost", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@localhost" });
 async function git(repo: string, ...args: string[]): Promise<string> { return (await exec("git", ["-c", "core.hooksPath=/dev/null", "-C", repo, ...args], { env: env(), timeout: 10_000 })).stdout.trim(); }
@@ -125,6 +125,50 @@ test("candidate identity and merge base cannot be substituted", async t => {
 	const f = await fixture(t); const w = await f.worker(); await writeFile(join(w.path, "main.txt"), "worker\n"); const candidate = await freezeGitCandidate(w);
 	await assert.rejects(applyGitCandidate(w, { ...candidate, inputBase: candidate.commit }), { code: "candidate_base_mismatch" });
 	await assert.rejects(applyGitCandidate(w, { ...candidate, workspaceId: "wrong" }), { code: "candidate_owner_mismatch" });
+});
+test("planning checkpoints the creation intent before the ref and promotes it at ownership", async t => {
+	const f = await fixture(t); const w = await f.worker(); await writeFile(join(w.path, "main.txt"), "worker\n"); const candidate = await freezeGitCandidate(w);
+	const steps: Array<{ pending: string[]; owned: string[] }> = [];
+	const clean = await planGitApply(w, candidate, async workspace => {
+		assert.equal(workspace, w);
+		steps.push({ pending: Object.keys(workspace.pendingRefs ?? {}).filter(ref => ref.includes("/integration/")), owned: Object.keys(workspace.ownedRefs).filter(ref => ref.includes("/integration/")) });
+	});
+	assert.equal(clean.status, "clean");
+	assert.equal(steps.length, 2);
+	assert.equal(steps[0]!.pending.length, 1, "a creation intent is recorded before the ref exists");
+	assert.equal(steps[0]!.owned.length, 0);
+	assert.equal(steps[1]!.pending.length, 0, "the created ref is promoted at the ownership checkpoint");
+	assert.equal(steps[1]!.owned.length, 1);
+	assert.equal(Object.keys(w.pendingRefs ?? {}).length, 0);
+	assert.ok(Object.keys(w.ownedRefs).some(ref => ref.includes("/integration/")));
+
+	// An intent-checkpoint failure creates no ref and leaves no dangling intent.
+	const g = await fixture(t); const w2 = await g.worker(); await writeFile(join(w2.path, "main.txt"), "worker-2\n"); const candidate2 = await freezeGitCandidate(w2);
+	const before = Object.keys(w2.ownedRefs).length;
+	await assert.rejects(planGitApply(w2, candidate2, async () => { throw new Error("checkpoint failed"); }), /checkpoint failed/);
+	assert.equal(Object.keys(w2.ownedRefs).length, before, "failed intent checkpoint creates no ref");
+	assert.equal(Object.keys(w2.pendingRefs ?? {}).length, 0, "failed intent checkpoint leaves no dangling intent");
+	assert.equal((await git(g.repo, "for-each-ref", "--format=%(refname)", "refs/csheng/subagents/")).split("\n").filter(ref => ref.includes("/integration/")).length, 0);
+});
+test("a failed promotion checkpoint keeps a durable creation intent that discard reconciles", async t => {
+	const f = await fixture(t); const w = await f.worker(); await writeFile(join(w.path, "main.txt"), "worker\n"); const candidate = await freezeGitCandidate(w);
+	let durable: GitTaskWorkspace | undefined;
+	let calls = 0;
+	await assert.rejects(planGitApply(w, candidate, async workspace => {
+		calls++;
+		if (calls === 1) durable = structuredClone(workspace);
+		else throw new Error("promotion checkpoint failed");
+	}), /promotion checkpoint failed/);
+	const ref = Object.keys(w.ownedRefs).find(name => name.includes("/integration/"));
+	assert.ok(ref, "the integration ref was created");
+	assert.equal(durable!.ownedRefs[ref!], undefined, "the durable record does not yet own the created ref");
+	assert.equal(durable!.pendingRefs?.[ref!], w.ownedRefs[ref!], "the durable record knows the ref only as a pending intent");
+	// Reload from the durable intent and discard: the pending ref is promoted and then released.
+	const reloaded = structuredClone(durable!);
+	await discardGitWorkspace(reloaded);
+	assert.equal(Object.keys(reloaded.ownedRefs).length, 0);
+	assert.equal(Object.keys(reloaded.pendingRefs ?? {}).length, 0);
+	await assert.rejects(git(f.repo, "show-ref", "--verify", ref!), /Command failed/);
 });
 test("discard removes only the registered task and its exact refs, preserving siblings and user branches", async t => {
 	const f = await fixture(t); await git(f.repo, "branch", "keep-me"); const a = await f.worker("a"); const b = await f.worker("b");

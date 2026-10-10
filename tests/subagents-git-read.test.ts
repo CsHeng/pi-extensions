@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -20,8 +20,8 @@ async function fixture(t: test.TestContext) {
  await git("init", "-q"); await writeFile(join(root, "src/a"), "old\n"); await writeFile(join(root, "outside"), "outside secret\n");
  await git("add", "."); await git("commit", "-qm", "first"); const first = await git("rev-parse", "HEAD");
  await writeFile(join(root, "src/a"), "new\n"); await git("add", "."); await git("commit", "-qm", "second"); const second = await git("rev-parse", "HEAD");
- const cap: NormalizedChildCapability = { version: 2, role: "reviewer", root, readRoots: [join(root, "src")], writePaths: [], externalReadRoots: [] };
- const query = (input: Record<string, unknown>, signal?: AbortSignal) => queryGitRead(cap, { repository: "src", paths: ["src/a"], ...input }, signal);
+ const cap: NormalizedChildCapability = { version: 4, role: "reviewer", cwd: root, grants: [{ permission: "read", path: join(root, "src") }], roots: [] };
+ const query = (input: Record<string, unknown>, signal?: AbortSignal) => queryGitRead(cap, { repository: root, paths: ["src/a"], ...input }, signal);
  const unchanged = async () => ({ index: await readFile(join(root, ".git/index")), config: await readFile(join(root, ".git/config")), refs: await git("for-each-ref", "--format=%(refname) %(objectname)"), source: await readFile(join(root, "src/a")) });
  return { base, root, git, first, second, cap, query, unchanged };
 }
@@ -57,19 +57,19 @@ test("scope and grammar cannot expose sibling content or a shell", async t => {
   { operation: "show", head: "HEAD:outside" }, { operation: "show", head: "--help" },
   { operation: "status", repository: ".." }, { operation: "status", argv: ["reset", "--hard"] },
  ]) { const result = await f.query(input); assert.equal(result.ok, false, JSON.stringify(input)); assert.equal(result.text, undefined); }
- assert.equal((await queryGitRead({ ...f.cap, role: "worker" }, { operation: "status", repository: "src", paths: ["src"] })).code, "role_denied");
- assert.ok(getManagedRole("reviewer").tools.includes("git_read")); assert.equal(getManagedRole("reviewer").tools.includes("bash"), false);
- assert.equal((await authorizePath(f.cap, "write", "src/a")).allowed, false);
- const worker = { ...f.cap, role: "worker" as const, readRoots: [f.root], writeRoot: true };
- assert.equal((await authorizePath(worker, "write", "../escape")).allowed, false);
- assert.equal((await authorizePath(worker, "write", "src/new")).allowed, true);
+ assert.notEqual((await queryGitRead({ ...f.cap, role: "worker" }, { operation: "status", repository: f.root, paths: ["src/a"] })).code, "role_denied");
+ assert.ok(getManagedRole("reviewer").tools.includes("git_read")); assert.equal(getManagedRole("reviewer").tools.includes("bash"), true);
+ assert.equal((await authorizePath(f.cap, "write", join(f.root, "src", "a"))).allowed, false);
+ const worker = { ...f.cap, role: "worker" as const, grants: [{ permission: "write" as const, path: join(f.root, "src") }] };
+ assert.equal((await authorizePath(worker, "write", join(f.base, "escape"))).allowed, false);
+ assert.equal((await authorizePath(worker, "write", join(f.root, "src", "new"))).allowed, true);
  await symlink(f.base, join(f.root, "src/link"));
  assert.equal((await f.query({ operation: "status", paths: ["src/link/secret"] })).ok, false);
 });
 
 test("external read subdirectories and historical symlink blobs do not widen grants", async t => {
  const f = await fixture(t); const child = join(f.base, "child"); await mkdir(child);
- const cap = { ...f.cap, root: child, readRoots: [child], externalReadRoots: [join(f.root, "src")] };
+ const cap = { ...f.cap, cwd: child, grants: [{ permission: "read" as const, path: child }, { permission: "read" as const, path: join(f.root, "src") }] };
  const allowed = await queryGitRead(cap, { operation: "show", repository: join(f.root, "src"), paths: ["src/a"], head: f.first }); assert.equal(allowed.ok, true, JSON.stringify(allowed));
  assert.equal((await queryGitRead(cap, { operation: "show", repository: join(f.root, "src"), paths: ["outside"], head: f.first })).ok, false);
  await symlink("../../outside-file", join(f.root, "src/link")); await f.git("add", "src/link"); await f.git("commit", "-qm", "symlink");
@@ -117,9 +117,9 @@ test("tracked parent symlink to a grant's ancestor cannot expose sibling bytes",
  await mkdir(link, { recursive: true }); await writeFile(join(link, "secret"), "tracked\n"); await writeFile(join(f.root, "src/secret"), "OUTSIDE_GRANT\n");
  await f.git("add", "src"); await f.git("commit", "-qm", "tracked descendant");
  await rm(link, { recursive: true }); await symlink("..", link);
- const cap = { ...f.cap, readRoots: [allowed] };
+ const cap = { ...f.cap, cwd: allowed, grants: [{ permission: "read" as const, path: allowed }] };
  for (const paths of [["src/allowed"], ["src/allowed/link/secret"]]) {
-  const result = await queryGitRead(cap, { operation: "status", repository: "src/allowed", paths });
+  const result = await queryGitRead(cap, { operation: "status", repository: f.root, paths });
   assert.equal(result.code, "read_scope_denied"); assert.equal(result.text, undefined); assert.equal(result.before, undefined);
  }
 });
@@ -163,7 +163,7 @@ test("object-source escapes, cancellation, and output limits fail explicitly", a
 test("registered linked worktree metadata is allowed without granting sibling source", async t => {
  const f = await fixture(t); const worktree = join(f.base, "linked");
  await f.git("worktree", "add", "--detach", worktree, f.first);
- const cap = { ...f.cap, root: worktree, readRoots: [join(worktree, "src")] };
+ const cap = { ...f.cap, cwd: worktree, grants: [{ permission: "read" as const, path: join(worktree, "src") }] };
  const result = await queryGitRead(cap, { operation: "show", repository: "src", paths: ["src/a"], head: "HEAD" });
  assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.head, f.first); assert.equal(result.text, "old\n");
  assert.equal((await queryGitRead(cap, { operation: "status", repository: f.root, paths: ["src"] })).ok, false);
@@ -185,6 +185,54 @@ test("bounded Git process timeout and in-flight cancellation reap the owned proc
   const abortedPid = Number(await readFile(pidfile, "utf8"));
   assert.throws(() => process.kill(abortedPid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH");
  } finally { if (prior === undefined) delete process.env.PATH; else process.env.PATH = prior; }
+});
+
+test("a replaced writable selector anchor fails before any Git process starts", async t => {
+ const f = await fixture(t);
+ const srcInfo = await lstat(join(f.root, "src"));
+ const cap: NormalizedChildCapability = { version: 4, role: "worker", cwd: f.root, grants: [{ permission: "write", path: join(f.root, "src"), anchor: { path: join(f.root, "src"), dev: srcInfo.dev, ino: srcInfo.ino } }], roots: [] };
+ const canary = join(f.base, "GIT_RAN");
+ const bin = join(f.base, "bin"); await mkdir(bin);
+ await writeFile(join(bin, "git"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(canary)}, 'ran'); process.exit(0);\n`);
+ await chmod(join(bin, "git"), 0o700);
+ const prior = process.env.PATH; process.env.PATH = `${bin}:${prior}`;
+ try {
+  await rename(join(f.root, "src"), join(f.root, "src-old"));
+  await mkdir(join(f.root, "src"));
+  const result = await queryGitRead(cap, { operation: "status", repository: f.root, paths: ["src/a"] });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.code, "read_scope_denied");
+  await assert.rejects(readFile(canary), { code: "ENOENT" });
+  const parent = await lstat(f.root);
+  cap.grants[0]!.anchor = { path: f.root, dev: parent.dev, ino: parent.ino };
+  await rm(join(f.root, "src"), { recursive: true });
+  const outside = join(f.base, "foreign"); await mkdir(outside);
+  await symlink(outside, join(f.root, "src"), "dir");
+  const redirected = await queryGitRead(cap, { operation: "status", repository: f.root, paths: ["src/a"] });
+  assert.equal(redirected.code, "read_scope_denied", "a stable parent anchor is not permission to follow a replaced selector");
+  await assert.rejects(readFile(canary), { code: "ENOENT" });
+ } finally { if (prior === undefined) delete process.env.PATH; else process.env.PATH = prior; }
+});
+
+test("Git reads preserve write-includes-read after an authorized atomic leaf replacement", async t => {
+ const f = await fixture(t); const parent = await lstat(join(f.root, "src")); const before = await lstat(join(f.root, "src/a"));
+ const cap: NormalizedChildCapability = { version: 4, role: "worker", cwd: f.root, roots: [], grants: [
+  { permission: "read", path: join(f.root, "src/a"), pin: { dev: before.dev, ino: before.ino } },
+  { permission: "write", path: join(f.root, "src/a"), anchor: { path: join(f.root, "src"), dev: parent.dev, ino: parent.ino } },
+ ] };
+ await writeFile(join(f.root, "src/replacement"), "updated\n"); await rename(join(f.root, "src/replacement"), join(f.root, "src/a"));
+ const result = await queryGitRead(cap, { operation: "status", repository: f.root, paths: ["src/a"] });
+ assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("a fresh empty repository remains readable without extra Git environment", async t => {
+ const base = await mkdtemp(join(tmpdir(), "git-read-empty-")); const root = join(base, "repo"); await mkdir(root);
+ t.after(() => rm(base, { recursive: true, force: true }));
+ await exec("git", ["-C", root, "init", "-q"], { env });
+ const cap: NormalizedChildCapability = { version: 4, role: "reviewer", cwd: root, grants: [{ permission: "read", path: root }], roots: [] };
+ const result = await queryGitRead(cap, { operation: "status", repository: root, paths: ["."] });
+ assert.equal(result.ok, true, JSON.stringify(result));
+ assert.equal(result.operation, "status");
 });
 
 test("registered readonly tool enforces its own typed boundary", async t => {

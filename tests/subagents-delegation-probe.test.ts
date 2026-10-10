@@ -44,7 +44,7 @@ test("probe variants reference the production parent-visible surface instead of 
 	assert.equal(flat.name, "csheng_subagent_sessions");
 	assert.equal(flat.description, SUBAGENT_TOOL_DESCRIPTION);
 	const keys = Object.keys((flat.parameters as { properties?: Record<string, unknown> }).properties ?? {});
-	assert.deepEqual(keys, ["role", "objective", "repository", "scope", "inputs", "writePaths", "verification"]);
+	assert.deepEqual(keys, ["role", "objective", "access", "inputs", "verification"]);
 	const agentShape = probeShapeDefinition("agent-shape");
 	assert.equal(agentShape.name, "Agent");
 	assert.deepEqual(Object.keys((agentShape.parameters as { properties?: Record<string, unknown> }).properties ?? {}), ["description", "prompt", "subagent_type", "model", "run_in_background"]);

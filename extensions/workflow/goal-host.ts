@@ -101,9 +101,10 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  pi.on("tool_execution_end", (event, ctx) => {
   const capture = captures.get(event.toolCallId); captures.delete(event.toolCallId);
   if (!capture) return;
-  const host = summarizeHostObservation({ ...event, at: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() });
   const details = event.result?.details as { schemaVersion?: number; action?: string; kind?: string; runId?: string; sessions?: Array<{ handle: string; episode: number; state: string; result?: unknown }> } | undefined;
-  if (event.toolName === MANAGED_SESSION_TOOL_NAME && details?.schemaVersion === 3 && details.kind === "submission" && details.runId) {
+  if (event.toolName === MANAGED_SESSION_TOOL_NAME && details?.schemaVersion !== 4) return;
+  const host = summarizeHostObservation({ ...event, at: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() });
+  if (event.toolName === MANAGED_SESSION_TOOL_NAME && details?.schemaVersion === 4 && details.kind === "submission" && details.runId) {
    if (dispatches.has(event.toolCallId) && !terminalRuns.has(details.runId)) {
     const tasks = new Set((details.sessions ?? []).filter(session => ["queued", "running"].includes(session.state) && !terminalTasks.has(`${details.runId}:${session.handle}:${session.episode}`)).map(session => `${session.handle}:${session.episode}`));
     if (tasks.size) pending.set(details.runId, { call: event.toolCallId, tasks });
@@ -111,10 +112,10 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
    }
    return; // An accepted receipt is not a completed host check.
   }
-  if (details?.schemaVersion === 3 && ["create", "continue"].includes(details.action ?? "")) return; // Execution events retain the original dispatch association, including foreground/replay.
+  if (details?.schemaVersion === 4 && ["create", "continue"].includes(details.action ?? "")) return; // Execution events retain the original dispatch association, including foreground/replay.
   const identity = hostCheckIdentity(event.toolName, host.managed ? { action: host.managed.action } : capture.input, host.managed ?? { isError: host.isError, exitCode: host.exitCode });
   let evidence = capture;
-  if (details?.schemaVersion === 3 && ["inspect", "join"].includes(details.action ?? "") && details.sessions?.some(session => session.result)) {
+  if (details?.schemaVersion === 4 && ["inspect", "join"].includes(details.action ?? "") && details.sessions?.some(session => session.result)) {
    const originals = details.sessions.filter(session => session.result).map(session => {
     const binding = executionCaptures.get(`${session.handle}:${session.episode}`);
     return binding?.contractId === store.current()?.id ? binding?.capture : undefined;
@@ -123,11 +124,12 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
    // Querying an old result is not a new execution check. Mixed or recovered bindings fail closed.
    evidence = first && originals.every(value => value && value.owner === first.owner && value.generation === first.generation && digest(value.scopes) === digest(first.scopes)) ? first : { ...capture, scopes: {} };
   }
-  store.observe({ scopes: evidence.scopes, owner: evidence.owner, generation: evidence.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  const observationId = store.observe({ scopes: evidence.scopes, owner: evidence.owner, generation: evidence.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  pi.appendEntry("csheng-workflow-observation", { version: 1, id: observationId });
  });
  const unsubscribeExecution = pi.events.on(SUBAGENT_EXECUTION_EVENT, raw => {
   const event = raw as SubagentExecutionEvent;
-  if (!event || event.version !== 3 || typeof event.eventId !== "string" || typeof event.runId !== "string" || !["task-terminal", "run-terminal"].includes(event.kind) || !Array.isArray(event.sessions) || event.sessions.length > 10 || seenEvents.has(event.eventId)) return;
+  if (!event || event.version !== 4 || typeof event.eventId !== "string" || typeof event.runId !== "string" || !["task-terminal", "run-terminal"].includes(event.kind) || !Array.isArray(event.sessions) || event.sessions.length > 10 || seenEvents.has(event.eventId)) return;
   const binding = dispatches.get(event.toolCallId); const state = store.current();
   if (!binding || !state || binding.contractId !== state.id || binding.sessionId !== event.owner?.sessionId) return;
   if (event.sessions.some(session => !session || !Number.isSafeInteger(session.episode) || typeof session.handle !== "string" || ["queued", "running"].includes(session.state))) return;
@@ -144,9 +146,10 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
   while (terminalRuns.size > 256) terminalRuns.delete(terminalRuns.values().next().value!);
   store.pendingExecutions([...pending.keys()]);
   const status = event.sessions.every(session => session.result?.status === "succeeded") ? "succeeded" : "failed";
-  const host = summarizeHostObservation({ toolCallId: event.eventId, toolName: MANAGED_SESSION_TOOL_NAME, isError: status !== "succeeded", sessionId: binding.sessionId, result: { details: { action: "execution", status, sessions: event.sessions } } });
+  const host = summarizeHostObservation({ toolCallId: event.eventId, toolName: MANAGED_SESSION_TOOL_NAME, isError: status !== "succeeded", sessionId: binding.sessionId, result: { details: { schemaVersion: 4, action: "execution", status, sessions: event.sessions } } });
   const identity = hostCheckIdentity(MANAGED_SESSION_TOOL_NAME, { action: "execution" }, host.managed);
-  store.observe({ scopes: binding.capture.scopes, owner: binding.capture.owner, generation: binding.capture.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  const observationId = store.observe({ scopes: binding.capture.scopes, owner: binding.capture.owner, generation: binding.capture.generation, host, ...(identity ? { checkIdentity: identity } : {}) });
+  pi.appendEntry("csheng-workflow-observation", { version: 1, id: observationId });
   store.executionReady(event.runId); // The executor alone owns the completion wake.
  });
  pi.on("session_shutdown", () => { unsubscribeExecution(); stopArming(); });

@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ConfigSourceSnapshot } from "./config.ts";
-import type { ProvenanceTelemetry } from "./contracts.ts";
+import { COLLABORATION_CONTRACT_VERSION, type ProvenanceTelemetry } from "./contracts.ts";
+import { isProductId, mintProductId } from "./identity.ts";
 
 export const PROVENANCE_DIR = "subagent-provenance";
-export const PROVENANCE_MANIFEST = "current.json";
+export const PROVENANCE_MANIFEST = `current-v${COLLABORATION_CONTRACT_VERSION}.json`;
 export const PROVENANCE_LOCK = ".provenance-lock";
 const MANIFEST_VERSION = 1 as const;
 const LOCK_WAIT_MS = 2_000;
@@ -80,11 +81,11 @@ function isManifest(value: unknown): value is Manifest {
 	const record = value as Record<string, unknown>;
 	return record.version === MANIFEST_VERSION
 		&& typeof record.extensionFingerprint === "string"
-		&& typeof record.extensionEpoch === "string"
+		&& typeof record.extensionEpoch === "string" && isProductId(record.extensionEpoch)
 		&& typeof record.extensionActivatedAtMs === "number"
 		&& Number.isFinite(record.extensionActivatedAtMs)
 		&& typeof record.configurationFingerprint === "string"
-		&& typeof record.configurationEpoch === "string"
+		&& typeof record.configurationEpoch === "string" && isProductId(record.configurationEpoch)
 		&& typeof record.configurationActivatedAtMs === "number"
 		&& Number.isFinite(record.configurationActivatedAtMs)
 		&& Object.keys(record).length === 7;
@@ -120,7 +121,7 @@ async function privateFile(path: string): Promise<boolean> {
 
 export function createProvenance(dependencies: ProvenanceDependencies = {}): ProvenanceCore {
 	const now = dependencies.now ?? Date.now;
-	const randomId = dependencies.randomId ?? randomUUID;
+	const randomId = dependencies.randomId ?? mintProductId;
 	const sourceRoot = dependencies.sourceRoot ?? fileURLToPath(new URL(".", import.meta.url));
 	const listSourceFiles = dependencies.listSourceFiles ?? defaultListSourceFiles;
 	// Pin the loaded runtime's source identity. A disk edit is not a reload.
@@ -201,6 +202,7 @@ export function createProvenance(dependencies: ProvenanceDependencies = {}): Pro
 	}
 
 	async function writeManifest(directory: string, token: string, manifest: Manifest): Promise<boolean> {
+		if (!isManifest(manifest)) return false;
 		const lockPath = join(directory, PROVENANCE_LOCK);
 		const owner = await readFile(join(lockPath, TOKEN_FILE), "utf8");
 		if (owner !== token) return false;

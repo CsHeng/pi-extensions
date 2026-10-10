@@ -7,13 +7,14 @@ const telemetry = { version: 1, ownerSessionId: "owner", invocationId: "invocati
 function session(details: object[], owner = "owner") {
 	return [{ type: "session", version: 3, id: owner }, ...details.map((data, index) => ({ type: "message", id: `entry${index}`, parentId: index ? `entry${index-1}` : null, message: { role: "toolResult", toolName: "csheng_subagent_sessions", details: data } }))].map(row => JSON.stringify(row)).join("\n") + "\n";
 }
-const result = (extra = {}) => ({ schemaVersion: 2, action: "create", status: "succeeded", sessions: [], requestTelemetry: telemetry, ...extra });
+const result = (extra = {}) => ({ schemaVersion: 4, action: "create", status: "succeeded", sessions: [], requestTelemetry: telemetry, ...extra });
 
-test("managed dispatch does not need a settled observation window or alter one-shot totals", () => {
+test("managed dispatch does not need a settled observation window and stays separate from excluded history", () => {
 	const metrics = extractSessionMetrics(session([result(), result({ action: "close", status: "failed", error: { code: "missing_session_version" }, requestTelemetry: { ...telemetry, invocationId: "close", admittedTasks: null, requestedTasks: null, launchedChildren: 0, configurationEpoch: null } })]));
-	assert.equal(metrics.schemaVersion, 4);
+	assert.equal(metrics.schemaVersion, 5);
 	assert.equal(metrics.observations.available, false);
-	assert.equal(metrics.totals.toolCalls, 0);
+	assert.equal(metrics.source.selectedRuns, 2);
+	assert.equal(metrics.source.excludedRuns, 0);
 	assert.equal(metrics.managedDispatch.ownedRequests, 2);
 	assert.equal(metrics.managedDispatch.launchedChildren.known, 1);
 	assert.deepEqual(metrics.managedDispatch.errors, [{ code: "missing_session_version", count: 1 }]);
@@ -33,9 +34,8 @@ test("epoch selection distinguishes request provenance from returned historical 
 	assert.equal(metrics.selectedRequests, 1);
 	assert.equal(metrics.excludedRequests, 1);
 	assert.equal(metrics.unassignedRequests, 1);
-	assert.equal(metrics.legacyResults, 1);
+	assert.equal(metrics.excludedRecords, 1, "the schema-one result envelope is excluded before interpretation");
 	assert.equal(metrics.launchedChildren.known, 1);
-	assert.deepEqual(metrics.legacyActions, [{ action: "inspect", status: "failed", count: 1 }], "never infer a historical create from an error code");
 });
 
 test("owned invocation duplicates deduplicate, conflicts invalidate and copied forks do not own requests", () => {

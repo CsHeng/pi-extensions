@@ -81,3 +81,19 @@ export async function prepareChildGuidance(sourceRoot: string, childRoot: string
 	}
 	return { contextFiles, skillPaths, readRoots, physicalRoots };
 }
+
+/** Combine one guidance result per source/prepared pair. Earlier pairs win name collisions. */
+export function mergeChildGuidance(parts: readonly ChildGuidance[]): ChildGuidance {
+	const contextFiles: ChildGuidance["contextFiles"] = [];
+	const seenFiles = new Set<string>();
+	const skillPaths: string[] = [];
+	const readRoots: string[] = [];
+	const physicalRoots: string[] = [];
+	for (const part of parts) {
+		for (const file of part.contextFiles) if (!seenFiles.has(file.path)) { seenFiles.add(file.path); contextFiles.push(file); }
+		for (const path of part.skillPaths) if (!skillPaths.includes(path)) skillPaths.push(path);
+		for (const path of part.readRoots) if (!readRoots.includes(path)) readRoots.push(path);
+		for (const path of part.physicalRoots) if (!physicalRoots.includes(path)) physicalRoots.push(path);
+	}
+	return { contextFiles, skillPaths, readRoots, physicalRoots };
+}

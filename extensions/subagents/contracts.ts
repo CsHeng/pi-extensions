@@ -40,8 +40,10 @@ export const EXECUTION_PROFILES = ["fast", "balanced", "deep"] as const;
 export const REASONING_PROFILES = ["light", "standard", "deep"] as const;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const STABLE_TASK_ERROR_CODES = [
-	"invalid_scope",
-	"worker_write_paths_required",
+	"invalid_access",
+	"unbounded_scope",
+	"non_git_write_unsupported",
+	"unsupported_contract",
 	"model_not_found",
 	"model_unavailable",
 	"ambiguous_model",
@@ -53,16 +55,11 @@ export const STABLE_TASK_ERROR_CODES = [
 	"diagnostic_session_limit",
 	"child_exit_stalled",
 	"repository_root_unavailable",
-	"scope_outside_repository",
-	"external_read_roots_forbidden", // Historical diagnostic remains decodable.
-	"invalid_external_read_root",
-	"external_read_root_unavailable",
-	"external_read_root_not_external",
-	"duplicate_external_read_root",
 ] as const;
 export const CAPABILITY_RECOVERY_HINT = "Reading capability changed or became unavailable. Verify the intended roots and create a new session; continuing the same binding does not reauthorize replaced roots.";
-export const CHILD_CAPABILITY_MANIFEST_V1 = 1 as const;
-export const CHILD_CAPABILITY_MANIFEST_V2 = 2 as const;
+/** Current collaboration contract. Older envelopes are excluded, not interpreted. */
+export const COLLABORATION_CONTRACT_VERSION = 4 as const;
+export const CHILD_CAPABILITY_MANIFEST_VERSION = COLLABORATION_CONTRACT_VERSION;
 export type RoleName = (typeof ROLE_NAMES)[number];
 export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
 export type ReasoningProfile = (typeof REASONING_PROFILES)[number];
@@ -111,27 +108,24 @@ const BoundedStringArray = Type.Array(Type.String(), { maxItems: 32 });
 
 export const SubagentTaskSchema = Type.Object(
 	{
-		id: Type.String({ minLength: 1, maxLength: 64 }),
+		id: Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9]+$" }),
 		role: RoleSchema,
 		objective: Type.String({ minLength: 1 }),
-		repository: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "Worker-only explicit absolute Git worktree root already authorized for this task. Defaults to the parent repository. Each worker still writes exactly one pinned repository; scope and writePaths are relative to that target. Target selection does not grant authority." })),
-		scope: Type.Array(Type.String({ minLength: 1 }), {
+		access: Type.Array(Type.Object({
+			permission: StringEnum(["read", "write"] as const),
+			scope: Type.Union([
+				Type.String({ minLength: 1 }),
+				Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 32 }),
+			], { description: "Absolute paths, or * only inside an explicit finite universe supplied by the host. A scalar and a one-item list are the same grant. Write includes read of that range." }),
+		}, { additionalProperties: false }), {
 			minItems: 1,
 			maxItems: 32,
-			description: "Repository-relative paths this task may read. Prefer '.' for the repository root. Physically contained absolute or parent-traversing spellings are canonicalized to repository-relative form; declare explicitly authorized paths outside the current repository in externalReadRoots.",
+			description: "Independent read and write grants. Permission is not implied by role or by being a child. Overlapping rules combine. Legacy repository, scope, writePaths and externalReadRoots fields are rejected.",
 		}),
 		inputs: Type.Optional(BoundedStringArray),
 		dependsOn: Type.Optional(Type.Array(Type.String(), {
 			maxItems: 32,
 			description: "Optional hard predecessor task IDs. Omit for ordinary independent work; use only for an approved implementation order with no intervening parent decision.",
-		})),
-		writePaths: Type.Optional(Type.Array(Type.String(), {
-			maxItems: 32,
-			description: "Optional initial repository-relative write regions, advisory for managed v3 workers. Actual in-scope additions, deletions, renames and mode changes are discovered from Git; absolute paths and parent traversal remain invalid.",
-		})),
-		externalReadRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
-			maxItems: HARD_LIMITS.maxExternalReadRoots,
-			description: "Explicit absolute regular-file or directory read roots outside the current repository for any role, including workers. At most eight entries. No external write capability.",
 		})),
 		verification: Type.Optional(BoundedStringArray),
 		resourceLocks: Type.Optional(BoundedStringArray),
@@ -150,12 +144,9 @@ export interface SubagentTask {
 	id: string;
 	role: RoleName;
 	objective: string;
-	repository?: string;
-	scope: string[];
+	access: Array<{ permission: "read" | "write"; scope: string | string[] }>;
 	inputs?: string[];
 	dependsOn?: string[];
-	writePaths?: string[];
-	externalReadRoots?: string[];
 	verification?: string[];
 	resourceLocks?: string[];
 	executionProfile?: ExecutionProfile;
@@ -331,37 +322,33 @@ export interface SubagentRunResult {
 	telemetry: RunTelemetry;
 }
 
-export interface ChildCapabilityManifestV1 {
-	version: typeof CHILD_CAPABILITY_MANIFEST_V1;
-	root: string;
-	role: RoleName;
-	readRoots: string[];
-	writePaths: string[];
+export interface CapabilityGrant {
+	permission: "read" | "write";
+	path: string;
+	/** Immutable read-only evidence identity for a non-writable selector. */
+	pin?: { dev: number; ino: number };
+	/** Stable existing-parent binding for a writable or missing selector; never the mutable leaf. */
+	anchor?: { path: string; dev: number; ino: number };
 }
 
-export interface ChildCapabilityManifestV2 {
-	version: typeof CHILD_CAPABILITY_MANIFEST_V2;
-	root: string;
+export interface CapabilityRoot {
+	id: string;
+	source: string;
+	path: string;
+	permission: "read" | "write";
+}
+
+export interface ChildCapabilityManifest {
+	version: typeof CHILD_CAPABILITY_MANIFEST_VERSION;
 	role: RoleName;
-	readRoots: string[];
-	writePaths: string[];
-	externalReadRoots: string[];
-	/** Admission-pinned filesystem identities, not model-authored. */
-	externalReadPins?: Array<{ dev: number; ino: number }>;
+	cwd: string;
+	grants: CapabilityGrant[];
+	roots: CapabilityRoot[];
 	/** Runtime-derived native guidance, never supplied by a model task. */
 	guidance?: { contextFiles: Array<{ path: string; content: string }>; readRoots: string[]; physicalRoots: string[] };
-	/** Managed v3 source-root writes; initial writePaths are advisory. */
-	writeRoot?: boolean;
 }
 
-/** Normalized runtime capability after exact v1 or v2 parse. */
-export type NormalizedChildCapability = ChildCapabilityManifestV2;
-
-/**
- * Producer/runtime capability shape. Existing v1 literals remain valid until
- * the guard and runner slices migrate to normalized v2.
- */
-export type ChildCapabilityManifest = ChildCapabilityManifestV1 | ChildCapabilityManifestV2;
+export type NormalizedChildCapability = ChildCapabilityManifest;
 
 export function emptyUsage(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };

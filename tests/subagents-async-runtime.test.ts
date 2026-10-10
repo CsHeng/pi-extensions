@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -18,7 +22,7 @@ import type { SubagentExecutionEvent } from "../extensions/shared/subagent-execu
 const git = promisify(execFile);
 function gate() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
 async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) => Promise<void>, concurrency = 2, getParentSkills?: (sourceRoot: string) => readonly Skill[] | undefined) {
-	const base = await mkdtemp(join(tmpdir(), "subagent-v3-")); const repo = join(base, "repo"); await mkdir(repo);
+	const base = await mkdtemp(join(tmpdir(), "subagent-v3-")); const repo = join(base, "repo"); writeRoot = repo; await mkdir(repo);
 	await git("git", ["init", "-q", repo]); await writeFile(join(repo, "base.txt"), "dirty parent\n");
 	const model = { provider: "fixture", id: "fixture", reasoning: false };
 	const ctx = { mode: "tui", cwd: repo, isProjectTrusted: () => true, model, thinkingLevel: "off", scopedModels: [], modelRegistry: { getAll: () => [model], getAvailable: () => [model] }, sessionManager: { getSessionId: () => "parent", getLeafId: () => "anchor", getBranch: () => [{ id: "anchor" }] } } as unknown as ExtensionContext;
@@ -32,7 +36,8 @@ async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) =
 	t.after(async () => { await service.shutdown(); for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await rm(base, { recursive: true, force: true }); });
 	return { repo, ctx, store, service, events, wakes, config };
 }
-const task = (id: string) => ({ id, role: "worker" as const, objective: "change source", scope: ["."], writePaths: [] });
+let writeRoot = "/tmp/scope";
+const task = (id: string): import("../extensions/subagents/contracts.ts").SubagentTask => ({ id, role: "worker", objective: "change source", access: [{ permission: "write", scope: writeRoot }] });
 
 test("wake filtering fences observed episodes, late run aggregates, new episodes and owner identity without accepting work", async t => {
  const f = await fixture(t, async () => {});
@@ -62,7 +67,7 @@ test("v3 receipts precede completion, early apply leaves sibling active, fixed i
 		await writeFile(join(options.cwd, `${options.task.id}.txt`), options.prompt === "repair" ? "repair\n" : "first\n");
 	});
 	const receipt = await f.service.execute({ action: "create", requestId: "batch", tasks: [task("fast"), task("slow")] }, f.ctx, undefined, undefined, "submission-call");
-	assert.equal(receipt.status, "accepted", JSON.stringify(receipt)); assert.equal(receipt.schemaVersion, 3);
+	assert.equal(receipt.status, "accepted", JSON.stringify(receipt)); assert.equal(receipt.schemaVersion, 4);
 	await started.promise;
 	await writeFile(join(f.repo, "base.txt"), "new parent\n");
 	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions[0]?.result?.id === "fast"); attempt++) { assert.ok(attempt < 500); await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -103,9 +108,9 @@ test("queued episodes keep the accepted role Skill setting despite a later confi
 		settings.push({ id: options.task.id, inheritSkills: options.inheritSkills });
 		if (options.task.id === "one") { started.release(); await hold.promise; }
 	}, 1);
-	const first = await f.service.execute({ action: "create", requestId: "skills-one", tasks: [task("one")] }, f.ctx);
+	const first = await f.service.execute({ action: "create", requestId: "skillsone", tasks: [task("one")] }, f.ctx);
 	await started.promise;
-	const second = await f.service.execute({ action: "create", requestId: "skills-two", tasks: [task("two")] }, f.ctx);
+	const second = await f.service.execute({ action: "create", requestId: "skillstwo", tasks: [task("two")] }, f.ctx);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	assert.equal((await f.store.load(second.sessions[0]!.handle, owner)).inheritSkills, true);
 	f.config.roles.worker.inheritSkills = false;
@@ -115,7 +120,7 @@ test("queued episodes keep the accepted role Skill setting despite a later confi
 	assert.deepEqual(settings, [{ id: "one", inheritSkills: true }, { id: "two", inheritSkills: true }]);
 	assert.equal(joined.sessions[0]?.execution?.inheritSkills, true);
 	await f.service.execute({ action: "join", runId: first.runId }, f.ctx);
-	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "skills-next", message: "next" }] }, f.ctx);
+	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "skillsnext", message: "next" }] }, f.ctx);
 	assert.equal(continued.status, "succeeded", JSON.stringify(continued));
 	assert.equal(settings.at(-1)?.inheritSkills, false);
 	assert.equal(continued.sessions[0]?.execution?.inheritSkills, false);
@@ -136,25 +141,26 @@ test("parent catalog reload cannot remove a Skill from fixed child input before 
 	await writeFile(join(privateSkill, "SKILL.md"), "---\nname: private-old\ndescription: Ignored private guidance.\n---\n# Private\n");
 	const readParent = () => loadSkills({ cwd: f.repo, agentDir: join(f.repo, "empty-agent"), includeDefaults: false, skillPaths: [join(f.repo, ".agents", "skills")] }).skills.map(value => ({ ...value, sourceInfo: { ...value.sourceInfo, scope: "project" as const } }));
 	parent = readParent();
-	const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "fixed-guide", tasks: [task("one")] }, f.ctx);
+	const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "fixedguide", tasks: [task("one")] }, f.ctx);
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
 	const handle = first.sessions[0]!.handle;
-	const captured = join(f.store.path(handle), "source", ".agents", "skills", "guide");
-	assert.deepEqual(selected[0], [captured, privateSkill]);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const workspace = (await f.store.load(handle, owner)).roots.find(root => root.inputs?.gitWorkspace)?.inputs?.gitWorkspace?.path;
+	const captured = join(workspace!, ".agents", "skills", "guide");
+	assert.deepEqual(selected[0], [captured, privateSkill]);
 	assert.deepEqual((await f.store.load(handle, owner)).projectSkills?.map(value => value.name), ["guide"]);
 	await rm(join(skill, "SKILL.md")); await rm(privateSkill, { recursive: true }); parent = readParent();
-	const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, requestId: "without-refresh", message: "same input" }] }, f.ctx);
+	const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, requestId: "withoutrefresh", message: "same input" }] }, f.ctx);
 	assert.equal(second.status, "succeeded", JSON.stringify(second));
 	assert.deepEqual(selected[1], [captured], "current parent catalog must not erase the fixed snapshot Skill or retain removed private guidance");
 	const privateNew = join(f.repo, ".agents", "skills", "private-new"); await mkdir(privateNew);
 	await writeFile(join(privateNew, "SKILL.md"), "---\nname: private-new\ndescription: New ignored private guidance.\n---\n# Private\n");
 	parent = readParent();
-	const third = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, requestId: "private-added", message: "same input" }] }, f.ctx);
+	const third = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, requestId: "privateadded", message: "same input" }] }, f.ctx);
 	assert.equal(third.status, "succeeded", JSON.stringify(third));
 	assert.deepEqual(selected[2], [captured, privateNew], "new private guidance follows the current parent catalog without refresh");
 	assert.equal((await f.service.execute({ action: "refresh", handle, expectedEpisode: 3 }, f.ctx)).status, "succeeded");
-	const fourth = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 3, requestId: "after-refresh", message: "new input" }] }, f.ctx);
+	const fourth = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 3, requestId: "afterrefresh", message: "new input" }] }, f.ctx);
 	assert.equal(fourth.status, "succeeded", JSON.stringify(fourth));
 	assert.deepEqual(selected[3], [privateNew]);
 });
@@ -189,8 +195,10 @@ test("continuation rechecks recovery state after a concurrent uncertain apply an
 test("same-process batch completions await the root writer instead of treating it as unknown", async t => {
 	const f = await fixture(t, async () => {});
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
-	const graph = validateGraphStructure({ tasks: [task("one")] }); if (!graph.ok) throw new Error("fixture");
-	const make = async (id: string): Promise<SessionActionResult> => ({ schemaVersion: 3, action: "create", status: "succeeded", sessions: (await f.store.allocate(owner, id, graph.tasks)).records.map(record => f.store.view(record)) });
+	const make = async (id: string): Promise<SessionActionResult> => {
+		const graph = validateGraphStructure({ tasks: [task(id)] }); if (!graph.ok) throw new Error("fixture");
+		return { schemaVersion: 4, action: "create", status: "succeeded", sessions: (await f.store.allocate(owner, id, graph.tasks)).records.map(record => f.store.view(record)) };
+	};
 	const a = await make("a"), b = await make("b");
 	const entered = gate(), proceed = gate(); t.after(() => proceed.release()); const write = f.store.write.bind(f.store); let pause = true, secondDone = false;
 	f.store.write = async (file, value) => { if (pause && file.startsWith(join(f.store.root, "request_"))) { pause = false; entered.release(); await proceed.promise; } return write(file, value); };

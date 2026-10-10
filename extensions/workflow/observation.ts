@@ -15,6 +15,7 @@ export interface ManagedSessionObservation {
 }
 
 export interface ManagedResultObservation {
+	schemaVersion: 4;
 	action: string | null;
 	status: string;
 	sessions: ManagedSessionObservation[];
@@ -61,20 +62,20 @@ function summarizeSession(value: unknown): ManagedSessionObservation | undefined
 
 /** Defensive parse of a public managed result envelope; unknown shapes are not observed. */
 export function summarizeManagedResult(details: unknown): ManagedResultObservation | undefined {
-	if (!isRecord(details)) return undefined;
+	if (!isRecord(details) || details.schemaVersion !== 4) return undefined;
 	const status = bounded(details.status);
 	if (status.length === 0) return undefined;
 	const action = typeof details.action === "string" ? bounded(details.action) : null;
 	const sessions = Array.isArray(details.sessions)
 		? details.sessions.slice(0, OBSERVATION_LIMITS.maxSessions).map(summarizeSession).filter((session): session is ManagedSessionObservation => session !== undefined)
 		: [];
-	return { action, status, sessions };
+	return { schemaVersion: 4, action, status, sessions };
 }
 
 export function summarizeHostObservation(event: { toolCallId: string; toolName: string; isError: boolean; result?: unknown; sessionId?: string; at?: string }): HostObservation {
 	const details = isRecord(event.result) ? event.result.details : undefined;
 	const observation: HostObservation = {
-		toolCallId: bounded(event.toolCallId),
+		toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : "",
 		toolName: bounded(event.toolName),
 		at: event.at ?? new Date().toISOString(),
 		sessionId: bounded(event.sessionId),

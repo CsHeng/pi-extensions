@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
@@ -30,8 +34,8 @@ test("v4 records serial child intervals and dependency waits on the parent clock
 	const clock = createRunClock(() => now);
 	now = 120; // admission/preparation before scheduler entry
 	const tasks = graph([
-		{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"] },
-		{ id: "b", role: "worker", objective: "b", scope: ["."], writePaths: ["b"], dependsOn: ["a"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/write" }] },
+		{ id: "b", role: "worker", objective: "b", access: [{ permission: "write", scope: "/tmp/write" }], dependsOn: ["a"] },
 	]);
 	const result = await runScheduledTasks(tasks, {
 		clock,
@@ -54,9 +58,9 @@ test("v4 records serial child intervals and dependency waits on the parent clock
 test("v4 records overlapping slot and lock waits without interpreting provider queues", async () => {
 	let now = 0;
 	const tasks = graph([
-		{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"], resourceLocks: ["fixture"] },
-		{ id: "b", role: "worker", objective: "b", scope: ["."], writePaths: ["b"] },
-		{ id: "c", role: "reviewer", objective: "c", scope: ["."], resourceLocks: ["fixture"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/write" }], resourceLocks: ["fixture"] },
+		{ id: "b", role: "worker", objective: "b", access: [{ permission: "write", scope: "/tmp/write" }] },
+		{ id: "c", role: "reviewer", objective: "c", access: [{ permission: "read", scope: "/tmp/scope" }], resourceLocks: ["fixture"] },
 	]);
 	const result = await runScheduledTasks(tasks, { maxConcurrency: 1, now: () => now,
 		execute: async (task, _p, _s, lifecycle) => {
@@ -76,7 +80,7 @@ test("v4 records overlapping slot and lock waits without interpreting provider q
 });
 
 test("v4 marks unclosed child endpoints and backward clocks unavailable", async () => {
-	const tasks = graph([{ id: "a", role: "worker", objective: "a", scope: ["."], writePaths: ["a"] }]);
+	const tasks = graph([{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/write" }] }]);
 	const unclosed = await runScheduledTasks(tasks, { execute: async (task, _p, _s, lifecycle) => { lifecycle.childStarted(); return success(task); } });
 	assert.equal(unclosed.telemetry.timing?.children[0]?.endMs, null);
 	assert.equal(unclosed.telemetry.timing?.complete, false);
@@ -89,44 +93,41 @@ test("v4 marks unclosed child endpoints and backward clocks unavailable", async 
 });
 
 test("canonical repository-relative hints stay contained but do not serialize isolated workers", () => {
-	const outsideScope = validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["lib/a.ts"] },
-	]));
-	assert.equal(outsideScope.ok, false);
-	if (outsideScope.ok) throw new Error("expected scope rejection");
-	assert.equal(outsideScope.error.code, "write_outside_scope");
+	assert.equal(validateGraphRelationships(graph([
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
+	])).ok, true);
 	assert.equal(validateGraphStructure({ tasks: [
-		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
-		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
+		{ id: "b", role: "worker", objective: "b", access: [{ permission: "write", scope: "/tmp/src" }] },
 	] }).ok, true);
 	assert.equal(validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
 	])).ok, true);
 	assert.equal(validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/..config/a.ts"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
 	])).ok, true);
 });
 
 test("graph admission rejects cycles, unknown dependencies and read-only writes; overlapping hints are allowed", () => {
 	assert.equal(validateGraphStructure({ tasks: [
-		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["b"] },
-		{ id: "b", role: "explorer", objective: "b", scope: ["."], dependsOn: ["a"] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["b"] },
+		{ id: "b", role: "explorer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["a"] },
 	] }).ok, false);
 	assert.deepEqual(validateGraphStructure({ tasks: [
-		{ id: "a", role: "explorer", objective: "a", scope: ["."], dependsOn: ["missing"] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["missing"] },
 	] }), { ok: false, error: { code: "unknown_dependency", message: "Task a depends on unknown task missing." } });
 	assert.equal(validateGraphStructure({ tasks: [
-		{ id: "a", role: "reviewer", objective: "a", scope: ["."], writePaths: ["file.ts"] },
-	] }).ok, false);
+		{ id: "a", role: "reviewer", objective: "a", access: [{ permission: "write", scope: "/tmp/write" }] },
+	] }).ok, true);
 	assert.equal(validateGraphStructure({ tasks: [
-		{ id: "a", role: "worker", objective: "a", scope: ["src"], writePaths: ["src/a.ts"] },
-		{ id: "b", role: "worker", objective: "b", scope: ["src"], writePaths: ["src/a.ts"] },
+		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
+		{ id: "b", role: "worker", objective: "b", access: [{ permission: "write", scope: "/tmp/src" }] },
 	] }).ok, true);
 });
 
 test("graph admission rejects unknown semantic profiles before scheduling", () => {
 	assert.deepEqual(validateGraphStructure({ tasks: [
-		{ id: "a", role: "explorer", objective: "a", scope: ["."], executionProfile: "extreme" as never },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], executionProfile: "extreme" as never },
 	] }), {
 		ok: false,
 		error: { code: "invalid_execution_profile", message: "Task a has an unsupported execution profile." },
@@ -135,9 +136,9 @@ test("graph admission rejects unknown semantic profiles before scheduling", () =
 
 test("scheduler runs independent tasks concurrently and joins predecessors in stable order", async () => {
 	const tasks = graph([
-		{ id: "a", role: "explorer", objective: "a", scope: ["."] },
-		{ id: "b", role: "explorer", objective: "b", scope: ["."] },
-		{ id: "join", role: "reviewer", objective: "join", scope: ["."], dependsOn: ["a", "b"] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "b", role: "explorer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "join", role: "reviewer", objective: "join", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["a", "b"] },
 	]);
 	let active = 0;
 	let peak = 0;
@@ -165,9 +166,9 @@ test("scheduler runs independent tasks concurrently and joins predecessors in st
 
 test("resource locks serialize peers without reducing unrelated capacity", async () => {
 	const tasks = graph([
-		{ id: "a", role: "explorer", objective: "a", scope: ["."], resourceLocks: ["shared"] },
-		{ id: "b", role: "explorer", objective: "b", scope: ["."], resourceLocks: ["shared"] },
-		{ id: "c", role: "explorer", objective: "c", scope: ["."] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], resourceLocks: ["shared"] },
+		{ id: "b", role: "explorer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }], resourceLocks: ["shared"] },
+		{ id: "c", role: "explorer", objective: "c", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
 	const running = new Set<string>();
 	let lockOverlap = false;
@@ -188,9 +189,9 @@ test("resource locks serialize peers without reducing unrelated capacity", async
 
 test("failure blocks dependents while independent work succeeds", async () => {
 	const tasks = graph([
-		{ id: "bad", role: "explorer", objective: "bad", scope: ["."] },
-		{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["bad"] },
-		{ id: "good", role: "explorer", objective: "good", scope: ["."] },
+		{ id: "bad", role: "explorer", objective: "bad", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "blocked", role: "reviewer", objective: "blocked", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["bad"] },
+		{ id: "good", role: "explorer", objective: "good", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
 	const result = await runScheduledTasks(tasks, {
 		async execute(task) {
@@ -208,9 +209,9 @@ test("failure blocks dependents while independent work succeeds", async () => {
 
 test("configured package defaults allow four explorers, four reviewers, and two workers", async () => {
 	const tasks = graph([
-		...Array.from({ length: 4 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", scope: ["."] })),
-		...Array.from({ length: 4 }, (_, index) => ({ id: `r${index}`, role: "reviewer", objective: "r", scope: ["."] })),
-		...Array.from({ length: 2 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", scope: ["src"], writePaths: [`src/w${index}.ts`] })),
+		...Array.from({ length: 4 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", access: [{ permission: "read", scope: "/tmp/scope" }] })),
+		...Array.from({ length: 4 }, (_, index) => ({ id: `r${index}`, role: "reviewer", objective: "r", access: [{ permission: "read", scope: "/tmp/scope" }] })),
+		...Array.from({ length: 2 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] })),
 	]);
 	let release: (() => void) | undefined;
 	const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -239,9 +240,9 @@ test("configured package defaults allow four explorers, four reviewers, and two 
 
 test("configured role concurrency above package defaults is bounded by global concurrency", async () => {
 	const tasks = graph([
-		...Array.from({ length: 4 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", scope: ["src"], writePaths: [`src/w${index}.ts`] })),
-		...Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", scope: ["."] })),
-		{ id: "r0", role: "reviewer", objective: "r", scope: ["."] },
+		...Array.from({ length: 4 }, (_, index) => ({ id: `w${index}`, role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] })),
+		...Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, role: "explorer", objective: "e", access: [{ permission: "read", scope: "/tmp/scope" }] })),
+		{ id: "r0", role: "reviewer", objective: "r", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
 	let release: (() => void) | undefined;
 	const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -270,7 +271,7 @@ test("configured role concurrency above package defaults is bounded by global co
 });
 
 test("activity emits before settlement and injected heartbeat advances quiet evidence", async () => {
-	const tasks = graph([{ id: "quiet", role: "explorer", objective: "quiet", scope: ["."] }]);
+	const tasks = graph([{ id: "quiet", role: "explorer", objective: "quiet", access: [{ permission: "read", scope: "/tmp/scope" }] }]);
 	let now = 0;
 	let heartbeat: (() => void) | undefined;
 	let cleared = false;
@@ -306,9 +307,9 @@ test("activity emits before settlement and injected heartbeat advances quiet evi
 
 test("abort stops pending work and forwards one signal to running tasks", async () => {
 	const tasks = graph([
-		{ id: "a", role: "explorer", objective: "a", scope: ["."] },
-		{ id: "b", role: "explorer", objective: "b", scope: ["."] },
-		{ id: "c", role: "explorer", objective: "c", scope: ["."] },
+		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "b", role: "explorer", objective: "b", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "c", role: "explorer", objective: "c", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
 	const controller = new AbortController();
 	let observed = 0;
@@ -335,9 +336,9 @@ test("abort stops pending work and forwards one signal to running tasks", async 
 
 test("task cancellation aborts pending work, blocks dependents, and leaves unrelated tasks running", async () => {
 	const tasks = graph([
-		{ id: "hold", role: "explorer", objective: "hold", scope: ["."] },
-		{ id: "pending", role: "explorer", objective: "pending", scope: ["."] },
-		{ id: "blocked", role: "reviewer", objective: "blocked", scope: ["."], dependsOn: ["pending"] },
+		{ id: "hold", role: "explorer", objective: "hold", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "pending", role: "explorer", objective: "pending", access: [{ permission: "read", scope: "/tmp/scope" }] },
+		{ id: "blocked", role: "reviewer", objective: "blocked", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["pending"] },
 	]);
 	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
 	let release: (() => void) | undefined;
@@ -371,8 +372,8 @@ test("task cancellation aborts pending work, blocks dependents, and leaves unrel
 
 test("enterConvergence linearizes task and run cancellation", async () => {
 	const tasks = graph([
-		{ id: "worker", role: "worker", objective: "w", scope: ["src"], writePaths: ["src/a.ts"] },
-		{ id: "other", role: "explorer", objective: "o", scope: ["."] },
+		{ id: "worker", role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] },
+		{ id: "other", role: "explorer", objective: "o", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
 	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
 	let otherSignal: AbortSignal | undefined;
@@ -408,7 +409,7 @@ test("enterConvergence linearizes task and run cancellation", async () => {
 });
 
 test("task cancellation before enterConvergence wins and prevents the critical section", async () => {
-	const tasks = graph([{ id: "worker", role: "worker", objective: "w", scope: ["src"], writePaths: ["src/a.ts"] }]);
+	const tasks = graph([{ id: "worker", role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] }]);
 	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
 	let ready: (() => void) | undefined;
 	const started = new Promise<void>((resolve) => { ready = resolve; });

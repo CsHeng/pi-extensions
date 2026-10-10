@@ -4,12 +4,16 @@ import { Check } from "typebox/value";
 import { goalStateSchema, requireGoal, type GoalAcceptance, type GoalOperation, type GoalState } from "./goal-contracts.ts";
 
 export const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export function targetKey(target: { kind: string; id?: string } | undefined, fallback = ""): string {
+ if (!target) return fallback;
+ return target.kind === "delivery" ? "delivery" : `${target.kind}:${target.id ?? ""}`;
+}
 export function subjectRevision(state: GoalState, subject: string): number | undefined {
  if (subject === "delivery") return state.goalRevision;
  return state.requirements.find(r => `requirement:${r.key}` === subject)?.revision ?? state.tasks.find(t => `task:${t.key}` === subject)?.revision;
 }
 export function accepted(state: GoalState, subject: string): boolean {
- const judgment = state.acceptance.find(j => j.subject === subject);
+ const judgment = state.acceptance.find(j => targetKey(j.target) === subject);
  if (!judgment?.accepted || judgment.revision !== subjectRevision(state, subject) || !judgment.facts.length) return false;
  return judgment.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));
 }
@@ -50,7 +54,7 @@ export function deficits(state: GoalState): string[] {
 /** Excludes wording, receipts, counters, attempts and repeated facts: these cannot buy another automatic turn. */
 export function progressKey(state: GoalState): string {
  return digest({ goal: state.goalRevision, input: state.input.generation,
-  accepted: state.acceptance.filter(j => accepted(state, j.subject)).map(j => j.subject).sort(),
+  accepted: state.acceptance.filter(j => accepted(state, targetKey(j.target))).map(j => targetKey(j.target)).sort(),
   facts: [...new Set(state.facts.filter(f => f.usable).map(f => digest([f.kind, f.result, f.scope, f.kind === "host" ? f.checkIdentity : undefined])))].sort(),
   blockers: state.tasks.filter(t => t.blocker).map(t => [t.key, t.blocker!.kind]) });
 }
@@ -84,8 +88,8 @@ export function invalidate(state: GoalState, subjects: Set<string>, obsoleteExec
   }
  }
  if (subjects.size) subjects.add("delivery");
- const revoked = new Set(state.acceptance.filter(j => j.accepted && subjects.has(j.subject)).map(j => j.subject));
- state.acceptance = state.acceptance.filter(j => !subjects.has(j.subject));
+ const revoked = new Set(state.acceptance.filter(j => j.accepted && subjects.has(targetKey(j.target))).map(j => targetKey(j.target)));
+ state.acceptance = state.acceptance.filter(j => !subjects.has(targetKey(j.target)));
  // Fence obsolete writers and retain lost acceptance in the projection. A revoked judgment does not invalidate its observations.
  // Source refresh/corrected facts own evidence validity; the agent must explicitly rejudge any changed support relation.
  for (const attempt of state.attempts) if (subjects.has(`task:${attempt.task}`) && (obsoleteExecution || attempt.status === "running" || revoked.has(`task:${attempt.task}`))) attempt.status = "interrupted";
@@ -96,7 +100,7 @@ export function amend(state: GoalState, op: GoalOperation): void {
  const affected = new Set<string>();
  if ((op.goal && op.goal !== state.goal) || (op.delivery && op.delivery !== state.delivery)) {
   state.goal = op.goal ?? state.goal; state.delivery = op.delivery ?? state.delivery; state.goalRevision++;
-  for (const j of state.acceptance) affected.add(j.subject);
+  for (const j of state.acceptance) affected.add(targetKey(j.target));
   for (const t of state.tasks) affected.add(`task:${t.key}`);
  }
  if (op.requirements) {
@@ -122,16 +126,17 @@ export function amend(state: GoalState, op: GoalOperation): void {
  validateGraph(state); invalidate(state, affected, true);
 }
 export function judge(state: GoalState, input: Omit<GoalAcceptance, "revision">, diagnostics: string[]): void {
- const revision = subjectRevision(state, input.subject);
- requireGoal(revision !== undefined, "unknown_subject", `Unknown subject ${input.subject}.`);
+ const subject = targetKey(input.target);
+ const revision = subjectRevision(state, subject);
+ requireGoal(revision !== undefined, "unknown_subject", `Unknown subject ${subject}.`);
  const missingFact = input.facts.find(id => !state.facts.some(f => f.id === id));
- requireGoal(!missingFact, "unknown_fact", `Judgment fact ${missingFact ?? "unknown"} is unavailable; current facts: ${state.facts.filter(f => f.usable).slice(-8).map(f => f.id).join(", ") || "none"}. Reference current fact ids as attempt:key; the facts list shows what is usable.`);
- state.acceptance = state.acceptance.filter(j => j.subject !== input.subject);
- if (!input.accepted) { invalidate(state, new Set([input.subject])); return; }
+ requireGoal(!missingFact, "unknown_fact", `Judgment fact ${missingFact ?? "unknown"} is unavailable; current facts: ${state.facts.filter(f => f.usable).slice(-8).map(f => f.id).join(", ") || "none"}. Reference the fact id exactly; do not construct it from the attempt.`);
+ state.acceptance = state.acceptance.filter(j => targetKey(j.target) !== subject);
+ if (!input.accepted) { invalidate(state, new Set([subject])); return; }
  const usable = input.facts.length > 0 && input.facts.every(id => state.facts.some(f => f.id === id && f.usable && f.result === "pass"));
- if (!usable) { diagnostics.push(`${input.subject}: passing usable evidence is missing.`); return; }
- const task = state.tasks.find(t => input.subject === `task:${t.key}`);
- if (task?.blocker) { diagnostics.push(`${input.subject}: resolve the recorded blocker explicitly.`); return; }
+ if (!usable) { diagnostics.push(`${subject}: passing usable evidence is missing.`); return; }
+ const task = state.tasks.find(t => subject === `task:${t.key}`);
+ if (task?.blocker) { diagnostics.push(`${subject}: resolve the recorded blocker explicitly.`); return; }
  const dependencies = task ? pendingDependencies(state, task) : [];
  if (dependencies.length) { diagnostics.push(dependencyDiagnostic(task!.key, dependencies)); return; }
  state.acceptance.push({ ...input, revision });
@@ -144,19 +149,20 @@ export function complete(state: GoalState, diagnostics: string[]): void {
 /** Validate shape, safe counters and relational integrity; malformed latest snapshots are never skipped. */
 export function validateGoalState(state: GoalState): void {
  requireGoal(Check(goalStateSchema, state), "state_unavailable", "Invalid snapshot shape or bounded field.");
- requireGoal(state.version === 3 && Number.isSafeInteger(state.revision) && state.revision > 0 && Number.isSafeInteger(state.serial) && state.serial >= 0, "state_unavailable", "Invalid version/counters.");
+ requireGoal(state.version === 4 && Number.isSafeInteger(state.revision) && state.revision > 0 && Number.isSafeInteger(state.serial) && state.serial >= 0, "state_unavailable", "Invalid version/counters.");
  validateGraph(state);
  const attemptIds = new Set(state.attempts.map(a => a.id));
  const factIds = new Set(state.facts.map(f => f.id));
- requireGoal(new Set(state.acceptance.map(j => j.subject)).size === state.acceptance.length, "state_unavailable", "Duplicate acceptance subjects.");
+ requireGoal(new Set(state.acceptance.map(j => targetKey(j.target))).size === state.acceptance.length, "state_unavailable", "Duplicate acceptance subjects.");
  for (const a of state.attempts) {
-  requireGoal(/^A[1-9][0-9]*$/.test(a.id) && Number(a.id.slice(1)) <= state.serial && a.generation <= state.input.generation, "state_unavailable", "Attempt counter or input is inconsistent.");
+  requireGoal(/^[A-Za-z0-9]+$/.test(a.id) && a.generation <= state.input.generation, "state_unavailable", "Attempt id or input is inconsistent.");
+  requireGoal(state.serial >= state.attempts.length, "state_unavailable", "Attempt counter is inconsistent.");
   if (a.status === "running") requireGoal(state.tasks.some(t => t.key === a.task && t.revision === a.revision), "state_unavailable", "Running attempt refers to obsolete task.");
  }
- for (const f of state.facts) requireGoal(f.id === `${f.attempt}:${f.key}` && f.generation <= state.input.generation, "state_unavailable", "Fact binding is inconsistent.");
+ for (const f of state.facts) requireGoal(/^[A-Za-z0-9]+$/.test(f.id) && f.generation <= state.input.generation, "state_unavailable", "Fact id must be a stable identifier.");
  requireGoal(attemptIds.size === state.attempts.length && factIds.size === state.facts.length, "state_unavailable", "Duplicate durable identities.");
  requireGoal((state.recoveredExecutions ?? []).every(id => state.executionPending?.includes(id)), "state_unavailable", "Recovered execution obligations must remain visible until explicitly reconciled.");
  for (const fact of state.facts) requireGoal(attemptIds.has(fact.attempt), "state_unavailable", "Fact references missing attempt.");
- for (const j of state.acceptance) requireGoal(subjectRevision(state, j.subject) !== undefined && j.facts.every(id => factIds.has(id)), "state_unavailable", "Acceptance references missing subject/fact.");
+ for (const j of state.acceptance) requireGoal(subjectRevision(state, targetKey(j.target)) !== undefined && j.facts.every(id => factIds.has(id)), "state_unavailable", "Acceptance references missing subject/fact.");
  if (state.fulfillment === "complete") requireGoal(deficits(state).length === 0, "state_unavailable", "Complete snapshot has deficits.");
 }

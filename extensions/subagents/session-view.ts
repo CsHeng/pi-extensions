@@ -1,4 +1,5 @@
 import type { CurrentOwner, ManagedState } from "./session-contracts.ts";
+import { COLLABORATION_CONTRACT_VERSION } from "./contracts.ts";
 import type { ManagedSessionStore, SessionInventoryResult } from "./managed-sessions.ts";
 import { parseObserverTask, parseObserverRoute, type ObserverTask } from "./observer-events.ts";
 import {
@@ -16,7 +17,7 @@ export const SESSION_VIEW_EVENT = "csheng.subagents.session-view";
 /** Invalidation only; contains no owner data and prompts an open consumer to requery its current scope. */
 export const SESSION_VIEW_CHANGED_EVENT = "csheng.subagents.session-view.changed";
 export const SESSION_VIEW_QUERY_EVENT = "csheng-subagent-view-query";
-export const SESSION_VIEW_VERSION = 1 as const;
+export const SESSION_VIEW_VERSION = COLLABORATION_CONTRACT_VERSION;
 /** Display delivery bounds; intentionally independent of open-session admission limits. */
 export const SESSION_VIEW_LIMITS = Object.freeze({ pageSize: 20, maxLiveRows: 16, maxRequestPage: 1_000_000, maxPayloadBytes: 256 * 1024 });
 
@@ -38,6 +39,8 @@ export interface SessionViewHistoryRow {
 	reportComplete: boolean;
 	retained: boolean;
 	recordedUsage: RecordedUsageProjection;
+	roots?: Array<{ id: string; destination: string; status: string; recovery?: "required"; release: string }>;
+	release?: { status: string; remaining: number };
 }
 
 export interface SessionViewSummary { agents: number; acceptedEpisodes: number | null; states: Record<ManagedState, number>; liveAgents: number }
@@ -76,12 +79,15 @@ const TERMINAL_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 const BOUNDED_REASON = /^[a-z0-9_]{1,48}$/;
 const MANAGED_STATES: readonly ManagedState[] = ["idle", "queued", "running", "interrupted", "closed"];
 const OUTCOMES: readonly SessionViewOutcome[] = ["succeeded", "failed", "aborted", "unknown"];
+const ROOT_STATUSES = ["not-applied", "applying", "applied", "partial", "conflict", "unknown"] as const;
+const ROOT_RELEASES = ["pending", "remaining", "released"] as const;
 const COVERAGES: readonly RecordedCoverage[] = ["complete", "incomplete", "unavailable"];
 const FAILURES: readonly RecordedUsageFailure[] = ["invalid-input", "conflicting-rows", "row-budget"];
 const METRIC_KEYS: readonly RecordedUsageMetric[] = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"];
 const REQUEST_KEYS = ["version", "requestId", "page"];
 const SUMMARY_KEYS = ["agents", "acceptedEpisodes", "states", "liveAgents"];
 const ROW_KEYS = ["handle", "role", "state", "episode", "latestOutcome", "acceptedEpisodes", "onCurrentBranch", "legacy", "reportComplete", "retained", "recordedUsage"];
+const ROW_OPTIONAL = ["route", "roots", "release"];
 const USAGE_KEYS = ["status", "usage", "assistantTurns", "metrics", "turnsCoverage", "episodes", "conflicts", "reason"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +113,10 @@ function intOrNull(value: unknown): value is number | null {
 
 function boundedReason(value: unknown): value is string {
 	return typeof value === "string" && BOUNDED_REASON.test(value);
+}
+
+function boundedLabel(value: unknown, maxBytes: number): value is string {
+	return typeof value === "string" && !TERMINAL_CONTROL.test(value) && Buffer.byteLength(value, "utf8") <= maxBytes;
 }
 
 function parseUsageFields(value: unknown): ObservedUsage | undefined {
@@ -152,7 +162,7 @@ export function parseSessionViewRequest(value: unknown): SessionViewRequest | un
 }
 
 function parseHistoryRow(value: unknown): SessionViewHistoryRow | undefined {
-	if (!isRecord(value) || !keysExact(value, ROW_KEYS, ["route"])) return undefined;
+	if (!isRecord(value) || !keysExact(value, ROW_KEYS, ROW_OPTIONAL)) return undefined;
 	const route = value.route === undefined ? undefined : parseObserverRoute(value.route);
 	if (value.route !== undefined && route === undefined) return undefined;
 	if (!opaqueId(value.handle) || !["worker", "reviewer", "explorer"].includes(value.role as string)) return undefined;
@@ -161,15 +171,31 @@ function parseHistoryRow(value: unknown): SessionViewHistoryRow | undefined {
 	if (typeof value.onCurrentBranch !== "boolean" || typeof value.legacy !== "boolean" || typeof value.reportComplete !== "boolean" || typeof value.retained !== "boolean") return undefined;
 	const recordedUsage = parseRecordedUsageProjection(value.recordedUsage);
 	if (recordedUsage === undefined) return undefined;
-	return { handle: value.handle, ...(route === undefined ? {} : { route }), role: value.role as SessionViewHistoryRow["role"], state: value.state as ManagedState, episode: value.episode,
+	const row: SessionViewHistoryRow = { handle: value.handle, ...(route === undefined ? {} : { route }), role: value.role as SessionViewHistoryRow["role"], state: value.state as ManagedState, episode: value.episode,
 		latestOutcome: value.latestOutcome as SessionViewOutcome, acceptedEpisodes: value.acceptedEpisodes as number | null,
 		onCurrentBranch: value.onCurrentBranch, legacy: value.legacy, reportComplete: value.reportComplete, retained: value.retained, recordedUsage };
+	if (value.roots !== undefined) {
+		if (!Array.isArray(value.roots) || value.roots.length > 8) return undefined;
+		const roots: NonNullable<SessionViewHistoryRow["roots"]> = [];
+		for (const raw of value.roots) {
+			if (!isRecord(raw) || !keysExact(raw, ["id", "destination", "status", "release"], ["recovery"])) return undefined;
+			if (!opaqueId(raw.id) || !boundedLabel(raw.destination, 256) || !ROOT_STATUSES.includes(raw.status as typeof ROOT_STATUSES[number])
+				|| !ROOT_RELEASES.includes(raw.release as typeof ROOT_RELEASES[number]) || (raw.recovery !== undefined && raw.recovery !== "required")) return undefined;
+			roots.push({ id: raw.id, destination: raw.destination, status: raw.status as string,
+				...(raw.recovery === "required" ? { recovery: "required" as const } : {}), release: raw.release as string });
+		}
+		if (new Set(roots.map((root) => root.id)).size !== roots.length) return undefined;
+		row.roots = roots;
+	}
+	if (isRecord(value.release) && typeof value.release.status === "string" && Number.isFinite(value.release.remaining)) row.release = { status: value.release.status, remaining: Number(value.release.remaining) };
+	return row;
 }
 
 export function parseSessionViewReply(value: unknown): { ok: true; value: SessionViewReply } | { ok: false } {
-	if (!isRecord(value) || !keysExact(value, ["version", "requestId", "ownerSessionId", "anchor", "generation", "revision", "inventory", "summary", "live", "history", "usage"])) return { ok: false };
+	if (!isRecord(value) || value.version !== SESSION_VIEW_VERSION) return { ok: false };
+	if (!keysExact(value, ["version", "requestId", "ownerSessionId", "anchor", "generation", "revision", "inventory", "summary", "live", "history", "usage"])) return { ok: false };
 	try { if (Buffer.byteLength(JSON.stringify(value), "utf8") > SESSION_VIEW_LIMITS.maxPayloadBytes) return { ok: false }; } catch { return { ok: false }; }
-	if (value.version !== SESSION_VIEW_VERSION || !opaqueId(value.requestId) || !opaqueId(value.ownerSessionId)) return { ok: false };
+	if (!opaqueId(value.requestId) || !opaqueId(value.ownerSessionId)) return { ok: false };
 	if ((value.anchor !== null && !opaqueId(value.anchor)) || !opaqueId(value.generation) || !nonNegativeInt(value.revision)) return { ok: false };
 	if (!isRecord(value.inventory) || !keysExact(value.inventory, ["state", "complete", "unreadableRecords"], ["reason"])) return { ok: false };
 	if (value.inventory.state !== "ready" && value.inventory.state !== "unavailable") return { ok: false };
@@ -298,6 +324,7 @@ export class SessionViewBuilder {
 						handle: entry.handle, route: entry.route, role: entry.role, state: entry.state, episode: entry.episode, latestOutcome: entry.latestOutcome,
 						acceptedEpisodes: entry.acceptedEpisodes, onCurrentBranch: entry.ownerAnchor === null || scope.owner!.branch.includes(entry.ownerAnchor) || scope.owner!.anchor === entry.ownerAnchor, legacy: entry.legacy,
 						reportComplete: entry.reportComplete, retained: entry.retained, recordedUsage: cache.rows.get(entry.handle)!,
+						...(entry.roots ? { roots: entry.roots } : {}), ...(entry.release ? { release: entry.release } : {}),
 					}));
 				}
 			} catch {

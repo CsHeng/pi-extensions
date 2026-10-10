@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -18,7 +22,7 @@ test("installed Pi recovery context edits are readable without mutating native h
 	t.after(() => rm(base, { recursive: true, force: true }));
 	const store = new ManagedSessionStore(base);
 	const owner = { repo: base, parentSessionId: "parent", anchor: "branch", branch: ["branch"] };
-	const graph = validateGraphStructure({ tasks: [{ id: "reader", role: "explorer", objective: "synthetic", scope: ["."] }] });
+	const graph = validateGraphStructure({ tasks: [{ id: "reader", role: "explorer", objective: "synthetic", access: [{ permission: "read", scope: "/tmp/scope" }] }] });
 	if (!graph.ok) throw new Error("fixture");
 	const record = (await store.allocate(owner, "native", graph.tasks)).records[0]!;
 	const source = join(store.path(record.handle), "source"); await mkdir(source);

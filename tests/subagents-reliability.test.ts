@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -16,12 +20,12 @@ test("managed refusals keep action and missing fields without launching or readi
 	const service = new ContinuationService({ loadConfig: async () => { configReads++; throw new Error("must not read"); } });
 	const ctx = { isProjectTrusted: () => false, sessionManager: { getSessionId: () => "owner" } } as unknown as ExtensionContext;
 	for (const [request, action, fields] of [
-		[{ action: "create", tasks: [{ id: "a", role: "reviewer", objective: "fixture", scope: ["."] }] }, "create", ["requestId"]],
+		[{ action: "create", tasks: [{ id: "a", role: "reviewer", objective: "fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, "create", ["requestId"]],
 		[{ action: "close", handle: "h" }, "close", ["expectedEpisode"]],
 		[{ action: "untrusted arbitrary action" }, null, undefined],
 	] as const) {
 		const result = await service.execute(request, ctx);
-		assert.equal(result.schemaVersion, 3);
+		assert.equal(result.schemaVersion, 4);
 		assert.equal(result.action, action);
 		assert.equal(result.status, "failed");
 		assert.deepEqual(result.error?.missingFields, fields);
@@ -36,7 +40,7 @@ test("managed refusals keep action and missing fields without launching or readi
 test("managed results and index retain actual model/reasoning even on failed and historical results", () => {
 	const view: SessionView = { handle: "h", role: "worker", episode: 1, state: "interrupted", reportComplete: false, route,
 		result: { id: "task", role: "worker", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 10, changedPaths: [], convergence: "not-applied", route, error: { code: "timeout", message: "fixture" } } };
-	for (const schemaVersion of [1, 2] as const) {
+	for (const schemaVersion of [4] as const) {
 		const details: SessionActionResult = { schemaVersion, action: "create", status: "failed", sessions: [view] };
 		const content = JSON.parse(formatManagedContent(details));
 		assert.deepEqual(content.sessions[0].route, { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", selectionSource: "role-default" });

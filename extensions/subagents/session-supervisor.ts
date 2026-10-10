@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { mintProductId } from "./identity.ts";
 
 export type ExecutionRole = "worker" | "reviewer" | "explorer";
 export interface ExecutionOwner { repository: string; sessionId: string; branchAnchor: string | null }
@@ -100,7 +100,7 @@ function errorFact(error: unknown): { name: string; message: string } {
 /** Session-local mechanical execution. Integrators persist outcomes before forwarding onWake to Pi. */
 export class SessionExecutionSupervisor {
 	private owner: ExecutionOwner;
-	private generation = randomUUID();
+	private generation = mintProductId();
 	private entries = new Map<string, Entry>();
 	private requests = new Map<string, Entry>();
 	private capacity: Capacity;
@@ -134,7 +134,7 @@ export class SessionExecutionSupervisor {
 		// Keep failed preparations inspectable without an unhandled rejection before a replay arrives.
 		void ready.catch(() => {});
 		const entry: Entry = { key: submission.requestKey, controller, ready, completion: Promise.resolve(), jobs: new Set(), cancelled: false,
-			view: { runId: randomUUID(), requestId: submission.requestId, generation: this.generation, owner: structuredClone(this.owner), phase: "preparing", submittedAt: this.now(), preparedAt: null, finishedAt: null, tasks: [] } };
+			view: { runId: mintProductId(), requestId: submission.requestId, generation: this.generation, owner: structuredClone(this.owner), phase: "preparing", submittedAt: this.now(), preparedAt: null, finishedAt: null, tasks: [] } };
 		this.entries.set(entry.view.runId, entry); this.requests.set(submission.requestId, entry);
 		const cancelPreparation = () => { entry.cancelled = true; controller.abort(); };
 		signal?.addEventListener("abort", cancelPreparation, { once: true });
@@ -221,7 +221,7 @@ export class SessionExecutionSupervisor {
 	allowWake(): void { if (!this.closed) this.wakeEnabled = true; }
 	private async event(entry: Entry, kind: ExecutionEvent["kind"], task?: TaskExecution): Promise<void> {
 		// Retention is distinct from re-entry: an old/cancelled owner still has a terminal outcome.
-		const event: ExecutionEvent = { version: 1, eventId: randomUUID(), kind, generation: entry.view.generation,
+		const event: ExecutionEvent = { version: 1, eventId: mintProductId(), kind, generation: entry.view.generation,
 			owner: structuredClone(entry.view.owner), runId: entry.view.runId,
 			...(task ? { task: structuredClone(task) } : { run: structuredClone(entry.view) }) };
 		try { await this.hooks.onEvent?.(structuredClone(event)); } catch (error) { this.deliveryError(error); return; }
@@ -242,7 +242,7 @@ export class SessionExecutionSupervisor {
 	/** Synchronous fencing precedes cancellation; delayed old-owner outcomes cannot wake a new owner. */
 	async replaceOwner(owner: ExecutionOwner): Promise<void> {
 		if (this.closed) throw new SupervisorError("supervisor_closed");
-		this.generation = randomUUID(); this.owner = structuredClone(owner); this.notifications.clear();
+		this.generation = mintProductId(); this.owner = structuredClone(owner); this.notifications.clear();
 		const previous = [...this.entries.values()];
 		for (const entry of previous) { entry.cancelled = true; entry.controller.abort(); }
 		this.requests.clear(); this.entries.clear(); this.wakeEnabled = true;

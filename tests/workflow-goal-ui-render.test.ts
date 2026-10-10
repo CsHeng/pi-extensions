@@ -17,9 +17,9 @@ async function fixture(): Promise<GoalState> {
 }
 function markDone(state: GoalState, key: string) {
  const scope = ["."];
- const id = `A1:${key}`;
- state.facts.push({ id, key, kind: "agent", check: "fixture", result: "pass", attempt: "A1", scope, at: "fixture", generation: 0, usable: true });
- state.acceptance.push({ subject: `task:${key}`, revision: 1, facts: [id], accepted: true, rationale: "fixture" });
+ const id = key;
+ state.facts.push({ id, kind: "agent", check: "fixture", result: "pass", attempt: "A1", scope, at: "fixture", generation: 0, usable: true });
+ state.acceptance.push({ target: { kind: "task", id: key }, revision: 1, facts: [id], accepted: true, rationale: "fixture" });
 }
 const view = (state: GoalState): GoalView => ({ state, deficits: [] });
 

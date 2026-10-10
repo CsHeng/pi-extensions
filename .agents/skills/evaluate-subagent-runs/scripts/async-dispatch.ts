@@ -16,7 +16,7 @@ export class AsyncDispatchCollector {
  private duplicate = 0; private conflicts = 0; private copied = 0; private invalid = 0;
  receipt(details: Record<string, unknown>) { if (details.kind === "submission" && details.status === "accepted" && id(details.runId)) { this.receipts++; this.runs.add(details.runId); } }
  event(raw: unknown, owner: unknown) {
-  const event = object(raw); if (!event || event.version !== 3 || !id(event.eventId) || !id(event.runId) || !["task-terminal", "run-terminal"].includes(String(event.kind)) || !Array.isArray(event.sessions) || event.sessions.length > 10) { this.invalid++; return; }
+  const event = object(raw); if (!event || event.version !== 4 || !id(event.eventId) || !id(event.runId) || !["task-terminal", "run-terminal"].includes(String(event.kind)) || !Array.isArray(event.sessions) || event.sessions.length > 10) { this.invalid++; return; }
   if (object(event.owner)?.sessionId !== owner) { this.copied++; return; }
   const key = `${owner}:${event.eventId}`, sig = signature(event); const prior = this.events.get(key);
   if (prior) { if (prior === sig) this.duplicate++; else this.conflicts++; return; }

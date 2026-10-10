@@ -1,15 +1,16 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	CHILD_CAPABILITY_ENV,
-	CHILD_CAPABILITY_MANIFEST_V1,
-	CHILD_CAPABILITY_MANIFEST_V2,
+	CHILD_CAPABILITY_MANIFEST_VERSION,
 	isSafePathGrammar,
+	type CapabilityGrant,
 	type ChildCapabilityManifest,
 	type NormalizedChildCapability,
 	type RoleName,
 } from "./contracts.ts";
-import { getRole } from "./roles.ts";
+import { pathContains } from "./access.ts";
+import { toolsForAccess } from "./roles.ts";
 
 export interface PathDecision {
 	allowed: boolean;
@@ -27,151 +28,76 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function escapesRoot(relation: string): boolean {
-	return relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation);
-}
-
-function contains(root: string, target: string): boolean {
-	const relation = relative(root, target);
-	return relation === "" || !escapesRoot(relation);
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && "code" in error;
-}
-
 function isRole(value: unknown): value is RoleName {
 	return value === "explorer" || value === "reviewer" || value === "worker";
 }
 
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function isPermission(value: unknown): value is "read" | "write" {
+	return value === "read" || value === "write";
 }
 
-async function nearestExisting(target: string): Promise<string> {
-	let current = target;
-	while (true) {
-		try {
-			await lstat(current);
-			return current;
-		} catch (error) {
-			if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-			const parent = resolve(current, "..");
-			if (parent === current) throw error;
-			current = parent;
-		}
+const MANIFEST_KEYS = new Set(["version", "role", "cwd", "grants", "roots", "guidance"]);
+
+function parsePin(value: unknown): { dev: number; ino: number } | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value) || Object.keys(value).length !== 2 || typeof value.dev !== "number" || typeof value.ino !== "number" || !Number.isSafeInteger(value.dev) || !Number.isSafeInteger(value.ino) || value.dev < 0 || value.ino < 0) {
+		throw new Error("invalid access identity");
 	}
+	return { dev: value.dev, ino: value.ino };
 }
 
-async function hasSymlinkComponent(root: string, target: string): Promise<boolean> {
-	const relation = relative(root, target);
-	if (relation === "") return false;
-	if (escapesRoot(relation)) return true;
-	let current = root;
-	for (const component of relation.split(sep)) {
-		current = resolve(current, component);
-		try {
-			if ((await lstat(current)).isSymbolicLink()) return true;
-		} catch (error) {
-			if (isNodeError(error) && error.code === "ENOENT") return false;
-			throw error;
-		}
+function parseAnchor(value: unknown): { path: string; dev: number; ino: number } | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value) || Object.keys(value).length !== 3 || typeof value.path !== "string" || !isAbsolute(value.path) || resolve(value.path) !== value.path || typeof value.dev !== "number" || typeof value.ino !== "number" || !Number.isSafeInteger(value.dev) || !Number.isSafeInteger(value.ino) || value.dev < 0 || value.ino < 0) {
+		throw new Error("invalid access anchor");
 	}
-	return false;
-}
-
-function normalizedCapability(manifest: ChildCapabilityManifest): NormalizedChildCapability {
-	if (manifest.version === CHILD_CAPABILITY_MANIFEST_V2) return manifest;
-	return {
-		version: CHILD_CAPABILITY_MANIFEST_V2,
-		root: manifest.root,
-		role: manifest.role,
-		readRoots: manifest.readRoots,
-		writePaths: manifest.writePaths,
-		externalReadRoots: [],
-	};
-}
-
-const MANIFEST_V1_KEYS = new Set(["version", "root", "role", "readRoots", "writePaths"]);
-const MANIFEST_V2_KEYS = new Set([...MANIFEST_V1_KEYS, "externalReadRoots", "externalReadPins", "writeRoot", "guidance"]);
-
-function assertExactManifestKeys(value: Record<string, unknown>, version: unknown): void {
-	const allowed = version === CHILD_CAPABILITY_MANIFEST_V1 ? MANIFEST_V1_KEYS : MANIFEST_V2_KEYS;
-	if (Object.keys(value).some((key) => !allowed.has(key))) {
-		throw new Error("capability manifest contains unknown fields");
-	}
-}
-
-function parseExternalReadRoots(value: Record<string, unknown>, version: unknown): string[] {
-	if (version === CHILD_CAPABILITY_MANIFEST_V1) {
-		if ("externalReadRoots" in value) {
-			throw new Error("capability manifest v1 cannot contain external read roots");
-		}
-		return [];
-	}
-	if (!isStringArray(value.externalReadRoots)) {
-		throw new Error("capability manifest externalReadRoots must be strings");
-	}
-	return value.externalReadRoots.map((entry) => {
-		if (!isAbsolute(entry) || resolve(entry) !== entry) {
-			throw new Error("capability manifest external read roots must be absolute and canonical");
-		}
-		return entry;
-	});
+	return { path: value.path, dev: value.dev, ino: value.ino };
 }
 
 export function parseCapability(value: unknown): NormalizedChildCapability {
-	if (!isRecord(value) || (value.version !== CHILD_CAPABILITY_MANIFEST_V1 && value.version !== CHILD_CAPABILITY_MANIFEST_V2) || !isRole(value.role) || typeof value.root !== "string") {
-		throw new Error("capability manifest has an invalid version, role, or root");
+	if (!isRecord(value) || value.version !== CHILD_CAPABILITY_MANIFEST_VERSION || !isRole(value.role) || typeof value.cwd !== "string") {
+		throw new Error("capability manifest has an unsupported version, role, or cwd");
 	}
-	if (!isStringArray(value.readRoots)) {
-		throw new Error("capability manifest readRoots must be strings");
-	}
-	if (!isStringArray(value.writePaths)) {
-		throw new Error("capability manifest writePaths must be strings");
-	}
-	if (value.writeRoot !== undefined && (value.writeRoot !== true || value.version !== 2 || value.role !== "worker")) throw new Error("invalid source-root write capability");
-	const externalReadRoots = parseExternalReadRoots(value, value.version);
-	const externalReadPins = value.externalReadPins;
-	if (externalReadPins !== undefined && (value.version !== 2 || !Array.isArray(externalReadPins) || externalReadPins.length !== externalReadRoots.length || !externalReadPins.every(pin => isRecord(pin) && Object.keys(pin).length === 2 && typeof pin.dev === "number" && Number.isSafeInteger(pin.dev) && typeof pin.ino === "number" && Number.isSafeInteger(pin.ino) && pin.dev >= 0 && pin.ino >= 0))) throw new Error("invalid external read identities");
-	assertExactManifestKeys(value, value.version);
+	if (Object.keys(value).some((key) => !MANIFEST_KEYS.has(key))) throw new Error("capability manifest contains unknown fields");
+	if (!Array.isArray(value.grants) || !Array.isArray(value.roots)) throw new Error("capability manifest grants and roots are required");
+	const grants: CapabilityGrant[] = value.grants.map((entry) => {
+		if (!isRecord(entry) || !isPermission(entry.permission) || typeof entry.path !== "string" || !isAbsolute(entry.path) || resolve(entry.path) !== entry.path) throw new Error("capability grant must be a canonical absolute path");
+		const pin = parsePin(entry.pin);
+		const anchor = parseAnchor(entry.anchor);
+		return { permission: entry.permission, path: entry.path, ...(pin ? { pin } : {}), ...(anchor ? { anchor } : {}) };
+	});
+	const roots = value.roots.map((entry) => {
+		if (!isRecord(entry) || typeof entry.id !== "string" || !/^[a-z0-9]{32}$/.test(entry.id) || typeof entry.source !== "string" || typeof entry.path !== "string" || !isPermission(entry.permission)) throw new Error("capability root is invalid");
+		if (!isAbsolute(entry.source) || !isAbsolute(entry.path) || resolve(entry.source) !== entry.source || resolve(entry.path) !== entry.path) throw new Error("capability root paths must be canonical");
+		return { id: entry.id, source: entry.source, path: entry.path, permission: entry.permission };
+	});
+	if (!isAbsolute(value.cwd) || resolve(value.cwd) !== value.cwd) throw new Error("capability cwd must be canonical");
 	let guidance: NormalizedChildCapability["guidance"];
 	if (value.guidance !== undefined) {
-		if (value.version !== 2 || !isRecord(value.guidance) || Object.keys(value.guidance).some(key => !["contextFiles", "readRoots", "physicalRoots"].includes(key)) || !isStringArray(value.guidance.readRoots) || !isStringArray(value.guidance.physicalRoots) || !Array.isArray(value.guidance.contextFiles) || !value.guidance.contextFiles.every(file => isRecord(file) && Object.keys(file).every(key => ["path", "content"].includes(key)) && typeof file.path === "string" && typeof file.content === "string")) throw new Error("invalid guidance capability");
-		const roots = value.guidance.readRoots as string[];
-		const physical = value.guidance.physicalRoots as string[];
-		const files = value.guidance.contextFiles as Array<{ path: string; content: string }>;
-		if (roots.length !== physical.length || roots.some(path => !isAbsolute(path) || resolve(path) !== path) || physical.some(path => !isAbsolute(path) || resolve(path) !== path) || files.some(file => !isAbsolute(file.path) || resolve(file.path) !== file.path || !roots.includes(file.path))) throw new Error("invalid guidance paths");
-		guidance = { readRoots: roots, physicalRoots: physical, contextFiles: files };
+		if (!isRecord(value.guidance) || Object.keys(value.guidance).some((key) => !["contextFiles", "readRoots", "physicalRoots"].includes(key)) || !Array.isArray(value.guidance.readRoots) || !Array.isArray(value.guidance.physicalRoots) || !Array.isArray(value.guidance.contextFiles)) throw new Error("invalid guidance capability");
+		const readRoots = value.guidance.readRoots as unknown[];
+		const physicalRoots = value.guidance.physicalRoots as unknown[];
+		const files = value.guidance.contextFiles as unknown[];
+		if (readRoots.length !== physicalRoots.length || readRoots.some((path) => typeof path !== "string" || !isAbsolute(path)) || physicalRoots.some((path) => typeof path !== "string" || !isAbsolute(path))) throw new Error("invalid guidance paths");
+		if (!files.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string" && isAbsolute(file.path))) throw new Error("invalid guidance files");
+		guidance = { readRoots: readRoots as string[], physicalRoots: physicalRoots as string[], contextFiles: files as Array<{ path: string; content: string }> };
 	}
-	if (!isAbsolute(value.root) || value.readRoots.some((entry) => !isAbsolute(entry)) || value.writePaths.some((entry) => !isAbsolute(entry))) {
-		throw new Error("capability manifest paths must be absolute");
-	}
-	const root = resolve(value.root);
-	const readRoots = value.readRoots.map((entry) => resolve(entry));
-	const writePaths = value.writePaths.map((entry) => resolve(entry));
-	if (readRoots.some((entry) => !contains(root, entry)) || writePaths.some((entry) => !contains(root, entry))) {
-		throw new Error("capability manifest paths must stay inside the root");
-	}
-	if (value.role !== "worker" && writePaths.length > 0) {
-		throw new Error("read-only capability cannot contain write paths");
-	}
-	return { version: CHILD_CAPABILITY_MANIFEST_V2, root, role: value.role, readRoots, writePaths, externalReadRoots, ...(externalReadPins ? { externalReadPins: externalReadPins as Array<{ dev: number; ino: number }> } : {}), ...(guidance ? { guidance } : {}), ...(value.writeRoot === true ? { writeRoot: true } : {}) };
+	return { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: value.role, cwd: resolve(value.cwd), grants, roots, ...(guidance ? { guidance } : {}) };
 }
 
-export async function assertCanonicalExternalRoots(manifest: Pick<NormalizedChildCapability, "externalReadRoots" | "externalReadPins">): Promise<void> {
-	for (const [index, entry] of manifest.externalReadRoots.entries()) {
-		let physical: string;
-		try {
-			physical = await realpath(entry);
-		} catch {
-			throw new Error("capability manifest external read roots must be absolute and canonical");
+export async function assertCanonicalGrants(manifest: Pick<NormalizedChildCapability, "grants">): Promise<void> {
+	for (const grant of manifest.grants) {
+		const coveredReadPin = grant.permission === "read" && manifest.grants.some(other => other.permission === "write" && pathContains(other.path, grant.path));
+		if (grant.pin && !coveredReadPin) {
+			const info = await lstat(grant.path);
+			if ((!info.isFile() && !info.isDirectory()) || info.dev !== grant.pin.dev || info.ino !== grant.pin.ino) throw new Error("access identity changed");
+			const physical = await realpath(grant.path).catch(() => grant.path);
+			if (physical !== grant.path) throw new Error("access path is no longer canonical");
 		}
-		if (physical !== entry) {
-			throw new Error("capability manifest external read roots must be absolute and canonical");
+		if (grant.anchor) {
+			const info = await lstat(grant.anchor.path);
+			if (!info.isDirectory() || info.dev !== grant.anchor.dev || info.ino !== grant.anchor.ino || await realpath(grant.anchor.path) !== grant.anchor.path) throw new Error("access anchor changed");
 		}
-		const pin = manifest.externalReadPins?.[index];
-		if (pin) { const info = await lstat(entry); if ((!info.isFile() && !info.isDirectory()) || info.dev !== pin.dev || info.ino !== pin.ino) throw new Error("external read root identity changed"); }
 	}
 }
 
@@ -183,59 +109,86 @@ export async function loadCapability(env: NodeJS.ProcessEnv = process.env): Prom
 		if (!info.isFile() || info.isSymbolicLink()) return { error: "child capability manifest must be a regular non-symlink file" };
 		if ((info.mode & 0o077) !== 0) return { error: "child capability manifest permissions are too broad" };
 		const manifest = parseCapability(JSON.parse(await readFile(manifestPath, "utf8")) as unknown);
-		await assertCanonicalExternalRoots(manifest);
+		await assertCanonicalGrants(manifest);
 		return { manifest };
 	} catch (error) {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
-async function physicalRoots(roots: readonly string[]): Promise<string[]> {
-	return Promise.all(roots.map(async (root) => {
-		try { return await realpath(root); } catch { return root; }
-	}));
+function covering(grants: readonly CapabilityGrant[], target: string, write: boolean): CapabilityGrant | undefined {
+	const matches = grants.filter((grant) => pathContains(grant.path, target) && (!write || grant.permission === "write"));
+	// A writable range owns the path: its stable anchor must never be shadowed by a
+	// read-only evidence pin, so an authorized leaf replacement stays possible.
+	return matches.find((grant) => grant.permission === "write") ?? matches[0];
 }
 
-async function authorizeRead(
-	capability: NormalizedChildCapability,
-	toolName: string,
-	target: string,
-	lexicalRoots: readonly string[],
-	confineToChildRoot: boolean,
-	pinnedPhysical?: readonly string[],
-): Promise<PathDecision> {
-	const existing = await nearestExisting(target);
-	const physicalExisting = await realpath(existing);
-	const allowedPhysical = pinnedPhysical ?? await physicalRoots(lexicalRoots);
-	if (confineToChildRoot) {
-		const physicalRoot = await realpath(capability.root);
-		if (!contains(physicalRoot, physicalExisting)) return { allowed: false, reason: "Path resolves outside the child root." };
-	} else if (!allowedPhysical.some((root) => contains(root, physicalExisting))) {
-		return { allowed: false, reason: "Path resolves outside the declared read scope." };
-	}
-	try {
-		const physicalTarget = await realpath(target);
-		if (!allowedPhysical.some((root) => contains(root, physicalTarget))) {
-			return { allowed: false, reason: "Path resolves outside the declared read scope." };
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error;
+}
+
+/** Nearest component that exists; an authorized new path may have a missing tail. */
+async function nearestExisting(target: string): Promise<string> {
+	let current = target;
+	for (;;) {
+		try { await lstat(current); return current; }
+		catch (error) {
+			if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+			const parent = dirname(current);
+			if (parent === current) throw error;
+			current = parent;
 		}
-	} catch (error) {
-		if (!isNodeError(error) || error.code !== "ENOENT") throw error;
 	}
-	return { allowed: true, resolvedPath: target };
 }
 
-async function selectedGuidanceRoots(capability: NormalizedChildCapability, target: string): Promise<{ paths: string[]; physical: string[] } | undefined> {
-	const guidance = capability.guidance;
-	if (!guidance) return undefined;
-	const paths: string[] = [], physical: string[] = [];
-	for (let index = 0; index < guidance.readRoots.length; index++) {
-		const root = guidance.readRoots[index]!;
-		if (!contains(root, target)) continue;
-		const pinned = guidance.physicalRoots[index]!;
-		if (await realpath(root) !== pinned) throw new Error("guidance owner changed");
-		paths.push(root); physical.push(pinned);
+/** True when any existing component from `root` to `target` is a symlink; a missing tail is not one. */
+async function hasSymlinkComponent(root: string, target: string): Promise<boolean> {
+	const relation = relative(root, target);
+	if (relation === "" || relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) return relation !== "";
+	let current = root;
+	for (const component of relation.split(sep)) {
+		current = resolve(current, component);
+		try { if ((await lstat(current)).isSymbolicLink()) return true; }
+		catch (error) { if (isNodeError(error) && error.code === "ENOENT") return false; throw error; }
 	}
-	return paths.length ? { paths, physical } : undefined;
+	return false;
+}
+
+/**
+ * `container` is already trusted (a matched pin or a verified physical chain).
+ * The nearest existing target component must resolve physically inside it; a missing
+ * tail is created under that container and never follows an existing symlink out.
+ */
+async function containedPhysical(container: string, target: string): Promise<PathDecision | undefined> {
+	let physicalContainer: string;
+	let physicalTarget: string;
+	try {
+		physicalContainer = await realpath(container);
+		physicalTarget = await realpath(await nearestExisting(target));
+	} catch {
+		return { allowed: false, fatal: true, reason: "Path could not be checked safely." };
+	}
+	if (physicalTarget === physicalContainer || pathContains(physicalContainer, physicalTarget)) return undefined;
+	return { allowed: false, fatal: true, reason: "Path escapes the pinned grant." };
+}
+
+/**
+ * Walk from `anchor` to the filesystem root. A missing tail is the expected shape of
+ * an authorized new path; any existing symlink on the chain means the anchored range
+ * no longer names the prepared object, including ancestors above the child cwd.
+ */
+async function anchorChain(anchor: string): Promise<PathDecision | undefined> {
+	let current = anchor;
+	for (;;) {
+		try {
+			if ((await lstat(current)).isSymbolicLink()) return { allowed: false, fatal: true, reason: "The granted path anchor or an ancestor is a symlink." };
+		} catch (error) {
+			if (!isNodeError(error) || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) return { allowed: false, fatal: true, reason: "Path could not be checked safely." };
+		}
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
 }
 
 export async function authorizePath(
@@ -243,69 +196,69 @@ export async function authorizePath(
 	toolName: string,
 	requestedPath: string,
 ): Promise<PathDecision> {
-	const capability = normalizedCapability(manifest);
-	try {
-		if (!(await lstat(capability.root)).isDirectory() || await realpath(capability.root) !== capability.root) throw new Error("invalid root");
-		await assertCanonicalExternalRoots(capability);
-	} catch {
-		return { allowed: false, fatal: true, reason: "Child capability root is unavailable or no longer canonical." };
-	}
-	const role = getRole(capability.role);
-	if (!role.tools.includes(toolName)) return { allowed: false, reason: `Tool ${toolName} is not allowed for role ${capability.role}.` };
-	if (requestedPath.includes("\0")) return { allowed: false, reason: "Path contains a null byte." };
-	if (!isSafePathGrammar(requestedPath)) return { allowed: false, reason: "Path is unsafe." };
-
+	const capability = parseCapability(manifest);
 	const write = toolName === "edit" || toolName === "write";
-	if (write) {
-		const target = resolve(capability.root, requestedPath);
-		if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
-		if (capability.writeRoot) {
-			if (relative(capability.root, target).split(sep)[0] === ".git") return { allowed: false, reason: "Managed Git metadata is not a source write." };
-		} else if (!capability.writePaths.includes(target)) return { allowed: false, reason: "Path is not an exact declared write file." };
-		try {
-			const physicalRoot = await realpath(capability.root);
-			const existing = await nearestExisting(target);
-			const physicalExisting = await realpath(existing);
-			if (!contains(physicalRoot, physicalExisting)) return { allowed: false, reason: "Path resolves outside the child root." };
-			if (await hasSymlinkComponent(capability.root, target)) {
-				return { allowed: false, reason: "Writes through symlinks are not allowed." };
-			}
-			return { allowed: true, resolvedPath: target };
-		} catch (error) {
-			return pathCheckFailure(error);
-		}
-	}
-
+	const allowedTools = toolsForAccess(capability.grants.some((grant) => grant.permission === "write"));
+	if (toolName === "bash") return { allowed: false, reason: "Shell is cooperative and is not a path grant." };
+	if (!allowedTools.includes(toolName) && toolName !== "read") return { allowed: false, reason: `Tool ${toolName} is outside the granted capability.` };
+	if (!isSafePathGrammar(requestedPath) || requestedPath.includes("\0")) return { allowed: false, reason: "Path is unsafe." };
+	const target = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(capability.cwd, requestedPath);
+	const guidance = write ? undefined : capability.guidance?.readRoots.find((root) => pathContains(root, target));
+	const grant = covering(capability.grants, target, write);
+	if (!grant && !guidance) return { allowed: false, reason: write ? "Path is outside the write grant." : "Path is outside the read grant." };
+	// Relative paths resolve only against cwd. Do not search another grant for a matching relative name.
+	const resolved = target;
+	if (write && grant && relative(grant.path, resolved).split(sep)[0] === ".git") return { allowed: false, reason: "Managed Git metadata is not a source write." };
 	try {
-		if (!isAbsolute(requestedPath)) {
-			const target = resolve(capability.root, requestedPath);
-			if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
-			if (capability.readRoots.some((root) => contains(root, target))) return await authorizeRead(capability, toolName, target, capability.readRoots, true);
-			const guidanceRoots = await selectedGuidanceRoots(capability, target);
-			if (guidanceRoots) return await authorizeRead(capability, toolName, target, guidanceRoots.paths, false, guidanceRoots.physical);
-			return { allowed: false, reason: "Path is outside the declared read scope." };
+		if (grant) {
+			// Read-only evidence keeps an immutable identity; a writable or missing
+			// selector binds to a stable existing parent so an authorized leaf may be
+			// created, deleted or atomically replaced without widening the range.
+			if (grant.pin) {
+				let info;
+				try { info = await lstat(grant.path); }
+				catch { return { allowed: false, fatal: true, reason: "Access identity changed." }; }
+				if ((!info.isFile() && !info.isDirectory()) || info.dev !== grant.pin.dev || info.ino !== grant.pin.ino) return { allowed: false, fatal: true, reason: "Access identity changed." };
+				const decision = await containedPhysical(grant.path, resolved);
+				if (decision) return decision;
+				return { allowed: true, resolvedPath: resolved };
+			}
+			if (grant.anchor) {
+				let info;
+				try { info = await lstat(grant.anchor.path); }
+				catch { return { allowed: false, fatal: true, reason: "Access anchor changed." }; }
+				if (!info.isDirectory() || info.dev !== grant.anchor.dev || info.ino !== grant.anchor.ino) return { allowed: false, fatal: true, reason: "Access anchor changed." };
+				// A writable selector never follows a symlink, even one that resolves inside the range.
+				if (write && await hasSymlinkComponent(grant.anchor.path, resolved)) return { allowed: false, fatal: true, reason: "Writes through symlinks are not allowed." };
+				const decision = await containedPhysical(grant.anchor.path, resolved);
+				if (decision) return decision;
+				// The anchor proves stable ancestry, not a wider read grant. A mutable
+				// selected leaf may not redirect reads to its otherwise ungranted siblings.
+				if (!write) {
+					const existing = await nearestExisting(resolved);
+					const physical = resolve(await realpath(existing), relative(existing, resolved));
+					if (!pathContains(grant.path, physical)) return { allowed: false, reason: "Read target is outside the selected grant." };
+				}
+				return { allowed: true, resolvedPath: resolved };
+			}
+			// A synthesized current manifest without a recorded binding requires a physical,
+			// symlink-free chain before trusting the nearest existing component.
+			const anchor = await anchorChain(grant.path);
+			if (anchor) return anchor;
+			const container = await nearestExisting(grant.path);
+			const decision = await containedPhysical(container, resolved);
+			if (decision) return decision;
+			return { allowed: true, resolvedPath: resolved };
 		}
-
-		const target = resolve(requestedPath);
-		const internalRoots = capability.readRoots.filter((root) => contains(root, target));
-		if (internalRoots.length > 0) {
-			if (!contains(capability.root, target)) return { allowed: false, reason: "Path escapes the child root." };
-			return await authorizeRead(capability, toolName, target, internalRoots, true);
-		}
-		const guidanceRoots = await selectedGuidanceRoots(capability, target);
-		if (guidanceRoots) return await authorizeRead(capability, toolName, target, guidanceRoots.paths, false, guidanceRoots.physical);
-		const externalRoots = capability.externalReadRoots.filter((root) => contains(root, target));
-		if (externalRoots.length === 0) return { allowed: false, reason: "Path is outside the declared read scope." };
-		return await authorizeRead(capability, toolName, target, externalRoots, false);
+		// Guidance-only read: the build-time physical owner is the accepted container.
+		const index = capability.guidance!.readRoots.indexOf(guidance!);
+		const pinned = capability.guidance!.physicalRoots[index];
+		if (pinned === undefined || await realpath(guidance!) !== pinned) return { allowed: false, fatal: true, reason: "Guidance owner changed." };
+		const decision = await containedPhysical(guidance!, resolved);
+		if (decision) return decision;
+		return { allowed: true, resolvedPath: resolved };
 	} catch (error) {
-		return pathCheckFailure(error);
+		const code = (error as NodeJS.ErrnoException).code;
+		return { allowed: false, fatal: code !== "ENOENT" && code !== "ENOTDIR", reason: "Path could not be checked safely." };
 	}
-}
-
-function pathCheckFailure(error: unknown): PathDecision {
-	return {
-		allowed: false,
-		fatal: !isNodeError(error) || !["ENOENT", "ENOTDIR"].includes(error.code ?? ""),
-		reason: "Path could not be checked safely.",
-	};
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isNativeObservation, mergeOwnedUsage, nativeLeaf, normalizeCommandCorrelation, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/subagents/observability.ts";
 import { isLocalTiming, spanDuration } from "../../../../extensions/subagents/telemetry.ts";
 import type { TimeSpan } from "../../../../extensions/subagents/contracts.ts";
+import { isProductId } from "../../../../extensions/subagents/identity.ts";
 
 /** Read-only, cumulative owned evidence. These are not bills per tool invocation. */
 export interface ObservationMetrics {
@@ -9,8 +10,13 @@ export interface ObservationMetrics {
 	parentDispositionScope: "explicit-entry-range" | "unavailable";
 	observedSessions: number;
 	observedEpisodes: number;
+	/** Unsupported envelope versions, excluded before payload interpretation; never mixed into current coverage. */
+	excludedRecords: number;
 	actions: Record<"create" | "continue" | "inspect" | "apply" | "close", number>;
 	outcomes: { executionSucceeded: number; reportComplete: number; candidatesApplied: number; parentAccepted: boolean | null; semanticRepairs: number | null; takeovers: number | null; acceptedDeliveryWallMs: number | null };
+	rootStatuses: Array<{ candidateId: string | null; rootId: string; destination: string; status: string; recovery: string; release: string }>;
+	/** Aggregate per-session release facts, kept separate from each root's own disposition. */
+	releases: Array<{ candidateId: string | null; status: string; remaining: number }>;
 	usage: { parent: ObservedUsage; children: ObservedUsage; total: ObservedUsage };
 	timing: Record<"workerEffortMs" | "workerOccupiedMs" | "parentWallMs" | "parentActiveMs" | "parentLocalToolMs" | "parentDelegationWaitMs" | "parentReasoningMs" | "parentCompactionMs" | "unattributedMs", number | null>;
 	childCapabilities: { manifestIdentities: number | null; contextWindows: number[] | null; configuredToolSets: string[][] | null };
@@ -33,7 +39,7 @@ export interface ParentDisposition {
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined;
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
-const id = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value);
+const ownedId = (value: unknown): value is string => typeof value === "string" && isProductId(value);
 function canonical(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
 	const data = object(value);
@@ -43,9 +49,11 @@ const usageKeys = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", 
 const nullUsage = (): ObservedUsage => unavailableObservation().usage;
 function empty(): ObservationMetrics {
 	return {
-		available: false, parentDispositionScope: "unavailable", observedSessions: 0, observedEpisodes: 0,
+		available: false, parentDispositionScope: "unavailable", observedSessions: 0, observedEpisodes: 0, excludedRecords: 0,
 		actions: { create: 0, continue: 0, inspect: 0, apply: 0, close: 0 },
 		outcomes: { executionSucceeded: 0, reportComplete: 0, candidatesApplied: 0, parentAccepted: null, semanticRepairs: null, takeovers: null, acceptedDeliveryWallMs: null },
+		rootStatuses: [],
+		releases: [],
 		usage: { parent: nullUsage(), children: nullUsage(), total: nullUsage() },
 		timing: { workerEffortMs: null, workerOccupiedMs: null, parentWallMs: null, parentActiveMs: null, parentLocalToolMs: null, parentDelegationWaitMs: null, parentReasoningMs: null, parentCompactionMs: null, unattributedMs: null },
 		childCapabilities: { manifestIdentities: null, contextWindows: null, configuredToolSets: null },
@@ -64,7 +72,7 @@ export function validateParentDisposition(value: unknown, text: string): ParentD
 	const data = object(value); const parsed = parse(text);
 	const keys = new Set(["version", "parentSessionId", "startEntryId", "endEntryId", "outcome", "startedAtMs", "acceptedAtMs", "semanticRepairs", "takeovers"]);
 	if (!data || !parsed || Object.keys(data).some((key) => !keys.has(key)) || data.version !== 1 || data.parentSessionId !== parsed.header.id
-		|| !id(data.startEntryId) || !id(data.endEntryId) || !parsed.positions.has(data.startEntryId) || !parsed.positions.has(data.endEntryId)
+		|| typeof data.startEntryId !== "string" || typeof data.endEntryId !== "string" || !parsed.positions.has(data.startEntryId) || !parsed.positions.has(data.endEntryId)
 		|| parsed.positions.get(data.startEntryId)! > parsed.positions.get(data.endEntryId)!
 		|| (data.outcome !== "accepted" && data.outcome !== "rejected")) throw new Error("invalid_parent_disposition_scope");
 	for (const key of ["startedAtMs", "acceptedAtMs", "semanticRepairs", "takeovers"]) {
@@ -157,23 +165,24 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 	const parents: NativeObservation[] = []; const children: NativeObservation[] = [];
 	const episodeObservations = new Map<string, NativeObservation>();
 	const claimed = new Set<number>(); const ranges = new Map<string, string>();
-	const sessions = new Set<string>(); const episodes = new Map<string, { succeeded: boolean; complete: boolean }>(); const applied = new Set<string>();
+	const sessions = new Set<string>(); const episodes = new Map<string, { succeeded: boolean; complete: boolean }>(); const applied = new Set<string>(); const rootStatus = new Map<string, { candidateId: string | null; rootId: string; destination: string; status: string; recovery: string; release: string }>(); const releases = new Map<string, { candidateId: string | null; status: string; remaining: number }>();
 	let validTiming = true; let validWall = true; let validWorkers = true; let invalidEvidence = false;
 	const totals = { workerEffortMs: 0, workerOccupiedMs: 0, parentWallMs: 0, parentActiveMs: 0, parentLocalToolMs: 0, parentDelegationWaitMs: 0, parentReasoningMs: 0, parentCompactionMs: 0, unattributedMs: 0 };
 	// Async completions may arrive outside every parent interaction range. Their
 	// owner-tagged native observations remain owned usage, not receipt usage.
 	const eventIds = new Map<string, string>();
 	for (const entry of parsed.body) {
-		if (entry.type !== "custom" || entry.customType !== "csheng.subagents.execution.v3") continue;
+		if (entry.type === "custom" && entry.customType === "csheng.subagents.execution.v3") { result.excludedRecords++; continue; }
+		if (entry.type !== "custom" || entry.customType !== "csheng.subagents.execution.v4") continue;
 		const event = object(entry.data);
 		if (object(event?.owner)?.sessionId !== parsed.header.id) continue;
-		if (!event || event.version !== 3 || !id(event.eventId) || !Array.isArray(event.sessions) || event.sessions.length > 10) { invalidEvidence = true; continue; }
+		if (!event || event.version !== 4 || !ownedId(event.eventId) || !Array.isArray(event.sessions) || event.sessions.length > 10) { invalidEvidence = true; continue; }
 		const serialized = canonical(event); const priorEvent = eventIds.get(event.eventId);
 		if (priorEvent) { if (priorEvent !== serialized) invalidEvidence = true; continue; }
 		eventIds.set(event.eventId, serialized);
 		for (const raw of event.sessions) {
 			const view = object(raw), task = object(view?.result);
-			if (!view || !id(view.handle) || !Number.isSafeInteger(view.episode) || !task) { invalidEvidence = true; continue; }
+			if (!view || !ownedId(view.handle) || !Number.isSafeInteger(view.episode) || !task) { invalidEvidence = true; continue; }
 			sessions.add(view.handle);
 			const key = JSON.stringify([view.handle, view.episode]);
 			const outcome = { succeeded: task.status === "succeeded", complete: view.reportComplete === true };
@@ -218,11 +227,14 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 		for (const item of scope) {
 			const message = object(item.message); const details = object(message?.details);
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
-			if (message.toolName === "csheng_subagent_sessions" && (details.schemaVersion === 1 || details.schemaVersion === 2 || details.schemaVersion === 3) && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
+			// Shallow version/type cut before payload interpretation: explicitly versioned non-current and legacy
+			// tool envelopes are excluded from current evidence and reported separately, never treated as invalid.
+			if (message.toolName === "csheng_subagents" || (message.toolName === "csheng_subagent_sessions" && typeof details.schemaVersion === "number" && details.schemaVersion !== 4)) { result.excludedRecords++; continue; }
+			if (message.toolName === "csheng_subagent_sessions" && details.schemaVersion === 4 && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
-				if (details.schemaVersion === 3 && details.kind === "submission") continue;
+				if (details.kind === "submission") continue;
 				for (const raw of details.sessions) {
-					const view = object(raw); if (!view || !id(view.handle) || !Number.isSafeInteger(view.episode) || (view.episode as number) < 0) { invalidEvidence = true; continue; }
+					const view = object(raw); if (!view || !ownedId(view.handle) || !Number.isSafeInteger(view.episode) || (view.episode as number) < 0) { invalidEvidence = true; continue; }
 					sessions.add(view.handle);
 					const task = object(view.result);
 					if (task) {
@@ -241,16 +253,34 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 							windowEpisodes.set(episodeKey, episodeObservations.get(episodeKey)!);
 						}
 					}
-					const candidate = object(view.candidate); if (candidate?.status === "applied" && id(candidate.id)) applied.add(candidate.id);
-				}
-			} else if (message.toolName === "csheng_subagents" && Array.isArray(details.tasks) && details.tasks.length <= 10) {
-				for (const task of details.tasks) {
-					const value = object(task);
-					if (value && object(value.telemetry)?.childStarted !== false) {
-						const observation = isNativeObservation(value.observation) && value.observation.ownerSessionId !== parsed.header.id ? value.observation : unavailableObservation();
-						children.push(observation);
-						windowEpisodes.set(JSON.stringify([item.id, value.id]), observation);
+					const release = object(view.release);
+					const remainingRoots = new Set(Array.isArray(release?.remaining) ? release.remaining.filter((value): value is string => typeof value === "string") : []);
+					const candidate = object(view.candidate);
+					if (candidate && !ownedId(candidate.id)) { invalidEvidence = true; continue; }
+					const candidateId = candidate ? candidate.id as string : null;
+					if (release && typeof release.status === "string") releases.set(`${view.handle}:${view.episode}`, { candidateId, status: release.status, remaining: remainingRoots.size });
+					// Owned-root projection is authoritative when present: it survives a never-frozen candidate and
+					// carries each root's own release fact instead of copying the aggregate status.
+					const ownedRoots = Array.isArray(view.roots) ? view.roots : undefined;
+					if (ownedRoots) {
+						for (const rawRoot of ownedRoots) {
+							const root = object(rawRoot);
+							if (!root || !ownedId(root.id) || typeof root.status !== "string" || typeof root.release !== "string") { invalidEvidence = true; continue; }
+							rootStatus.set(`${view.handle}:${view.episode}:${root.id}`, { candidateId, rootId: root.id,
+								destination: typeof root.destination === "string" ? root.destination : "", status: root.status,
+								recovery: root.recovery === "required" ? "required" : "clear", release: root.release });
+						}
+					} else if (candidateId && Array.isArray(candidate?.roots)) {
+						for (const rawRoot of candidate.roots) {
+							const root = object(rawRoot);
+							if (!root || !ownedId(root.rootId) || typeof root.status !== "string") { invalidEvidence = true; continue; }
+							rootStatus.set(`${view.handle}:${view.episode}:${root.rootId}`, { candidateId, rootId: root.rootId,
+								destination: typeof root.destination === "string" ? root.destination : "", status: root.status,
+								recovery: ["applying", "partial", "unknown"].includes(root.status) ? "required" : "clear",
+								release: release === undefined ? "pending" : remainingRoots.has(root.rootId) ? "remaining" : "released" });
+						}
 					}
+					if (candidate?.status === "applied" && ownedId(candidate.id)) applied.add(candidate.id);
 				}
 			}
 		}
@@ -295,7 +325,7 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 	}
 	result.observedSessions = sessions.size; result.observedEpisodes = episodes.size;
 	result.outcomes.executionSucceeded = [...episodes.values()].filter((value) => value.succeeded).length;
-	result.outcomes.reportComplete = [...episodes.values()].filter((value) => value.complete).length; result.outcomes.candidatesApplied = applied.size;
+	result.outcomes.reportComplete = [...episodes.values()].filter((value) => value.complete).length; result.outcomes.candidatesApplied = applied.size; result.rootStatuses = [...rootStatus.values()].slice(0, 32); result.releases = [...releases.values()].slice(0, 32);
 	if (invalidEvidence || parents.length === 0) return result;
 	result.available = true; children.push(...episodeObservations.values());
 	result.usage.parent = mergeOwnedUsage(parents).usage; result.usage.children = mergeOwnedUsage(children).usage;

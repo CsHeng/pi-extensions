@@ -1,127 +1,88 @@
 # Subagent Session Metric Schema
 
-`schemaVersion = 4` is a redacted evaluation document, not runtime state and not a workflow ledger. The evaluator reads runtime telemetry schema versions one through four and qualified legacy task results; it always emits this metric schema version. Current-epoch mode selects matching schema-three and schema-four runs and never infers provenance from mtime or prose.
+`schemaVersion = 5` is a redacted evaluation document, not runtime state and not a workflow ledger. It is independent of the collaboration/managed envelope version (currently `4`) and of the session-view version (currently `4`): those describe runtime payloads, while `schemaVersion` versions only this report.
+
+The evaluator reads the retired one-shot `csheng_subagents` tool name and the registered managed `csheng_subagent_sessions` tool name only to **classify** envelopes. It never interprets one-shot task payloads, and it interprets a managed envelope only when its `schemaVersion === 4`. Every other version is excluded before any nested field is read and is reported as an exclusion, not as invalid current evidence. There is no legacy inference and no compatibility adapter.
 
 ## Top level
 
-- `source.legacyCountersScope`: `csheng_subagents-only`. That name is the historical one-shot tool, not the registered managed runtime. Existing `totals`, `roles`, `routes`, `errors`, `concurrency`, and `runs` keep that historical one-shot meaning and do not include managed calls or parent-native usage.
-- `observations`: separately owned native/managed evidence described below; never add its usage to the legacy aggregate a second time.
-- `managedDispatch`: additive metric-v4 transport evidence, independent of settled observation windows and one-shot totals. Older reports lacking this section have unavailable managed dispatch evidence, not known zero.
-- `source.sessionId`: identifier derived from the selected JSONL filename.
-- `source.telemetryMode`: `authoritative`, `legacy`, or `mixed`. Recognized runtime telemetry versions are authoritative only for the fields they declare.
-- `totals`: run, requested/admitted/persisted task, launch, usage, duration, changed-path, singleton, zero-change-worker, and correction evidence.
-- `roles`: explorer, reviewer, and worker aggregates.
-- `routes`: aggregates keyed by resolved provider, model, thinking, configuration source, and selection source.
-- `errors`: stable error-code counts.
-- `concurrency`: largest known requested width and authoritative observed peak when available.
-- `runs`: the first 1,000 per-call metrics by ordinal with role summaries; `totals.toolCalls` remains the complete count. No task objective, output, ID, selector, or path is retained.
+- `schemaVersion`: the metric artifact version (`5`).
+- `source`: selected/excluded/unavailable envelope coverage and the selection mode.
+- `observations`: owned native/managed evidence. Never add its usage to any transport count a second time.
+- `managedDispatch`: managed transport/invocation evidence, with its own explicit denominator.
 
-## Version-two metrics
+This version emits only the sections below. It does not emit legacy one-shot aggregate sections, and it provides no adapter for older report shapes.
 
-Runtime telemetry schema two supplies exact per-run:
+## Source and version selection
 
-- `requestedTasks`, `admittedTasks`, and `launchedChildren`;
-- `requestedDependencyEdges` and `admittedDependencyEdges`;
-- `explicitModelTasks` and `explicitThinkingTasks`;
-- run duration and peak concurrency.
+- `sessionId`: identifier derived from the selected JSONL filename, or `current-epoch`.
+- `selectionMode`: `exact-session` or `current-epoch`.
+- `scannedSessions`: `1` for exact-session; the number of walked JSONL files for current-epoch.
+- `matchedSessions`: sessions that contributed supported current evidence.
+- `selectedRuns`: exact-session counts supported current managed tool-result envelopes; current-epoch reports the managed selector's `selectedRequests` (distinct owned requests with a matching epoch).
+- `excludedRuns`: exact-session counts unsupported envelopes (retired one-shot results and managed results whose version is not `4`); current-epoch adds the managed selector's `excludedRequests` to those unsupported envelopes.
+- `unavailableProvenanceRuns`: `0` for exact-session; current-epoch reports the managed selector's `unassignedRequests` (current requests with no effective extension/configuration pair).
+- `planEligibility`: always `unavailable`; this document does not judge plan conformance.
 
-`totals.requestedTasks`, `totals.admittedTasks`, and `totals.launchedChildren` sum their known run values. `totals.hardDependencyEdges`, `totals.explicitModelTasks`, and `totals.explicitThinkingTasks` each have `{ known, unavailableRuns }`. The hard-dependency total counts requested hard edges, including edges in a graph rejected before admission. For runtime schema one and legacy runs, the corresponding per-run fields are `null` and `unavailableRuns` increments. The evaluator never reconstructs these fields from assistant tool arguments or prose.
+`excluded`, `invalid`, and `unavailable` are separate categories:
 
-`totals.singletonRuns` counts runs whose authoritative or legacy-inferred `requestedTasks` is exactly one. Empty legacy rejections have `requestedTasks = null`, are excluded from requested-width totals, and are not singletons.
+- **excluded** — an envelope whose version is not the current supported version. It is never interpreted and never counted as current work.
+- **invalid** — a current-version envelope whose payload fails bounded shape/consistency validation. It cannot silently become current coverage.
+- **unavailable** — current evidence that exists but lacks a required, non-inferable field (for example a missing epoch pair).
 
-`totals.zeroChangeWorkers` counts historical task results with role `worker`, status `succeeded`, and a structured empty `changedPaths` array. Missing changed-path evidence is not inferred. A `worker_no_changes` failure remains an error, not a successful zero-change worker.
-
-Each bounded run includes role summaries so singleton role, usage, cost, duration, launch, and outcome remain derivable without retaining task identifiers or prose.
-
-## Version-four timing
-
-Runtime v4 measures `runDurationMs` from tool entry through final result readiness, including admission and awaited cleanup, on one parent-process monotonic clock. `runs[].timing.boundary` distinguishes `tool-entry` from standalone `scheduler` measurements. Wall-clock `startedAtMs` remains provenance correlation, not a duration source. Historical v1–v3 run durations keep their original meaning; legacy inference is unchanged.
-
-`runs[].timing` is unavailable (`null`) for older or missing evidence. Recognized v4 timing provides:
-
-- `schedulerMs`: a separately validated scheduler span, or `null`;
-- `complete`: whether all required interval evidence is valid and complete;
-- `workerEffortMs`: summed parent-observed worker child intervals;
-- `workerOccupiedMs`: the union of those intervals on the common parent clock;
-- `waitMsByReason`: summed task waiting spans for `dependency`, global `capacity`, `role-capacity`, `resource-lock`, and eligible `ready` time.
-
-Invalid, backward, nonfinite, missing, or unclosed endpoints do not become zero: incomplete worker/wait totals are `null`. A complete empty interval set legitimately totals zero. Wait reasons can overlap; their sums are not a partition of wall time. Effort is neither wall time nor provider utilization: three workers each alive for ten overlapping minutes contribute thirty minutes of effort and ten occupied minutes. These are process observations, not model-only work, provider queue time, or child reasoning time. Native episode/command observations are consumed separately rather than changing these historical counters. Parent acceptance is never supplied by process timing.
-
-Raw timing task IDs and intervals are projected into bounded redacted summaries, never copied. Existing `totals.durationMs` and role/route durations remain sums of task durations, not the v4 tool wall duration. Current-epoch v4 selection accepts fractional or explicitly unavailable run duration without inventing timing; the provenance and count checks still apply.
-
-## Route attribution
-
-Route aggregates intentionally retain the resolved provider, model, thinking, and configuration `source`. Their key also includes `selectionSource`:
-
-- `role-default`: package or user role defaults selected the physical model, with or without an applied execution profile;
-- `explicit-task`: an ephemeral task parameter selected the physical model;
-- `unavailable`: old or incomplete route evidence did not declare selection source.
-
-Selection source is mechanical attribution and does not prove user intent. Raw model selectors are never retained or reconstructed.
-
-## Older evidence labels
-
-Runtime telemetry schema one remains authoritative for its requested/admitted/launched counts, run duration, and peak concurrency. New schema-two topology and explicit-route request fields are unavailable.
-
-For legacy details:
-
-- a task is inferred to have launched only when `usage.turns > 0`;
-- run duration is inferred as the maximum task duration;
-- requested and admitted width are inferred from a non-empty persisted task list;
-- an empty legacy result has unknown requested/admitted width (`null`);
-- observed peak concurrency remains `null`.
-
-`mechanicalDispatchCorrectionCandidates` counts failed calls with no child launch. It does not prove that a later call corrected the same intent. Legacy `totals.semanticRepairs` remains `null` with `semanticRepairEvidence: unavailable`. Explicit scoped parent declarations are separate under `observations.outcomes`.
+Neither excluded nor unavailable evidence is silently merged into a known total.
 
 ## Owned native observations
 
-Exact-session `observations` consumes version-one parent custom observations and embedded native child projections from both tools. `available` means recognized owned observation windows exist, not that every field is complete or that the whole task lifetime was observed. The physical native reader shares the producer's 32 MiB, 100,000-entry, 1 MiB-line bounds and rejects partial tails. Malformed/overlapping/conflicting evidence does not become a complete prefix. A copied fork prefix has no new owner; only validated new-owner ranges can contribute.
+Exact-session `observations` consumes version-one parent custom observations and embedded native child projections. `available` means recognized owned observation windows exist, not that every field is complete or that the whole task lifetime was observed. The physical native reader shares the producer's 32 MiB, 100,000-entry, 1 MiB-line bounds and rejects partial tails. Malformed, overlapping, or conflicting evidence does not become a complete prefix. A copied fork prefix has no new owner; only validated new-owner ranges contribute. Native observations require an exact-session input; the current-epoch projection leaves them unavailable.
 
+- `excludedRecords`: unsupported envelope versions encountered while reading owned windows (v3 execution events, retired one-shot tool results, non-current managed tool results). Counted separately; they never invalidate current evidence.
 - `observedSessions` and `observedEpisodes`: unique managed handles and handle/episode pairs seen in owned windows, not new launches per request.
-- `actions`: observed managed create/continue/inspect/apply/close tool-result counts.
-- `outcomes.executionSucceeded`, `reportComplete`, and `candidatesApplied`: distinct committed episode/candidate facts. An error on a later request does not replace a previous episode's result. None is parent acceptance.
-- `usage.parent`, `children`, and `total`: six nullable `input`, `output`, `cacheRead`, `cacheWrite`, `totalTokens`, and `cost` values, recomputed from direct native rows with owner/entry deduplication. Total is not legacy aggregate plus native cost. This is cumulative referenced owned evidence, not a bill for the current replay/inspect call.
-- `models`: at most 1,000 groups with opaque tuple-hashed `modelKey` (or null) and owned usage. `modelCoverage` is complete or unavailable; unavailable grouping does not silently claim zero models.
+- `actions`: observed managed `create`/`continue`/`inspect`/`apply`/`close` tool-result counts.
+- `outcomes.executionSucceeded`, `reportComplete`, and `candidatesApplied`: distinct committed episode/candidate facts. `candidatesApplied` counts a **logical candidate once** and only when its own status is `applied`; a root-level status change never adds a second applied candidate. An error on a later request does not replace a previous episode's result. None is parent acceptance.
+- `rootStatuses`: a bounded per-root projection of `{ candidateId, rootId, destination, status, recovery, release }`. `candidateId` is `null` when no candidate was frozen. `recovery` is `required` for `applying`/`partial`/`unknown` windows, otherwise `clear`. `release` is that root's own `pending`/`remaining`/`released` fact, derived from the record's owned state, not copied from the aggregate status. Rows are keyed by stable session/episode/root identity, so repeated reads update one row instead of multiplying it.
+- `releases`: the bounded aggregate `{ candidateId, status, remaining }` per session, kept **separate** from `rootStatuses`. A `partial` release with only session `scratch` remaining therefore reports every projected root as released and one aggregate partial cleanup; scratch is never invented as a per-root failure.
+- `usage.parent`, `children`, and `total`: six nullable `input`, `output`, `cacheRead`, `cacheWrite`, `totalTokens`, and `cost` values, recomputed from direct native rows with owner/entry deduplication. Total is not a sum of unrelated aggregates. This is cumulative referenced owned evidence, not a bill for the current replay/inspect call, and it is counted once per logical owner/episode.
+- `models`: at most 1,000 groups with an opaque tuple-hashed `modelKey` (or `null`) and owned usage. `modelCoverage` is `complete` or `unavailable`; unavailable grouping does not silently claim zero models.
 
-Direct assistant, compaction, and branch-summary rows contribute once; nested tool aggregates and retained context copies do not. Failed summary usage remains unknown. Missing fields remain null, real zero stays zero, and nonfinite overflow is not a valid metric. A missing disposable cache on replay can reuse earlier valid evidence for that episode; conflicting entries, timing, command, or configured capability snapshots cannot silently choose whichever was read first. Launched child identities without matching view evidence make child usage unavailable rather than free.
+Direct assistant, compaction, and branch-summary rows contribute once; nested tool aggregates and retained context copies do not. Failed summary usage remains unknown. Missing fields remain `null`, real zero stays zero, and nonfinite overflow is not a valid metric. A missing disposable cache on replay can reuse earlier valid evidence for that episode; conflicting entries, timing, command, or configured capability snapshots cannot silently choose whichever was read first. Launched child identities without matching view evidence make child usage unavailable rather than free.
 
 `timing` reports independently validated parent wall, active, reasoning, local delegation wait, compaction, and unattributed milliseconds, plus worker effort/occupied wall. Parent active is the union of assistant/local-tool/compaction spans; wait can overlap activity. Unattributed is the complement of observed activity plus wait, not proven user idle. Each owned parent window is measured separately. Run child offsets are translated only with matching process clock keys and known origins/endpoints; unrelated clocks are never unioned. A known parent boundary can remain available when reasoning endpoints or a child clock are missing.
 
 `childTiming` reports summed episode wall, active, reasoning, local-tool, and compaction effort. It unions spans inside each valid episode, then sums those separately measured values across child processes. It never presents that effort as parallel occupied wall or server compute. Missing/incomplete child timing does not inherit parent process duration.
 
-`commands` reports coverage (complete/partial/unavailable), deduplicated observed rows and status counts, duration effort, and source/environment endpoint-change counts. Aggregate duration and change totals require complete coverage and known endpoints; partial observed status counts are not a complete command total. Equal before/after hashes do not prove no transient mutation. A successful command is not proof that the command was a test or that the parent accepted its output. No command text, hashes, or raw call IDs are exported.
+`commands` reports coverage (`complete`/`partial`/`unavailable`), deduplicated observed rows and status counts, duration effort, and source/environment endpoint-change counts. Aggregate duration and change totals require complete coverage and known endpoints; partial observed status counts are not a complete command total. Equal before/after hashes do not prove no transient mutation. A successful command is not proof that the command was a test or that the parent accepted its output. No command text, hashes, or raw call IDs are exported. Native command rows carry their own command-correlation version; legacy raw-ID and current hashed-key representations normalize before comparison, and unknown keys/versions stay conservative.
 
-`childCapabilities` reports the count of known manifest identities, distinct configured context windows, and configured tool sets. Missing configurations remain null. These are host-state observations, not final provider payload, stronger sandbox permissions, token utilization, or provider quotas. No manifest paths or hashes are emitted.
+`childCapabilities` reports the count of known manifest identities, distinct configured context windows, and configured tool sets. Missing configurations remain `null`. These are host-state observations, not final provider payload, stronger sandbox permissions, token utilization, or provider quotas. No manifest paths or hashes are emitted.
 
-Current-epoch mode retains the historical source counters/provenance selector and its unassigned create/continue accounting for backward compatibility. The separate `managedDispatch` selector consumes v2/v3 invocation telemetry with its own explicit denominator. Neither selector infers a missing pair from current settings, file time, or prose. Native `observations` remain unavailable for the epoch-filtered projection; select an exact session to inspect them.
-
-Missing native timing does not erase otherwise validated owned rows, command records, or capabilities. Each plane retains its own completeness. Usage is still scoped to committed recorded rows and does not assert a complete bill for a killed in-flight request. New command projections declare `commandCorrelationVersion: 2`; legacy raw-ID and current hashed-key representations normalize before comparison/deduplication. Unknown keys/versions and conflicting evidence remain conservative.
+Missing native timing does not erase otherwise validated owned rows, command records, or capabilities. Each plane retains its own completeness. Usage is still scoped to committed recorded rows and does not assert a complete bill for a killed in-flight request.
 
 ## Managed dispatch
 
-This section counts transport evidence, not missions, acceptance, fresh work on replay, or cost. It reads structured managed tool results and owner-tagged v3 terminal custom entries; it never reconstructs historical actions from assistant arguments or error prose. Results v2/v3 contain `requestTelemetry` version one with native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A queued task with no committed episode does not become a replayed episode.
+This section counts transport evidence, not missions, acceptance, fresh work on replay, or cost. It reads current managed tool results and owner-tagged v3/v4 execution custom entries; it never reconstructs actions from assistant arguments or error prose. A current managed result's `requestTelemetry` carries native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A queued task with no committed episode does not become a replayed episode.
 
 - `recordedResults`: all encountered managed tool-result records within bounds, including invalid and copied records.
-- `ownedRequests`: distinct valid v2/v3 owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records do not gain ownership.
+- `ownedRequests`: distinct valid current managed owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records do not gain ownership.
 - `selectedRequests`, `excludedRequests`, `unassignedRequests`: partition valid owned requests. Exact-session mode selects all valid owned requests. Current-epoch mode selects only matching extension/configuration pairs with an eligible start; missing pairs are unassigned. Returned session/episode provenance never substitutes for invocation provenance.
-- `legacyResults` and `legacyActions`: v1 recorded-result counts by recorded action/status, without claiming unique ownership, correcting historically mislabeled inspect, or inventing launch evidence.
-- `invalidRecords`, `conflictingRequests`, `duplicateRecords`, `copiedRecords`: independently named exclusions/duplicate evidence; a conflict removes that invocation from authoritative counts.
-- `actions`: bounded selected-request groups containing only action, status, and count. Null action is `invalid-request`, never inspect. `errors` contains bounded selected stable request-code counts.
-- `launchedChildren` and `replayedEpisodes`: `{ known, unavailableRequests }`. Known sums cover selected valid requests; unavailable requests count legacy records, invalid records, and conflicting identities. Excluded and unassigned valid requests are reported through their selection buckets rather than silently merged into the known sums.
+- `excludedRecords`: unsupported envelope versions (v3 execution custom events and non-current managed results), excluded before interpretation.
+- `invalidRecords`: current-version records that fail shape/consistency validation.
+- `conflictingRequests`, `duplicateRecords`, `copiedRecords`: independently named conflict/duplicate/copied evidence; a conflict removes that invocation from authoritative counts.
+- `actions`: bounded selected-request groups containing only action, status, and count. A null action is `invalid-request`, never `inspect`. `errors` contains bounded selected stable request-code counts.
+- `launchedChildren` and `replayedEpisodes`: `{ known, unavailableRequests }`. Known sums cover selected valid requests (each logical request counted once); unavailable requests count invalid records and conflicting identities. Excluded and unassigned requests are reported through their own buckets rather than silently merged into the known sums.
 
-All fields preserve the historical `csheng_subagents-only` meaning of the pre-existing aggregate sections. No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output. Static parent-acceptance ownership remains documentation; missing disposition remains an offline nullable metric, not a routine runtime warning.
+No request IDs, handles, native owner/invocation identities, epoch values, reports, or command keys appear in redacted dispatch output.
 
-### Asynchronous v3 evidence
+### Asynchronous evidence
 
-`managedDispatch.async` is additive and absent when no v3 receipt/event evidence exists. `receipts` counts accepted admission, `runs` distinct referenced runs, and `terminalRuns`/`terminalTasks` selected terminal evidence. `duplicateEvents`, `conflictingEvents`, `copiedEvents`, `invalidEvents` and `excludedTasks` expose evidence quality, not semantic outcome.
+`managedDispatch.async` is additive and absent when no receipt/event evidence exists. `receipts` counts accepted admission, `runs` distinct referenced runs, and `terminalRuns`/`terminalTasks` selected terminal evidence. `duplicateEvents`, `conflictingEvents`, `copiedEvents`, `invalidEvents`, and `excludedTasks` expose evidence quality, not semantic outcome.
 
-`launchedChildren` comes from terminal episode `childStarted` evidence, never a receipt or repeated inspect/join. `timing` contains nullable `preparationMs`, `queueMs`, `workspaceMs`, `childEffortMs` and `submissionToTerminalMs`. Task/run facts deduplicate by owner and episode; conflicting results cannot be replaced merely to enrich timing. The epoch activation predicate applies equally to selected task facts and run latency. Missing phase timing is unavailable, not a fabricated zero. Native observation entry ownership prevents receipt/event/replay double billing, and cross-turn async worker occupancy is not assigned to an unrelated parent window.
+`launchedChildren` comes from terminal episode `childStarted` evidence, never a receipt or repeated inspect/join. `timing` contains nullable `preparationMs`, `queueMs`, `workspaceMs`, `childEffortMs`, and `submissionToTerminalMs`. Task/run facts deduplicate by owner and episode; conflicting results cannot be replaced merely to enrich timing. The epoch activation predicate applies equally to selected task facts and run latency. Missing phase timing is unavailable, not a fabricated zero. Native observation entry ownership prevents receipt/event/replay double billing, and cross-turn async worker occupancy is not assigned to an unrelated parent window.
 
 ## Explicit parent disposition
 
 Exact-session mode can additionally read one explicitly supplied `--disposition <json-file>` of at most 4 KiB. The exact shape is `{version:1,parentSessionId,startEntryId,endEntryId,outcome,startedAtMs?,acceptedAtMs?,semanticRepairs?,takeovers?}`. The owner must match the native header; both entry IDs must exist in physical order. Outcome is `accepted` or `rejected`. Optional numeric fields accept omission or explicit null; known endpoints are finite/nonnegative and ordered, and repair/takeover counts are nonnegative safe integers. Unknown keys and prose are rejected.
 
-`parentDispositionScope` becomes `explicit-entry-range`, not whole-report acceptance. `outcomes.parentAccepted`, `semanticRepairs`, and `takeovers` reflect only that parent declaration. `acceptedDeliveryWallMs` requires accepted outcome and both explicit finite endpoints; otherwise it is null. All these fields remain unavailable without a declaration. The evaluator validates association and shape, not the parent's semantic judgment, and never applies candidates or mutates runtime state. Do not pair a narrow declared delivery interval with wider recorded costs as if their scopes were equal.
+`parentDispositionScope` becomes `explicit-entry-range`, not whole-report acceptance. `outcomes.parentAccepted`, `semanticRepairs`, and `takeovers` reflect only that parent declaration. `acceptedDeliveryWallMs` requires an accepted outcome and both explicit finite endpoints; otherwise it is `null`. All these fields remain unavailable without a declaration. The evaluator validates association and shape, not the parent's semantic judgment, and never applies candidates or mutates runtime state. Do not pair a narrow declared delivery interval with wider recorded costs as if their scopes were equal.
 
 ## Redaction
 
@@ -129,8 +90,8 @@ The schema must never include:
 
 - prompts, objectives, user or child messages;
 - raw model selectors, assistant tool arguments, stdout, stderr, tool prose, or external file content;
-- task IDs or repository paths;
+- task IDs or repository paths beyond the bounded root `destination` projection explicitly listed above;
 - environment variables, credentials, settings, or raw route configuration;
 - session directory paths.
 
-Resolved provider/model/thinking identifiers, bounded stable error codes, selection source, configuration source, and aggregate usage are intentionally retained because route evaluation owns those fields. Candidate lists and error prose are not retained.
+Resolved provider/model/thinking identifiers, bounded stable error codes, operator/tool names, candidate/root identifiers, bounded root destinations, and aggregate usage are intentionally retained because evaluation owns those fields. Candidate lists and error prose are not retained.

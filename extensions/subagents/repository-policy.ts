@@ -2,11 +2,12 @@ import { spawn } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Stats } from "node:fs";
+import { pathContains, type TaskRoot } from "./access.ts";
 import {
-	HARD_LIMITS,
 	isSafePathGrammar,
 	type TaskError,
 } from "./contracts.ts";
+import { mintProductId } from "./identity.ts";
 import type { NormalizedTask } from "./graph.ts";
 import { runReadGit } from "./git-workspace.ts";
 
@@ -21,7 +22,7 @@ export async function captureRepositoryTarget(declared: string): Promise<Reposit
 	if (!isAbsolute(declared) || !isSafePathGrammar(declared)) throw new RepositoryPolicyError("invalid_task_repository", "Worker repository must name an authorized absolute Git worktree root.");
 	try {
 		const root = await findCanonicalGitRoot(declared);
-		if (await realpath(declared) !== root) throw new Error("not the repository root");
+		if (await realpath(declared) !== root && declared !== root) throw new Error("not the repository root");
 		const gitDir = await realpath((await runReadGit(root, ["rev-parse", "--absolute-git-dir"])).stdout.toString().trim());
 		const commonDir = await realpath(resolve(root, (await runReadGit(root, ["rev-parse", "--git-common-dir"])).stdout.toString().trim()));
 		const identities = await Promise.all([root, gitDir, commonDir].map(async path => {
@@ -215,14 +216,12 @@ export async function canonicalizeExternalReadRoot(
 }
 
 function retarget(code: string, taskId: string): string {
-	if (code === "invalid_task_repository") return `Task ${taskId} repository requires an explicitly authorized absolute worker Git root.`;
-	if (code === "task_repository_unavailable") return `Task ${taskId} selected repository is not an accessible Git worktree root.`;
-	if (code === "invalid_scope") return `Task ${taskId} scope must contain only safe path strings. Prefer repository-relative paths and '.'.`;
-	if (code === "scope_outside_repository") return `Task ${taskId} scope resolves outside the current Git repository.`;
-	if (code === "invalid_external_read_root") return `Task ${taskId} external read root must be an absolute safe path.`;
-	if (code === "external_read_root_unavailable") return `Task ${taskId} external read root is missing, inaccessible, or special.`;
-	if (code === "external_read_root_not_external") return `Task ${taskId} external read root is inside the current repository; use scope instead.`;
-	if (code === "duplicate_external_read_root") return `Task ${taskId} repeats an external read root after canonicalization.`;
+	if (code === "invalid_access") return `Task ${taskId} access must use absolute paths or a bounded all-selector.`;
+	if (code === "unbounded_scope") return `Task ${taskId} used * without an explicit finite enclosing scope.`;
+	if (code === "non_git_write_unsupported") return `Task ${taskId} write grant is not inside a Git repository. This host applies Git candidates only; name a Git path or keep that range read-only.`;
+	if (code === "repository_root_unavailable") return `Task ${taskId} access path is not in an accessible Git worktree.`;
+	if (code === "access_unavailable") return `Task ${taskId} access path is missing, inaccessible, or special.`;
+	if (code === "invalid_task_repository" || code === "task_repository_unavailable") return `Task ${taskId} write root is not an accessible Git worktree root.`;
 	return "The current working directory is not an accessible Git worktree.";
 }
 
@@ -236,70 +235,86 @@ function failAdmission(code: string, taskId?: string): RepositoryAdmission {
 	};
 }
 
+async function pinPath(path: string, host: RepositoryHost): Promise<{ path: string; dev: number; ino: number }> {
+	const info = await host.lstat(path);
+	if (isSpecialFile(info)) throw new RepositoryPolicyError("access_unavailable", "An access path is missing, inaccessible, or special.");
+	// A symlink grant is pinned by its own identity so a later retarget is visible.
+	if (info.isSymbolicLink()) return { path, dev: info.dev, ino: info.ino };
+	if (!info.isFile() && !info.isDirectory()) throw new RepositoryPolicyError("access_unavailable", "An access path is missing, inaccessible, or special.");
+	const physical = await host.realpath(path);
+	if (physical !== path) throw new RepositoryPolicyError("invalid_access", "An access path must already be canonical.");
+	return { path, dev: info.dev, ino: info.ino };
+}
+
+async function locateGrant(path: string, host: RepositoryHost): Promise<{ declared: string; existing: string; info: Awaited<ReturnType<RepositoryHost["lstat"]>>; missing: boolean }> {
+	let current = path;
+	for (;;) {
+		try {
+			return { declared: path, existing: current, info: await host.lstat(current), missing: current !== path };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = dirname(current);
+			if (parent === current) throw new RepositoryPolicyError("access_unavailable", "An access path is missing, inaccessible, or special.");
+			current = parent;
+		}
+	}
+}
+
+/** Resolve one task's access grants into Git write roots and read evidence. Does not copy or mutate. */
+export async function resolveTaskRoots(task: NormalizedTask, host: RepositoryHost = defaultRepositoryHost): Promise<TaskRoot[]> {
+	const writeRoots = new Map<string, TaskRoot>();
+	const reads: TaskRoot[] = [];
+	for (const grant of task.grants) {
+		let located: Awaited<ReturnType<typeof locateGrant>>;
+		try { located = await locateGrant(grant.path, host); }
+		catch (error) {
+			if (error instanceof RepositoryPolicyError) throw error;
+			throw new RepositoryPolicyError("access_unavailable", "An access path is missing, inaccessible, or special.");
+		}
+		const info = located.info;
+		if (!located.missing && !info.isSymbolicLink() && info.isFile() === false && info.isDirectory() === false) throw new RepositoryPolicyError("access_unavailable", "An access path is missing, inaccessible, or special.");
+		const pin = located.missing ? { path: located.existing, dev: info.dev, ino: info.ino } : await pinPath(grant.path, host);
+		const probe = info.isSymbolicLink() || info.isDirectory() ? located.existing : dirname(located.existing);
+		let gitRoot: string | undefined;
+		try { gitRoot = await findCanonicalGitRoot(probe, host); }
+		catch { gitRoot = undefined; }
+		const physicalGrant = info.isSymbolicLink() ? await host.realpath(grant.path) : grant.path;
+		if (grant.permission === "write") {
+			if (!gitRoot || !(pathContains(gitRoot, grant.path) || pathContains(gitRoot, physicalGrant))) throw new RepositoryPolicyError("non_git_write_unsupported", "A write grant must be inside a Git repository.");
+			const existing = writeRoots.get(gitRoot);
+			const relativePath = toRepositoryRelative(gitRoot, pathContains(gitRoot, grant.path) ? grant.path : physicalGrant);
+			if (!isSafePathGrammar(relativePath)) throw new RepositoryPolicyError("invalid_access", "A write path cannot be normalized inside its Git root.");
+			if (existing) existing.paths.push(relativePath);
+			else {
+				const target = await captureRepositoryTarget(info.isSymbolicLink() ? grant.path : gitRoot);
+				writeRoots.set(gitRoot, { id: mintProductId(), source: gitRoot, permission: "write", git: true, paths: [relativePath], target });
+			}
+			continue;
+		}
+		if (gitRoot && pathContains(gitRoot, grant.path)) {
+			const relativePath = toRepositoryRelative(gitRoot, grant.path);
+			const existing = reads.find((item) => item.source === gitRoot);
+			if (existing) { existing.paths.push(relativePath); existing.pins?.push(pin); }
+			else reads.push({ id: mintProductId(), source: gitRoot, permission: "read", git: true, paths: [relativePath], pins: [pin] });
+		} else reads.push({ id: mintProductId(), source: grant.path, permission: "read", git: false, paths: [grant.path], pins: [pin] });
+	}
+	return [...writeRoots.values(), ...reads];
+}
+
 export async function admitRepositoryTasks(
 	cwd: string,
 	tasks: readonly NormalizedTask[],
 	host: RepositoryHost = defaultRepositoryHost,
 ): Promise<RepositoryAdmission> {
-	let gitRoot: string;
-	try {
-		gitRoot = await findCanonicalGitRoot(cwd, host);
-	} catch (error) {
-		const code = error instanceof RepositoryPolicyError ? error.code : "repository_root_unavailable";
-		return failAdmission(code);
-	}
-
+	let gitRoot = cwd;
+	try { gitRoot = await findCanonicalGitRoot(cwd, host); } catch { /* Access paths name their own roots; cwd is only a fallback label. */ }
 	const admitted: NormalizedTask[] = [];
 	for (const task of tasks) {
-		let repositoryTarget: RepositoryTarget | undefined;
-		if (task.repository !== undefined) {
-			if (task.role !== "worker") return failAdmission("invalid_task_repository", task.id);
-			try { repositoryTarget = await captureRepositoryTarget(task.repository); }
-			catch (error) { return failAdmission(error instanceof RepositoryPolicyError ? error.code : "task_repository_unavailable", task.id); }
+		try {
+			admitted.push({ ...task, roots: await resolveTaskRoots(task, host) });
+		} catch (error) {
+			return failAdmission(error instanceof RepositoryPolicyError ? error.code : "invalid_access", task.id);
 		}
-		const taskRoot = repositoryTarget?.root ?? gitRoot;
-		const declaredExternal = task.externalReadRoots ?? [];
-		const scope: string[] = [];
-		for (const entry of task.scope) {
-			try {
-				scope.push(await canonicalizeInternalScope(taskRoot, entry, host));
-			} catch (error) {
-				const code = error instanceof RepositoryPolicyError ? error.code : "invalid_scope";
-				return failAdmission(code, task.id);
-			}
-		}
-		if (declaredExternal.length > HARD_LIMITS.maxExternalReadRoots) {
-			return failAdmission("invalid_external_read_root", task.id);
-		}
-		const externalReadRoots: string[] = [];
-		const externalReadPins: Array<{ dev: number; ino: number }> = [];
-		const seen = new Set<string>();
-		{
-			for (const entry of declaredExternal) {
-				let canonical: string;
-				try {
-					canonical = await canonicalizeExternalReadRoot(taskRoot, entry, host);
-				} catch (error) {
-					const code = error instanceof RepositoryPolicyError ? error.code : "invalid_external_read_root";
-					return failAdmission(code, task.id);
-				}
-				if (seen.has(canonical)) return failAdmission("duplicate_external_read_root", task.id);
-				seen.add(canonical);
-				try {
-					const info = await host.lstat(canonical);
-					if (!info.isFile() && !info.isDirectory()) return failAdmission("external_read_root_unavailable", task.id);
-					externalReadPins.push({ dev: info.dev, ino: info.ino });
-				} catch { return failAdmission("external_read_root_unavailable", task.id); }
-				externalReadRoots.push(canonical);
-			}
-		}
-		admitted.push({
-			...task,
-			scope,
-			externalReadRoots,
-			externalReadPins,
-			...(repositoryTarget ? { repositoryTarget } : {}),
-		});
 	}
 	return { ok: true, gitRoot, tasks: admitted };
 }

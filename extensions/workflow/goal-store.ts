@@ -2,12 +2,13 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { absolutePath, containsPath, pathIdentity } from "./paths.ts";
 import { Check } from "typebox/value";
 import { randomUUID } from "node:crypto";
+import { mintProductId } from "../subagents/identity.ts";
 import type { HostObservation } from "./observation.ts";
-import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact, type LegacyGoalState, legacyGoalStateSchema } from "./goal-contracts.ts";
-import { accepted, amend, complete, deficits, dependencyDiagnostic, digest, invalidate, judge, pendingDependencies, progressKey, validateGoalState, validateGraph } from "./goal-state.ts";
+import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
+import { accepted, amend, complete, deficits, dependencyDiagnostic, digest, invalidate, judge, pendingDependencies, progressKey, targetKey, validateGoalState, validateGraph } from "./goal-state.ts";
 
 export interface SessionEntryLike { type: string; customType?: string; data?: unknown }
-export interface CheckObservation { host: HostObservation; scopes: Record<string, string[]>; generation: number; owner: number; checkIdentity?: string }
+export interface CheckObservation { id: string; host: HostObservation; scopes: Record<string, string[]>; generation: number; owner: number; checkIdentity?: string }
 export interface GoalContext { cwd: string; now: string; signal?: AbortSignal; sessionId: string; fenced?: () => boolean }
 export interface GoalResult { ok: boolean; code?: string; message?: string; diagnostics: string[]; view: GoalView }
 function declaredScope(paths: string[] | undefined, cwd: string): string[] {
@@ -39,24 +40,23 @@ export const overlaps = (writes: string[], sources: string[], sourceLinks: strin
 
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
- let legacy: LegacyGoalState | undefined;
  let unavailable: string | undefined;
  let owner = 0;
  const listeners = new Set<() => void>();
  const checks = new Map<string, CheckObservation>();
  const notify = () => { for (const listener of listeners) try { listener(); } catch { listeners.delete(listener); } };
- const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(legacy ? { legacy: structuredClone(legacy) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
+ const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
  const availableObservations = (sessionId: string) => state?.attempts.filter(a => a.status !== "interrupted" && a.generation === state?.input.generation).flatMap(a =>
   [...checks.values()].filter(c => c.scopes[a.id] && c.generation === a.generation && c.host.sessionId === sessionId && c.host.at >= a.started && c.host.toolName !== "csheng_workflow")
-   .slice(-8).map(c => ({ attempt: a.id, id: c.host.toolCallId, failed: c.host.isError || (c.host.exitCode != null && c.host.exitCode !== 0) || c.host.managed?.status !== undefined && c.host.managed.status !== "succeeded" })))
+   .slice(-8).map(c => ({ attempt: a.id, id: c.id, failed: c.host.isError || (c.host.exitCode != null && c.host.exitCode !== 0) || c.host.managed?.status !== undefined && c.host.managed.status !== "succeeded" })))
   .slice(-16) ?? [];
  function commit(next: GoalState, call: string): void {
   next.revision++;
   next.calls = [...next.calls, digest(call)];
   validateGoalState(next);
-  try { append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 3, state: next }); }
+  try { append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 4, state: next }); }
   catch (error) { throw new GoalError("persistence_failed", `Snapshot persistence failed; proposed state was not installed. Reconcile host storage, not business checks; do not repair history. ${String(error).slice(0, 500)}`); }
-  state = next; legacy = undefined; owner++; notify();
+  state = next; owner++; notify();
  }
  const writable = () => requireGoal(!unavailable, "state_unavailable", `Workflow unavailable: ${unavailable}. Continue authorized work without claiming contract certification; do not repair history.`);
  function align(next: GoalState, op: GoalOperation) {
@@ -67,8 +67,11 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
  /** A preparation-only lease conflict re-derives the whole operation from current state; cancellation and fencing never replay. */
  async function mutate(op: GoalOperation, ctx: GoalContext, call: string): Promise<GoalResult> {
   for (let preparation = 1; ; preparation++) {
+   const basis = () => state ? digest({ generation: state.input.generation, authority: state.authority, aligned: state.input.aligned }) : "none";
+   const startBasis = basis();
    const result = await mutateOnce(op, ctx, call);
    const conflict = !result.ok && result.code === "preparation_changed" && !ctx.signal?.aborted && !ctx.fenced?.();
+   if (conflict && basis() !== startBasis) return { ok: false, code: "alignment_required", message: "Input or authority changed during preparation. Reconcile alignment; this was not only a revision race.", diagnostics: result.diagnostics, view: view() };
    if (!conflict || preparation >= PREPARATION_LIMIT) {
     if (conflict && preparation > 1) result.message = `${result.message ?? ""} Replayed ${preparation - 1} preparation(s); concurrent commits continued.`;
     return result;
@@ -98,11 +101,10 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    if (op.operation === "enroll") {
     requireGoal(!state || state.fulfillment !== "pending", "already_enrolled", "An implementation contract is already enrolled; amend or close it explicitly.");
     requireGoal(op.goal && op.delivery && op.authority && op.requirements?.length, "invalid_contract", "Explicit implementation enrollment requires goal, delivery, existing authority and requirements.");
-    if (legacy) requireGoal(op.alignment, "legacy_replacement_required", "V2 is historical only. Explicitly reconcile its obligations and unresolved executions with alignment when enrolling a replacement; no accepted state is imported.");
-    next = { version: 3, revision: state?.revision ?? legacy?.revision ?? 0, id: randomUUID(), goal: op.goal, delivery: op.delivery, authority: op.authority,
+    next = { version: 4, revision: state?.revision ?? 0, id: randomUUID().replaceAll("-", ""), goal: op.goal, delivery: op.delivery, authority: op.authority,
      goalRevision: 1, fulfillment: "pending", continuation: { state: "active", repeat: 0, dispatched: 0 }, input: { generation: 0, aligned: true, unknown: false },
      requirements: op.requirements.map(r => ({ ...r, revision: 1 })), tasks: (op.tasks ?? op.requirements.map(r => ({ key: r.key, title: r.outcome.slice(0, 80), covers: [r.key] }))).map(t => ({ ...t, revision: 1 })), attempts: [], facts: [], acceptance: [], calls: [], serial: 0,
-     ...(legacy ? { replacement: { id: legacy.id, revision: legacy.revision, alignment: op.alignment!, unresolvedExecutions: [...new Set([...(legacy.executionPending ?? []), ...(legacy.continuation.waitingFor ?? []), ...legacy.attempts.filter(a => a.status === "running").map(a => a.id)])] } } : {}) };
+    };
     validateGraph(next);
    } else {
     requireGoal(state, "no_contract", "Enroll an authorized implementation contract first. Ordinary work needs no workflow enrollment.");
@@ -124,7 +126,8 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
       if ((error as NodeJS.ErrnoException)?.code === "ENAMETOOLONG") throw new GoalError("invalid_scope", "ENAMETOOLONG: a declared path exceeds the filesystem limit. scope/writes require actual filesystem paths relative to cwd or authorized absolute paths, not task descriptions. Put objectives in goal/task title and outcomes in report.summary; shortening prose does not make it an evidence scope.");
       throw error;
      }
-     next.attempts.push({ id: `A${++next.serial}`, task: task.key, revision: task.revision, generation: next.input.generation, status: "running", started: ctx.now, scope, writes });
+     next.serial += 1;
+     next.attempts.push({ id: mintProductId(), task: task.key, revision: task.revision, generation: next.input.generation, status: "running", started: ctx.now, scope, writes });
     } else if (op.operation === "report") {
      const candidates = next.attempts.filter(a => a.status === "running" && (!op.task || a.task === op.task));
      const attempt = op.attempt ? next.attempts.find(a => a.id === op.attempt) : candidates.length === 1 ? candidates[0] : undefined;
@@ -132,26 +135,37 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
      requireGoal(attempt.revision === next.tasks.find(t => t.key === attempt.task)?.revision, "stale_attempt", "Task meaning changed; start a current attempt.");
      requireGoal(op.summary, "invalid_report", "Report needs a truthful outcome summary.");
      attempt.status = "reported"; attempt.summary = op.summary;
+     const declared = new Set<string>();
      for (const input of op.facts ?? []) {
-      const id = `${attempt.id}:${input.key}`;
+      requireGoal(/^[A-Za-z0-9]+$/.test(input.id), "invalid_fact_id", "Declare an alphanumeric fact id and pass that same id unchanged to the judgment.");
+      requireGoal(!declared.has(input.id), "duplicate_fact", `Fact ${input.id} is declared more than once in this report.`);
+      declared.add(input.id);
+      const id = input.id;
+      const prior = next.facts.find(f => f.id === id);
+      requireGoal(!prior || prior.attempt === attempt.id, "fact_id_conflict", `Fact ${id} already belongs to another attempt. Cite it; do not redeclare it.`);
       const observation = input.observationId ? checks.get(input.observationId) : input.kind === "host" ? [...checks.values()].reverse().find(check => check.scopes[attempt.id] && check.host.sessionId === ctx.sessionId && check.generation === attempt.generation && check.host.at >= attempt.started) : undefined;
-      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.key} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.scopes[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.host.toolCallId).join(", ") || "none"}. Checks captured before this attempt started cannot be relabeled as current host observations. Reference a listed current observation for a host fact; reuse still-valid earlier evidence as an honest non-host fact without a bookkeeping rerun.`);
+      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.id} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.scopes[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.id).join(", ") || "none"}. Checks captured before this attempt started cannot be relabeled as current host observations. Reference a listed current observation for a host fact; reuse still-valid earlier evidence as an honest non-host fact without a bookkeeping rerun.`);
       const scope = input.kind === "host" ? observation?.scopes[attempt.id] : attempt.scope;
-      const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.host.toolCallId, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, scope: scope ?? attempt.scope, usable: !!scope };
+      const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.id, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, scope: scope ?? attempt.scope, usable: !!scope };
       if (input.kind === "host" && (observation!.generation !== attempt.generation || observation!.host.at < attempt.started)) { fact.usable = false; fact.note = "Observation belongs to another input or predates this attempt and cannot be relabeled as a current host observation."; }
       if (input.kind === "host" && input.result === "pass" && (observation!.host.isError || (observation!.host.exitCode != null && observation!.host.exitCode !== 0) || (observation!.host.managed && observation!.host.managed.status !== "succeeded"))) { fact.usable = false; fact.note = "Host reported failure; cannot certify a passing check."; }
-      const old = next.facts.find(f => f.id === id);
-      // The same stable key corrects an earlier fact; remove only judgments depending on it.
-      if (old && digest([old.kind, old.check, old.result, old.scope, old.observationId]) !== digest([fact.kind, fact.check, fact.result, fact.scope, fact.observationId])) invalidate(next, new Set(next.acceptance.filter(j => j.facts.includes(id)).map(j => j.subject)));
+      const old = prior;
+      if (old) { fact.attempt = old.attempt; fact.at = old.at; }
+      if (old && digest([old.kind, old.check, old.result, old.scope, old.observationId]) !== digest([fact.kind, fact.check, fact.result, fact.scope, fact.observationId])) invalidate(next, new Set(next.acceptance.filter(j => j.facts.includes(id)).map(j => targetKey(j.target))));
       next.facts = next.facts.filter(f => f.id !== id); next.facts.push(fact);
-      if (!fact.usable || fact.result !== "pass") diagnostics.push(`${input.key}: ${fact.note ?? fact.result}`);
+      if (!fact.usable || fact.result !== "pass") diagnostics.push(`${input.id}: ${fact.note ?? fact.result}`);
      }
      if (op.blocker) {
       next.tasks.find(t => t.key === attempt.task)!.blocker = op.blocker;
       invalidate(next, new Set([`task:${attempt.task}`]));
      }
      for (const judgment of op.judgments ?? []) {
-      const resolved = { ...judgment, facts: judgment.facts.map(id => next.facts.some(f => f.id === id) ? id : `${attempt.id}:${id}`) };
+      const resolvedFacts = judgment.facts.map(ref => {
+       const byId = next.facts.find(f => f.id === ref);
+       if (!byId) throw new GoalError("unknown_fact", "Judgment references a fact id that was not declared. Pass the fact id unchanged.");
+       return byId.id;
+      });
+      const resolved = { ...judgment, facts: resolvedFacts };
       const used = next.facts.filter(f => resolved.facts.includes(f.id));
       const sources = await Promise.all(used.filter(f => f.usable).map(async f => ({
        paths: await canonicalScope(f.scope, ctx.cwd),
@@ -159,7 +173,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
       })));
       const writers = await Promise.all(next.attempts.filter(a => a.status === "running" && a.writes.length).map(a => canonicalScope(a.writes, ctx.cwd)));
       const overlap = writers.some(writes => sources.some(scope => overlaps(writes, scope.paths, scope.links)));
-      if (!next.input.aligned || overlap) { diagnostics.push(`${judgment.subject}: ${overlap ? "overlapping writer is running" : "input alignment required"}.`); continue; }
+      if (!next.input.aligned || (judgment.accepted && overlap)) { diagnostics.push(`${targetKey(judgment.target)}: ${overlap ? "overlapping writer is running" : "input alignment required"}.`); continue; }
       judge(next, resolved, diagnostics);
      }
      if (next.tasks.some(t => t.blocker) && !next.attempts.some(a => a.status === "running") && !next.tasks.some(t => !t.blocker && !accepted(next, `task:${t.key}`) && (t.dependsOn?.every(dep => accepted(next, `task:${dep}`)) ?? true))) {
@@ -208,13 +222,13 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   current: () => state ? structuredClone(state) : undefined,
   replay(entries: readonly SessionEntryLike[]) {
-   owner++; state = undefined; legacy = undefined; unavailable = undefined; checks.clear();
+   owner++; state = undefined; unavailable = undefined; checks.clear();
    const last = entries.findLast(e => e.type === "custom" && e.customType === WORKFLOW_ENTRY_TYPE);
    if (last) try {
     const snapshot = last.data as { schemaVersion?: number; state?: GoalState };
-    if (snapshot?.schemaVersion === 2 && Check(legacyGoalStateSchema, snapshot.state)) legacy = structuredClone(snapshot.state) as unknown as LegacyGoalState;
+    if (snapshot?.schemaVersion !== 4) unavailable = "unsupported_contract";
     else {
-     requireGoal(snapshot?.schemaVersion === 3 && snapshot.state, "state_unavailable", "Unsupported latest workflow snapshot; no migration or fallback.");
+     requireGoal(snapshot.state, "state_unavailable", "Current workflow snapshot is missing its state.");
      validateGoalState(snapshot.state); state = structuredClone(snapshot.state);
     }
    } catch (error) { unavailable = error instanceof Error ? error.message : String(error); }
@@ -239,7 +253,7 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    const scopes = Object.fromEntries((state?.attempts ?? []).filter(a => a.status === "running").map(a => [a.id, [...a.scope]]));
    return { scopes, owner, generation: state?.input.generation ?? -1 };
   },
-  observe(observation: CheckObservation) { checks.set(observation.host.toolCallId, observation); while (checks.size > 256) checks.delete(checks.keys().next().value!); },
+  observe(observation: Omit<CheckObservation, "id"> & { id?: string }): string { const id = observation.id && /^[A-Za-z0-9]+$/.test(observation.id) ? observation.id : mintProductId(); checks.set(id, { ...observation, id }); while (checks.size > 256) checks.delete(checks.keys().next().value!); return id; },
   pendingExecutions(runIds: string[]) {
    if (!state || state.fulfillment !== "pending") return;
    const values = [...new Set([...(state.recoveredExecutions ?? []), ...runIds])];

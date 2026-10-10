@@ -17,7 +17,7 @@ import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensi
 
 import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
 
-function managedResult(status: SessionActionResult["status"], schemaVersion: 1 | 2 = 2): SessionActionResult {
+function managedResult(status: SessionActionResult["status"], schemaVersion: 4 = 4): SessionActionResult {
 	return { schemaVersion, action: "create", status, sessions: [] };
 }
 
@@ -54,7 +54,7 @@ function event(status: SessionActionResult["status"], toolName = SUBAGENT_SESSIO
 
 test("Pi host result interception maps managed session status to transport errors", async (t) => {
 	const runner = await extensionRunner(t);
-	for (const schemaVersion of [1, 2] as const) {
+	for (const schemaVersion of [4] as const) {
 		assert.equal((await runner.emitToolResult(event("succeeded", SUBAGENT_SESSION_TOOL_NAME, managedResult("succeeded", schemaVersion))))?.isError, false);
 		assert.equal((await runner.emitToolResult(event("partial", SUBAGENT_SESSION_TOOL_NAME, managedResult("partial", schemaVersion))))?.isError, true);
 		assert.equal((await runner.emitToolResult(event("failed", SUBAGENT_SESSION_TOOL_NAME, managedResult("failed", schemaVersion))))?.isError, true);

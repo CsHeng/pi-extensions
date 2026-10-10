@@ -74,8 +74,8 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 		version: OBSERVER_VERSION,
 		parentSessionId: "parent_session-1",
 		anchor: "leaf_entry-1",
-		generation: "gen-1",
-		runId: "run-1",
+		generation: "Gen1",
+		runId: "Run1",
 		revision: 0,
 		phase: "running",
 		requestedTasks: 1,
@@ -111,10 +111,10 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	// Opening the session-scoped overlay queries retained history through the core contract.
 	const requests = events.emitted.filter((entry: { name: string }) => entry.name === SESSION_VIEW_REQUEST_EVENT).map((entry: { data: unknown }) => entry.data as { version: number; requestId: string; page: number });
 	assert.equal(requests.length, 1);
-	assert.equal(requests[0]!.version, 1);
+	assert.equal(requests[0]!.version, 4);
 	assert.equal(requests[0]!.page, 0);
 	const reply: SessionViewReply = {
-		version: 1, requestId: requests[0]!.requestId, ownerSessionId: "parent_session-1", anchor: "leaf_entry-1", generation: "gen-1", revision: 1,
+		version: 4, requestId: requests[0]!.requestId, ownerSessionId: "parent_session-1", anchor: "leaf_entry-1", generation: "Gen1", revision: 1,
 		inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 1 }, liveAgents: 1 },
 		live: snapshot.tasks,

@@ -15,11 +15,22 @@ async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
 	t.after(() => rm(base, { recursive: true, force: true }));
 	const owner = { repo: base, parentSessionId: "parent", anchor: "branch", branch: ["branch"] };
-	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", scope: ["."], writePaths: ["file"] }] });
+	const graph = validateGraphStructure({ tasks: [{ id: "worker", role: "worker", objective: "work", access: [{ permission: "write", scope: "/tmp/write" }] }] });
 	assert.equal(graph.ok, true); if (!graph.ok) throw new Error("fixture");
 	const store = new ManagedSessionStore(base);
 	return { base, owner, tasks: graph.tasks, store };
 }
+
+test("public IDs preserve mixed case through admission, storage and lookup without aliases", async t => {
+ const { store, owner } = await setup(t);
+ const graph = validateGraphStructure({ tasks: [{ id: "TaskR2a", role: "reviewer", objective: "Inspect evidence", access: [{ permission: "read", scope: owner.repo }] }] });
+ assert.equal(graph.ok, true); if (!graph.ok) throw new Error("fixture");
+ const record = (await store.allocate(owner, "RequestA1", graph.tasks)).records[0]!;
+ assert.equal(record.handle, "TaskR2a");
+ assert.equal(store.view(record).handle, "TaskR2a");
+ assert.equal((await store.load("TaskR2a", owner)).task.id, "TaskR2a");
+ await assert.rejects(store.load("taskr2a", owner));
+});
 
 test("hard workspace and parsing bounds remain independent of global estimates", () => {
 	assert.equal(MANAGED_LIMITS.maxWorkspaceBytes, 8 * 1024 ** 3);
@@ -52,8 +63,8 @@ test("above-threshold storage warns without blocking allocation or deleting any 
 	assert.equal((await store.saveObservation(record.handle, 1, value)).available, true);
 	const observation = join(store.path(record.handle), "observation_1.json");
 	const observed = await readFile(observation);
-	assert.equal((await store.allocate(owner, "another", tasks)).fresh, true);
-	await store.completeBatch(owner, "request", { schemaVersion: 2, action: "create", status: "succeeded", sessions: [store.view(record)] });
+	assert.equal((await store.allocate(owner, "another", tasks.map(task => ({ ...task, id: `${task.id}b` })))).fresh, true);
+	await store.completeBatch(owner, "request", { schemaVersion: 4, action: "create", status: "succeeded", sessions: [store.view(record)] });
 	assert.deepEqual(await readFile(observation), observed);
 	assert.deepEqual(await readFile(registry), original);
 	assert.equal((await readFile(native)).length, 0);
@@ -81,7 +92,7 @@ test("concurrent writes and subtree removal do not turn advisory scans into erro
 
 test("native validation classifies malformed history without exposing its contents", async (t) => {
  const { store, owner, tasks } = await setup(t);
- const record = (await store.allocate(owner, "invalid-native", tasks)).records[0]!;
+ const record = (await store.allocate(owner, "invalidnative", tasks)).records[0]!;
  await writeFile(join(store.path(record.handle), "native.jsonl"), "{invalid secret payload}\n");
  await assert.rejects(store.nativeRevision(record.handle), (error: unknown) => error instanceof Error && "code" in error && error.code === "managed_native_invalid" && "detail" in error && error.detail === "parse" && !error.message.includes("secret"));
 });
@@ -102,11 +113,11 @@ test("managed allocation is idempotent and rejects request or parent-branch drif
 
 test("dotted task result ids stay readable and falsy replay files never create duplicate sessions", async (t) => {
 	const { store, owner, tasks } = await setup(t);
-	const dottedTasks = [{ ...tasks[0]!, id: "review.store" }];
+	const dottedTasks = [{ ...tasks[0]!, id: "reviewstore" }];
 	const record = (await store.allocate(owner, "request", dottedTasks)).records[0]!;
-	record.result = { id: "review.store", role: "worker", status: "succeeded", output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable", reportComplete: true };
+	record.result = { id: "reviewstore", role: "worker", status: "succeeded", output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable", reportComplete: true };
 	await store.save(record);
-	assert.equal((await store.load(record.handle, owner)).result?.id, "review.store");
+	assert.equal((await store.load(record.handle, owner)).result?.id, "reviewstore");
 	const file = join(store.root, `request_${fingerprint([owner.repo, owner.parentSessionId, "request"])}.json`);
 	for (const value of [null, false, 0, ""]) {
 		await writeFile(file, JSON.stringify(value));
@@ -135,12 +146,12 @@ test("registry lock spans the mutation and unknown stale writers are not reclaim
 
 test("retained sessions count across sibling branches and corrupted replay identities fail closed", async (t) => {
 	const { store, owner, tasks } = await setup(t);
-	const allocated = await store.allocate(owner, "batch", Array.from({ length: 10 }, (_, index) => ({ ...tasks[0]!, id: `task-${index}` })));
+	const allocated = await store.allocate(owner, "batch", Array.from({ length: 10 }, (_, index) => ({ ...tasks[0]!, id: `task${index}` })));
 	await assert.rejects(store.allocate({ ...owner, anchor: "sibling", branch: ["sibling"] }, "another", tasks), /session_limit/);
 	const file = join(store.root, `request_${fingerprint([owner.repo, owner.parentSessionId, "batch"])}.json`);
 	const request = JSON.parse(await readFile(file, "utf8"));
 	await writeFile(file, JSON.stringify({ ...request, handles: [] }));
-	await assert.rejects(store.allocate(owner, "batch", Array.from({ length: 10 }, (_, index) => ({ ...tasks[0]!, id: `task-${index}` }))), /registry_invalid/);
+	await assert.rejects(store.allocate(owner, "batch", Array.from({ length: 10 }, (_, index) => ({ ...tasks[0]!, id: `task${index}` }))), /registry_invalid/);
 	const record = allocated.records[0]!;
 	(record as any).candidate = { id: "candidate", episode: 1, status: "unrecognized", changedPaths: ["file"], appliedPaths: [] };
 	await store.save(record);
@@ -149,7 +160,7 @@ test("retained sessions count across sibling branches and corrupted replay ident
 
 test("closing frees a logical slot without deleting retained native evidence", async (t) => {
 	const { store, owner, tasks } = await setup(t);
-	const records = (await store.allocate(owner, "full", Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ ...tasks[0]!, id: `task-${index}` })))).records;
+	const records = (await store.allocate(owner, "full", Array.from({ length: MANAGED_LIMITS.maxSessions }, (_, index) => ({ ...tasks[0]!, id: `task${index}` })))).records;
 	await assert.rejects(store.allocate(owner, "overflow", tasks), /session_limit/);
 	const record = records[0]!; record.state = "closed"; record.retained = true;
 	await store.save(record);
@@ -179,12 +190,12 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	const { store, base, owner, tasks } = await setup(t);
 	const outcome = (record: { task: { id: string } }, status: "succeeded" | "failed" | "aborted", reportComplete = false) =>
 		({ id: record.task.id, role: "worker" as const, status, output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" as const, ...(reportComplete ? { reportComplete } : {}) });
-	const batchA = (await store.allocate(owner, "batch-a", Array.from({ length: 6 }, (_, index) => ({ ...tasks[0]!, id: `a-${index}` })))).records;
+	const batchA = (await store.allocate(owner, "batcha", Array.from({ length: 6 }, (_, index) => ({ ...tasks[0]!, id: `a${index}` })))).records;
 	const closed = batchA[0]!, legacy = batchA[1]!, runner = batchA[2]!, queued = batchA[3]!, idle = batchA[4]!, interrupted = batchA[5]!;
 	await store.withSession(closed.handle, owner, async record => { record.state = "closed"; record.retained = true; await store.save(record); });
 	await store.withSession(legacy.handle, owner, async record => {
 		record.episode = 1; record.state = "closed"; record.retained = true;
-		record.requests.push({ id: "legacy-run", fingerprint: fingerprint("legacy"), episode: 1, state: "complete" });
+		record.requests.push({ id: "legacyrun", fingerprint: fingerprint("legacy"), episode: 1, state: "complete" });
 		record.result = outcome(record, "succeeded", true);
 		await store.save(record);
 	});
@@ -192,7 +203,7 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	await writeFile(legacyFile, JSON.stringify({ ...JSON.parse(await readFile(legacyFile, "utf8")), version: 2 }), { mode: 0o600 });
 	await store.withSession(runner.handle, owner, async record => {
 		record.state = "running"; record.episode = 2;
-		record.requests.push({ id: "run-1", fingerprint: fingerprint("one"), episode: 1, state: "complete" }, { id: "run-2", fingerprint: fingerprint("two"), episode: 2, state: "running" });
+		record.requests.push({ id: "run1", fingerprint: fingerprint("one"), episode: 1, state: "complete" }, { id: "run2", fingerprint: fingerprint("two"), episode: 2, state: "running" });
 		record.result = outcome(record, "succeeded", true);
 		await store.save(record);
 	});
@@ -200,46 +211,46 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	await store.beginFinalization(runner.handle, 2);
 	await store.withSession(queued.handle, owner, async record => {
 		record.state = "queued"; record.episode = 1;
-		record.requests.push({ id: "queue-run", fingerprint: fingerprint("queued"), episode: 1, state: "running" });
+		record.requests.push({ id: "queuerun", fingerprint: fingerprint("queued"), episode: 1, state: "running" });
 		await store.save(record);
 	});
 	await store.withSession(interrupted.handle, owner, async record => { record.state = "interrupted"; await store.save(record); });
-	const batchB = (await store.allocate(owner, "batch-b", Array.from({ length: 4 }, (_, index) => ({ ...tasks[0]!, id: `b-${index}` })))).records;
+	const batchB = (await store.allocate(owner, "batchb", Array.from({ length: 4 }, (_, index) => ({ ...tasks[0]!, id: `b${index}` })))).records;
 	const unprovable = batchB[0]!, duplicate = batchB[1]!, failed = batchB[2]!, fresh = batchB[3]!;
 	await store.withSession(unprovable.handle, owner, async record => {
 		record.episode = 3;
-		record.requests.push({ id: "u-1", fingerprint: fingerprint("u1"), episode: 1, state: "complete" }, { id: "u-2", fingerprint: fingerprint("u2"), episode: 2, state: "complete" });
+		record.requests.push({ id: "u1", fingerprint: fingerprint("u1"), episode: 1, state: "complete" }, { id: "u2", fingerprint: fingerprint("u2"), episode: 2, state: "complete" });
 		await store.save(record);
 	});
 	await store.withSession(duplicate.handle, owner, async record => {
 		record.episode = 1;
-		record.requests.push({ id: "d-1", fingerprint: fingerprint("d1"), episode: 1, state: "complete" }, { id: "d-2", fingerprint: fingerprint("d2"), episode: 1, state: "complete" });
+		record.requests.push({ id: "d1", fingerprint: fingerprint("d1"), episode: 1, state: "complete" }, { id: "d2", fingerprint: fingerprint("d2"), episode: 1, state: "complete" });
 		await store.save(record);
 	});
 	await store.withSession(failed.handle, owner, async record => {
 		record.episode = 1;
-		record.requests.push({ id: "f-1", fingerprint: fingerprint("f1"), episode: 1, state: "complete" });
+		record.requests.push({ id: "f1", fingerprint: fingerprint("f1"), episode: 1, state: "complete" });
 		record.result = outcome(record, "failed");
 		await store.save(record);
 	});
 	const offOwner = { ...owner, anchor: "feature-x", branch: ["feature-x"] };
-	const offBranch = (await store.allocate(offOwner, "batch-off", [{ ...tasks[0]!, id: "off-0" }])).records[0]!;
+	const offBranch = (await store.allocate(offOwner, "batchoff", [{ ...tasks[0]!, id: "off0" }])).records[0]!;
 	await store.withSession(offBranch.handle, offOwner, async record => {
 		record.episode = 1;
-		record.requests.push({ id: "o-1", fingerprint: fingerprint("o1"), episode: 1, state: "complete" });
+		record.requests.push({ id: "o1", fingerprint: fingerprint("o1"), episode: 1, state: "complete" });
 		record.result = outcome(record, "aborted", true);
 		await store.save(record);
 	});
-	const foreign = (await store.allocate({ repo: base, parentSessionId: "foreign-parent", anchor: "f", branch: ["f"] }, "foreign", [{ ...tasks[0]!, id: "f-0" }])).records[0]!;
-	const otherRepo = (await store.allocate({ repo: join(base, "elsewhere"), parentSessionId: "parent", anchor: "f2", branch: ["f2"] }, "other-repo", [{ ...tasks[0]!, id: "o-0" }])).records[0]!;
+	const foreign = (await store.allocate({ repo: base, parentSessionId: "foreign-parent", anchor: "f", branch: ["f"] }, "foreign", [{ ...tasks[0]!, id: "f0" }])).records[0]!;
+	const otherRepo = (await store.allocate({ repo: join(base, "elsewhere"), parentSessionId: "parent", anchor: "f2", branch: ["f2"] }, "otherrepo", [{ ...tasks[0]!, id: "o0" }])).records[0]!;
 	// The active list keeps its exact branch-filtered open-session semantics before any corruption exists.
 	const active = (await store.list(owner)).map((view) => view.handle).sort();
 	const retained = [closed, legacy, runner, queued, idle, interrupted, unprovable, duplicate, failed, fresh, offBranch].map((record) => record.handle);
 	assert.deepEqual(active, retained.filter((handle) => handle !== closed.handle && handle !== legacy.handle && handle !== offBranch.handle).sort());
-	await mkdir(join(store.root, "session_corrupt0001"), { mode: 0o700 });
-	await writeFile(join(store.root, "session_corrupt0001", "registry.json"), "{corrupt", { mode: 0o600 });
-	await mkdir(join(store.root, "session_badmode002"), { mode: 0o700 });
-	await writeFile(join(store.root, "session_badmode002", "registry.json"), "{}", { mode: 0o644 });
+	await mkdir(join(store.root, "corrupt0001"), { mode: 0o700 });
+	await writeFile(join(store.root, "corrupt0001", "registry.json"), "{corrupt", { mode: 0o600 });
+	await mkdir(join(store.root, "badmode002"), { mode: 0o700 });
+	await writeFile(join(store.root, "badmode002", "registry.json"), "{}", { mode: 0o644 });
 	await writeFile(join(store.path(fresh.handle), "observation_999.json"), "{}", { mode: 0o600 });
 	const walk = async (directory: string, files = new Map<string, { bytes: Buffer; mtimeMs: number }>()) => {
 		for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -258,17 +269,16 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	if (!inventory.available) throw new Error("fixture");
 	assert.equal(inventory.complete, false);
 	assert.equal(inventory.problems.unreadableRecords, 2);
-	assert.equal(inventory.summary.agents, 11);
+	assert.equal(inventory.summary.agents, 10);
 	const handles = inventory.entries.map((entry) => entry.handle);
 	assert.deepEqual(handles, [...handles].sort());
 	assert.equal(handles.includes(foreign.handle), false);
 	assert.equal(handles.includes(otherRepo.handle), false);
-	assert.equal(handles.includes("session_corrupt0001"), false);
-	assert.equal(handles.includes("session_badmode002"), false);
+	assert.equal(handles.includes("corrupt0001"), false);
+	assert.equal(handles.includes(legacy.handle), false);
 	const byHandle = new Map(inventory.entries.map((entry) => [entry.handle, entry]));
 	assert.deepEqual(byHandle.get(closed.handle), { handle: closed.handle, role: "worker", route: null, state: "closed", episode: 0, latestOutcome: "unknown", acceptedEpisodes: 0, ownerAnchor: owner.anchor, onCurrentBranch: true, legacy: false, reportComplete: false, retained: true, usageEvidence: { episodes: [] } });
-	const legacyView = byHandle.get(legacy.handle)!;
-	assert.equal(legacyView.legacy, true); assert.equal(legacyView.state, "closed"); assert.equal(legacyView.acceptedEpisodes, 1); assert.equal(legacyView.latestOutcome, "succeeded"); assert.equal(legacyView.reportComplete, true); assert.equal(legacyView.retained, true);
+	await assert.rejects(store.load(legacy.handle, owner), /unsupported_contract/);
 	const runnerView = byHandle.get(runner.handle)!;
 	assert.equal(runnerView.state, "interrupted"); assert.equal(runnerView.latestOutcome, "failed"); assert.equal(runnerView.acceptedEpisodes, 2); assert.deepEqual(runnerView.usageEvidence, { episodes: [1, 2] }); assert.equal(runnerView.reportComplete, true);
 	const queuedView = byHandle.get(queued.handle)!;
@@ -284,12 +294,12 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	const offView = byHandle.get(offBranch.handle)!;
 	assert.equal(offView.onCurrentBranch, false); assert.equal(offView.latestOutcome, "aborted"); assert.equal(offView.acceptedEpisodes, 1); assert.equal(offView.reportComplete, true);
 	assert.equal(inventory.summary.acceptedEpisodes, null);
-	assert.deepEqual(inventory.summary.states, { idle: 6, queued: 1, running: 0, interrupted: 2, closed: 2 });
+	assert.deepEqual(inventory.summary.states, { idle: 6, queued: 1, running: 0, interrupted: 2, closed: 1 });
 	// The read widening never broadens the mutation predicate.
 	await assert.rejects(store.load(offBranch.handle, owner), /owner_mismatch/);
 	await assert.rejects(store.load(foreign.handle, owner), /owner_mismatch/);
 	await assert.rejects(store.withSession(offBranch.handle, owner, async () => {}), /owner_mismatch/);
-	assert.equal((await store.load(legacy.handle, owner)).version, 2);
+	await assert.rejects(store.load(legacy.handle, owner), /unsupported_contract/);
 });
 
 test("inventory treats missing storage as empty and invalid storage as unavailable without creating it", async (t) => {

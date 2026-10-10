@@ -47,9 +47,9 @@ function task(index: number, output: string): TaskResult {
 }
 
 test("model-visible submission retains join identity after large reports", () => {
- const runId = "run-123", generation = "generation-123";
- const result: SessionActionResult = { schemaVersion: 3, action: "create", kind: "submission", status: "accepted", runId, generation,
-  sessions: [{ handle: "session-123", role: "explorer", episode: 1, state: "running", reportComplete: false, result: task(1, "x".repeat(100_000)) }] };
+ const runId = "run123", generation = "generation123";
+ const result: SessionActionResult = { schemaVersion: 4, action: "create", kind: "submission", status: "accepted", runId, generation,
+  sessions: [{ handle: "session123", role: "explorer", episode: 1, state: "running", reportComplete: false, result: task(1, "x".repeat(100_000)) }] };
  const payload = JSON.parse(formatManagedContent(result));
  assert.equal(payload.kind, "submission"); assert.equal(payload.runId, runId); assert.equal(payload.generation, generation);
  assert.deepEqual(parseSessionRequest({ action: "join", runId, mode: "foreground" }), { action: "join", runId });
@@ -144,18 +144,19 @@ function sessionView(index: number, overrides: Partial<SessionView> = {}): Sessi
 			observation: emptyObservation(),
 		},
 		candidate: {
-			id: `cand-${index}`,
+			id: `cand${index}`,
 			episode: index,
-			status: "applied",
+			status: "applied" as const,
 			changedPaths: ["a.ts"],
 			appliedPaths: ["a.ts"],
+			roots: [],
 		},
 		...overrides,
 	};
 }
 
 function managed(sessions: SessionView[], extra: Partial<SessionActionResult> = {}): SessionActionResult {
-	return { schemaVersion: 1, action: "inspect", status: "succeeded", sessions, ...extra };
+	return { schemaVersion: 4, action: "inspect", status: "succeeded", sessions, ...extra };
 }
 
 test("managed model content is parseable JSON with headers for ten huge reports", () => {
@@ -174,7 +175,7 @@ test("managed model content is parseable JSON with headers for ten huge reports"
 			nativeUsage: { recorded: boolean; input: number | null };
 		}>;
 	};
-	assert.equal(parsed.schemaVersion, 1);
+	assert.equal(parsed.schemaVersion, 4);
 	assert.equal(parsed.action, "inspect");
 	assert.equal(parsed.status, "succeeded");
 	assert.equal(parsed.error?.code, "partial_failure");
@@ -188,7 +189,7 @@ test("managed model content is parseable JSON with headers for ten huge reports"
 		assert.equal(row.result?.status, index === 8 ? "failed" : "succeeded");
 		assert.equal(row.result?.stopReason, "stop");
 		assert.equal(row.result?.error?.code, "incomplete_report");
-		assert.equal(row.candidate?.id, `cand-${index}`);
+		assert.equal(row.candidate?.id, `cand${index}`);
 		assert.equal(row.candidate?.status, "applied");
 		assert.equal(row.candidate?.changedCount, 1);
 		assert.equal(row.result?.reportTruncated, true);
@@ -253,7 +254,7 @@ test("managed TUI separates request, stored state, episode outcome, and never in
 		state: "idle",
 		requestError: { code: "stale_request" },
 		result: { ...task(0, "committed-output"), status: "succeeded" },
-		candidate: { id: "cand-0", episode: 0, status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+		candidate: { id: "cand0", episode: 0, status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"], roots: [] },
 	});
 	const text = formatManagedResult(managed([stale], { status: "failed", error: { code: "stale_request" } }), false);
 	assert.match(text, /Managed session inspect: failed/);
@@ -261,7 +262,7 @@ test("managed TUI separates request, stored state, episode outcome, and never in
 	assert.match(text, /idle \(no running process\)/);
 	assert.match(text, /episode-outcome=succeeded/);
 	assert.match(text, /requestError=stale_request/);
-	assert.match(text, /candidate=cand-0 apply=applied/);
+	assert.match(text, /candidate=cand0 apply=applied/);
 	assert.doesNotMatch(text, /parent acceptance/);
 	assert.match(text, /route=synthetic\/model-/);
 	assert.match(text, /thinking=high/);
@@ -271,10 +272,39 @@ test("managed TUI separates request, stored state, episode outcome, and never in
 	assert.match(expanded, /committed-output/);
 });
 
+test("managed content carries per-root recovery and session release, including release-only records", () => {
+	const roots = [
+		{ rootId: "rootone", destination: "/work/alpha", status: "applied" as const, changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+		{ rootId: "roottwo", destination: "/work/beta", status: "unknown" as const, changedPaths: ["b.ts"], appliedPaths: [] },
+	];
+	const withCandidate = sessionView(0, {
+		candidate: { id: "cand0", episode: 0, status: "partial", changedPaths: ["rootone/a.ts", "roottwo/b.ts"], appliedPaths: ["rootone/a.ts"], roots },
+		release: { status: "partial", remaining: ["roottwo"] },
+	});
+	const parsed = JSON.parse(formatManagedContent(managed([withCandidate]))) as { sessions: Array<{ candidate: { roots: Array<{ id: string; status: string; recovery: string }> }; release?: { status: string; remaining: string[] } }> };
+	assert.deepEqual(parsed.sessions[0]!.release, { status: "partial", remaining: ["roottwo"] });
+	assert.deepEqual(parsed.sessions[0]!.candidate.roots.map((root) => [root.id, root.status, root.recovery]), [["rootone", "applied", "none"], ["roottwo", "unknown", "required"]]);
+	const text = formatManagedResult(managed([withCandidate]));
+	assert.match(text, /release=partial remaining=roottwo/);
+	assert.match(text, /root=roottwo destination=\/work\/beta status=unknown recovery=required/);
+	// Release and owned roots survive when no candidate was frozen; neither is hidden inside the candidate branch.
+	const releaseOnly = sessionView(1, { release: { status: "complete", remaining: [] }, roots: [
+		{ id: "rootthree", destination: "/work/gamma", status: "not-applied", release: "released" },
+	] });
+	delete releaseOnly.candidate;
+	const releaseJson = JSON.parse(formatManagedContent(managed([releaseOnly]))) as { sessions: Array<{ roots?: Array<{ id: string; destination: string; status: string; recovery: string; release: string }>; release?: { status: string; remaining: string[] } }> };
+	assert.deepEqual(releaseJson.sessions[0]!.release, { status: "complete", remaining: [] });
+	assert.deepEqual(releaseJson.sessions[0]!.roots, [{ id: "rootthree", destination: "/work/gamma", status: "not-applied", recovery: "none", release: "released" }]);
+	const releaseText = formatManagedResult(managed([releaseOnly]));
+	assert.match(releaseText, /release=complete remaining=none/);
+	assert.match(releaseText, /root=rootthree destination=\/work\/gamma status=not-applied release=released/);
+	assert.doesNotMatch(releaseText, /candidate=/);
+});
+
 test("managed TUI does not leak command rows and keeps candidate ids under bounds", () => {
 	const view = sessionView(2, {
 		handle: `h-${"x".repeat(400)}`,
-		candidate: { id: `c-${"y".repeat(400)}`, episode: 2, status: "not-applied", changedPaths: [], appliedPaths: [] },
+		candidate: { id: `c-${"y".repeat(400)}`, episode: 2, status: "not-applied", changedPaths: [], appliedPaths: [], roots: [] },
 		result: { ...task(2, "ok"), observation: emptyObservation() },
 	});
 	const text = formatManagedResult(managed([view]));

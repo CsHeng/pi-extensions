@@ -1,3 +1,7 @@
+
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseSessionRequest, SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
@@ -16,7 +20,7 @@ test("managed actions have strict disjoint fields and bounded opaque identities"
 	assert.throws(() => parseSessionRequest({ action: "continue", episodes: [{ ...episode, message: "汉".repeat(30_000) }] }), /message_too_large/);
 	assert.equal(parseSessionRequest({ action: "continue", episodes: [episode] }).episodes?.length, 1);
 	for (const objective of ["x".repeat(20_000), "汉".repeat(10_000)]) {
-		assert.throws(() => parseSessionRequest({ action: "create", requestId: "r", tasks: [{ id: "a", role: "explorer", scope: ["."], objective }] }));
+		assert.throws(() => parseSessionRequest({ action: "create", requestId: "r", tasks: [{ id: "a", role: "explorer", access: [{ permission: "read", scope: "/tmp/scope" }], objective }] }));
 	}
-	assert.throws(() => parseSessionRequest({ action: "create", requestId: "r", tasks: [{ id: "a", role: "explorer", scope: ["."], objective: "work", inputs: ["汉".repeat(40_000)] }] }));
+	assert.throws(() => parseSessionRequest({ action: "create", requestId: "r", tasks: [{ id: "a", role: "explorer", access: [{ permission: "read", scope: "/tmp/scope" }], objective: "work", inputs: ["汉".repeat(40_000)] }] }));
 });

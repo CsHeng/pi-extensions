@@ -44,7 +44,7 @@ test("model-visible frontier separates independent work, local blockers and depe
  assert.ok(lines.find(line => line.startsWith("Blocked:"))?.includes("b [capability]"));
  assert.ok(lines.find(line => line.startsWith("Waiting on dependencies:"))?.includes("join <- b"));
  await mutate({ operation: "start", task: "a", scope: ["a"] });
- await mutate({ operation: "report", task: "a", summary: "local accepted", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "fixture" }] });
+ await mutate({ operation: "report", task: "a", summary: "local accepted", facts: [{ id: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ target: { kind: "task", id: "a" }, facts: ["f"], accepted: true, rationale: "fixture" }] });
  assert.deepEqual(taskFrontier(store.current()!).ready, []);
  assert.equal(store.current()!.continuation.state, "waiting");
 });
@@ -73,13 +73,14 @@ test("real slices remain visible before acceptance, parallel attempts and recove
  await mutate({ operation: "start", task: "b", scope: ["b"], writes: ["b"] });
  const ambiguous = await store.mutate({ operation: "report", summary: "no task" }, ctx, "ambiguous");
  assert.equal(ambiguous.code, "unknown_attempt");
- await mutate({ operation: "report", task: "a", summary: "slice checked, awaits judgment", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }] });
+ await mutate({ operation: "report", task: "a", summary: "slice checked, awaits judgment", facts: [{ id: "fa", kind: "agent", check: "fixture", result: "pass" }] });
  assert.match(rows(), /◇ a Task a.*reported/); assert.match(rows(), /◐ b Task b/); assert.match(rows(), /0\/2 accepted/);
- await mutate({ operation: "report", attempt: "A1", summary: "locally accepted", judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "fixture judgment" }] });
+ const first = store.current()!.attempts.find(item => item.task === "a")!.id;
+ await mutate({ operation: "report", attempt: first, summary: "locally accepted", judgments: [{ target: { kind: "task", id: "a" }, facts: ["fa"], accepted: true, rationale: "fixture judgment" }] });
  assert.match(rows(), /1\/2 accepted/); assert.match(rows(), /✓ a Task a/);
  await writeFile(join(cwd, "a"), "changed");
  assert.match(rows(), /1\/2 accepted/, "disk drift alone does not revoke judgment");
- await mutate({ operation: "report", attempt: "A1", summary: "check relevance withdrawn", judgments: [{ subject: "task:a", facts: ["f"], accepted: false, rationale: "affected source requires recheck" }] });
+ await mutate({ operation: "report", attempt: first, summary: "check relevance withdrawn", judgments: [{ target: { kind: "task", id: "a" }, facts: ["fa"], accepted: false, rationale: "affected source requires recheck" }] });
  assert.match(rows(), /0\/2 accepted/);
  await mutate({ operation: "report", task: "b", summary: "blocked", blocker: { kind: "prerequisite", reason: "test environment", unblock: "restore" } });
  assert.match(rows(), /! b Task b.*blocked/);
@@ -98,21 +99,23 @@ test("losing accepted predecessor evidence marks a reported dependent for rechec
  await mutate({ operation: "amend", reason: "fixture dependencies", authority: "fixture", tasks: [{ key: "a", title: "Task a", covers: ["r"] }, { key: "b", title: "Task b", covers: ["r"], dependsOn: ["a"] }] });
  for (const task of ["a", "b"]) {
   await mutate({ operation: "start", task, scope: [task] });
-  await mutate({ operation: "report", task, summary: "accepted", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: `task:${task}`, facts: ["f"], accepted: true, rationale: "fixture" }] });
+  await mutate({ operation: "report", task, summary: "accepted", facts: [{ id: `f${task}`, kind: "agent", check: "fixture", result: "pass" }], judgments: [{ target: { kind: "task", id: task }, facts: [`f${task}`], accepted: true, rationale: "fixture" }] });
  }
  assert.match(goalRows(store.view(), 120).join("\n"), /2\/2 accepted/);
  await writeFile(join(cwd, "a"), "new predecessor");
- await mutate({ operation: "report", attempt: "A1", summary: "correct prior check result", facts: [{ key: "f", kind: "agent", check: "changed predecessor check", result: "fail" }] });
+ const predecessor = store.current()!.attempts.find(item => item.task === "a")!.id;
+ await mutate({ operation: "report", attempt: predecessor, summary: "correct prior check result", facts: [{ id: "fa", kind: "agent", check: "changed predecessor check", result: "fail" }] });
  assert.equal(store.current()!.attempts.at(-1)!.status, "interrupted");
- assert.equal(store.current()!.facts.find(f => f.id === "A1:f")!.result, "fail", "explicit correction invalidates dependent acceptance");
+ assert.equal(store.current()!.facts.find(f => f.id === "fa")!.result, "fail", "explicit correction invalidates dependent acceptance");
  assert.equal(store.current()!.facts.at(-1)!.usable, true, "unchanged dependent source remains evidence, not accepted support for the new predecessor");
  assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/);
  await mutate({ operation: "start", task: "a", scope: ["a"] });
- await mutate({ operation: "report", task: "a", summary: "predecessor rechecked", facts: [{ key: "f", kind: "agent", check: "new predecessor", result: "pass" }], judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "rechecked" }] });
+ await mutate({ operation: "report", task: "a", summary: "predecessor rechecked", facts: [{ id: "fa2", kind: "agent", check: "new predecessor", result: "pass" }], judgments: [{ target: { kind: "task", id: "a" }, facts: ["fa2"], accepted: true, rationale: "rechecked" }] });
  assert.match(goalRows(store.view(), 120).join("\n"), /1\/2 accepted/);
  assert.match(goalRows(store.view(), 120).join("\n"), /↻ b Task b.*recheck/, "reaccepting A cannot automatically restore B's judgment");
  await mutate({ operation: "start", task: "b", scope: ["b"] });
- await mutate({ operation: "report", task: "b", summary: "independent source check still supports the current dependent outcome", judgments: [{ subject: "task:b", facts: ["A2:f"], accepted: true, rationale: "explicitly reviewed against the accepted predecessor; no new execution claimed" }] });
+ const prior = store.current()!.facts.find(f => f.id === "fb")!.id;
+ await mutate({ operation: "report", task: "b", summary: "independent source check still supports the current dependent outcome", judgments: [{ target: { kind: "task", id: "b" }, facts: [prior], accepted: true, rationale: "explicitly reviewed against the accepted predecessor; no new execution claimed" }] });
  assert.match(goalRows(store.view(), 120).join("\n"), /2\/2 accepted/);
 });
 
@@ -129,7 +132,7 @@ test("recovered narrow warning view reserves acceptance count and an identifiabl
 for (const name of ["dark", "light"]) test(`real ${name} theme preserves local strike independent of ambient Chalk, including list`, async t => {
  const { store, mutate } = await fixture(t); const theme = getThemeByName(name); assert.ok(theme);
  await mutate({ operation: "start", task: "a", scope: ["a"] });
- await mutate({ operation: "report", task: "a", summary: "accepted", facts: [{ key: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ subject: "task:a", facts: ["f"], accepted: true, rationale: "fixture" }] });
+ await mutate({ operation: "report", task: "a", summary: "accepted", facts: [{ id: "f", kind: "agent", check: "fixture", result: "pass" }], judgments: [{ target: { kind: "task", id: "a" }, facts: ["f"], accepted: true, rationale: "fixture" }] });
  for (const width of [32, 120]) {
   const rows = goalRows(store.view(), width, 12, theme);
   assert.ok(rows[1]?.includes("\x1b[9m")); assert.ok(rows[1]?.includes("\x1b[29m"));

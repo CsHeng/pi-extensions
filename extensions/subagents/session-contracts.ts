@@ -2,10 +2,10 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { validateGraphStructure } from "./graph.ts";
-import { HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
+import { COLLABORATION_CONTRACT_VERSION, HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
 export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
-export const MANAGED_SESSION_VERSION = 3;
+export const MANAGED_SESSION_VERSION = COLLABORATION_CONTRACT_VERSION;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
 	maxWorkspaceBytes: 8 * 1024 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
@@ -20,7 +20,7 @@ export const MANAGED_STORAGE_WARNINGS = {
 } as const;
 export type ManagedStorageWarning = (typeof MANAGED_STORAGE_WARNINGS)[keyof typeof MANAGED_STORAGE_WARNINGS];
 
-const opaque = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });
+const opaque = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9]+$" });
 const version = Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes });
 const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode: version,
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
@@ -28,7 +28,7 @@ const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode
 export const SubagentSessionToolSchema = Type.Object({
 	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create requires requestId/tasks; continue requires episodes. Interactive/RPC submissions default async; mode=foreground joins explicitly. inspect accepts handle or runId; join/cancel require runId (cancel may name taskId); apply requires handle/expectedEpisode/candidateId; refresh/close require handle/expectedEpisode." }),
 	requestId: Type.Optional(Type.String({ ...opaque, description: "Required for create. Stable caller-selected identity for replay; reuse only for the same request." })),
-	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Full workers require scope [\".\"] for one coherent Git worktree; writePaths are optional advisory regions. Read-only roles may use narrower scopes." })),
+	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares access grants. A write grant may name multiple repository roots. Read grants authorize evidence without copying it. Role does not grant or remove permission." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks })),
 	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply, refresh and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
@@ -83,13 +83,30 @@ export interface SessionOwner {
 export interface CurrentOwner extends SessionOwner { branch: readonly string[] }
 export type ManagedState = "idle" | "queued" | "running" | "interrupted" | "closed";
 export type ApplyStatus = "not-applied" | "applying" | "applied" | "partial" | "conflict" | "unknown";
+export interface CandidateRootStatus {
+	rootId: string;
+	destination: string;
+	status: ApplyStatus;
+	changedPaths: string[];
+	appliedPaths: string[];
+	git?: import("./git-workspace.ts").GitCandidate;
+	attempt?: import("./git-workspace.ts").GitApplyAttempt;
+}
 export interface CandidateRef {
 	id: string;
 	episode: number;
 	status: ApplyStatus;
 	changedPaths: string[];
 	appliedPaths: string[];
-	git?: import("./git-workspace.ts").GitCandidate;
+	roots: CandidateRootStatus[];
+}
+/** Bounded per-root owned-resource outcome, independent of whether a candidate was frozen. */
+export interface OwnedRootOutcome {
+	id: string;
+	destination: string;
+	status: string;
+	recovery?: "required";
+	release: string;
 }
 export interface EpisodeExecution {
 	startedAtMs: number;
@@ -120,11 +137,15 @@ export interface SessionView {
 	result?: TaskResult;
 	candidate?: CandidateRef;
 	retained?: boolean;
+	release?: { status: "pending" | "partial" | "complete"; remaining: string[] };
+	/** Per-root destination/apply/recovery/release projection; present once an explicit release exists
+	 * (candidate-only roots already travel inside `candidate`). */
+	roots?: OwnedRootOutcome[];
 	/** This request failed; result remains the latest committed episode evidence. */
 	requestError?: { code: string; detail?: string };
 }
 export interface SessionActionResult {
-	schemaVersion: 1 | 2 | 3;
+	schemaVersion: typeof MANAGED_SESSION_VERSION;
 	action: SessionRequest["action"] | null;
 	requestTelemetry?: ManagedRequestTelemetry;
 	/** Legacy advisory on historical envelopes; current actions do not generate it. */
