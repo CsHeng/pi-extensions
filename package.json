@@ -54,7 +54,8 @@
       "./extensions/status-footer/index.ts",
       "./extensions/work-timing/index.ts",
       "./extensions/subagents-ui/index.ts",
-      "./extensions/workflow/index.ts"
+      "./extensions/workflow/index.ts",
+      "./extensions/agent-bark.ts"
     ]
   }
 }

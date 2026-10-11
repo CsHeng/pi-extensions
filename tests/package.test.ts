@@ -16,7 +16,7 @@ interface PackageManifest {
 
 const ROOT = new URL("../", import.meta.url);
 
-test("package exposes the seven maintained extensions and their Pi peers", async () => {
+test("package exposes the maintained extensions and their Pi peers", async () => {
 	const manifest = JSON.parse(
 		await readFile(new URL("package.json", ROOT), "utf8"),
 	) as PackageManifest;
@@ -33,6 +33,7 @@ test("package exposes the seven maintained extensions and their Pi peers", async
 		"./extensions/work-timing/index.ts",
 		"./extensions/subagents-ui/index.ts",
 		"./extensions/workflow/index.ts",
+		"./extensions/agent-bark.ts",
 	]);
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": "*",

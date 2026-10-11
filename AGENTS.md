@@ -4,7 +4,7 @@
 
 This repository is the authored source for small local Pi extensions. Extensions may change the host loop's active tools, prompt context, editor completion behavior, provider request payload, or execute bounded session-owned delegation, but must not replace the coding agent with a second lifecycle engine.
 
-The package exposes seven maintained extensions: `multi-skill-mentions` as an explicit prompt expansion mechanism, `fast-gpt` as a branch-local request profile, `subagents` as a bounded session-owned asynchronous managed-delegation executor, `subagents-ui` as a default-loaded TUI-only read-only observer, `status-footer` as a TUI-only compact status footer, `work-timing` as TUI-only timing feedback, and `workflow` as a branch-local explicitly enrolled implementation completion contract. Keep each extension's behavior, state, tests, and removal semantics independent.
+The package exposes eight maintained extensions: `multi-skill-mentions` as an explicit prompt expansion mechanism, `fast-gpt` as a branch-local request profile, `subagents` as a bounded session-owned asynchronous managed-delegation executor, `subagents-ui` as a default-loaded TUI-only read-only observer, `status-footer` as a TUI-only compact status footer, `work-timing` as TUI-only timing feedback, `workflow` as a branch-local explicitly enrolled implementation completion contract, and `agent-bark` as a main-agent-only adapter to the optional user-owned notification hook. Keep each extension's behavior, state, tests, and removal semantics independent.
 
 ## Layout
 
@@ -15,6 +15,7 @@ The package exposes seven maintained extensions: `multi-skill-mentions` as an ex
 - `extensions/status-footer/`: TUI one-line footer with model/thinking, optional fast-gpt lightning, original workdir, session UUID, usage stats, context fill, and MCP counts
 - `extensions/workflow/`: explicit implementation contract, semantic tool protocol, declared scope and evidence provenance, prepared-input alignment, productive continuation with anti-spin pause, schema-v4 session snapshots, fail-closed unsupported history, and optional TUI projection
 - `extensions/work-timing/`: live request and reasoning timing with durable TUI-only completion entries
+- `extensions/agent-bark.ts`: main-agent notification adapter; child-marker exclusion stays here, while shared hook configuration and delivery remain user-owned
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
 - `.agents/skills/evaluate-subagent-runs/`: maintainer-only read-only evaluator, excluded from the npm package
 - `.agents/skills/evaluate-session-cost/`: maintainer-only read-only session cost and prompt-cache evaluator, excluded from the npm package
