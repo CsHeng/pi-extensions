@@ -41,11 +41,10 @@ for (const mode of ["tui", "rpc"] as const) {
 		t.after(async () => { release(); await harness.dispose(); });
 		harness.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("csheng_workflow", {
-				operation: "enroll", goal: "Co-loaded workflow", delivery: "co-load evidence", authority: "explicit fixture implementation",
-				requirements: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }],
+				operation: "set", goal: "Co-loaded workflow", tasks: [{ id: "t", title: "Task" }],
 			} as never)),
 			fauxAssistantMessage("prematurely stopped"),
-			fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "close", outcome: "cancelled", reason: "explicit fixture cancellation" } as never)),
+			fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "cancel", reason: "explicit fixture cancellation" } as never)),
 			fauxAssistantMessage("truthfully paused"),
 		]);
 		const running = harness.session.prompt("go");
@@ -56,9 +55,9 @@ for (const mode of ["tui", "rpc"] as const) {
 		await waitForTrace(trace, () => trace.entries.filter((entry) => entry.event === "native:agent_settled").length === 2);
 		const branch = harness.session.sessionManager.getBranch();
 		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } };
-		assert.equal(snapshot.data.state.fulfillment, "cancelled");
-		assert.equal(snapshot.data.state.continuation.dispatched, 1);
-		assert.deepEqual(snapshot.data.state.acceptance, [], "continuation is not semantic acceptance");
+		assert.equal(snapshot.data.state.cancelled, true);
+		assert.ok(snapshot.data.state.remindedRevision);
+		assert.equal(snapshot.data.state.tasks[0]!.status, "cancelled");
 		assert.equal(harness.faux.state.callCount, 4);
 		const input = trace.entries.filter((entry) => entry.event === "input");
 		assert.equal(input.length, 2);

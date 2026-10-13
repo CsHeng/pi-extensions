@@ -1,8 +1,14 @@
 [env]
 AGENT_ARCHITECTURE_DIR = "{{ config_root | dirname }}/agent-architecture"
 AGENT_SKILLS_DIR = "{{ config_root | dirname }}/agent-skills"
-PI_EXTENSIONS_DIR = "{{ config_root | dirname }}/pi-extensions"
-TMPDIR = "{{ env.HOME }}/tmp/agent-arch"
+PI_EXTENSIONS_DIR = "{{ config_root }}"
+TMPDIR = "{{ get_env(name='TMPDIR', default='') | default(value=env.TMPDIR | default(value=env.HOME ~ '/tmp/agent-arch', boolean=true), boolean=true) }}"
+# This package has no uv project, so a uv environment inherited from a sibling checkout is meaningless.
+UV_PROJECT_ENVIRONMENT = false
+
+[tasks.check]
+description = "Run the extensions owner's offline checks"
+run = "bun run check"
 
 [tasks.publish-local-package]
 description = "Sync package.json, config/, and extensions/ into the local Pi package snapshot"

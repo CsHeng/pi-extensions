@@ -1,308 +1,85 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { absolutePath, containsPath, pathIdentity } from "./paths.ts";
 import { Check } from "typebox/value";
-import { randomUUID } from "node:crypto";
-import { mintProductId } from "../subagents/identity.ts";
-import type { HostObservation } from "./observation.ts";
-import { GoalError, GOAL_LIMITS, WORKFLOW_ENTRY_TYPE, goalParameters, requireGoal, type GoalOperation, type GoalState, type GoalView, type GoalFact } from "./goal-contracts.ts";
-import { accepted, amend, complete, deficits, dependencyDiagnostic, digest, invalidate, judge, pendingDependencies, progressKey, targetKey, validateGoalState, validateGraph } from "./goal-state.ts";
-
-export interface SessionEntryLike { type: string; customType?: string; data?: unknown }
-export interface CheckObservation { id: string; host: HostObservation; scopes: Record<string, string[]>; generation: number; owner: number; checkIdentity?: string }
-export interface GoalContext { cwd: string; now: string; signal?: AbortSignal; sessionId: string; fenced?: () => boolean }
-export interface GoalResult { ok: boolean; code?: string; message?: string; diagnostics: string[]; view: GoalView }
-function declaredScope(paths: string[] | undefined, cwd: string): string[] {
- const root = resolve(cwd);
- const result = (paths?.length ? paths : ["."]).map(path => {
-  requireGoal(path.trim().length > 0 && !path.includes("\0"), "invalid_scope", "Scope requires a nonempty filesystem path.");
-  const absolute = absolutePath(path, root);
-  // Parent components after a symlink have filesystem, not lexical, meaning.
-  if (path.split(sep === "\\" ? /[\\/]/ : sep).includes("..")) return absolute;
-  const rel = relative(root, absolute);
-  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? absolute : rel || ".";
- });
- return [...new Set(result)].sort();
-}
-export async function canonicalScope(paths: string[] | undefined, cwd: string): Promise<string[]> {
- const canonical: string[] = [];
- for (const entry of declaredScope(paths, cwd)) {
-  const declared = absolutePath(entry, cwd);
-  const identity = await pathIdentity(declared);
-  const leaf = await pathIdentity(declared, false);
-  // Bind the actual replaceable leaf and target, never a fictitious lexical '..' endpoint.
-  canonical.push(leaf.physical, identity.physical);
- }
- return [...new Set(canonical)].sort();
-}
-/** Compare declared and physical identities, never global '.' sentinels. */
-export const overlaps = (writes: string[], sources: string[], sourceLinks: string[] = []): boolean =>
- writes.some(x => sources.some(y => containsPath(x, y) || containsPath(y, x)) || sourceLinks.some(link => containsPath(x, link)));
-
+import { goalParameters, goalStateSchema, type GoalOperation, type GoalState, type GoalTask, type GoalView } from "./goal-contracts.ts";
+import { actionable, unfinished } from "./goal-state.ts";
+export interface GoalContext { signal?: AbortSignal; fenced?: () => boolean }
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
  let unavailable: string | undefined;
- let owner = 0;
+ let observation: GoalView["observation"];
  const listeners = new Set<() => void>();
- const checks = new Map<string, CheckObservation>();
- const notify = () => { for (const listener of listeners) try { listener(); } catch { listeners.delete(listener); } };
- const view = (): GoalView => ({ ...(state ? { state: structuredClone(state) } : {}), ...(unavailable ? { unavailable } : {}), deficits: state ? deficits(state) : [] });
- const availableObservations = (sessionId: string) => state?.attempts.filter(a => a.status !== "interrupted" && a.generation === state?.input.generation).flatMap(a =>
-  [...checks.values()].filter(c => c.scopes[a.id] && c.generation === a.generation && c.host.sessionId === sessionId && c.host.at >= a.started && c.host.toolName !== "csheng_workflow")
-   .slice(-8).map(c => ({ attempt: a.id, id: c.id, failed: c.host.isError || (c.host.exitCode != null && c.host.exitCode !== 0) || c.host.managed?.status !== undefined && c.host.managed.status !== "succeeded" })))
-  .slice(-16) ?? [];
- function commit(next: GoalState, call: string): void {
-  next.revision++;
-  next.calls = [...next.calls, digest(call)];
-  validateGoalState(next);
-  try { append(WORKFLOW_ENTRY_TYPE, { schemaVersion: 4, state: next }); }
-  catch (error) { throw new GoalError("persistence_failed", `Snapshot persistence failed; proposed state was not installed. Reconcile host storage, not business checks; do not repair history. ${String(error).slice(0, 500)}`); }
-  state = next; owner++; notify();
- }
- const writable = () => requireGoal(!unavailable, "state_unavailable", `Workflow unavailable: ${unavailable}. Continue authorized work without claiming contract certification; do not repair history.`);
- function align(next: GoalState, op: GoalOperation) {
-  if (op.alignment) { next.input.aligned = true; }
-  requireGoal(next.input.aligned, "alignment_required", "Reconcile delivered input against existing authority and supply alignment; this is not new permission.");
- }
- const PREPARATION_LIMIT = 3;
- /** A preparation-only lease conflict re-derives the whole operation from current state; cancellation and fencing never replay. */
- async function mutate(op: GoalOperation, ctx: GoalContext, call: string): Promise<GoalResult> {
-  for (let preparation = 1; ; preparation++) {
-   const basis = () => state ? digest({ generation: state.input.generation, authority: state.authority, aligned: state.input.aligned }) : "none";
-   const startBasis = basis();
-   const result = await mutateOnce(op, ctx, call);
-   const conflict = !result.ok && result.code === "preparation_changed" && !ctx.signal?.aborted && !ctx.fenced?.();
-   if (conflict && basis() !== startBasis) return { ok: false, code: "alignment_required", message: "Input or authority changed during preparation. Reconcile alignment; this was not only a revision race.", diagnostics: result.diagnostics, view: view() };
-   if (!conflict || preparation >= PREPARATION_LIMIT) {
-    if (conflict && preparation > 1) result.message = `${result.message ?? ""} Replayed ${preparation - 1} preparation(s); concurrent commits continued.`;
-    return result;
-   }
-  }
- }
- async function mutateOnce(op: GoalOperation, ctx: GoalContext, call: string): Promise<GoalResult> {
-  const diagnostics: string[] = [];
-  try {
-   requireGoal(Check(goalParameters, op), "invalid_request", "Malformed semantic operation.");
-   requireGoal(!op.reconciledExecutions?.length || op.operation === "resume", "invalid_reconciliation", "Recovered executions are reconciled through explicit resume only.");
-   if (op.operation === "inspect") return { ok: true, diagnostics, view: view() };
-   writable();
-   if (op.operation === "close" && state?.fulfillment !== "pending" && state) {
-    requireGoal(op.outcome && op.reason, "invalid_close", "Close needs outcome and reason.");
-    const closeOwner = owner, closeContract = state.id;
-    requireGoal(state?.id === closeContract && !ctx.signal?.aborted && !ctx.fenced?.() && (view().state?.fulfillment === "pending" || owner === closeOwner), "preparation_changed", "Owner, input or cancellation changed during close revalidation.");
-    if (view().state?.fulfillment === "pending") return { ok: true, diagnostics: deficits(state), view: view() };
-    if (view().state?.fulfillment !== "pending") {
-     requireGoal((state.fulfillment === "complete" ? "completed" : state.fulfillment) === op.outcome, "closed_contract", "Contract is terminal with a different outcome; explicitly enroll new work.");
-     return { ok: true, diagnostics: ["Already closed; no new snapshot committed."], view: view() };
-    }
-   }
-   if (op.operation !== "close" && state?.calls.includes(digest(call))) return { ok: true, diagnostics: ["Already recorded."], view: view() };
-   const lease = owner;
-   let next: GoalState;
-   if (op.operation === "enroll") {
-    requireGoal(!state || state.fulfillment !== "pending", "already_enrolled", "An implementation contract is already enrolled; amend or close it explicitly.");
-    requireGoal(op.goal && op.delivery && op.authority && op.requirements?.length, "invalid_contract", "Explicit implementation enrollment requires goal, delivery, existing authority and requirements.");
-    next = { version: 4, revision: state?.revision ?? 0, id: randomUUID().replaceAll("-", ""), goal: op.goal, delivery: op.delivery, authority: op.authority,
-     goalRevision: 1, fulfillment: "pending", continuation: { state: "active", repeat: 0, dispatched: 0 }, input: { generation: 0, aligned: true, unknown: false },
-     requirements: op.requirements.map(r => ({ ...r, revision: 1 })), tasks: (op.tasks ?? op.requirements.map(r => ({ key: r.key, title: r.outcome.slice(0, 80), covers: [r.key] }))).map(t => ({ ...t, revision: 1 })), attempts: [], facts: [], acceptance: [], calls: [], serial: 0,
-    };
-    validateGraph(next);
-   } else {
-    requireGoal(state, "no_contract", "Enroll an authorized implementation contract first. Ordinary work needs no workflow enrollment.");
-    next = structuredClone(state);
-    requireGoal(next.fulfillment === "pending" || op.operation === "resume", "closed_contract", "Contract is terminal; explicitly enroll new work.");
-    if (op.operation !== "report" || op.alignment) align(next, op);
-    if (op.operation === "start") {
-     requireGoal(next.continuation.state === "active", "suspended", "Explicitly resume the contract under existing authority.");
-     const task = next.tasks.find(t => t.key === op.task);
-     requireGoal(task, "unknown_task", "Start needs a current task key.");
-     requireGoal(!task.blocker, "blocked_task", "Resolve this task's recorded blocker with explicit resume before starting it.");
-     requireGoal(!next.attempts.some(a => a.task === task.key && a.status === "running"), "running_attempt", "This task already has a running attempt.");
-     requireGoal(!accepted(next, `task:${task.key}`), "accepted_task", "Task is already accepted.");
-     const dependencies = pendingDependencies(next, task);
-     requireGoal(!dependencies.length, "dependency_pending", dependencyDiagnostic(task.key, dependencies));
-     const scope = declaredScope(op.scope, ctx.cwd); const writes = op.writes?.length ? declaredScope(op.writes, ctx.cwd) : [];
-     try { await canonicalScope(scope, ctx.cwd); if (writes.length) await canonicalScope(writes, ctx.cwd); }
-     catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENAMETOOLONG") throw new GoalError("invalid_scope", "ENAMETOOLONG: a declared path exceeds the filesystem limit. scope/writes require actual filesystem paths relative to cwd or authorized absolute paths, not task descriptions. Put objectives in goal/task title and outcomes in report.summary; shortening prose does not make it an evidence scope.");
-      throw error;
-     }
-     next.serial += 1;
-     next.attempts.push({ id: mintProductId(), task: task.key, revision: task.revision, generation: next.input.generation, status: "running", started: ctx.now, scope, writes });
-    } else if (op.operation === "report") {
-     const candidates = next.attempts.filter(a => a.status === "running" && (!op.task || a.task === op.task));
-     const attempt = op.attempt ? next.attempts.find(a => a.id === op.attempt) : candidates.length === 1 ? candidates[0] : undefined;
-     requireGoal(attempt && attempt.status !== "interrupted", "unknown_attempt", `Report attempt ${op.attempt ?? "unspecified"} is not a current unambiguous attempt; available: ${next.attempts.filter(a => a.status !== "interrupted").slice(-8).map(a => a.id).join(", ") || "none"}. Report the exact attempt id start returned, or inspect when several attempts run.`);
-     requireGoal(attempt.revision === next.tasks.find(t => t.key === attempt.task)?.revision, "stale_attempt", "Task meaning changed; start a current attempt.");
-     requireGoal(op.summary, "invalid_report", "Report needs a truthful outcome summary.");
-     attempt.status = "reported"; attempt.summary = op.summary;
-     const declared = new Set<string>();
-     for (const input of op.facts ?? []) {
-      requireGoal(/^[A-Za-z0-9]+$/.test(input.id), "invalid_fact_id", "Declare an alphanumeric fact id and pass that same id unchanged to the judgment.");
-      requireGoal(!declared.has(input.id), "duplicate_fact", `Fact ${input.id} is declared more than once in this report.`);
-      declared.add(input.id);
-      const id = input.id;
-      const prior = next.facts.find(f => f.id === id);
-      requireGoal(!prior || prior.attempt === attempt.id, "fact_id_conflict", `Fact ${id} already belongs to another attempt. Cite it; do not redeclare it.`);
-      const observation = input.observationId ? checks.get(input.observationId) : input.kind === "host" ? [...checks.values()].reverse().find(check => check.scopes[attempt.id] && check.host.sessionId === ctx.sessionId && check.generation === attempt.generation && check.host.at >= attempt.started) : undefined;
-      if (input.kind === "host") requireGoal(observation && observation.host.toolName !== "csheng_workflow" && observation.host.sessionId === ctx.sessionId, "observation_required", `Host fact ${input.id} needs a captured non-workflow observation for ${attempt.id}; requested ${input.observationId ?? "latest"}; current: ${[...checks.values()].filter(c => c.scopes[attempt.id] && c.host.sessionId === ctx.sessionId).slice(-8).map(c => c.id).join(", ") || "none"}. Checks captured before this attempt started cannot be relabeled as current host observations. Reference a listed current observation for a host fact; reuse still-valid earlier evidence as an honest non-host fact without a bookkeeping rerun.`);
-      const scope = input.kind === "host" ? observation?.scopes[attempt.id] : attempt.scope;
-      const fact: GoalFact = { ...input, ...(input.kind === "host" && observation ? { observationId: observation.id, ...(observation.checkIdentity ? { checkIdentity: observation.checkIdentity } : {}) } : {}), id, attempt: attempt.id, at: ctx.now, generation: input.kind === "host" && observation ? observation.generation : next.input.generation, scope: scope ?? attempt.scope, usable: !!scope };
-      if (input.kind === "host" && (observation!.generation !== attempt.generation || observation!.host.at < attempt.started)) { fact.usable = false; fact.note = "Observation belongs to another input or predates this attempt and cannot be relabeled as a current host observation."; }
-      if (input.kind === "host" && input.result === "pass" && (observation!.host.isError || (observation!.host.exitCode != null && observation!.host.exitCode !== 0) || (observation!.host.managed && observation!.host.managed.status !== "succeeded"))) { fact.usable = false; fact.note = "Host reported failure; cannot certify a passing check."; }
-      const old = prior;
-      if (old) { fact.attempt = old.attempt; fact.at = old.at; }
-      if (old && digest([old.kind, old.check, old.result, old.scope, old.observationId]) !== digest([fact.kind, fact.check, fact.result, fact.scope, fact.observationId])) invalidate(next, new Set(next.acceptance.filter(j => j.facts.includes(id)).map(j => targetKey(j.target))));
-      next.facts = next.facts.filter(f => f.id !== id); next.facts.push(fact);
-      if (!fact.usable || fact.result !== "pass") diagnostics.push(`${input.id}: ${fact.note ?? fact.result}`);
-     }
-     if (op.blocker) {
-      next.tasks.find(t => t.key === attempt.task)!.blocker = op.blocker;
-      invalidate(next, new Set([`task:${attempt.task}`]));
-     }
-     for (const judgment of op.judgments ?? []) {
-      const resolvedFacts = judgment.facts.map(ref => {
-       const byId = next.facts.find(f => f.id === ref);
-       if (!byId) throw new GoalError("unknown_fact", "Judgment references a fact id that was not declared. Pass the fact id unchanged.");
-       return byId.id;
-      });
-      const resolved = { ...judgment, facts: resolvedFacts };
-      const used = next.facts.filter(f => resolved.facts.includes(f.id));
-      const sources = await Promise.all(used.filter(f => f.usable).map(async f => ({
-       paths: await canonicalScope(f.scope, ctx.cwd),
-       links: (await Promise.all(f.scope.map(path => pathIdentity(absolutePath(path, ctx.cwd))))).flatMap(identity => identity.links.map(link => link.path)),
-      })));
-      const writers = await Promise.all(next.attempts.filter(a => a.status === "running" && a.writes.length).map(a => canonicalScope(a.writes, ctx.cwd)));
-      const overlap = writers.some(writes => sources.some(scope => overlaps(writes, scope.paths, scope.links)));
-      if (!next.input.aligned || (judgment.accepted && overlap)) { diagnostics.push(`${targetKey(judgment.target)}: ${overlap ? "overlapping writer is running" : "input alignment required"}.`); continue; }
-      judge(next, resolved, diagnostics);
-     }
-     if (next.tasks.some(t => t.blocker) && !next.attempts.some(a => a.status === "running") && !next.tasks.some(t => !t.blocker && !accepted(next, `task:${t.key}`) && (t.dependsOn?.every(dep => accepted(next, `task:${dep}`)) ?? true))) {
-      next.continuation.state = "waiting"; next.continuation.reason = "Remaining ready work is blocked."; next.continuation.unblock = "Resolve the recorded task blockers and explicitly resume.";
-     }
-     if (op.complete) complete(next, diagnostics);
-    } else if (op.operation === "amend") {
-     amend(next, op);
-    } else if (op.operation === "suspend") {
-     requireGoal(op.reason && op.condition, "invalid_suspend", "Suspension needs an actual reason and explicit resume condition.");
-     next.continuation.state = "suspended"; next.continuation.reason = op.reason; next.continuation.unblock = op.condition;
-    } else if (op.operation === "resume") {
-     requireGoal(op.reason && op.authority, "invalid_resume", "Resume requires the resolved condition and existing authority, not new permission by implication.");
-     requireGoal(next.fulfillment !== "cancelled" && next.fulfillment !== "superseded", "closed_contract", "Cannot resume cancelled/superseded work.");
-     const active = next.continuation.state === "active";
-     const blocked = next.tasks.filter(t => t.blocker && (!op.task || t.key === op.task));
-     requireGoal(!active || blocked.length > 0 || !!op.reconciledExecutions?.length, "already_active", "Active work has no matching resolved blocker; resume cannot replenish continuation history.");
-     if (!active) {
-      // Resume resolves a real pause/blocker, not the observed automatic-dispatch history.
-      next.continuation.state = "active";
-      delete next.continuation.reason; delete next.continuation.unblock; delete next.continuation.waitingFor;
-     }
-     if (op.reconciledExecutions?.length) {
-      requireGoal(op.alignment && op.reconciledExecutions.every(id => next.recoveredExecutions?.includes(id)), "invalid_reconciliation", "Name only recovered executions and explicitly reconcile their actual terminal state or owner disposition in alignment; live executions cannot be cleared.");
-      const resolved = new Set(op.reconciledExecutions);
-      next.recoveredExecutions = next.recoveredExecutions!.filter(id => !resolved.has(id));
-      next.executionPending = (next.executionPending ?? []).filter(id => !resolved.has(id));
-      next.executionReconciliations = [...(next.executionReconciliations ?? []), { ids: [...resolved], reason: op.reason, authority: op.authority, alignment: op.alignment }];
-     }
-     for (const task of blocked) delete task.blocker;
-    } else if (op.operation === "close") {
-     requireGoal(op.outcome && op.reason, "invalid_close", "Close needs outcome and reason.");
-     if (op.outcome === "completed") complete(next, diagnostics);
-     else { next.fulfillment = op.outcome; for (const a of next.attempts) if (a.status === "running") a.status = "interrupted"; }
-    }
-   }
-   requireGoal(owner === lease && !ctx.signal?.aborted && !ctx.fenced?.(), "preparation_changed", "Owner, input or cancellation changed during preparation; nothing committed.");
-   commit(next, call);
-   return { ok: true, diagnostics: [...new Set(diagnostics)], view: view() };
-  } catch (error) {
-   return { ok: false, code: error instanceof GoalError ? error.code : "state_unavailable", message: error instanceof Error ? error.message : String(error), diagnostics, view: view() };
-  }
- }
+ const notify = () => { for (const listener of listeners) { try { listener(); } catch { /* Read-only observers cannot fail a committed update. */ } } };
+ const view = (): GoalView => structuredClone({ ...(state ? { state } : {}), ...(unavailable ? { unavailable } : {}), ...(observation ? { observation } : {}) });
+ const commit = (next: GoalState) => { append("csheng-workflow-state", { schemaVersion: 5, state: next }); state = next; unavailable = undefined; notify(); };
+ const validateTasks = (tasks: GoalTask[]) => {
+  if (new Set(tasks.map(task => task.id)).size !== tasks.length) throw new Error("Task ids must be unique.");
+  if (tasks.some(task => task.status === "blocked" && !task.note)) throw new Error("A blocked task needs a note describing the actual blocker.");
+ };
  return {
-  view, mutate, availableObservations, owner: () => owner,
+  current: () => state && structuredClone(state), view,
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  current: () => state ? structuredClone(state) : undefined,
-  replay(entries: readonly SessionEntryLike[]) {
-   owner++; state = undefined; unavailable = undefined; checks.clear();
-   const last = entries.findLast(e => e.type === "custom" && e.customType === WORKFLOW_ENTRY_TYPE);
-   if (last) try {
-    const snapshot = last.data as { schemaVersion?: number; state?: GoalState };
-    if (snapshot?.schemaVersion !== 4) unavailable = "unsupported_contract";
-    else {
-     requireGoal(snapshot.state, "state_unavailable", "Current workflow snapshot is missing its state.");
-     validateGoalState(snapshot.state); state = structuredClone(snapshot.state);
+  mutate(op: GoalOperation, ctx: GoalContext = {}) {
+   try {
+    if (!Check(goalParameters, op)) throw new Error("Invalid task update.");
+    if (op.operation === "inspect") return { ok: true, view: view() };
+    if (ctx.signal?.aborted || ctx.fenced?.()) throw new Error("The host interrupted this update; no state changed.");
+    let next: GoalState;
+    if (op.operation === "set") {
+     if (!op.goal || !op.tasks) throw new Error("set needs a goal and the complete task list.");
+     next = { version: 5, revision: (state?.revision ?? 0) + 1, goal: op.goal, paused: false, cancelled: false,
+      tasks: op.tasks.map(task => { if (!task.title) throw new Error("Each task in set needs a title."); return { id: task.id, title: task.title, status: task.status ?? "todo", ...(task.note ? { note: task.note } : {}) }; }) };
+    } else {
+     if (!state) throw new Error(unavailable ?? "No task list exists. Use set when tracking would help.");
+     if (state.cancelled) throw new Error("This list was cancelled. Use set explicitly for a new task list.");
+     next = structuredClone(state);
+     if (op.operation === "update") {
+      if (op.goal) next.goal = op.goal;
+      if (new Set((op.tasks ?? []).map(task => task.id)).size !== (op.tasks ?? []).length) throw new Error("An update cannot repeat a task id.");
+      for (const patch of op.tasks ?? []) {
+       const task = next.tasks.find(task => task.id === patch.id);
+       if (!task) throw new Error("Unknown task id: " + patch.id + ". Use set to revise the task list.");
+       if (patch.title !== undefined) task.title = patch.title;
+       if (patch.status !== undefined) task.status = patch.status;
+       if (patch.note === null) delete task.note;
+       else if (patch.note !== undefined) task.note = patch.note;
+      }
+     } else if (op.operation === "pause") {
+      if (!op.reason) throw new Error("pause needs the real pause reason.");
+      next.paused = true; next.reason = op.reason;
+     } else if (op.operation === "resume") {
+      next.paused = false; delete next.reason;
+     } else if (op.operation === "cancel") {
+      next.cancelled = true; next.paused = false;
+      if (op.reason) next.reason = op.reason;
+      for (const task of unfinished(next)) task.status = "cancelled";
+     }
+     if (JSON.stringify(next) === JSON.stringify(state)) return { ok: true, view: view() };
+     next.revision++;
     }
-   } catch (error) { unavailable = error instanceof Error ? error.message : String(error); }
+    validateTasks(next.tasks);
+    if (!Check(goalStateSchema, next)) throw new Error("Invalid task list.");
+    const meaning = (value: GoalState) => JSON.stringify([value.goal, value.tasks, value.paused, value.cancelled, value.reason]);
+    if (state && meaning(next) === meaning(state)) return { ok: true, view: view() };
+    commit(next);
+    return { ok: true, view: view() };
+   } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "Task tracking update failed.", view: view() }; }
+  },
+  replay(entries: readonly unknown[]) {
+   state = undefined; unavailable = undefined; observation = undefined;
+   const newest = entries.findLast(entry => !!entry && typeof entry === "object" && (entry as { type?: string }).type === "custom" && (entry as { customType?: string }).customType === "csheng-workflow-state") as { data?: { schemaVersion?: number; state?: unknown } } | undefined;
+   if (newest) {
+    try {
+     if (newest.data?.schemaVersion !== 5 || !Check(goalStateSchema, newest.data.state)) throw new Error();
+     const restored = newest.data.state as GoalState; validateTasks(restored.tasks); state = structuredClone(restored);
+    } catch { unavailable = "Previous workflow state is unsupported or invalid and was ignored; no tasks or completion were migrated. Use set to record the current task list."; }
+   }
    notify();
   },
-  /** Restart/tree replacement is not permission to resume. Persist interruptions before accepting more work. */
-  recover(reason: string) {
-   if (!state || state.fulfillment !== "pending") return;
-   const next = structuredClone(state); for (const a of next.attempts) if (a.status === "running") a.status = "interrupted";
-   next.recoveredExecutions = [...new Set([...(next.recoveredExecutions ?? []), ...(next.executionPending ?? []), ...(next.continuation.waitingFor ?? [])])];
-   next.executionPending = [...next.recoveredExecutions];
-   delete next.continuation.waitingFor;
-   next.input.aligned = false; next.continuation.state = "suspended"; next.continuation.reason = reason; next.continuation.unblock = "Reconcile branch/input and explicitly resume under existing authority.";
-   try { commit(next, `recover:${owner}`); } catch (error) { unavailable = String(error); notify(); }
-  },
-  delivered(unknown: boolean) {
-   if (!state || state.fulfillment !== "pending") return;
-   const next = structuredClone(state); next.input.generation++; next.input.aligned = false; next.input.unknown = unknown;
-   commit(next, `input:${next.input.generation}:${owner}`);
-  },
-  async capture(_cwd: string): Promise<{ scopes: Record<string, string[]>; owner: number; generation: number }> {
-   const scopes = Object.fromEntries((state?.attempts ?? []).filter(a => a.status === "running").map(a => [a.id, [...a.scope]]));
-   return { scopes, owner, generation: state?.input.generation ?? -1 };
-  },
-  observe(observation: Omit<CheckObservation, "id"> & { id?: string }): string { const id = observation.id && /^[A-Za-z0-9]+$/.test(observation.id) ? observation.id : mintProductId(); checks.set(id, { ...observation, id }); while (checks.size > 256) checks.delete(checks.keys().next().value!); return id; },
-  pendingExecutions(runIds: string[]) {
-   if (!state || state.fulfillment !== "pending") return;
-   const values = [...new Set([...(state.recoveredExecutions ?? []), ...runIds])];
-   if (digest(values) === digest(state.executionPending ?? [])) return;
-   const next = structuredClone(state); next.executionPending = values;
-   commit(next, `execution-pending:${owner}`);
-  },
-  waitForExecutions(runIds: string[]) {
-   if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active" || !runIds.length) return;
-   const next = structuredClone(state);
-   next.continuation.state = "waiting"; next.continuation.waitingFor = [...new Set(runIds)];
-   next.continuation.reason = "Awaiting accepted subagent execution; receipts are not completion.";
-   next.continuation.unblock = "A current-owner terminal event makes evidence available; the executor owns the wake.";
-   commit(next, `execution-wait:${owner}`);
-  },
-  executionReady(runId: string) {
-   if (!state || state.continuation.state !== "waiting" || !state.continuation.waitingFor?.includes(runId)) return;
-   const next = structuredClone(state);
-   next.continuation.state = "active"; delete next.continuation.waitingFor;
-   delete next.continuation.reason; delete next.continuation.unblock;
-   commit(next, `execution-ready:${owner}:${runId}`);
-  },
-  async settle(ctx: GoalContext, dispatch: () => void): Promise<void> {
-   if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active" || !state.input.aligned || unavailable || ctx.signal?.aborted || ctx.fenced?.()) return;
-   const lease = owner; const next = structuredClone(state);
-   if (lease !== owner || ctx.signal?.aborted || ctx.fenced?.()) return;
-   const key = progressKey(next);
-   next.continuation.repeat = key === next.continuation.lastProgress ? Math.min(next.continuation.repeat + 1, GOAL_LIMITS.noProgress) : 0;
-   next.continuation.lastProgress = key;
-   if (next.continuation.repeat >= GOAL_LIMITS.noProgress) {
-    // Stop only repeated automatic messages; this heuristic cannot withdraw authority or prohibit normal tool work.
-    next.continuation.automaticPaused = true;
-    next.continuation.reason = "Automatic dispatch paused: no new observed evidence for another follow-up; the task remains unfinished.";
-    next.continuation.unblock = "Continue authorized work through normal host input/tools. New relevant evidence can re-enable automatic dispatch; no new task approval is implied.";
-    if (digest(next) !== digest(state)) commit(next, `automatic-pause:${owner}`);
-    return;
-   }
-   if (next.continuation.automaticPaused) {
-    delete next.continuation.automaticPaused; delete next.continuation.reason; delete next.continuation.unblock;
-   }
-   next.continuation.dispatched++;
-   commit(next, `settled:${owner}`);
-   dispatch();
-  },
-  suspend(reason: string) {
-   if (!state || state.fulfillment !== "pending" || state.continuation.state !== "active") return;
-   const next = structuredClone(state); next.continuation.state = "suspended"; next.continuation.reason = reason; next.continuation.unblock = "Restore the named capability/condition and explicitly resume.";
-   commit(next, `suspend:${owner}`);
-  },
+  recover(reason: string) { if (state && !state.cancelled && unfinished(state).length) { state = { ...state, paused: true, reason }; notify(); } },
+  pause(reason: string) { if (state && !state.cancelled && unfinished(state).length) return this.mutate({ operation: "pause", reason }); },
+  observe(tool: string, failed: boolean) { if (state) { observation = { tool, failed }; notify(); } },
+  receivedInput() { if (state) delete state.remindedRevision; },
+  canRemind() { return !!state && !state.paused && !state.cancelled && actionable(state) && state.remindedRevision !== state.revision; },
+  remind(send: () => void) { if (!this.canRemind() || !state) return false; commit({ ...state, remindedRevision: state.revision }); send(); return true; },
  };
 }
 export type GoalStore = ReturnType<typeof createGoalStore>;

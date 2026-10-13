@@ -2,7 +2,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { GoalState, GoalTask, GoalView } from "./goal-contracts.ts";
-import { accepted } from "./goal-state.ts";
+import { taskOutcome } from "./goal-state.ts";
 
 export type GoalUiTheme = Pick<Theme, "fg" | "strikethrough">;
 const plainTheme: GoalUiTheme = { fg: (_color, text) => text, strikethrough: text => text };
@@ -12,21 +12,8 @@ function clean(text: string): string {
  return stripTerminalSequences(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
-type Progress = "pending" | "running" | "reported" | "recheck" | "blocked" | "done";
-/** One read-only projection shared by the widget and list; history is not current acceptance. */
-export function taskProgress(state: GoalState, task: GoalTask): Progress {
- if (task.blocker) return "blocked";
- const attempts = state.attempts.filter(a => a.task === task.key && a.revision === task.revision);
- if (attempts.some(a => a.status === "running")) return "running";
- if (accepted(state, `task:${task.key}`)) return "done";
- const latest = attempts.at(-1);
- const judgment = state.acceptance.find(j => j.target.kind === "task" && j.target.id === task.key);
- // Starting a dependent task required accepted predecessors. Losing one revokes that work's basis.
- if (latest && task.dependsOn?.some(dep => !accepted(state, `task:${dep}`))) return "recheck";
- if (latest?.status === "interrupted" || judgment?.accepted || (latest && state.facts.some(f => f.attempt === latest.id && !f.usable))
-  || (!latest && state.attempts.some(a => a.task === task.key))) return "recheck";
- return latest?.status === "reported" ? "reported" : "pending";
-}
+type Progress = GoalTask["status"];
+export function taskProgress(_state: GoalState, task: GoalTask): Progress { return task.status; }
 
 /** The host has already selected a TUI: ambient stdout/Chalk detection must not erase SGR 9. */
 function strike(title: string, theme: GoalUiTheme): string {
@@ -43,41 +30,34 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
  if (view.unavailable !== undefined) return [clip(theme.fg("warning", "! Tasks · state unavailable · /workflow-ui list"))];
  const s = view.state;
  if (!s) return [];
- const tasks = s.tasks.map(task => {
-  const status = taskProgress(s, task);
-  const dependencies = task.dependsOn?.filter(key => !accepted(s, `task:${key}`)) ?? [];
-  const suffix = task.blocker ? `blocked: ${clean(task.blocker.reason)}` : status === "reported" ? "reported · awaiting acceptance"
-   : status === "recheck" ? "recheck · evidence stale or interrupted" : status === "pending" && dependencies.length ? `waits for ${dependencies.map(clean).join(", ")}` : "";
-  return { task, status, suffix };
- });
+ const tasks = s.tasks.map(task => ({ task, status: task.status, suffix: task.note ? clean(task.note) : "" }));
  const doneCount = tasks.filter(t => t.status === "done").length;
- const outcome = s.fulfillment === "complete" ? " · completed" : s.fulfillment === "cancelled" ? " · cancelled" : s.fulfillment === "superseded" ? " · superseded" : "";
- const warnings = s.fulfillment === "pending" ? [
-  ...(s.continuation.state !== "active" ? [s.continuation.state] : s.continuation.automaticPaused ? ["automatic dispatch paused"] : []), ...(!s.input.aligned ? ["needs alignment"] : []),
- ] : [];
+ const cancelledCount = tasks.filter(t => t.status === "cancelled").length;
+ const outcome = taskOutcome(s);
+ const warnings = s.paused ? ["paused"] : outcome === "blocked" ? ["blocked"] : [];
  let prefix = warnings.length ? `! ${warnings.join(" · ")} · Tasks` : "● Tasks";
- const counts = ["running", "reported"].map(status => { const n = tasks.filter(t => t.status === status).length; return n ? ` · ${n} ${status}` : ""; }).join("");
- const end = ` (${doneCount}/${tasks.length} accepted)${outcome}`;
- if (warnings.length && visibleWidth(prefix + end) > width) prefix = `! ${warnings.map(w => w === "needs alignment" ? "align" : w).join("/")}`;
+ const counts = ["doing"].map(status => { const n = tasks.filter(t => t.status === status).length; return n ? ` · ${n} ${status}` : ""; }).join("");
+ const end = ` (${doneCount}/${tasks.length} done${cancelledCount ? ` · ${cancelledCount} cancelled` : ""})${outcome === "done" || outcome === "cancelled" ? ` · ${outcome}` : ""}`;
+ if (warnings.length && visibleWidth(prefix + end) > width) prefix = `! ${warnings.join("/")}`;
  if (warnings.length && visibleWidth(prefix + end) > width) prefix = "!";
  const detail = visibleWidth(prefix + end + counts) <= width ? counts : "";
  const goalWidth = width - visibleWidth(`${prefix} · ${end}${detail}`);
  const goal = goalWidth > 0 ? ` · ${truncateToWidth(clean(s.goal), goalWidth, "…")}` : "";
  const rows = [clip(theme.fg(warnings.length ? "warning" : "accent", `${prefix}${goal}${end}${detail}`))];
- if (warnings.length && s.continuation.reason && maxRows >= 5) rows.push(clip(theme.fg("warning", `  ${clean(s.continuation.reason)}`)));
+ if (warnings.length && s.reason && maxRows >= 5) rows.push(clip(theme.fg("warning", `  ${clean(s.reason)}`)));
  const available = maxRows - rows.length;
  const overflow = tasks.length > available;
  // Keep active and blocked tasks visible instead of filling the widget with completed work.
- const priority = (status: string) => status === "running" || status === "blocked" || status === "recheck" ? 0 : status === "done" ? 2 : 1;
+ const priority = (status: string) => status === "doing" || status === "blocked" ? 0 : (status === "done" || status === "cancelled") ? 2 : 1;
  const ordered = overflow ? [...tasks].sort((a, b) => priority(a.status) - priority(b.status)) : tasks;
  const shown = ordered.slice(0, Math.max(0, available - (overflow ? 1 : 0)));
  for (const [index, { task, status, suffix }] of shown.entries()) {
-  const glyph = { done: "✓", running: "◐", blocked: "!", pending: "○", reported: "◇", recheck: "↻" }[status];
-  const color = status === "done" ? "success" : status === "running" || status === "blocked" || status === "recheck" ? "warning" : "dim";
+  const glyph = { done: "✓", doing: "◐", blocked: "!", todo: "○", cancelled: "–" }[status];
+  const color = status === "done" ? "success" : status === "doing" || status === "blocked" ? "warning" : "dim";
   const branch = index === shown.length - 1 && !overflow ? "└─ " : "├─ ";
   const prefix = `${branch}${glyph} `;
   const keyWidth = Math.min(16, Math.floor(Math.max(0, width - visibleWidth(prefix)) / 4));
-  const key = keyWidth >= 3 ? `${truncateToWidth(clean(task.key), keyWidth, "…")} ` : "";
+  const key = keyWidth >= 3 ? `${truncateToWidth(clean(task.id), keyWidth, "…")} ` : "";
   const remaining = Math.max(0, width - visibleWidth(prefix + key));
   // Titles are the primary content; long keys and diagnostic hints must not crowd them out.
   const titleText = clean(task.title);
@@ -86,7 +66,7 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
   const label = suffix && suffixWidth >= 8 ? ` · ${truncateToWidth(suffix, suffixWidth, "…")}` : "";
   const titleWidth = remaining - visibleWidth(label);
   const title = titleWidth > 0 ? truncateToWidth(titleText, titleWidth, "…") : "";
-  const text = status === "done" ? theme.fg("dim", strike(title, theme)) : theme.fg(status === "running" ? "accent" : "text", title);
+  const text = status === "done" ? theme.fg("dim", strike(title, theme)) : theme.fg(status === "doing" ? "accent" : "text", title);
   rows.push(clip(theme.fg("dim", branch) + theme.fg(color, glyph) + " " + theme.fg("dim", key) + text + theme.fg("dim", label)));
  }
  if (overflow && available > 0) rows.push(clip(theme.fg("dim", `… ${tasks.length - shown.length} more · /workflow-ui list`)));

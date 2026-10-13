@@ -43,7 +43,11 @@ test("managed results and index retain actual model/reasoning even on failed and
 	for (const schemaVersion of [4] as const) {
 		const details: SessionActionResult = { schemaVersion, action: "create", status: "failed", sessions: [view] };
 		const content = JSON.parse(formatManagedContent(details));
-		assert.deepEqual(content.sessions[0].route, { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", selectionSource: "role-default" });
+		assert.deepEqual(content.sessions[0].route, {
+			provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", selectionSource: "role-default",
+			executionProfileRequested: null, executionProfileApplied: false,
+			reasoningProfileRequested: null, reasoningProfileApplied: false, profileFallbacks: [],
+		});
 		for (const expanded of [false, true]) {
 			const text = formatManagedResult(details, expanded);
 			assert.match(text, /route=fixture\/actual-model thinking=high/);

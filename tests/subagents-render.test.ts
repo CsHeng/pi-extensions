@@ -52,6 +52,17 @@ test("model-visible submission retains join identity after large reports", () =>
   sessions: [{ handle: "session123", role: "explorer", episode: 1, state: "running", reportComplete: false, result: task(1, "x".repeat(100_000)) }] };
  const payload = JSON.parse(formatManagedContent(result));
  assert.equal(payload.kind, "submission"); assert.equal(payload.runId, runId); assert.equal(payload.generation, generation);
+ assert.equal(payload.sessions[0].route.executionProfileRequested, "deep");
+ assert.equal(payload.sessions[0].route.executionProfileApplied, false);
+ assert.equal(payload.sessions[0].route.reasoningProfileRequested, "deep");
+ assert.equal(payload.sessions[0].route.reasoningProfileApplied, true);
+ assert.deepEqual(payload.sessions[0].route.profileFallbacks, ["execution-role-default"]);
+ for (const expanded of [false, true]) {
+  const rendered = formatManagedResult(result, expanded);
+  assert.match(rendered, /executionProfile=deep applied=false/);
+  assert.match(rendered, /reasoningProfile=deep applied=true/);
+  assert.match(rendered, /profileFallbacks=execution-role-default/);
+ }
  assert.deepEqual(parseSessionRequest({ action: "join", runId, mode: "foreground" }), { action: "join", runId });
  assert.throws(() => parseSessionRequest({ action: "join", runId, mode: "async" }), /invalid_join_mode/);
  assert.throws(() => parseSessionRequest({ action: "join", mode: "foreground" }), /missing_run_id/);

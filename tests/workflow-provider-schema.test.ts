@@ -29,7 +29,7 @@ function fixture() {
 }
 
 for (const api of ["openai-responses", "openai-codex-responses"] as const) {
-	test(`workflow registration survives the real ${api} request serializer before enrollment`, async () => {
+	test(`workflow registration survives the real ${api} request serializer before task creation`, async () => {
 		const { tool, writes } = fixture();
 		const model: Model<typeof api> = {
 			id: "schema-fixture", name: "Schema fixture", api, provider: api === "openai-responses" ? "openai" : "openai-codex",
@@ -60,30 +60,20 @@ for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 		assert.equal(schema.type, "object");
 		assert.deepEqual(schema.required, ["operation"]);
 		assert.equal(schema.additionalProperties, false);
-		assert.equal(writes(), 0, "tool registration must not enroll a workflow");
+		assert.equal(writes(), 0, "tool registration must not create a task list");
 	});
 }
 
-test("workflow rejects retired v1 operations and migration fields before mutation", async () => {
-	const harness = fixture();
-	const enroll = { operation: "enroll", goal: "Fixture", delivery: "source", authority: "user request", requirements: [{ key: "c", outcome: "Criterion", verification: "check" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }] };
-	for (const args of [
-		{ operation: "open", expectedRevision: 0 },
-		{ operation: "pause", expectedRevision: 1 },
-		{ operation: "inspect", expectedRevision: 1 },
-		{ operation: "inspect", subject: "task:t" },
-		{ ...enroll, migrateLegacy: true },
-		{ operation: "start", taskId: "T-1" },
-	]) {
-		await assert.rejects(async () => harness.execute(args), /Validation failed/);
-		assert.equal(harness.store.current(), undefined);
-		assert.equal(harness.writes(), 0);
-	}
-	const missing = await harness.execute({ operation: "enroll", goal: "Incomplete" });
-	assert.equal((missing.details as { ok: boolean }).ok, false);
-	assert.equal(harness.writes(), 0);
-	await harness.execute(enroll);
-	assert.equal(harness.store.current()?.revision, 1);
-	await harness.execute({ operation: "suspend", reason: "fixture complete", condition: "explicit resume" });
-	assert.equal(harness.store.current()?.continuation.state, "suspended");
+test("workflow rejects completion-protocol operations and fields before mutation", async () => {
+ const harness = fixture();
+ for (const args of [{ operation: "enroll" }, { operation: "report", facts: [] }, { operation: "inspect", expectedRevision: 1 }]) {
+  await assert.rejects(async () => harness.execute(args), /Validation failed/);
+  assert.equal(harness.writes(), 0);
+ }
+ const missing = await harness.execute({ operation: "set", goal: "Incomplete" });
+ assert.equal((missing.details as { ok: boolean }).ok, false);
+ await harness.execute({ operation: "set", goal: "Fixture", tasks: [{ id: "t", title: "Task" }] });
+ assert.equal(harness.store.current()?.revision, 1);
+ await harness.execute({ operation: "pause", reason: "fixture pause" });
+ assert.equal(harness.store.current()?.paused, true);
 });

@@ -148,23 +148,23 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  const latest = (id: string): SessionView => events.flatMap(event => event.sessions).filter(view => view.result?.id === id).sort((a, b) => b.episode - a.episode)[0]!;
  const apply = (view: SessionView) => managed({ action: "apply", handle: view.handle, expectedEpisode: view.episode, candidateId: view.candidate!.id });
  h.faux.setResponses([
-  contract({ operation: "enroll", goal: "fixture implementation", delivery: "local source", authority: "offline fixture", requirements: [{ key: "r", outcome: "reviewed source", verification: "parent check" }], tasks: [{ key: "t", title: "Source work", covers: ["r"] }] }),
-  contract({ operation: "start", task: "t", scope: ["dirty.txt"] }),
+  contract({ operation: "set", goal: "fixture implementation", tasks: [{ id: "t", title: "Source work" }] }),
+  contract({ operation: "update", tasks: [{ id: "t", status: "doing" }] }),
   managed({ action: "create", requestId: "pair", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: h.workDir }], model: "subagent-fixture/fixture", thinking: "off" })) }),
   tool("bash", { command: "printf independent > parent-progress" }),
-  contract({ operation: "report", attempt: "A1", summary: "Submitted; parent made independent progress, not accepted" }), fauxAssistantMessage("waiting"),
+  contract({ operation: "update", tasks: [{ id: "t", note: "Submitted; parent made independent progress" }] }), fauxAssistantMessage("waiting"),
  ]);
  await h.session.prompt("implement fixture");
  assert.equal(results[0]?.status, "accepted", JSON.stringify(results[0])); const runId = results[0]!.runId;
  await until(async () => { await access(join(base, "started-fast")); await access(join(base, "started-slow")); return true; });
- assert.equal(await readFile(join(h.workDir, "parent-progress"), "utf8"), "independent"); assert.equal(state().continuation.state, "waiting"); assert.equal(events.length, 0);
+ assert.equal(await readFile(join(h.workDir, "parent-progress"), "utf8"), "independent"); assert.equal(state().tasks[0]!.status, "doing"); assert.equal(events.length, 0);
  h.faux.setResponses([() => apply(latest("fast")), fauxAssistantMessage("early apply; sibling still running")]);
  await writeFile(join(base, "release-fast"), "go");
  await until(async () => (await readFile(join(h.workDir, "fast.txt"), "utf8")) === "candidate-1" && h.session.isStreaming === false);
- assert.equal(events.some(event => event.kind === "run-terminal"), false); assert.equal(state().acceptance.length, 0);
+ assert.equal(events.some(event => event.kind === "run-terminal"), false); assert.notEqual(state().tasks[0]!.status, "done");
  const fast = latest("fast"), before = await store.load(fast.handle, { repo: h.workDir, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) });
  h.faux.setResponses([
-  contract({ operation: "amend", alignment: "Same fixture authority; explicit repair requested", reason: "repair", authority: "offline fixture" }),
+  contract({ operation: "update", tasks: [{ id: "t", note: "Repair requested" }] }),
   managed({ action: "refresh", handle: fast.handle, expectedEpisode: 1 }),
   managed({ action: "continue", mode: "foreground", episodes: [{ handle: fast.handle, expectedEpisode: 1, requestId: "repair", message: "host-worker-fixture" }] }),
   () => apply(latest("fast")), fauxAssistantMessage("repair applied; still waiting for sibling"),
@@ -173,9 +173,9 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  assert.equal(await readFile(join(h.workDir, "fast.txt"), "utf8"), "candidate-2");
  const after = await store.load(fast.handle, { repo: h.workDir, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) });
  assert.equal(after.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path, before.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path); assert.notEqual(after.nativeLeaf, before.nativeLeaf);
- h.faux.setResponses([managed({ action: "join", runId }), () => apply(latest("slow")), contract({ operation: "close", outcome: "cancelled", reason: "fixture transport proof is not semantic acceptance" }), fauxAssistantMessage("done")]);
- await writeFile(join(base, "release-slow"), "go"); await until(() => state().fulfillment === "cancelled" && h.session.isStreaming === false);
+ h.faux.setResponses([managed({ action: "join", runId }), () => apply(latest("slow")), contract({ operation: "cancel", reason: "fixture transport proof is not semantic acceptance" }), fauxAssistantMessage("done")]);
+ await writeFile(join(base, "release-slow"), "go"); await until(() => state().cancelled === true && h.session.isStreaming === false);
  assert.equal(results.findLast(result => result.action === "join")!.sessions.find(view => view.handle === fast.handle)!.episode, 1);
- assert.equal(await readFile(join(h.workDir, "slow.txt"), "utf8"), "candidate-1"); assert.equal(state().acceptance.length, 0); assert.deepEqual(h.errors, []);
+ assert.equal(await readFile(join(h.workDir, "slow.txt"), "utf8"), "candidate-1"); assert.notEqual(state().tasks[0]!.status, "done"); assert.deepEqual(h.errors, []);
  assert.ok(results.every(result => ["accepted", "succeeded"].includes(result.status)), JSON.stringify(results.map(result => ({ action: result.action, status: result.status, error: result.error }))));
 });

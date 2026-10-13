@@ -145,7 +145,7 @@ export default function probe(pi: ExtensionAPI): void {
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop", content: [], usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 				stream.push({ type: "start", partial: message });
 				if (call === 0) {
-					const toolCall = { type: "toolCall" as const, id: "probe-open", name: "csheng_workflow", arguments: { operation: "enroll", goal: "Synthetic workflow probe", delivery: "probe session entry", authority: "explicit fixture implementation", requirements: [{ key: "c", outcome: "Criterion met", verification: "probe" }], tasks: [{ key: "t", title: "Task", covers: ["c"] }] } };
+					const toolCall = { type: "toolCall" as const, id: "probe-open", name: "csheng_workflow", arguments: { operation: "set", goal: "Synthetic workflow probe", tasks: [{ id: "t", title: "Task" }] } };
 					message.content = [toolCall];
 					message.stopReason = "toolUse";
 					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });

@@ -36,7 +36,7 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 				const event = JSON.parse(line);
 				if (event.type === "extension_error") extensionError = true;
 				if (event.type !== "message_update") {
-					events.push({ type: event.type, command: event.command, success: event.success, role: event.message?.role, stop: event.message?.stopReason, code: event.result?.details?.code, alignment: event.result?.details?.workflow?.workset?.alignment });
+					events.push({ type: event.type, command: event.command, success: event.success, role: event.message?.role, stop: event.message?.stopReason, code: event.result?.details?.code });
 					if (events.length > 30) events.shift();
 				}
 			} catch { /* startup text is not protocol */ }
@@ -51,7 +51,7 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 		await exited.catch(() => {});
 		await rm(base, { recursive: true, force: true });
 	});
-	child.stdin.write(`${JSON.stringify({ id: "fixture", type: "prompt", message: "enroll and continue the fixture" })}\n`);
+	child.stdin.write(`${JSON.stringify({ id: "fixture", type: "prompt", message: "track and continue the fixture" })}\n`);
 	const exitCode = await exited;
 	if (exitCode !== 0) {
 		t.diagnostic(JSON.stringify(events));
@@ -60,7 +60,7 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 	assert.equal(exitCode, 0, "offline installed-host continuation must settle and shut down cleanly");
 	assert.equal(extensionError, false);
 	const proof = JSON.parse(await readFile(join(agent, "continuation-proof.json"), "utf8"));
-	assert.deepEqual(proof, { calls: 4, settled: 2, starts: [0, 1], sources: ["rpc", "extension"], disposition: "cancelled", used: 1,
+	assert.deepEqual(proof, { calls: 4, settled: 2, starts: [0, 1], sources: ["rpc", "extension"], disposition: "cancelled",
 		facts: [{ mode: "rpc", trusted: true, signal: true, idle: false }, { mode: "rpc", trusted: true, signal: true, idle: false }],
 	});
 });

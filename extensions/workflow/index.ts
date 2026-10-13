@@ -1,2 +1,2 @@
-/** Explicit implementation enrollment and semantic completion contracts; v2 snapshots only. */
+/** Optional Pi task tracking and bounded continuation; no Skill dependency or acceptance engine. */
 export { default } from "./goal-host.ts";

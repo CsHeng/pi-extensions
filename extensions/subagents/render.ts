@@ -103,7 +103,15 @@ function truncateReport(text: string, maxBytes: number): { report: string; trunc
 }
 
 function managedRoute(route: EffectiveRoute): Record<string, unknown> {
-	return { provider: boundScalar(route.provider), model: boundScalar(route.model), thinking: boundScalar(route.thinking), source: route.source, selectionSource: route.selectionSource ?? null };
+	return {
+		provider: boundScalar(route.provider), model: boundScalar(route.model), thinking: boundScalar(route.thinking), source: route.source,
+		selectionSource: route.selectionSource ?? null,
+		executionProfileRequested: route.executionProfileRequested ?? null,
+		executionProfileApplied: route.executionProfileApplied,
+		reasoningProfileRequested: route.reasoningProfileRequested ?? null,
+		reasoningProfileApplied: route.reasoningProfileApplied,
+		profileFallbacks: route.profileFallbacks,
+	};
 }
 
 function sessionPayload(session: SessionView, reportBudget: number | null): Record<string, unknown> {
@@ -243,7 +251,12 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 			? `native-usage recorded input=${native.input} output=${native.output}`
 			: "native-usage unrecorded");
 		const route = session.result?.route ?? session.route;
-		if (route) parts.push(`route=${boundScalar(route.provider)}/${boundScalar(route.model)} thinking=${boundScalar(route.thinking)} source=${route.source} selection=${route.selectionSource ?? "unknown"}`);
+		if (route) {
+			parts.push(`route=${boundScalar(route.provider)}/${boundScalar(route.model)} thinking=${boundScalar(route.thinking)} source=${route.source} selection=${route.selectionSource ?? "unknown"}`);
+			if (route.executionProfileRequested !== undefined) parts.push(`executionProfile=${route.executionProfileRequested} applied=${route.executionProfileApplied}`);
+			if (route.reasoningProfileRequested !== undefined) parts.push(`reasoningProfile=${route.reasoningProfileRequested} applied=${route.reasoningProfileApplied}`);
+			if (route.profileFallbacks.length > 0) parts.push(`profileFallbacks=${route.profileFallbacks.join(",")}`);
+		}
 		lines.push(parts.join(" "));
 	}
 	// Reserve every session/candidate header before any expanded report can consume its budget.

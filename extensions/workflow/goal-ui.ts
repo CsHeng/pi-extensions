@@ -1,4 +1,4 @@
-/** Default-visible read-only projection. It cannot enroll, mutate, resume or complete a contract. */
+/** Default-visible read-only projection. It cannot update tasks or resume work. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GoalStore } from "./goal-store.ts";
 import { goalRows } from "./goal-ui-render.ts";
@@ -19,7 +19,7 @@ export function registerGoalUi(pi: ExtensionAPI, store: GoalStore) {
  };
  store.subscribe(render);
  pi.registerCommand("workflow-ui", {
-  description: "Toggle the read-only implementation contract view (show/hide/list)",
+  description: "Toggle the read-only task list view (show/hide/list)",
   async handler(args, commandCtx) {
    ctx = commandCtx;
    if (ctx.mode !== "tui" || !ctx.hasUI) return;

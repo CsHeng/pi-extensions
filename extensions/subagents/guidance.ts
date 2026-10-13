@@ -1,7 +1,7 @@
 import type { DelegationGuidance } from "./config.ts";
 
 /** Base delegation policy: batch shape and parent-owned closure, without a delegation trigger. */
-export const BASE_DELEGATION_GUIDANCE = "Use a flat csheng_subagent_sessions create batch for independent bounded work. A single episode may complete the task; continuation is explicit. Parent owns synthesis, verification, acceptance, apply and close. File-dependent successors require explicit parent apply between dispatches; dependency edges pass reports, not candidate files.";
+export const BASE_DELEGATION_GUIDANCE = "Use a flat csheng_subagent_sessions create batch for independent bounded work. Workers implement their assigned slice with relevant unit tests, compilation or narrow reproduction, then return the candidate, actual checks and remaining uncertainty. Parent owns integration, conflict resolution, the shared verification strategy, acceptance, apply and close. Coordinate integration, E2E and full-suite checks at useful joins; assign their execution explicitly when needed and reuse applicable worker evidence instead of repeating it. A worker does not need a separate delivery lifecycle. A single episode may complete the assignment; continuation is explicit. File-dependent successors require explicit parent apply between dispatches; dependency edges pass reports, not candidate files.";
 
 /**
  * Aggressive guidance encourages substantive independent work without a
