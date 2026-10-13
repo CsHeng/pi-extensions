@@ -69,7 +69,7 @@ test("idle extension-origin re-entry runs the ordinary prompt path after settlem
 	assert.ok(indexOf(trace, "native:agent_settled", 0) < indexOf(trace, "wf:dispatch"), "first settlement finishes before dispatch");
 	assert.ok(indexOf(trace, "wf:dispatch") < indexOf(trace, "input", 1), "dispatch precedes its own input event");
 	assert.deepEqual(detailOf(trace, "input", 1), { source: "extension", text: "WORKFLOW-REVIEW", imageCount: 0 });
-	assert.deepEqual(detailOf(trace, "before_agent_start", 1), { prompt: "WORKFLOW-REVIEW" });
+	assert.deepEqual(detailOf(trace, "before_agent_start", 1), { messageType: "user", prompt: "WORKFLOW-REVIEW" });
 	const reviewMessage = trace.entries.filter((entry) => entry.event === "message_start" && entry.detail?.role === "user")[1];
 	assert.equal(reviewMessage?.detail?.preview, "WORKFLOW-REVIEW");
 	assert.deepEqual(harness.errors, []);
@@ -243,7 +243,7 @@ test("input sees raw text and before_agent_start sees the expanded prompt", asyn
 	await harness.session.prompt("/wf-template");
 
 	assert.deepEqual(detailOf(trace, "input"), { source: "interactive", text: "/wf-template", imageCount: 0 });
-	assert.deepEqual(detailOf(trace, "before_agent_start"), { prompt: "EXPANDED-TEMPLATE-BODY" });
+	assert.deepEqual(detailOf(trace, "before_agent_start"), { messageType: "user", prompt: "EXPANDED-TEMPLATE-BODY" });
 });
 
 test("retry settles once after the chain; abort settles without retry", async (t) => {
@@ -283,7 +283,7 @@ test("custom entries live on the active branch, replay on reload, and stay out o
 	let appended = 0;
 	const scenario: (pi: ExtensionAPI) => void = (pi) => {
 		pi.on("before_agent_start", (event) => {
-			if (!event.prompt.startsWith("append")) return;
+			if (event.messageType !== "user" || !event.prompt.startsWith("append")) return;
 			appended += 1;
 			pi.appendEntry("wf-probe", { value: appended });
 		});

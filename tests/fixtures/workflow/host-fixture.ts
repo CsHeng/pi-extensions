@@ -72,7 +72,10 @@ export function createTraceObserver(trace: Trace): ExtensionFactory {
 				imageCount: event.images?.length ?? 0,
 				...(event.streamingBehavior === undefined ? {} : { streamingBehavior: event.streamingBehavior }),
 			}));
-		pi.on("before_agent_start", (event) => trace.record("before_agent_start", { prompt: event.prompt }));
+		pi.on("before_agent_start", (event) => trace.record("before_agent_start", {
+			messageType: event.messageType,
+			...(event.messageType === "user" ? { prompt: event.prompt } : { customType: event.message.customType }),
+		}));
 		pi.on("agent_start", () => trace.record("agent_start"));
 		pi.on("agent_end", (event) => trace.record("agent_end", { stopReason: stopReasonOf(event.messages) }));
 		pi.on("agent_settled", () => trace.record("agent_settled"));
@@ -146,7 +149,7 @@ const DEFAULT_SETTINGS = {
 };
 
 /**
- * Runs the actual installed dependency host (`@earendil-works/pi-coding-agent` 0.86.0) with the
+ * Runs the actual installed dependency host (`@earendil-works/pi-coding-agent`) with the
  * official faux provider: real lifecycle, real tools, real session manager, no inference.
  */
 export async function createHostHarness(options: HostHarnessOptions = {}): Promise<HostHarness> {

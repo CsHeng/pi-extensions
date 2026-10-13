@@ -35,7 +35,10 @@ test("host worker tools preserve Pi schemas and share edit/test/repair state", a
 	assert.deepEqual(worker.tools.map((tool) => tool.name), ["read", "grep", "find", "ls", "edit", "write", "bash"]);
 	assert.ok(worker.tools.every((tool) => tool.parameters && tool.description && tool.promptSnippet));
 	await execute("write", { path: "candidate.txt", content: "broken" });
-	await assert.rejects(execute("bash", { command: command("check") }), /code 2/);
+	const failed = await execute("bash", { command: command("check") });
+	assert.equal(failed.isError, true);
+	assert.equal((failed.structuredContent as { exit_code: number }).exit_code, 2);
+	assert.match(JSON.stringify(failed.content), /code 2/);
 	await execute("edit", { path: "candidate.txt", edits: [{ oldText: "broken", newText: "fixed" }] });
 	assert.match(JSON.stringify(await execute("bash", { command: command("check") })), /verified/);
 	assert.match(JSON.stringify(await execute("read", { path: "candidate.txt" })), /fixed/);
@@ -116,7 +119,12 @@ test("command instrumentation does not impose cumulative command or output budge
 	const fullOutputPath = (result.details as { fullOutputPath: string }).fullOutputPath;
 	assert.ok(fullOutputPath.startsWith(`${scratch}/`));
 	assert.ok((await readFile(fullOutputPath)).length > 32 * 1024 * 1024);
-	await execute("bash", { command: ":" });
+	const structured = result.structuredContent as { full_output_path: string; truncated: boolean; exit_code: number };
+	assert.equal(structured.full_output_path, fullOutputPath, "codemode must receive the same owned output path");
+	assert.equal(structured.truncated, true);
+	assert.equal(structured.exit_code, 0);
+	await worker.shutdown();
+	await assert.rejects(access(structured.full_output_path));
 });
 
 test("command timeouts do not poison later tasks and native truncated output is owned by scratch", async (t) => {

@@ -4,7 +4,7 @@ import { zstdDecompressSync } from "node:zlib";
 import { normalizeContext, validateToolArguments, type JsonObject, type Model } from "@earendil-works/pi-ai";
 import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses";
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createGoalStore } from "../extensions/workflow/goal-store.ts";
 import { registerGoalTool } from "../extensions/workflow/goal-tool.ts";
 
@@ -15,7 +15,10 @@ function fixture() {
 	const store = createGoalStore(() => { writes += 1; });
 	registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store, () => false);
 	assert.ok(tool);
-	const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" } } as ExtensionContext;
+	const ctx = {
+		cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" },
+		tools: [], executeTool: async () => { throw new Error("nested tool execution is outside this schema fixture"); },
+	} as unknown as ExtensionToolContext;
 	return {
 		tool, store, writes: () => writes,
 		execute(args: Record<string, unknown>) {

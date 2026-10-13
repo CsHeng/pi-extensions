@@ -15,7 +15,7 @@ The package exposes eight maintained extensions: `multi-skill-mentions` as an ex
 - `extensions/status-footer/`: TUI one-line footer with model/thinking, optional fast-gpt lightning, original workdir, session UUID, usage stats, context fill, and MCP counts
 - `extensions/workflow/`: explicit implementation contract, semantic tool protocol, declared scope and evidence provenance, prepared-input alignment, productive continuation with anti-spin pause, schema-v4 session snapshots, fail-closed unsupported history, and optional TUI projection
 - `extensions/work-timing/`: live request and reasoning timing with durable TUI-only completion entries
-- `extensions/agent-bark.ts`: main-agent notification adapter; child-marker exclusion stays here, while shared hook configuration and delivery remain user-owned
+- `extensions/agent-bark.ts`: main-agent notification adapter; child-marker exclusion and parent custom-run filtering stay here, while shared hook configuration and delivery remain user-owned
 - `config/csheng-subagents.json`: packaged role routes, semantic-profile mappings, and concurrency defaults
 - `.agents/skills/evaluate-subagent-runs/`: maintainer-only read-only evaluator, excluded from the npm package
 - `.agents/skills/evaluate-session-cost/`: maintainer-only read-only session cost and prompt-cache evaluator, excluded from the npm package

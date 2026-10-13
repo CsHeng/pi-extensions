@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -677,7 +677,9 @@ test("education surfaces: start names its attempt and window; rejections teach t
  registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
  assert.ok(tool);
  assert.match(tool.description, /^High-frequency rules: report names the attempt id start returned, or omits attempt only while exactly one matching attempt runs \(optionally selected by task\)/);
- const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" },
+  tools: [], executeTool: async () => { throw new Error("nested tool execution is outside this goal fixture"); },
+ } as unknown as ExtensionToolContext;
  let serial = 0;
  let lastDetails: { ok?: boolean; code?: string } | undefined;
  const runTool = async (args: Record<string, unknown>) => {
@@ -721,7 +723,9 @@ test("bounded inspection recovery advertises the selectors inspect actually acce
  let tool: ToolDefinition | undefined;
  registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
  assert.ok(tool);
- const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" },
+  tools: [], executeTool: async () => { throw new Error("nested tool execution is outside this goal fixture"); },
+ } as unknown as ExtensionToolContext;
  const inspect = async (id: string, args: Record<string, unknown>) => ((await tool!.execute(id, args as never, undefined, undefined, ctx)).content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
  const bounded = await inspect("bounded-inspect", { operation: "inspect" });
  assert.ok(Buffer.byteLength(bounded, "utf8") < Buffer.byteLength(JSON.stringify(f.store.current()), "utf8"), "the oversized inspection is bounded without hiding individual selectors");
@@ -739,7 +743,9 @@ test("structured inspect selects delivery, fact and attempt records and rejects 
  let tool: ToolDefinition | undefined;
  registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, f.store, () => false);
  assert.ok(tool);
- const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" } } as unknown as ExtensionContext;
+ const ctx = { cwd: f.cwd, sessionManager: { getSessionId: () => "fixture" },
+  tools: [], executeTool: async () => { throw new Error("nested tool execution is outside this goal fixture"); },
+ } as unknown as ExtensionToolContext;
  const inspect = async (args: Record<string, unknown>) => ((await tool!.execute("inspect", { operation: "inspect", ...args } as never, undefined, undefined, ctx)).content as Array<{ text?: string }>).map(part => part.text ?? "").join("\n");
  assert.match(await inspect({ target: { kind: "delivery" } }), /"delivery"/);
  assert.match(await inspect({ fact: factId }), new RegExp(`"id":"${factId}"`));

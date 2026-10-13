@@ -122,10 +122,11 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 		}),
 	] as ToolDefinition[];
 
-	const projectOutput = (result: { content: unknown[]; details?: unknown }) => {
+	const projectOutput = (result: { content: unknown[]; details?: unknown; structuredContent?: unknown }) => {
 		const details = result.details as { fullOutputPath?: string } | undefined;
-		if (details?.fullOutputPath && !outputs.has(details.fullOutputPath)) {
-			outputs.set(details.fullOutputPath, join(scratch, `command-${randomUUID()}.log`));
+		const structured = result.structuredContent as { full_output_path?: string } | undefined;
+		for (const path of [details?.fullOutputPath, structured?.full_output_path]) {
+			if (path && !outputs.has(path)) outputs.set(path, join(scratch, `command-${randomUUID()}.log`));
 		}
 		const rewrite = (text: string) => {
 			for (const [source, destination] of outputs) text = text.replaceAll(source, destination);
@@ -135,6 +136,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 			...result,
 			content: result.content.map((part: any) => part.type === "text" ? { ...part, text: rewrite(part.text) } : part),
 			...(details?.fullOutputPath ? { details: { ...details, fullOutputPath: outputs.get(details.fullOutputPath) } } : {}),
+			...(structured?.full_output_path ? { structuredContent: { ...structured, full_output_path: outputs.get(structured.full_output_path) } } : {}),
 		};
 	};
 	const moved = new Set<string>();

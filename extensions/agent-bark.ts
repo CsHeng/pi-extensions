@@ -67,17 +67,31 @@ function invokeHook(eventName: HookEvent, ctx: ExtensionContext, summary = ""): 
 }
 
 export default function (pi: ExtensionAPI): void {
+	// This marker excludes child processes, not internal wake runs in the parent session.
 	if (process.env.CSHENG_SUBAGENT_CHILD === "1") return;
 
-	pi.on("before_agent_start", async (_event, ctx) => {
+	// Pi 1.2 reports custom-triggered wakes separately from user-message runs (including
+	// sendUserMessage). Classify every start; consume eligibility before awaiting settlement.
+	let notifyingRun = false;
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		notifyingRun = event.messageType === "user";
+		if (!notifyingRun) return;
 		await invokeHook("UserPromptSubmit", ctx);
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		if (!notifyingRun) return;
+		notifyingRun = false;
 		await invokeHook(
 			latestAssistantFailed(ctx) ? "StopFailure" : "Stop",
 			ctx,
 			assistantSummary(ctx),
 		);
+	});
+
+	// Session replacement must not inherit an earlier run's notification eligibility.
+	pi.on("session_start", () => {
+		notifyingRun = false;
 	});
 }
