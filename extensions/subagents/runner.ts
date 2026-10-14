@@ -157,6 +157,24 @@ export function buildChildPrompt(task: NormalizedTask, prompt: string, advisoryW
 	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nAccess grants:\n- ${grants || "none"}\nPrepared mapping:\n- ${roots}\n${advisoryWrites ? "Write tools may change only the listed write grants. Use those prepared paths, not the primary checkout." : "This session has no write grant."}${verification}\n\nInputs:\n${prompt}`;
 }
 
+function cloneActivity(activity: Readonly<ChildActivity>): ChildActivity {
+	return {
+		...activity,
+		activeTools: [...activity.activeTools],
+		...(activity.calls ? { calls: activity.calls.map((call) => ({ ...call })) } : {}),
+	};
+}
+
+function closedActivity(activity: Readonly<ChildActivity>, elapsedMs: number): ChildActivity {
+	const cloned = cloneActivity(activity);
+	return {
+		...cloned,
+		phase: "closed",
+		elapsedMs,
+		...(cloned.calls ? { calls: cloned.calls.map((call) => call.status === "running" ? { ...call, status: "unknown" } : call) } : {}),
+	};
+}
+
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	const now = options.now ?? (() => performance.now());
 	const started = now();
@@ -171,7 +189,8 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	let finalActivity: Readonly<ChildActivity> | undefined;
 	let activitySink = (activity: Readonly<ChildActivity>) => {
 		finalActivity = activity;
-		options.onActivity?.(activity);
+		try { options.onActivity?.(activity); }
+		catch { /* Optional observation must not stop launch. */ }
 	};
 	const parser = new JsonlProtocolParser({
 		now,
@@ -249,7 +268,8 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			};
 			const activity = (snapshot: Readonly<ChildActivity>) => {
 				finalActivity = snapshot;
-				options.onActivity?.(snapshot);
+				try { options.onActivity?.(snapshot); }
+				catch { /* Optional observation must not stop the child or its settlement. */ }
 				if (snapshot.agentSettledObserved && !settledTimer && !closed) {
 					settledTimer = setTimeout(() => requestStop("child_exit_stalled"), options.settledExitGraceMs ?? HARD_LIMITS.settledExitGraceMs);
 					settledTimer.unref();
@@ -291,8 +311,9 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const parsed = parser.finish();
 		const managedToolState = options.managedWorkerScratch ? await workerToolsSettled(options.diagnosticSession.path, nativeStartBytes) : undefined;
 		if (finalActivity) {
-			finalActivity = Object.freeze({ ...finalActivity, phase: "closed", elapsedMs: Math.max(finalActivity.elapsedMs, now() - started) });
-			options.onActivity?.(finalActivity);
+			finalActivity = closedActivity(finalActivity, Math.max(finalActivity.elapsedMs, now() - started));
+			try { options.onActivity?.(finalActivity); }
+			catch { /* Closing the projection is optional; the child result remains. */ }
 		}
 		const output = truncateUtf8(parsed.output, HARD_LIMITS.maxFinalOutputBytes);
 		const suffix = output.truncatedBytes > 0 ? `\n\n[Output truncated: ${output.truncatedBytes} bytes omitted.]` : "";
@@ -320,7 +341,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			convergence: "not-applicable",
 			route: options.route,
 			...(childDidStart ? { diagnosticSessionRef: options.diagnosticSession.ref } : {}),
-			...(finalActivity === undefined ? {} : { activity: { ...finalActivity, activeTools: [...finalActivity.activeTools] } }),
+			...(finalActivity === undefined ? {} : { activity: cloneActivity(finalActivity) }),
 			...(parsed.stopReason === undefined ? {} : { stopReason: parsed.stopReason }),
 		};
 		if (spawnError) return { ...base, status: "failed", error: { code: "spawn_failure", message: spawnError.message } };

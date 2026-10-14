@@ -180,7 +180,10 @@ test("terminal notices coalesce behind the public waiter; joined results neither
 	let updates = 0;
 	const receipt = await state.tool.execute("dispatch", createInput("wake", ["fast", "slow"].map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }))), undefined, () => { updates++; }, ctx);
 	assert.equal(receipt.details.status, "accepted"); releaseFast(); await terminal; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0);
-	releaseSlow(); await state.tool.execute("join", { action: "join", runId: receipt.details.runId }, undefined, undefined, ctx);
+	releaseSlow(); const joined = await state.tool.execute("join", { action: "join", runId: receipt.details.runId }, undefined, undefined, ctx);
+	// This fixture invokes execute directly. Simulate the actual host result boundary,
+	// not an acknowledgement before a returned pull exists.
+	for (const handler of state.handlers.get("tool_execution_end") ?? []) await handler({ toolName: SUBAGENT_SESSION_TOOL_NAME, result: joined, isError: false }, ctx);
 	idle = true; releaseIdle(); await waiter; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0); assert.equal(updates, 0);
 	idle = false; idleWait = new Promise<void>(resolve => { releaseIdle = resolve; });
 	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
@@ -188,7 +191,9 @@ test("terminal notices coalesce behind the public waiter; joined results neither
 	await nextDone; await new Promise(resolve => setImmediate(resolve)); idle = true; releaseIdle(); await waiter; await notice;
 	assert.equal(sent.length, 1); assert.ok(sent[0].content.includes(next.details.sessions[0].handle));
 	for (const view of receipt.details.sessions) assert.ok(!sent[0].content.includes(view.handle));
-	await state.tool.execute("join-next", { action: "join", runId: next.details.runId }, undefined, undefined, ctx); assert.equal(updates, 0);
+	const joinedNext = await state.tool.execute("join-next", { action: "join", runId: next.details.runId }, undefined, undefined, ctx);
+	for (const handler of state.handlers.get("tool_execution_end") ?? []) await handler({ toolName: SUBAGENT_SESSION_TOOL_NAME, result: joinedNext, isError: false }, ctx);
+	assert.equal(updates, 0);
 });
 
 test("extension registers only the managed tool and a redacted status command", async () => {

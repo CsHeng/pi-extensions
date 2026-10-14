@@ -192,6 +192,55 @@ test("continuation rechecks recovery state after a concurrent uncertain apply an
 	const inspected = await f.service.execute({ action: "inspect", handle: view.handle }, f.ctx); assert.equal(inspected.sessions[0]?.candidate?.status, "unknown");
 });
 
+test("a finished sibling is readable while a silent peer runs and an independent session is admitted", async t => {
+	const hold = gate();
+	const started = { silent: gate(), done: gate(), next: gate() };
+	const launches = new Map<string, number>();
+	t.after(() => hold.release());
+	const f = await fixture(t, async options => {
+		launches.set(options.task.id, (launches.get(options.task.id) ?? 0) + 1);
+		if (options.task.id === "silent") { started.silent.release(); await hold.promise; return; }
+		if (options.task.id === "done") { await writeFile(join(options.cwd, "done.txt"), "candidate\n"); started.done.release(); return; }
+		started.next.release();
+	}, 3);
+	f.config.maxConcurrency = 3;
+	f.config.routes.worker.maxConcurrency = 3;
+	const receipt = await f.service.execute({ action: "create", requestId: "pair", tasks: [task("silent"), task("done")] }, f.ctx);
+	assert.equal(receipt.status, "accepted", JSON.stringify(receipt));
+	await started.silent.promise;
+	await started.done.promise;
+	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.id === "done")); attempt++) {
+		assert.ok(attempt < 500);
+		await new Promise(resolve => setTimeout(resolve, 5));
+	}
+	const doneEvents = () => f.events.filter(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.id === "done"));
+	assert.equal(doneEvents().length, 1);
+	const done = doneEvents()[0]!.sessions.find(session => session.result?.id === "done")!;
+	const inspected = await f.service.execute({ action: "inspect", handle: done.handle }, f.ctx);
+	assert.equal(inspected.sessions[0]?.result?.status, "succeeded");
+	assert.equal(inspected.sessions[0]?.reportComplete, true);
+	assert.ok(inspected.sessions[0]?.candidate);
+	const run = await f.service.execute({ action: "inspect", runId: receipt.runId }, f.ctx);
+	assert.equal(run.status, "accepted");
+	assert.equal(run.kind, "submission");
+	assert.equal(run.sessions.find(session => session.handle === done.handle)?.result?.status, "succeeded");
+	assert.notEqual(run.sessions.find(session => session.handle !== done.handle)?.result?.status, "succeeded");
+	const apply = await f.service.execute({ action: "apply", handle: done.handle, expectedEpisode: done.episode, candidateId: done.candidate!.id }, f.ctx);
+	assert.equal(apply.status, "succeeded", JSON.stringify(apply));
+	const next = await f.service.execute({ action: "create", requestId: "next", tasks: [task("next")] }, f.ctx);
+	assert.equal(next.status, "accepted", JSON.stringify(next));
+	await started.next.promise;
+	assert.equal(launches.get("silent"), 1);
+	assert.equal(launches.get("done"), 1);
+	assert.equal(launches.get("next"), 1);
+	assert.equal(doneEvents().length, 1);
+	assert.equal((await f.service.execute({ action: "inspect", runId: receipt.runId }, f.ctx)).status, "accepted");
+	hold.release();
+	const joined = await f.service.execute({ action: "join", runId: receipt.runId }, f.ctx);
+	assert.equal(joined.status, "succeeded", JSON.stringify(joined));
+	assert.equal(launches.get("silent"), 1);
+});
+
 test("same-process batch completions await the root writer instead of treating it as unknown", async t => {
 	const f = await fixture(t, async () => {});
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };

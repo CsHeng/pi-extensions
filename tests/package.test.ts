@@ -34,6 +34,7 @@ test("package exposes the maintained extensions and their Pi peers", async () =>
 		"./extensions/subagents-ui/index.ts",
 		"./extensions/workflow/index.ts",
 		"./extensions/agent-bark.ts",
+		"./extensions/retained-shell/index.ts",
 	]);
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": "*",

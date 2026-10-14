@@ -2,11 +2,13 @@ import { THINKING_LEVELS, type ThinkingLevel, type EffectiveRoute, type TaskResu
 import type { CurrentOwner } from "./session-contracts.ts";
 import {
 	OBSERVER_VERSION,
+	observerCalls,
 	observerHeadline,
 	observerTools,
 	parseObserverSnapshot,
 	type ObserverSnapshot,
 	type ObserverTask,
+	type ObserverToolCall,
 } from "./observer-events.ts";
 
 export const OBSERVER_HEARTBEAT_MS = 5_000;
@@ -22,6 +24,11 @@ function displayRoute(route: EffectiveRoute | undefined): ObserverTask["route"] 
 	if (!route || !THINKING_LEVELS.includes(route.thinking as ThinkingLevel)
 		|| [route.provider, route.model].some(value => !value || Buffer.byteLength(value) > 512 || /[\u0000-\u001f\u007f-\u009f]/.test(value))) return null;
 	return { provider: route.provider, model: route.model, thinking: route.thinking as ThinkingLevel };
+}
+function projectedCalls(live: boolean, result: TaskResult): { calls: ObserverToolCall[]; callsTruncated: boolean } {
+	if (!live) return { calls: [], callsTruncated: false };
+	const projected = observerCalls(result.activity?.calls);
+	return { calls: projected.calls, callsTruncated: projected.callsTruncated || result.activity?.callsTruncated === true };
 }
 
 /** Ephemeral projection only. Never reads native storage or controls a child. */
@@ -54,7 +61,7 @@ export class ManagedObserver {
 		this.rows = input.map((row, index) => ({ id: row.id, ordinal: index + 1, role: row.role,
 			episode: row.episode, route: displayRoute(row.route),
 			status: "pending", executionPhase: "queued", assistantTurns: 0, elapsedMs: null, replayed: row.replayed,
-			headline: observerHeadline(row.objective ?? ""), activeTools: [] }));
+			headline: observerHeadline(row.objective ?? ""), activeTools: [], calls: [], callsTruncated: false }));
 	}
 	begin(): void {
 		this.emit();
@@ -74,6 +81,8 @@ export class ManagedObserver {
 		if (row) {
 			row.elapsedMs = this.taskElapsed(id);
 			row.activeTools = [];
+			row.calls = [];
+			row.callsTruncated = false;
 		}
 		if (this.active.size === 0) this.phase = "settling";
 		this.emit();
@@ -91,14 +100,15 @@ export class ManagedObserver {
 				executionPhase: terminal ? "settled" : (this.active.has(row.id) ? "child-execution" : this.started.has(row.id) ? "convergence-critical" : result.status === "running" ? "workspace-preparation" : row.executionPhase),
 				assistantTurns: result.activity?.assistantTurns ?? result.usage.turns,
 				elapsedMs: row.replayed ? null : this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs,
-				activeTools: live ? (result.activity ? observerTools(result.activity.activeTools) : row.activeTools) : [] };
+				activeTools: live ? (result.activity ? observerTools(result.activity.activeTools) : row.activeTools) : [],
+				...projectedCalls(live, result) };
 		});
 		this.emit();
 	}
 	finish(failed: boolean, aborted: boolean): void {
 		if (this.closed) return;
 		if (this.timer) clearInterval(this.timer); this.timer = undefined;
-		this.rows = this.rows.map(row => ({ ...row, activeTools: [],
+		this.rows = this.rows.map(row => ({ ...row, activeTools: [], calls: [], callsTruncated: false,
 			elapsedMs: row.replayed ? null : this.started.has(row.id) ? this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs : null,
 			...(["running", "pending"].includes(row.status) ? { status: aborted ? "aborted" as const : "failed" as const, executionPhase: "settled" as const } : {}),
 		}));

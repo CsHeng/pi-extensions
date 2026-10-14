@@ -111,6 +111,28 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
 	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);
 	assert.doesNotMatch(progress, /subagent-sessions|private|jsonl/);
+	const withCall = formatProgress([{
+		...task(1, ""),
+		status: "running",
+		activity: {
+			phase: "running",
+			assistantTurns: 1,
+			activeTools: ["bash", "bash"],
+			calls: [
+				{ id: "bash-1", tool: "bash", status: "running", summary: "grep -R /", startedMs: 10, updatedMs: 20, deadlineMs: 5_000, tail: "quiet", truncated: false },
+				{ id: "parent/2", parentId: "bash-1", tool: "bash", status: "running", summary: "echo nested", tail: "", truncated: false },
+			],
+			errorObserved: false,
+			errorCount: 0,
+			agentEndObserved: false,
+			agentSettledObserved: false,
+			elapsedMs: 20,
+			inactiveForMs: 0,
+		},
+	}], 20);
+	assert.match(withCall, /bash#bash-1 running grep -R \/ deadline=5\.0s tail=quiet/);
+	assert.match(withCall, /bash#parent\/2\/bash-1 running echo nested/);
+	assert.doesNotMatch(withCall, /tool=bash,bash/);
 });
 
 function emptyObservation(overrides: Partial<NativeObservation> = {}): NativeObservation {

@@ -260,3 +260,59 @@ test("a real managed child cannot delegate outside its grants through the co-loa
 	assert.equal(result.status, "succeeded", `${result.error?.code}: ${result.stderr} ${result.output}`);
 	assert.match(result.output, /nested=failed;code=nested_access_denied/);
 });
+
+test("worker and reviewer reach a custom skill reference on a new and continued episode; disabled and temporary stay out", { timeout: 120000 }, async t => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-native-reachability-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const source = join(base, "project"), child = join(base, "source"), agentDir = join(base, "agent"), scratch = join(base, "scratch");
+	const skill = join(agentDir, "skills", "custom-guide"), temporaryDir = join(base, "temporary-only");
+	await Promise.all([source, child, scratch, join(skill, "references"), temporaryDir].map(path => mkdir(path, { recursive: true })));
+	const guide = join(skill, "SKILL.md");
+	const temporaryFile = join(temporaryDir, "SKILL.md");
+	await writeFile(guide, "---\nname: custom-guide\ndescription: Use custom-guide for guidance-reachability-fixture.\n---\n# Custom\n");
+	await writeFile(join(skill, "references", "rule.md"), "reference marker");
+	await writeFile(temporaryFile, "---\nname: temporary-parent-only\ndescription: temporary-parent-only body.\n---\n# Temporary\n");
+	const decision = "parent-only-decision-boundary";
+	const temporaryName = "temporary-parent-only";
+	const parentSkills = [
+		...loadSkills({ cwd: source, agentDir, includeDefaults: false, skillPaths: [skill] }).skills.map(item => ({ ...item, sourceInfo: { ...item.sourceInfo, scope: "user" as const } })),
+		{
+			name: temporaryName, description: "temporary-parent-only body", filePath: temporaryFile, baseDir: temporaryDir, disableModelInvocation: false,
+			sourceInfo: { path: temporaryFile, source: "parent-turn", scope: "temporary" as const, origin: "top-level" as const },
+		},
+	];
+	const env = syntheticSubprocessEnv(base, {
+		PI_CODING_AGENT_DIR: agentDir,
+		CSHENG_GUIDANCE_EXPECT_PATH: guide,
+		CSHENG_GUIDANCE_TEMPORARY_MARKER: temporaryName,
+		CSHENG_GUIDANCE_DECISION_MARKER: decision,
+		CSHENG_GUIDANCE_REFERENCE_MARKER: "reference marker",
+	});
+	const run = async (roleName: "worker" | "reviewer", inheritSkills: boolean, session: string) => {
+		const write = roleName === "worker";
+		return runChild({
+			task: { id: roleName, role: roleName, objective: "guidance-reachability-fixture", access: [{ permission: write ? "write" : "read", scope: ["/tmp/scope"] }], grants: [], inputs: [], dependsOn: [], verification: [], resourceLocks: [] },
+			role: write ? getManagedRole(roleName) : getRole(roleName), route, cwd: child, sourceRoot: source, inheritSkills, parentSkills,
+			guardExtensionPath: write ? workerGuard : guard,
+			...(write ? { managedWorkerScratch: scratch } : {}),
+			capability: { version: 4, cwd: child, role: roleName, grants: [{ permission: write ? "write" as const : "read" as const, path: child }], roots: [] },
+			prompt: decision, approveProject: true, diagnosticSession: { path: session, ref: `reach-${roleName}`, async removeUnused() {} }, invocation, env,
+		});
+	};
+	for (const roleName of ["worker", "reviewer"] as const) {
+		const session = join(base, `${roleName}.jsonl`);
+		await (await open(session, "wx", 0o600)).close();
+		for (const episode of [1, 2]) {
+			const result = await run(roleName, true, session);
+			assert.equal(result.status, "succeeded", `${roleName} episode ${episode}: ${result.error?.code} ${result.stderr} ${result.output}`);
+			assert.match(result.output, /catalog=1;reads=2;reference=1;temporary=0;decision=1/, `${roleName} episode ${episode}: ${result.output}`);
+		}
+	}
+	const disabled = join(base, "reviewer-disabled.jsonl");
+	await (await open(disabled, "wx", 0o600)).close();
+	for (const episode of [1, 2]) {
+		const result = await run("reviewer", false, disabled);
+		assert.equal(result.status, "succeeded", `disabled episode ${episode}: ${result.error?.code} ${result.stderr} ${result.output}`);
+		assert.match(result.output, /catalog=0;reads=0;reference=0;temporary=0;decision=1/, `disabled episode ${episode}: ${result.output}`);
+	}
+});

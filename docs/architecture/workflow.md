@@ -58,7 +58,7 @@ An unchanged list gets no second automatic reminder. Identical set/update operat
 
 The extension rechecks input/session ownership, abort, idle state, queued messages, project trust and tool availability at settlement. Host abort/provider errors pause unfinished tracking. Print/JSON modes do not dispatch reminders. There are no private loop calls, polling timers or provider changes.
 
-Managed subagent submissions with fresh current-invocation admission telemetry suppress workflow reminders until their run-terminal event. Replayed accepted receipts without a current admission cannot create a wait for an execution from an earlier process. The executor owns the completion wake; workflow never turns that event into task completion. This optional event integration does not require the subagent extension to be installed. Pending execution tracking is session-local and discarded on recovery.
+Managed subagent submissions with fresh current-invocation admission telemetry appear as pending facts in the reminder, not a global veto. The main may advance independent work or inspect ready results while siblings execute; if only event-dependent work remains, it can settle without inventing a blocker or updating tasks to renew reminders. Replayed accepted receipts without current admission do not imply live execution. Co-loaded executors and workflow share a thin idle-wake reservation through request preparation: a completion/attention turn carries the useful reminder rather than starting a second unchanged-revision turn. Workflow never turns execution events into task completion, and optional event integration does not require the subagent extension. Pending tracking is session-local and discarded on recovery.
 
 ## Persistence And Recovery
 

@@ -24,6 +24,8 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
 		replayed: false,
 		headline: "scan the bounded facts",
 		activeTools: ["read"],
+		calls: [],
+		callsTruncated: false,
 		...overrides,
 	};
 }
@@ -89,8 +91,8 @@ test("snapshots keep native parent punctuation and a real run id, while an aggre
 });
 
 test("older snapshot versions and rows missing current fields are rejected without a default adapter", () => {
-	const { headline, activeTools, ...withoutCurrentFields } = task();
-	void headline; void activeTools;
+	const { headline, activeTools, calls, callsTruncated, ...withoutCurrentFields } = task();
+	void headline; void activeTools; void calls; void callsTruncated;
 	for (const version of [1, 2, 3]) {
 		assert.equal(parseObserverSnapshot(snapshot({ version })).ok, false);
 		assert.equal(parseObserverSnapshot(snapshot({ version, tasks: [withoutCurrentFields] })).ok, false);
@@ -142,6 +144,24 @@ test("parser rejects legacy, sensitive, and non-allowlisted keys", () => {
 	})).ok, false);
 	assert.equal(parseObserverSnapshot(snapshot({
 		tasks: [task({ activeTools: ["../secret"] })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "bash-1", parentId: null, tool: "bash", summary: "grep -R /", startedMs: 1, updatedMs: 2, outputMs: null, status: "running", deadlineMs: null, tail: "", truncated: false }] })],
+	})).ok, true);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "parent/2", parentId: "bash-1", tool: "bash", summary: null, startedMs: null, updatedMs: 2, outputMs: 2, status: "unknown", deadlineMs: null, tail: "tail", truncated: true }] })],
+	})).ok, true);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "bash-1", parentId: null, tool: "bash", summary: null, startedMs: 1, updatedMs: 2, outputMs: null, status: "running", deadlineMs: null, tail: "", truncated: false, output: "SECRET" }] })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "bash-1", parentId: null, tool: "bash", summary: null, startedMs: 1, updatedMs: 2, outputMs: null, status: "running", deadlineMs: null, tail: "", truncated: false }, { id: "bash-1", parentId: null, tool: "read", summary: null, startedMs: 1, updatedMs: 2, outputMs: null, status: "running", deadlineMs: null, tail: "", truncated: false }] })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "bash-1", parentId: null, tool: "bash", summary: null, startedMs: 1, updatedMs: 2, status: "running", deadlineMs: null, tail: "", truncated: false }] })],
+	})).ok, false);
+	assert.equal(parseObserverSnapshot(snapshot({
+		tasks: [task({ calls: [{ id: "bash-1", parentId: null, tool: "bash", summary: null, startedMs: 1, updatedMs: 2, outputMs: 3, status: "running", deadlineMs: null, tail: "", truncated: false }] })],
 	})).ok, false);
 });
 

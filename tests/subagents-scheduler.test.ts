@@ -288,7 +288,7 @@ test("activity emits before settlement and injected heartbeat advances quiet evi
 		onUpdate(results) { updates.push(results.map((result) => ({ ...result }))); },
 		async execute(task, _predecessors, _signal, lifecycle) {
 			lifecycle.childStarted();
-			lifecycle.activity({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 0, inactiveForMs: 0 });
+			lifecycle.activity({ phase: "running", assistantTurns: 1, activeTools: ["read"], calls: [{ id: "read-1", tool: "read", status: "running", summary: "/tmp/notes.txt", tail: "", truncated: false }], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 0, inactiveForMs: 0 });
 			await gate;
 			lifecycle.childSettled();
 			return success(task);
@@ -296,10 +296,12 @@ test("activity emits before settlement and injected heartbeat advances quiet evi
 	});
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	assert.ok(updates.some((snapshot) => snapshot[0]?.activity?.activeTools[0] === "read"));
+	assert.equal(updates.at(-1)?.[0]?.activity?.calls?.[0]?.id, "read-1");
 	now = 5_000;
 	heartbeat?.();
 	assert.equal(updates.at(-1)?.[0]?.durationMs, 5_000);
 	assert.equal(updates.at(-1)?.[0]?.activity?.inactiveForMs, 5_000);
+	assert.equal(updates.at(-1)?.[0]?.activity?.calls?.[0]?.summary, "/tmp/notes.txt");
 	release?.();
 	await run;
 	assert.equal(cleared, true);

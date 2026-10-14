@@ -70,9 +70,9 @@ test("activity projects lifecycle and overlapping allowed tools only", () => {
 	parser.push(line({ type: "tool_execution_start", toolCallId: "b", toolName: "read", args: { secret: "beta" } }));
 	parser.push(line({ type: "tool_execution_start", toolCallId: "c", toolName: "bash", args: { secret: "gamma" } }));
 	assert.deepEqual(snapshots.at(-1)?.activeTools, ["read"]);
-	parser.push(line({ type: "tool_execution_end", toolCallId: "a", toolName: "read", result: "secret", isError: false }));
+	parser.push(line({ type: "tool_execution_end", toolCallId: "a", toolName: "read", result: "visible", isError: false }));
 	assert.deepEqual(snapshots.at(-1)?.activeTools, ["read"]);
-	parser.push(line({ type: "tool_execution_end", toolCallId: "b", toolName: "read", result: "secret", isError: false }));
+	parser.push(line({ type: "tool_execution_end", toolCallId: "b", toolName: "read", result: "visible", isError: false }));
 	assert.deepEqual(snapshots.at(-1)?.activeTools, []);
 	parser.push(line({ type: "tool_execution_end", toolCallId: "c", toolName: "bash", result: "secret", isError: true }));
 	assert.equal(snapshots.at(-1)?.phase, "running");
@@ -82,6 +82,103 @@ test("activity projects lifecycle and overlapping allowed tools only", () => {
 	assert.equal(parser.snapshot().inactiveForMs, 40);
 	assert.doesNotMatch(JSON.stringify(snapshots), /alpha|beta|gamma|secret|bash/);
 	assert.equal(Object.isFrozen(snapshots[0]), true);
+});
+
+test("call projection keeps distinct executions, redacts secrets, and survives an observer failure", () => {
+	let now = 0;
+	let thrown = false;
+	const parser = new JsonlProtocolParser({
+		now: () => now,
+		allowedTools: ["bash", "read"],
+		onActivity() {
+			if (!thrown) { thrown = true; throw new Error("observer down"); }
+		},
+	});
+	now = 20;
+	parser.push(line({
+		type: "tool_execution_start",
+		toolCallId: "bash-1",
+		toolName: "bash",
+		args: { command: "grep -R / --token alpha", timeout: 5, secret: "alpha" },
+	}));
+	now = 30;
+	parser.push(line({
+		type: "tool_execution_start",
+		toolCallId: "parent/2",
+		toolName: "bash",
+		parentToolCallId: "bash-1",
+		args: { command: "echo nested", env: { TOKEN: "beta" } },
+	}));
+	now = 40;
+	parser.push(line({
+		type: "tool_execution_update",
+		toolCallId: "bash-1",
+		toolName: "bash",
+		partialResult: { content: [{ type: "text", text: "x".repeat(400) + "TAIL" }], details: { fullOutputPath: "/tmp/secret-path" } },
+	}));
+	const running = parser.snapshot().calls ?? [];
+	const silent = running.find((call) => call.id === "bash-1");
+	const nested = running.find((call) => call.id === "parent/2");
+	assert.equal(running.filter((call) => call.tool === "bash").length, 2);
+	assert.equal(silent?.parentId, undefined);
+	assert.equal(silent?.summary, "grep -R / --token [redacted]");
+	assert.equal(silent?.deadlineMs, 5_000);
+	assert.equal(silent?.status, "running");
+	assert.equal(silent?.startedMs, 20);
+	assert.equal(silent?.updatedMs, 40);
+	assert.equal(silent?.outputMs, 40);
+	assert.equal(silent?.truncated, true);
+	assert.match(silent?.tail ?? "", /TAIL$/);
+	assert.equal(nested?.parentId, "bash-1");
+	assert.equal(nested?.deadlineMs, undefined);
+	assert.equal(nested?.summary, "echo nested");
+	assert.equal(nested?.updatedMs, 30);
+	assert.equal(nested?.outputMs, undefined);
+	parser.push(line({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "/tmp/notes.txt", token: "gamma" } }));
+	const read = parser.snapshot().calls?.find((call) => call.id === "read-1");
+	assert.equal(read?.summary, "/tmp/notes.txt");
+	assert.equal(read?.parentId, undefined);
+	assert.equal(read?.deadlineMs, undefined);
+	assert.equal(read?.outputMs, undefined);
+	now = 45;
+	parser.push(line({ type: "tool_execution_update", toolCallId: "bash-1", toolName: "bash", partialResult: { content: [{ type: "text", text: "   " }] } }));
+	const quiet = parser.snapshot().calls?.find((call) => call.id === "bash-1");
+	assert.equal(quiet?.updatedMs, 45);
+	assert.equal(quiet?.outputMs, 40);
+	assert.match(quiet?.tail ?? "", /TAIL$/);
+	assert.doesNotMatch(JSON.stringify(parser.snapshot()), /alpha|beta|gamma|secret-path|TOKEN/);
+	parser.push(line({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read", isError: false, result: "ok" }));
+	parser.push(line({ type: "tool_execution_end", toolCallId: "parent/2", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "nested done" }] } }));
+	parser.push(line({ type: "tool_execution_end", toolCallId: "bash-1", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "failed" }] } }));
+	const finished = parser.snapshot().calls ?? [];
+	assert.equal(finished.find((call) => call.id === "bash-1")?.status, "failed");
+	assert.equal(finished.find((call) => call.id === "parent/2")?.status, "succeeded");
+	assert.equal(finished.find((call) => call.id === "parent/2")?.tail, "nested done");
+	assert.equal(finished.find((call) => call.id === "parent/2")?.outputMs, finished.find((call) => call.id === "parent/2")?.updatedMs);
+	parser.push(line(assistant()) + line({ type: "agent_settled" }));
+	assert.equal(parser.finish().reportComplete, true);
+	assert.equal(thrown, true);
+});
+
+test("unmatched output updates stay optional and cannot grow past the pending-call ceiling", () => {
+	const parser = new JsonlProtocolParser({ allowedTools: ["bash"] });
+	parser.push(line({ type: "tool_execution_start", toolCallId: "known", toolName: "bash", args: { command: "sleep 1" } }));
+	for (let index = 0; index < 1_024; index += 1) {
+		parser.push(line({ type: "tool_execution_update", toolCallId: `unknown-${index}`, toolName: "bash", partialResult: { content: [{ type: "text", text: "noise" }] } }));
+	}
+	parser.push(line({ type: "tool_execution_update", toolCallId: "known", toolName: "bash", partialResult: { content: [{ type: "text", text: "still here" }] } }));
+	parser.push(line({ type: "tool_execution_update", toolCallId: "overflow", toolName: "bash", partialResult: { content: [{ type: "text", text: "dropped" }] } }));
+	for (let index = 0; index < 1_009; index += 1) {
+		parser.push(line({ type: "tool_execution_end", toolCallId: `unknown-${index}`, toolName: "bash", isError: false, result: { content: [{ type: "text", text: "done" }] } }));
+	}
+	const calls = parser.snapshot().calls ?? [];
+	assert.equal(calls.find((call) => call.id === "known")?.tail, "still here");
+	assert.equal(calls.some((call) => call.id === "unknown-1023"), false);
+	assert.equal(calls.some((call) => call.id === "overflow"), false);
+	assert.equal(parser.snapshot().callsTruncated, true);
+	parser.push(line({ type: "tool_execution_end", toolCallId: "known", toolName: "bash", isError: false, result: { content: [] } }));
+	parser.push(line(assistant()) + line({ type: "agent_settled" }));
+	assert.equal(parser.finish().reportComplete, true);
 });
 
 test("agent_end is nonfinal while agent_settled is semantic settlement", () => {

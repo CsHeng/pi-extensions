@@ -127,6 +127,24 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					const tools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
 					message.content = [{ type: "text", text: `override=${first.content?.map(part => part.text ?? "").join("") ?? "?"};tools=${tools.join(",")}` }];
 				}
+				else if (JSON.stringify(context.messages).includes("guidance-reachability-fixture")) {
+					const messages = context.messages;
+					const lastUserIndex = messages.findLastIndex(item => item.role === "user");
+					const turn = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
+					const results = turn.filter(item => item.role === "toolResult");
+					const latestSystem = [...messages].reverse().find(item => item.role === "system");
+					const current = JSON.stringify(latestSystem ?? {});
+					const userText = JSON.stringify(messages[lastUserIndex]?.content ?? "");
+					const guide = process.env.CSHENG_GUIDANCE_EXPECT_PATH ?? "";
+					const temporary = process.env.CSHENG_GUIDANCE_TEMPORARY_MARKER ?? "<no-temporary>";
+					const decision = process.env.CSHENG_GUIDANCE_DECISION_MARKER ?? "<no-decision>";
+					const reference = process.env.CSHENG_GUIDANCE_REFERENCE_MARKER ?? "reference marker";
+					if (guide && current.includes(guide) && results.length < 2) {
+						message.content = [{ type: "toolCall", id: `reach-${results.length}`, name: "read", arguments: { path: results.length === 0 ? guide : guide.replace(/SKILL\.md$/, "references/rule.md") } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					message.content = [{ type: "text", text: `catalog=${guide && current.includes(guide) ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes(reference) ? 1 : 0};temporary=${current.includes(temporary) ? 1 : 0};decision=${userText.includes(decision) ? 1 : 0}` }];
+				}
 				else if (JSON.stringify(context.messages).includes("guidance-worker-fixture") || JSON.stringify(context.messages).includes("guidance-fixture")) {
 					const worker = JSON.stringify(context.messages).includes("guidance-worker-fixture");
 					const system = getCurrentSystemPrompt(context.messages);

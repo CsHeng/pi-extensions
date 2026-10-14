@@ -24,8 +24,9 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
   fauxAssistantMessage("One reminder, not acceptance"),
  ]);
  await h.session.prompt("go");
- if (early) await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
- else { assert.equal(h.faux.state.callCount, 3); send(); assert.equal(h.faux.state.callCount, 3, "executor owns the wake"); }
+ await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
+ assert.equal(h.faux.state.callCount, 4, "a pending run must not veto the one useful reminder");
+ if (!early) { send(); assert.equal(h.faux.state.callCount, 4, "the execution event alone is not another workflow reminder"); }
  const snapshot = h.session.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "csheng-workflow-state") as { data: { state: { tasks: { status: string }[] } } };
  assert.equal(snapshot.data.state.tasks[0]!.status, "doing"); assert.deepEqual(h.errors, []);
 });

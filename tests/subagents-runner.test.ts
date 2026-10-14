@@ -249,6 +249,13 @@ test("activity arrives before close and intermediate error evidence does not ove
 	assert.equal(phases.at(-1), "closed");
 	assert.equal(result.activity?.assistantTurns, 1);
 	assert.equal(result.diagnosticSessionRef?.startsWith("subagent-sessions/"), true);
+	let observed = 0;
+	const failedObserver = await runChild(options("activity", {
+		onActivity() { observed += 1; throw new Error("observer down"); },
+	}));
+	assert.equal(failedObserver.status, "succeeded");
+	assert.ok(observed > 0);
+	assert.equal(failedObserver.activity?.phase, "closed");
 
 	const retry = await runChild(options("retry"));
 	assert.equal(retry.status, "succeeded");

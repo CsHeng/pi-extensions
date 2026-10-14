@@ -1,6 +1,6 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatDuration } from "../subagents/render.ts";
-import type { ObserverSnapshot, ObserverTask } from "../subagents/observer-events.ts";
+import type { ObserverSnapshot, ObserverTask, ObserverToolCall } from "../subagents/observer-events.ts";
 import type { SessionViewHistoryRow, SessionViewReply } from "../subagents/session-view.ts";
 import type { RecordedUsageProjection } from "../subagents/observability.ts";
 
@@ -140,10 +140,19 @@ export function displayDetailText(text: string): string {
 	return text.replace(DETAIL_INVISIBLE, " ");
 }
 
+function callText(call: ObserverToolCall): string {
+	const parent = call.parentId ? ` parent ${call.parentId}` : "";
+	const summary = call.summary ? ` ${call.summary}` : "";
+	return `${call.tool} ${call.id}${parent} ${call.status}${summary}`;
+}
+
 function liveSecondaryLine(task: ObserverTask): string | undefined {
 	const parts: string[] = [];
 	if (task.headline) parts.push(displayDetailText(task.headline));
-	if (task.activeTools.length > 0) parts.push(task.activeTools.join(", "));
+	if (task.calls.length > 0) {
+		parts.push(task.calls.map(callText).join("; "));
+		if (task.callsTruncated) parts.push("more");
+	} else if (task.activeTools.length > 0) parts.push(task.activeTools.join(", "));
 	if (parts.length === 0) return undefined;
 	return "\n" + " ".repeat(LIVE_DETAIL_INDENT) + parts.join(" · ");
 }

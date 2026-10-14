@@ -4,7 +4,7 @@ import {
 	truncateHead,
 	truncateLine,
 } from "@earendil-works/pi-coding-agent";
-import { truncateUtf8, utf8Bytes, type TaskResult, type EffectiveRoute } from "./contracts.ts";
+import { truncateUtf8, utf8Bytes, type ChildActivity, type TaskResult, type EffectiveRoute } from "./contracts.ts";
 import { isNativeObservation, type ObservedUsage } from "./observability.ts";
 import type { SessionActionResult, SessionView } from "./session-contracts.ts";
 
@@ -39,6 +39,21 @@ function routeSummary(task: TaskResult): string {
 	return ` route=${singleLine(`${task.route.provider}/${task.route.model}`)}:${singleLine(task.route.thinking)}`;
 }
 
+function activityCalls(activity: ChildActivity): string {
+	if (!activity.calls || activity.calls.length === 0) {
+		return activity.activeTools.length > 0 ? ` tool=${singleLine(activity.activeTools.join(","))}` : "";
+	}
+	const shown = activity.calls.slice(0, 4).map((call) => {
+		const parent = call.parentId ? `/${singleLine(call.parentId)}` : "";
+		const summary = call.summary ? ` ${singleLine(call.summary)}` : "";
+		const deadline = call.deadlineMs !== undefined ? ` deadline=${formatDuration(call.deadlineMs)}` : "";
+		const tail = call.tail ? ` tail=${singleLine(call.tail)}` : "";
+		return `${singleLine(call.tool)}#${singleLine(call.id)}${parent} ${call.status}${summary}${deadline}${tail}`;
+	});
+	const omitted = activity.calls.length > shown.length || activity.callsTruncated ? " more=omitted" : "";
+	return ` calls=${shown.join("; ")}${omitted}`;
+}
+
 export function boundToolContent(content: string): string {
 	const initial = truncateHead(content, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	if (!initial.truncated) return content;
@@ -59,7 +74,7 @@ export function formatProgress(results: readonly TaskResult[], elapsedMs: number
 	for (const result of results) {
 		if (result.status === "pending") continue;
 		if (result.status === "running" && result.activity) {
-			const tools = result.activity.activeTools.length > 0 ? ` tool=${singleLine(result.activity.activeTools.join(","))}` : "";
+			const tools = activityCalls(result.activity);
 			const errors = result.activity.errorCount > 0 ? ` errs=${result.activity.errorCount}` : "";
 			lines.push(`[${singleLine(result.id)}] ${result.role} ${result.activity.phase}${routeSummary(result)} elapsed=${formatDuration(result.activity.elapsedMs)} turns=${result.activity.assistantTurns}${tools}${errors} inactive=${formatDuration(result.activity.inactiveForMs)}`);
 			continue;
@@ -122,6 +137,10 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 		state: session.state,
 		reportComplete: session.reportComplete,
 	};
+	if (session.liveActivity) {
+		const live = session.liveActivity;
+		payload.liveActivity = { ...live, calls: live.calls.slice(0, 4).map(call => ({ ...call, summary: call.summary?.slice(0, 160) ?? null, tail: call.tail.slice(-256), truncated: call.truncated || call.tail.length > 256 })), callsTruncated: live.callsTruncated || live.calls.length > 4 };
+	}
 	const route = session.result?.route ?? session.route;
 	if (route) payload.route = managedRoute(route);
 	if (session.requestError) payload.requestError = { code: boundScalar(session.requestError.code), ...(session.requestError.detail ? { detail: boundScalar(session.requestError.detail) } : {}) };

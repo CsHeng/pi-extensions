@@ -127,6 +127,8 @@ export interface ManagedRequestTelemetry {
 	replayedEpisodes: number;
 }
 export interface SessionView {
+	/** Current owner/episode-scoped observation, not retained evidence or candidate readiness. */
+	liveActivity?: Pick<import("./observer-events.ts").ObserverTask, "executionPhase" | "elapsedMs" | "calls" | "callsTruncated"> & { runId: string };
 	execution?: EpisodeExecution;
 	route?: EffectiveRoute;
 	handle: string;

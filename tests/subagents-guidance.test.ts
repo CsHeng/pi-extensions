@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
 import { authorizePath } from "../extensions/subagents/path-policy.ts";
 
@@ -99,5 +100,28 @@ describe("child native guidance bridge", () => {
 		const guidance = await prepareChildGuidance(original, child, false, agentDir);
 		assert.deepEqual(guidance.skillPaths, []);
 		assert.deepEqual(guidance.contextFiles.map(file => file.content), ["global context", "ancestor context", "snapshot override"]);
+	});
+	it("effective parent catalog keeps a custom skill reference root and drops temporary or disabled skills", async () => {
+		const { agentDir, original, child } = await fixture();
+		const durable = join(agentDir, "skills", "custom-guide");
+		const temporaryDir = join(agentDir, "temporary-only");
+		const temporaryFile = join(temporaryDir, "SKILL.md");
+		await mkdir(join(durable, "references"), { recursive: true });
+		await mkdir(temporaryDir);
+		await writeFile(join(durable, "SKILL.md"), "---\nname: custom-guide\ndescription: Use custom-guide.\n---\n# Custom\n");
+		await writeFile(join(durable, "references", "rule.md"), "reference marker");
+		await writeFile(temporaryFile, "---\nname: temporary-parent-only\ndescription: temporary only.\n---\n# Temporary\n");
+		const parentSkills = [
+			...loadSkills({ cwd: original, agentDir, includeDefaults: false, skillPaths: [durable] }).skills.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo, scope: "user" as const } })),
+			{
+				name: "temporary-parent-only", description: "temporary only", filePath: temporaryFile, baseDir: temporaryDir, disableModelInvocation: false,
+				sourceInfo: { path: temporaryFile, source: "parent-turn", scope: "temporary" as const, origin: "top-level" as const },
+			},
+		];
+		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"), parentSkills);
+		assert.deepEqual(guidance.skillPaths, [durable]);
+		assert.ok(guidance.readRoots.includes(durable));
+		const disabled = await prepareChildGuidance(original, child, false, agentDir, join(agentDir, "empty-home"), parentSkills);
+		assert.deepEqual(disabled.skillPaths, []);
 	});
 });

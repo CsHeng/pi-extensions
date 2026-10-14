@@ -1,8 +1,11 @@
 import {
+	CHILD_TOOL_CALL_STATUSES,
 	HARD_LIMITS,
 	ROLE_NAMES,
 	TASK_EXECUTION_PHASES,
 	THINKING_LEVELS,
+	type ChildToolCall,
+	type ChildToolCallStatus,
 	type RoleName,
 	type TaskExecutionPhase,
 	type TaskStatus,
@@ -26,8 +29,9 @@ const SNAPSHOT_KEYS = [
 ] as const;
 const TASK_KEYS = [
 	"id", "ordinal", "role", "episode", "status", "executionPhase", "route",
-	"assistantTurns", "elapsedMs", "replayed", "headline", "activeTools",
+	"assistantTurns", "elapsedMs", "replayed", "headline", "activeTools", "calls", "callsTruncated",
 ] as const;
+const CALL_KEYS = ["id", "parentId", "tool", "summary", "startedMs", "updatedMs", "outputMs", "status", "deadlineMs", "tail", "truncated"] as const;
 const ROUTE_KEYS = ["provider", "model", "thinking"] as const;
 const ROLE_SET = new Set<string>(ROLE_NAMES);
 const PHASE_SET = new Set<string>(OBSERVER_PHASES);
@@ -36,6 +40,7 @@ const STATUS_SET = new Set<string>(TASK_STATUSES);
 const THINKING_SET = new Set<string>(THINKING_LEVELS);
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const CALL_STATUS = new Set<string>(CHILD_TOOL_CALL_STATUSES);
 const TERMINAL_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 const SENSITIVE_KEY = /prompt|objective|output|stderr|path|model|selector|credential|token|env/i;
 const MAX_ROUTE_BYTES = 512;
@@ -58,6 +63,22 @@ export interface ObserverTask {
 	replayed: boolean;
 	headline: string;
 	activeTools: string[];
+	calls: ObserverToolCall[];
+	callsTruncated: boolean;
+}
+
+export interface ObserverToolCall {
+	id: string;
+	parentId: string | null;
+	tool: string;
+	summary: string | null;
+	startedMs: number | null;
+	updatedMs: number | null;
+	outputMs: number | null;
+	status: ChildToolCallStatus;
+	deadlineMs: number | null;
+	tail: string;
+	truncated: boolean;
 }
 
 export interface ObserverSnapshot {
@@ -126,6 +147,104 @@ function parseHeadline(value: unknown): string | undefined {
 		return undefined;
 	}
 	return value;
+}
+
+function parseCallId(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || TERMINAL_CONTROL.test(value) || /\s/.test(value)) return undefined;
+	if (Buffer.byteLength(value, "utf8") > HARD_LIMITS.maxCallIdBytes) return undefined;
+	return value;
+}
+
+function parseCallText(value: unknown, maxBytes: number): string | undefined {
+	if (typeof value !== "string" || TERMINAL_CONTROL.test(value) || Buffer.byteLength(value, "utf8") > maxBytes) return undefined;
+	return value;
+}
+
+function parseCall(value: unknown): ObserverToolCall | undefined {
+	// outputMs names a timestamp, not tool payload. Exact keys still reject a raw output field.
+	if (!isRecord(value) || !keysExact(value, CALL_KEYS, true)) return undefined;
+	const id = parseCallId(value.id);
+	const tool = typeof value.tool === "string" && TOOL_NAME.test(value.tool) && !TERMINAL_CONTROL.test(value.tool) ? value.tool : undefined;
+	if (!id || !tool || !CALL_STATUS.has(value.status as string) || typeof value.truncated !== "boolean") return undefined;
+	if (value.parentId !== null && parseCallId(value.parentId) === undefined) return undefined;
+	const summary = value.summary === null ? null : parseCallText(value.summary, HARD_LIMITS.maxCallSummaryBytes);
+	const tail = parseCallText(value.tail, HARD_LIMITS.maxCallTailBytes);
+	if (summary === undefined || tail === undefined) return undefined;
+	if (!finiteNonNegativeOrNull(value.startedMs) || !finiteNonNegativeOrNull(value.updatedMs) || !finiteNonNegativeOrNull(value.outputMs) || !finiteNonNegativeOrNull(value.deadlineMs)) return undefined;
+	if (value.startedMs !== null && value.updatedMs !== null && value.updatedMs < value.startedMs) return undefined;
+	if (value.startedMs !== null && value.outputMs !== null && value.outputMs < value.startedMs) return undefined;
+	if (value.updatedMs !== null && value.outputMs !== null && value.outputMs > value.updatedMs) return undefined;
+	return {
+		id,
+		parentId: value.parentId as string | null,
+		tool,
+		summary,
+		startedMs: value.startedMs,
+		updatedMs: value.updatedMs,
+		outputMs: value.outputMs,
+		status: value.status as ChildToolCallStatus,
+		deadlineMs: value.deadlineMs,
+		tail,
+		truncated: value.truncated,
+	};
+}
+
+function parseCalls(value: unknown): ObserverToolCall[] | undefined {
+	if (!Array.isArray(value) || value.length > HARD_LIMITS.maxObservedCalls) return undefined;
+	const calls: ObserverToolCall[] = [];
+	const seen = new Set<string>();
+	for (const item of value) {
+		const call = parseCall(item);
+		if (!call || seen.has(call.id)) return undefined;
+		seen.add(call.id);
+		calls.push(call);
+	}
+	return calls;
+}
+
+function projectCall(call: ChildToolCall): ObserverToolCall | undefined {
+	const id = parseCallId(call.id);
+	const parentId = call.parentId === undefined ? null : parseCallId(call.parentId) ?? null;
+	if (!id || !TOOL_NAME.test(call.tool) || !CALL_STATUS.has(call.status)) return undefined;
+	if (call.parentId !== undefined && parentId === null) return undefined;
+	const summary = call.summary === undefined ? null : parseCallText(call.summary, HARD_LIMITS.maxCallSummaryBytes);
+	const tail = parseCallText(call.tail, HARD_LIMITS.maxCallTailBytes);
+	if (summary === undefined || tail === undefined) return undefined;
+	if (call.startedMs !== undefined && !finiteNonNegativeOrNull(call.startedMs)) return undefined;
+	if (call.updatedMs !== undefined && !finiteNonNegativeOrNull(call.updatedMs)) return undefined;
+	if (call.outputMs !== undefined && !finiteNonNegativeOrNull(call.outputMs)) return undefined;
+	if (call.deadlineMs !== undefined && !finiteNonNegativeOrNull(call.deadlineMs)) return undefined;
+	return {
+		id,
+		parentId,
+		tool: call.tool,
+		summary,
+		startedMs: call.startedMs ?? null,
+		updatedMs: call.updatedMs ?? null,
+		outputMs: call.outputMs ?? null,
+		status: call.status,
+		deadlineMs: call.deadlineMs ?? null,
+		tail,
+		truncated: call.truncated,
+	};
+}
+
+/** Bounded same-source call projection. Invalid rows are omitted rather than failing the child. */
+export function observerCalls(calls: readonly ChildToolCall[] | undefined): { calls: ObserverToolCall[]; callsTruncated: boolean } {
+	if (!calls) return { calls: [], callsTruncated: false };
+	const out: ObserverToolCall[] = [];
+	const seen = new Set<string>();
+	let dropped = false;
+	for (const call of calls) {
+		const projected = projectCall(call);
+		if (!projected || seen.has(projected.id) || out.length >= HARD_LIMITS.maxObservedCalls) {
+			dropped = true;
+			continue;
+		}
+		seen.add(projected.id);
+		out.push(projected);
+	}
+	return { calls: out, callsTruncated: dropped };
 }
 
 function parseActiveTools(value: unknown): string[] | undefined {
@@ -203,7 +322,8 @@ function parseTask(value: unknown): ObserverTask | undefined {
 	if (route === undefined) return undefined;
 	const headline = parseHeadline(value.headline);
 	const activeTools = parseActiveTools(value.activeTools);
-	if (headline === undefined || activeTools === undefined) return undefined;
+	const calls = parseCalls(value.calls);
+	if (headline === undefined || activeTools === undefined || calls === undefined || typeof value.callsTruncated !== "boolean") return undefined;
 	return {
 		id: value.id,
 		ordinal: value.ordinal,
@@ -217,6 +337,8 @@ function parseTask(value: unknown): ObserverTask | undefined {
 		replayed: value.replayed,
 		headline,
 		activeTools,
+		calls,
+		callsTruncated: value.callsTruncated,
 	};
 }
 

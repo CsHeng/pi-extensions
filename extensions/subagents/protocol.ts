@@ -1,4 +1,4 @@
-import { HARD_LIMITS, emptyUsage, type ChildActivity, type UsageTotals } from "./contracts.ts";
+import { HARD_LIMITS, emptyUsage, truncateUtf8, type ChildActivity, type ChildToolCall, type ChildToolCallStatus, type UsageTotals } from "./contracts.ts";
 
 const KNOWN_EVENT_TYPES = new Set([
 	"session", "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end",
@@ -69,6 +69,9 @@ export class JsonlProtocolParser {
 	private agentEndObserved = false;
 	private agentSettledObserved = false;
 	private readonly activeToolCalls = new Map<string, string>();
+	private readonly calls = new Map<string, TrackedCall>();
+	private finished: TrackedCall[] = [];
+	private callsAdmissionLimited = false;
 
 	constructor(options: ProtocolParserOptions = {}) {
 		this.now = options.now ?? (() => performance.now());
@@ -115,10 +118,13 @@ export class JsonlProtocolParser {
 
 	snapshot(at = this.now()): Readonly<ChildActivity> {
 		const activeTools = [...new Set([...this.activeToolCalls.values()].filter((tool) => !this.allowedTools || this.allowedTools.has(tool)))].sort();
+		const projected = this.projectedCalls();
 		return Object.freeze({
 			phase: this.phase,
 			assistantTurns: this.messageCount,
 			activeTools: Object.freeze(activeTools) as unknown as string[],
+			calls: Object.freeze(projected.calls.map((call) => Object.freeze({ ...call }))) as unknown as ChildToolCall[],
+			callsTruncated: projected.callsTruncated,
 			...(this.latestEventType === undefined ? {} : { latestEventType: this.latestEventType }),
 			...(this.stopReason === undefined ? {} : { latestStopReason: this.stopReason }),
 			errorObserved: this.errorObserved,
@@ -150,7 +156,8 @@ export class JsonlProtocolParser {
 		const eventType = typeof event.type === "string" && KNOWN_EVENT_TYPES.has(event.type) ? event.type : "unknown";
 		this.latestEventType = eventType;
 		this.projectEvent(eventType, event);
-		this.onActivity?.(this.snapshot(observedAt));
+		try { this.onActivity?.(this.snapshot(observedAt)); }
+		catch { /* Optional observation must not stop protocol consumption or later settlement. */ }
 	}
 
 	private projectEvent(eventType: string, event: Record<string, unknown>): void {
@@ -203,17 +210,23 @@ export class JsonlProtocolParser {
 		} else if (eventType === "tool_execution_start") {
 			const id = stringField(event, "toolCallId");
 			const tool = stringField(event, "toolName");
-			if (id && tool) this.trackTool(id, tool);
-			else this.protocolInvalid = true;
+			if (id && tool) {
+				this.trackTool(id, tool);
+				if (this.activeToolCalls.has(id)) this.observeCallStart(id, tool, event);
+			} else this.protocolInvalid = true;
 			this.agentSettledObserved = false;
 			this.finalOutput = "";
 			if (!this.agentSettledObserved) this.phase = "running";
+		} else if (eventType === "tool_execution_update") {
+			this.observeCallUpdate(event);
 		} else if (eventType === "tool_execution_end") {
 			this.agentSettledObserved = false;
 			this.finalOutput = "";
 			const id = stringField(event, "toolCallId");
-			if (id) this.activeToolCalls.delete(id);
-			else this.protocolInvalid = true;
+			if (id) {
+				this.activeToolCalls.delete(id);
+				this.finishObservedCall(id, event);
+			} else this.protocolInvalid = true;
 			if (event.isError === true) {
 				this.errorObserved = true;
 				this.errorCount += 1;
@@ -266,6 +279,93 @@ export class JsonlProtocolParser {
 		}
 		this.activeToolCalls.set(id, tool);
 	}
+
+	private elapsed(at: number): number {
+		return Math.max(0, at - this.startedAt);
+	}
+
+	private observeCallStart(id: string, tool: string, event: Record<string, unknown>): void {
+		try {
+			const at = this.elapsed(this.lastActivityAt);
+			const described = describeCall(tool, event.args);
+			const parentId = callParent(event);
+			const existing = this.calls.get(id);
+			this.finished = this.finished.filter((item) => item.id !== id);
+			this.calls.set(id, {
+				id,
+				tool,
+				...(parentId ? { parentId } : existing?.parentId ? { parentId: existing.parentId } : {}),
+				...(described.summary ? { summary: described.summary } : existing?.summary ? { summary: existing.summary } : {}),
+				...(described.deadlineMs !== undefined ? { deadlineMs: described.deadlineMs } : existing?.deadlineMs !== undefined ? { deadlineMs: existing.deadlineMs } : {}),
+				startedMs: existing?.startedMs ?? at,
+				updatedMs: at,
+				status: "running",
+				tail: existing?.tail ?? "",
+				truncated: existing?.truncated ?? false,
+			});
+		} catch { /* A summary failure must not invalidate the execution. */ }
+	}
+
+	private observeCallUpdate(event: Record<string, unknown>): void {
+		try {
+			const id = stringField(event, "toolCallId");
+			if (!id) return;
+			const at = this.elapsed(this.lastActivityAt);
+			let call = this.calls.get(id);
+			if (!call) {
+				const tool = stringField(event, "toolName");
+				if (!tool) return;
+				// Unmatched updates are optional. Do not consume the mandatory pending-tool fence.
+				if (this.calls.size >= HARD_LIMITS.maxPendingToolCalls) {
+					this.callsAdmissionLimited = true;
+					return;
+				}
+				call = { id, tool, updatedMs: at, status: "running", tail: "", truncated: false };
+			}
+			const described = describeCall(call.tool, event.args);
+			const observed = outputObservation(resultText(event.partialResult), at);
+			const parentId = callParent(event);
+			this.calls.set(id, {
+				...call,
+				updatedMs: at,
+				...(parentId ? { parentId } : {}),
+				...(described.summary ? { summary: described.summary } : {}),
+				...(described.deadlineMs !== undefined ? { deadlineMs: described.deadlineMs } : {}),
+				...(observed ? { tail: observed.tail, truncated: observed.truncated, outputMs: observed.outputMs } : {}),
+			});
+		} catch { /* Optional output projection. */ }
+	}
+
+	private finishObservedCall(id: string, event: Record<string, unknown>): void {
+		try {
+			const call = this.calls.get(id);
+			if (!call) return;
+			const at = this.elapsed(this.lastActivityAt);
+			const observed = outputObservation(resultText(event.result), at);
+			const parentId = callParent(event);
+			const status: ChildToolCallStatus = event.isError === true ? "failed" : event.isError === false ? "succeeded" : "unknown";
+			const finished = {
+				...call,
+				updatedMs: at,
+				status,
+				tail: observed ? observed.tail : call.tail,
+				truncated: observed ? observed.truncated : call.truncated,
+				...(observed ? { outputMs: observed.outputMs } : {}),
+				...(parentId ? { parentId } : {}),
+			};
+			this.calls.delete(id);
+			this.finished = [finished, ...this.finished.filter((item) => item.id !== id)].slice(0, HARD_LIMITS.maxObservedCalls);
+		} catch { /* Optional terminal projection. */ }
+	}
+
+	private projectedCalls(): { calls: ChildToolCall[]; callsTruncated: boolean } {
+		const visible = (call: TrackedCall) => !this.allowedTools || this.allowedTools.has(call.tool);
+		const combined = [...[...this.calls.values()].filter(visible), ...this.finished.filter(visible)];
+		return {
+			calls: combined.slice(0, HARD_LIMITS.maxObservedCalls).map(publicCall),
+			callsTruncated: combined.length > HARD_LIMITS.maxObservedCalls || this.callsAdmissionLimited,
+		};
+	}
 }
 
 // Native print JSON emits the discriminant first. The redundant run aggregate
@@ -274,8 +374,109 @@ function isRedundantAggregate(prefix: string): boolean {
 	return /^\s*\{\s*"type"\s*:\s*"agent_end"\s*[,}]/.test(prefix);
 }
 
+interface TrackedCall {
+	id: string;
+	tool: string;
+	parentId?: string;
+	summary?: string;
+	startedMs?: number;
+	updatedMs: number;
+	outputMs?: number;
+	status: ChildToolCallStatus;
+	deadlineMs?: number;
+	tail: string;
+	truncated: boolean;
+}
+
+const SHELL_TOOLS = new Set(["bash", "powershell"]);
+const SUMMARY_FIELDS = ["command", "pattern", "path", "query", "url"] as const;
+const SENSITIVE_ARG = /password|passwd|secret|token|credential|authorization|api[_-]?key|private[_-]?key|cookie|^env$/i;
+const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
+
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
 	return typeof record[key] === "string" ? record[key] : undefined;
+}
+
+function callParent(event: Record<string, unknown>): string | undefined {
+	const parent = event.parentToolCallId;
+	return typeof parent === "string" && parent.length > 0 && Buffer.byteLength(parent) <= HARD_LIMITS.maxCallIdBytes && !CONTROL.test(parent) ? parent : undefined;
+}
+
+function describeCall(tool: string, args: unknown): { summary?: string; deadlineMs?: number } {
+	if (!isRecord(args)) return {};
+	const deadlineMs = shellDeadline(tool, args);
+	const parts: string[] = [];
+	for (const key of SUMMARY_FIELDS) {
+		if (SHELL_TOOLS.has(tool) && key !== "command") continue;
+		if (!SHELL_TOOLS.has(tool) && key === "command") continue;
+		const value = args[key];
+		if (typeof value !== "string" || !value.trim() || SENSITIVE_ARG.test(key)) continue;
+		parts.push(redactText(value));
+	}
+	const summary = boundStart(parts.join(" ").replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").replace(/\s+/g, " ").trim());
+	return {
+		...(summary ? { summary } : {}),
+		...(deadlineMs === undefined ? {} : { deadlineMs }),
+	};
+}
+
+function shellDeadline(tool: string, args: Record<string, unknown>): number | undefined {
+	if (!SHELL_TOOLS.has(tool) || typeof args.timeout !== "number" || !Number.isFinite(args.timeout) || args.timeout < 0) return undefined;
+	const ms = Math.round(args.timeout * 1000);
+	return Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+function resultText(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (!isRecord(value) || !Array.isArray(value.content)) return undefined;
+	const texts = value.content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []);
+	return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
+function redactText(value: string): string {
+	return value
+		.replace(/(^|[\s;&|`(?&])((?:--?)?(?:password|passwd|secret|token|api-key|apikey|access-token|authorization)|[A-Za-z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY|CREDENTIAL|AUTHORIZATION)[A-Za-z0-9_]*)(=|\s+)([^\s;&|]+)/gi, "$1$2$3[redacted]")
+		.replace(/\/\/([^/\s:@]+):([^@\s/]+)@/g, "//$1:[redacted]@")
+		.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
+}
+
+function boundStart(value: string): string {
+	if (!value) return "";
+	const bounded = truncateUtf8(value, HARD_LIMITS.maxCallSummaryBytes);
+	return bounded.truncatedBytes > 0 ? `${truncateUtf8(value, HARD_LIMITS.maxCallSummaryBytes - 3).text.trimEnd()}…` : bounded.text;
+}
+
+function outputObservation(text: string | undefined, at: number): { tail: string; truncated: boolean; outputMs: number } | undefined {
+	if (!text || !text.trim()) return undefined;
+	const bounded = boundTail(text);
+	if (!bounded.tail) return undefined;
+	return { ...bounded, outputMs: at };
+}
+
+function boundTail(value: string): { tail: string; truncated: boolean } {
+	const single = redactText(value).replace(/[\u0000-\u001F\u007F-\u009F]+/g, " ").replace(/\s+/g, " ").trim();
+	const size = Buffer.byteLength(single);
+	if (size <= HARD_LIMITS.maxCallTailBytes) return { tail: single, truncated: false };
+	const bytes = Buffer.from(single);
+	let start = bytes.length - HARD_LIMITS.maxCallTailBytes;
+	while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
+	return { tail: bytes.subarray(start).toString("utf8").trimStart(), truncated: true };
+}
+
+function publicCall(call: TrackedCall): ChildToolCall {
+	return {
+		id: call.id,
+		tool: call.tool,
+		status: call.status,
+		tail: call.tail,
+		truncated: call.truncated,
+		...(call.parentId ? { parentId: call.parentId } : {}),
+		...(call.summary ? { summary: call.summary } : {}),
+		...(call.startedMs !== undefined ? { startedMs: call.startedMs } : {}),
+		...(call.updatedMs !== undefined ? { updatedMs: call.updatedMs } : {}),
+		...(call.outputMs !== undefined ? { outputMs: call.outputMs } : {}),
+		...(call.deadlineMs !== undefined ? { deadlineMs: call.deadlineMs } : {}),
+	};
 }
 
 function finiteNumber(value: unknown): number {

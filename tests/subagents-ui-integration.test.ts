@@ -98,6 +98,8 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 			replayed: false,
 			headline: "scan the bounded facts",
 			activeTools: ["read"],
+			calls: [],
+			callsTruncated: false,
 		}],
 	};
 	events.emit(OBSERVER_EVENT, snapshot);

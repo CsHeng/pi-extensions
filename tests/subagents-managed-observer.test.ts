@@ -50,6 +50,16 @@ test("observer publishes actual starts, route, turns and frozen terminal values 
 	assert.equal(seen.at(-1)?.tasks[0]?.assistantTurns, 3);
 	assert.equal(seen.at(-1)?.tasks[0]?.route?.thinking, "high");
 	assert.deepEqual(seen.at(-1)?.tasks[0]?.activeTools, ["read", "grep"]);
+	const withCall = result("running", ["bash"]);
+	withCall.activity = {
+		...withCall.activity!,
+		calls: [{ id: "bash-1", tool: "bash", status: "running", summary: "grep -R /", tail: "", truncated: false }],
+	};
+	observer.update([withCall]);
+	assert.equal(seen.at(-1)?.tasks[0]?.calls[0]?.id, "bash-1");
+	assert.equal(seen.at(-1)?.tasks[0]?.calls[0]?.summary, "grep -R /");
+	assert.equal(seen.at(-1)?.tasks[0]?.calls[0]?.parentId, null);
+	assert.doesNotMatch(JSON.stringify(seen.at(-1)), /never-published/);
 	const revision = seen.at(-1)!.revision;
 	t.mock.timers.tick(OBSERVER_HEARTBEAT_MS);
 	assert.ok(seen.at(-1)!.revision > revision);

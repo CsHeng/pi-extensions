@@ -13,6 +13,50 @@ export interface SettlementBarrier {
 	schedule(review: (ctx: ExtensionContext) => void): boolean;
 }
 
+/** One idle-start reservation shared by co-loaded extensions, not an execution scheduler.
+ * Keep it through preflight until request preparation or explicit invalidation. */
+interface WakeState { sessionId?: string; listening?: boolean }
+const wakeStates = new WeakMap<ExtensionAPI["events"], WakeState>();
+const WAKE_STATE_EVENT = "csheng.model-wake.state";
+function wakeState(pi: ExtensionAPI): WakeState {
+	const cached = wakeStates.get(pi.events);
+	if (cached) return cached;
+	// Pi exposes a different events facade to each extension. Resolve the one
+	// ephemeral lease through their shared public bus, not facade identity.
+	let shared: WakeState | undefined;
+	pi.events.emit(WAKE_STATE_EVENT, { accept: (state: WakeState) => { shared = state; } });
+	const state = shared ?? {};
+	if (!shared) pi.events.on(WAKE_STATE_EVENT, request => {
+		const accept = (request as { accept?: (state: WakeState) => void })?.accept;
+		if (typeof accept === "function") accept(state);
+	});
+	wakeStates.set(pi.events, state);
+	return state;
+}
+export function reserveModelWake(pi: ExtensionAPI, ctx: ExtensionContext): boolean {
+	const state = wakeState(pi);
+	if (!state.listening) {
+		state.listening = true;
+		const clear = () => { delete state.sessionId; };
+		// Every extension must observe the lease through request preparation, regardless
+		// of factory load order. Synthetic providers may omit transport hooks.
+		pi.on("before_provider_request", clear);
+		pi.on("message_start", event => { if (event.message.role === "assistant") clear(); });
+		pi.on("input", event => { if (event.source === "interactive" || event.source === "rpc") clear(); });
+		pi.on("agent_end", event => { if (event.messages.some(message => message.role === "assistant" && ["error", "aborted"].includes(message.stopReason))) clear(); });
+		pi.on("session_start", clear);
+		pi.on("session_tree", clear);
+		pi.on("session_shutdown", clear);
+	}
+	const sessionId = ctx.sessionManager.getSessionId();
+	if (state.sessionId === sessionId) return false;
+	if (!ctx.isIdle() || ctx.hasPendingMessages() || ctx.signal?.aborted || !ctx.isProjectTrusted()) return false;
+	state.sessionId = sessionId;
+	return true;
+}
+export function modelWakeReserved(pi: ExtensionAPI, ctx: ExtensionContext): boolean { return wakeState(pi).sessionId === ctx.sessionManager.getSessionId(); }
+export function releaseModelWake(pi: ExtensionAPI): void { delete wakeState(pi).sessionId; }
+
 interface RunWait {
 	token: string;
 	sessionId: string | undefined;

@@ -17,10 +17,12 @@ import {
 	formatSessionCountRows,
 	formatSessionCounts,
 	formatSessionTitle,
+	formatLiveRow,
 	formatSessionUsage,
 	sessionCounts,
 	sessionHelpText,
 	shortLabel,
+	taskColumns,
 } from "../extensions/subagents-ui/render.ts";
 import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
 import {
@@ -86,6 +88,8 @@ function task(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): Obser
 		replayed: false,
 		headline: "scan the bounded facts",
 		activeTools: [],
+		calls: [],
+		callsTruncated: false,
 		...overrides,
 	};
 }
@@ -378,6 +382,28 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 	const expanded = overlay.render(80, 40).join("\n");
 	assert.match(expanded, /history 1–20 of 27 · page 1\/2/);
 	assert.equal((expanded.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "live rows stay pinned under history");
+});
+
+test("live rows show call identity and summary without a control", () => {
+	const row = task({
+		activeTools: ["bash"],
+		calls: [{
+			id: "bash-1",
+			parentId: null,
+			tool: "bash",
+			summary: "grep -R /",
+			startedMs: 1,
+			updatedMs: 2,
+			outputMs: null,
+			status: "running",
+			deadlineMs: null,
+			tail: "quiet tail",
+			truncated: false,
+		}],
+	});
+	const rendered = formatLiveRow(row, "live", taskColumns([row], "live")).text;
+	assert.match(rendered, /bash bash-1 running grep -R \//);
+	assert.doesNotMatch(rendered, /cancel|apply|join|quiet tail/);
 });
 
 test("live route renders on the primary row while headline and tools stay on the secondary line", () => {

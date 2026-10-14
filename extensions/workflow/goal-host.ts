@@ -1,6 +1,6 @@
 /** Pi owns the loop. Tracking only records tasks and offers bounded settlement reminders. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerSettlementBarrier } from "../shared/settlement.ts";
+import { registerSettlementBarrier, reserveModelWake, modelWakeReserved, releaseModelWake } from "../shared/settlement.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
 import { isUserInputSource } from "./host-adapter.ts";
 import { createGoalStore } from "./goal-store.ts";
@@ -12,6 +12,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  let epoch = 0, stopped = false;
  let sessionId: string | undefined;
  const dispatches = new Set<string>(), pending = new Set<string>(), terminal = new Set<string>();
+ const reminderContent = () => "Return attention to the tracked work under the user's current instructions. Revise unnecessary inferred steps, advance independent work and inspect ready results. If only event-dependent work remains, leave it unfinished and wait for an execution event; do not invent a blocker or update the list merely to obtain another reminder. Tracking adds no verification or review obligations.\n" + (pending.size ? `${pending.size} managed run(s) remain pending; this does not prevent independent work.\n` : "") + goalReceipt(store.view());
  const barrier = registerSettlementBarrier(pi, { command: "csheng-workflow-wait", tool: "csheng_workflow", enabled: () => store.canRemind() });
  const unsubscribe = store.subscribe(() => { barrier.arm(); });
  registerGoalTool(pi, store, () => stopped);
@@ -33,6 +34,13 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
   if (view.state || view.unavailable) messages.push({ role: "custom", customType: type,
    content: "Current task tracking (read-only context, not new requirements or authority). " + goalReceipt(view, 12), display: false, timestamp: Date.now() });
   return { messages };
+ });
+ pi.on("context_with_system", (event, ctx) => {
+  // Share a completion/attention turn rather than scheduling a second reminder.
+  if (stopped || ctx.signal?.aborted || !store.canRemind() || !modelWakeReserved(pi, ctx) || !pi.getActiveTools().includes("csheng_workflow")) return;
+  const content = reminderContent();
+  store.remind(() => {});
+  return { messages: [...event.messages, { role: "custom", customType: "csheng-workflow-reminder", content, display: false, timestamp: Date.now() }] };
  });
  pi.on("message_end", event => { if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) stopped = true; });
  pi.on("tool_execution_start", event => {
@@ -57,13 +65,13 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  });
  pi.on("agent_settled", (_event, ctx) => {
   if (stopped || ctx.signal?.aborted || barrier.aborted) { store.pause("Host interruption; resume only when continuing the work."); return; }
-  if (!store.canRemind() || pending.size || !["tui", "rpc"].includes(ctx.mode) || !ctx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow")) return;
+  if (!store.canRemind() || !["tui", "rpc"].includes(ctx.mode) || !ctx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow")) return;
   const lease = epoch;
   barrier.schedule(idleCtx => {
-   if (stopped || lease !== epoch || pending.size || !idleCtx.isIdle() || idleCtx.hasPendingMessages() || !idleCtx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow")) return;
+   if (stopped || lease !== epoch || !store.canRemind() || !idleCtx.isIdle() || idleCtx.hasPendingMessages() || !idleCtx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow") || !reserveModelWake(pi, idleCtx)) return;
    try {
-    store.remind(() => pi.sendUserMessage("Return attention to the tracked work under the user's current instructions. Revise unnecessary inferred steps, continue useful work, or record the actual blocker or pause. Tracking adds no verification or review obligations.\n" + goalReceipt(store.view()), { deliverAs: "followUp" }));
-   } catch { store.recover("Task reminder could not be recorded or delivered; inspect before resuming."); }
+    store.remind(() => pi.sendUserMessage(reminderContent(), { deliverAs: "followUp" }));
+   } catch { releaseModelWake(pi); store.recover("Task reminder could not be recorded or delivered; inspect before resuming."); }
   });
  });
  pi.on("session_shutdown", () => { reset(); ui.detach(); unsubscribe(); unsubscribeExecution(); });

@@ -20,6 +20,10 @@ export const HARD_LIMITS = Object.freeze({
 	maxFinalOutputBytes: 50 * 1024,
 	maxProtocolLineBytes: 1024 * 1024,
 	maxPendingToolCalls: 1024,
+	maxObservedCalls: 16,
+	maxCallSummaryBytes: 160,
+	maxCallTailBytes: 240,
+	maxCallIdBytes: 128,
 	maxWaitSpans: 2048,
 	maxStderrBytes: 16 * 1024,
 	killGraceMs: 5 * 1000,
@@ -83,11 +87,33 @@ export const CHILD_ACTIVITY_PHASES = [
 	"closed",
 ] as const;
 export type ChildActivityPhase = (typeof CHILD_ACTIVITY_PHASES)[number];
+export const CHILD_TOOL_CALL_STATUSES = ["running", "succeeded", "failed", "unknown"] as const;
+export type ChildToolCallStatus = (typeof CHILD_TOOL_CALL_STATUSES)[number];
+
+/** One child tool call observed from the live stream. Absent fields were not in the event. */
+export interface ChildToolCall {
+	id: string;
+	parentId?: string;
+	tool: string;
+	summary?: string;
+	startedMs?: number;
+	/** Last stream activity for this call, including start or end with no text. */
+	updatedMs?: number;
+	/** Set only when nonempty output was observed. Absent means that time is unknown. */
+	outputMs?: number;
+	status: ChildToolCallStatus;
+	deadlineMs?: number;
+	tail: string;
+	truncated: boolean;
+}
 
 export interface ChildActivity {
 	phase: ChildActivityPhase;
 	assistantTurns: number;
 	activeTools: string[];
+	/** Bounded live calls. Missing means this snapshot has no call detail, not that no call ran. */
+	calls?: ChildToolCall[];
+	callsTruncated?: boolean;
 	latestEventType?: string;
 	latestStopReason?: string;
 	errorObserved: boolean;

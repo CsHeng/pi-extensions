@@ -136,7 +136,7 @@ test("live pages reject settled or duplicate identities and retain safe route de
 	const reply = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-identity", page: 0 }, scope(ownerOf(repo)));
 	assert.equal(reply.history.rows[0]!.route?.model, "safe-model");
 	assert.equal(parseSessionViewReply(reply).ok, true);
-	const live = { id: "LiveHandle", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
+	const live = { id: "LiveHandle", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [], calls: [], callsTruncated: false };
 	const withLive = { ...reply, live: [live], summary: { ...reply.summary!, liveAgents: 1 } };
 	assert.equal(parseSessionViewReply(withLive).ok, true);
 	assert.equal(parseSessionViewReply({ ...withLive, live: [{ ...live, status: "succeeded" }] }).ok, false);
@@ -213,7 +213,7 @@ test("builder pages every retained handle beyond admission limits with page-inde
 		for (const record of records) await store.withSession(record.handle, { repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async current => { current.state = "closed"; current.retained = true; await store.save(current); });
 	}
 	assert.equal(handles.length, 15);
-	const liveRow = { id: handles[0]!, ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 1, elapsedMs: 5, replayed: false, headline: "live", activeTools: [] };
+	const liveRow = { id: handles[0]!, ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 1, elapsedMs: 5, replayed: false, headline: "live", activeTools: [], calls: [], callsTruncated: false };
 	const builder = new SessionViewBuilder({ store, limits: { pageSize: 4 } });
 	const replies: SessionViewReply[] = [];
 	for (let page = 0; page < 4; page++) replies.push(await builder.build({ version: 4, requestId: `ui-${page}`, page }, scope(ownerOf(repo), [liveRow])));
@@ -242,7 +242,7 @@ test("builder gates untrusted or unresolved owners and keeps fresh live rows usa
 	const { base, repo } = await rootFixture(t);
 	const store = new ManagedSessionStore(base);
 	const builder = new SessionViewBuilder({ store });
-	const liveRow = { id: "LiveHandle1", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [] };
+	const liveRow = { id: "LiveHandle1", ordinal: 1, role: "explorer" as const, episode: 1, status: "running" as const, executionPhase: "child-execution" as const, route: null, assistantTurns: 0, elapsedMs: null, replayed: false, headline: "", activeTools: [], calls: [], callsTruncated: false };
 	const untrusted = await builder.build({ version: 4, requestId: "ui-1", page: 0 }, { ...scope(ownerOf(repo), [liveRow]), trusted: false });
 	assert.deepEqual(untrusted.history, { state: "unavailable", reason: "project_trust_required", pageSize: SESSION_VIEW_LIMITS.pageSize, page: 0, totalRows: 0, totalPages: 0, rows: [] });
 	assert.equal(untrusted.summary, null);
