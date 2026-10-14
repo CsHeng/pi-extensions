@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports eight maintained extensions: `multi-skill-mentions`, `fast-gpt`, `subagents`, `subagents-ui`, `status-footer`, `work-timing`, `workflow`, and `agent-bark`, while preserving Pi's authoritative host agent loop. `subagents-ui` is default-loaded as a TUI-only read-only observer.
+This repository contains small, independently removable Pi extensions. It exports nine maintained extensions: `multi-skill-mentions`, `fast-gpt`, `subagents`, `subagents-ui`, `status-footer`, `work-timing`, `workflow`, `agent-bark`, and `retained-shell`, while preserving Pi's authoritative host agent loop. `subagents-ui` is default-loaded as a TUI-only read-only observer.
 
 ## Multi-skill Mentions
 
@@ -44,13 +44,21 @@ Historical one-shot `csheng_subagents`, `/subagents-debug` and snapshot UI v1 ar
 
 ## Work Timing
 
-`work-timing` replaces the active TUI working label and appends one completion entry when the agent settles; both count the span of the current user message, meaning every model turn and tool call it triggered, while the footer keeps its own session-cumulative counters. Durations use carried `h`, `m`, and `s` units, such as `1h 1m 1s`, and non-zero sub-second reasoning renders `<1s` so it never contradicts its share. The live label is `Working... 12s • ↑ 17,234 ↓ 4,321 tokens • R 3s / ΣR 16s • 720 tok/s`: elapsed wall time and upstream/downstream tokens (`↑` provider `usage.input`, `↓` provider `usage.output` or the chars/4 estimate of streamed text, thinking, and tool-call arguments) accumulate for that user message and stay visible while tools run, `R` is the current turn's reasoning, and `ΣR` the reasoning accumulated across its turns. Once a tool has been executing for at least two seconds, the live label inserts `⚙ <elapsed>` right after the head clock, as in `Working... 47m 29s • ⚙ 46m 51s • ↑ 9,861 ↓ 20,323 tokens • R 4s / ΣR 1m 33s • 217 tok/s`: the longest-running active tool sets that clock, `+N` counts the other concurrent tools, and time spent waiting on extension UI prompts is excluded from it. The TUI-only entry repeats the field order with everything cumulative — `Worked for 12s • ↑ 17,234 ↓ 4,321 tokens • ΣR 16s (45%) • 720 tok/s` — and never enters model context. One formatter writes the working line at two cadences: the one-second clock samples elapsed time, `R`, and `ΣR` together, while stream events refresh tokens and `tok/s` immediately using those cached durations. Lifecycle edges can refresh the full sample; settlement renders final values once. Both cadences use the same complete format, and unchanged text is not republished. Narrow terminals compact the live label to the host's single-line working row — fields keep their order, `R / ΣR` and the live tool field always stay, and fields that no longer fit are omitted whole — while the settled entry keeps every field and folds at ` • ` boundaries only; the width comes from the host's terminal (`process.stdout.columns`, falling back to `COLUMNS` then 80) minus the loader padding, and resizes repaint immediately. Only one extension should own this row: when using pi-cc-extensions, turn its `enableWorkingMessage` feature off rather than trying to out-refresh it. `tests/work-timing-tui.test.ts` checks the installed Pi/CC TUI with a synthetic provider and disposable settings, without modifying user configuration. `tok/s` is decode throughput: output tokens from turns that actually streamed, divided by first-token-to-pause time. Each turn starts the decode clock on `thinking_start` or the first `thinking_delta` / `text_delta` / `toolcall_delta`, then runs through thinking and stream stalls until assistant `message_end` or the first `tool_execution_start`, so TTFT, tool execution, usage-only turns, and the gap between turns do not count. It is omitted while decode time or streamed output tokens are still zero; an unreported `↑`/`↓` side is omitted, collapsed and expanded states render the same entry line, and version-one entries render without the cumulative token segment. RPC, JSON, and print modes do not run or persist this display timer.
+A TUI-only working-row and completion-entry display for the current user message and its model/tool turns. `R / ΣR` means current-turn / cumulative **thinking duration**; the separate `tok/s` value is **decode throughput**, including thinking and tool-call output but excluding pre-output wait (TTFT), tool execution and between-turn gaps. The active `⚙` field times the longest-running current tool, not its progress. None of these displays certifies task completion.
+
+Waiting 20 seconds for first output and then decoding 600 tokens over 10 seconds still gives **60 tok/s**, not a request-wide 20 tok/s average. TTFT is a separate concept, not a standalone metric currently retained by this extension. The status footer's `R` instead counts cache-read tokens and its usage scope is session-wide.
+
+See [Work-timing metrics](docs/architecture/work-timing.md) for the complete legend, overlapping-window diagram, token estimates, live/settled examples, width behavior and maintenance boundaries. When co-loaded with `pi-cc-extensions`, its competing `enableWorkingMessage` writer must be off; source edits do not change user settings or an already-loaded process.
 
 ## Agent Bark
 
 `agent-bark` forwards user-message main-agent start and settled events to the optional user-owned `~/.local/bin/agent-bark-hook`. Only a run started by a prompt or `pi.sendUserMessage()` notifies. Pi 1.2 also starts a run for an idle `pi.sendMessage(..., { triggerTurn: true })` custom message — such as the subagent-completion wake — and that internal run stays silent at both start and settlement, so it does not produce extra Bark notifications or inherit a previous user run's eligibility. The adapter returns before registering handlers when `CSHENG_SUBAGENT_CHILD=1`, which excludes a managed subagent's own Pi process; that guard cannot cover internal runs in the parent session, which the per-run message-type eligibility handles. Main-agent TUI and headless sessions retain the same `UserPromptSubmit`, `Stop`, and `StopFailure` events, with a bounded assistant summary. A missing hook is non-fatal; credentials, duration thresholds, deduplication, and actual delivery remain the shared hook's responsibility.
 
 When adopting this packaged adapter, disable or remove the old loose `~/.pi/agent/extensions/agent-bark.ts` entry to avoid duplicate main-agent notifications. The package publisher does not modify loose extensions automatically. Removing this package entry stops the Pi adapter without changing the shared hook or its other consumers.
+
+## Retained shell
+
+In TUI and RPC, builtin `bash` can return while the same command keeps running. The result carries an execution id, a bounded output tail, and a finite deadline. `inspect` reads it, `wait` can be released without stopping it, `renew` extends that same execution, and `cancel` stops it. A running result is not exit 0 and does not get a second result on the original call. Print and JSON keep the native draining shell. A TUI/RPC terminal that the call does not return is delivered once on an idle wake or the next model request, through the shared reservation, and is not a second tool result. See [Retained shell](docs/architecture/retained-shell.md).
 
 ## Task Tracking
 
@@ -74,6 +82,8 @@ extensions/status-footer/index.ts
 extensions/work-timing/index.ts
 extensions/subagents-ui/index.ts
 extensions/workflow/index.ts
+extensions/agent-bark.ts
+extensions/retained-shell/index.ts
 ```
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.

@@ -8,6 +8,8 @@ These documents own self-contained extension behavior, maintenance and removal c
 - [Execution primitives](architecture/subagent-execution-primitives.md)
 - [Subagents UI](architecture/subagents-ui.md)
 - [Workflow](architecture/workflow.md)
+- [Work-timing metrics](architecture/work-timing.md)
+- [Retained shell](architecture/retained-shell.md)
 
 Shared integration and responsibility explanations live at `$AGENT_ARCHITECTURE_DIR/docs/architecture/`, including `pi-extension-integration.md`. New designs/plans (even changes limited to this product), deferred questions and retained evaluation results belong to that owner's `docs/plans/pi-integration/` and `docs/evaluations/pi-integration/`. Use this repository's mise root variables; do not infer checkout layout.
 
