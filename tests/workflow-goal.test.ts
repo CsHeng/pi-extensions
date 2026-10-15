@@ -82,6 +82,34 @@ test("append failure and host cancellation preserve previous records", () => {
  fail = true; assert.equal(store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }] }).ok, false); assert.deepEqual(store.current(), before);
  const signal = AbortSignal.abort(); assert.equal(store.mutate({ operation: "cancel" }, { signal }).ok, false); assert.deepEqual(store.current(), before);
 });
+test("cancelled invocations reject writes with a distinct reason without poisoning later calls", () => {
+ const f = fixture(); f.set();
+ f.store.mutate({ operation: "pause", reason: "Explicit pause" });
+ const before = f.store.current(), entries = f.entries.length;
+ const signal = AbortSignal.abort();
+ for (const operation of [
+  { operation: "update", tasks: [{ id: "a", status: "done" }] },
+  { operation: "resume" },
+  { operation: "cancel" },
+ ] as const) {
+  const result = f.store.mutate(structuredClone(operation) as Parameters<typeof f.store.mutate>[0], { signal });
+  assert.equal(result.ok, false);
+  assert.deepEqual("error" in result ? result.error : undefined, { code: "call_cancelled" });
+  assert.deepEqual(f.store.current(), before); assert.equal(f.entries.length, entries);
+ }
+ assert.equal(f.store.mutate({ operation: "inspect" }, { signal }).ok, true);
+ const active = new AbortController().signal;
+ assert.equal(f.store.mutate({ operation: "resume" }, { signal: active }).ok, true);
+ assert.equal(f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }] }, { signal: active }).ok, true);
+ assert.equal(f.store.mutate({ operation: "cancel" }, { signal: active }).ok, true);
+ assert.deepEqual(f.store.current()!.tasks.map(task => task.status), ["done", "cancelled"]);
+});
+test("validation failures are not classified as cancelled calls", () => {
+ const f = fixture(); f.set(); const before = f.store.current();
+ const result = f.store.mutate({ operation: "update", tasks: [{ id: "missing", status: "done" }] }, { signal: new AbortController().signal });
+ assert.equal(result.ok, false); assert.equal("error" in result ? result.error : undefined, undefined);
+ assert.deepEqual(f.store.current(), before);
+});
 test("duplicate ids and unknown protocol fields reject atomically", () => {
  const f = fixture(); f.set(); const before = f.store.current();
  assert.equal(f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }, { id: "a", status: "todo" }] }).ok, false);

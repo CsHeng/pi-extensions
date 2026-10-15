@@ -40,7 +40,7 @@ All-done lists display done. Cancelled work remains visible and distinct: mixed 
 }
 ```
 
-These items and notes are examples of the main agent's chosen work, not mandatory phases, tests or reports. Tracking updates should be useful progress records; a tracking failure never calls for rerunning a completed business operation to manufacture evidence.
+These items and notes are examples of the main agent's chosen work, not mandatory phases, tests or reports. Tracking updates should be useful progress records; a tracking failure never calls for rerunning a completed business operation to manufacture evidence. Mutation cancellation is scoped to the current tool invocation's AbortSignal, not an earlier provider error or automatic-wake fence. A cancelled write returns `ok: false` with `error.code: "call_cancelled"` and preserves the prior state; inspect remains read-only, and later active invocations may update, resume or cancel normally. Validation and persistence failures are not reported as cancellation.
 
 ## Context, Display And Observation
 
@@ -56,7 +56,7 @@ In trusted TUI/RPC sessions, a list with todo/doing work may receive one ordinar
 
 An unchanged list gets no second automatic reminder. Identical set/update operations, inspect, tool observations and new attempt-like labels do not establish task changes. A real task update or new interactive/RPC input permits another reminder. New user input enters the same ordinary main-agent context without an alignment ritual. Paused, cancelled, all-terminal and wholly blocked lists do not dispatch reminders.
 
-The extension rechecks input/session ownership, abort, idle state, queued messages, project trust and tool availability at settlement. Host abort/provider errors pause unfinished tracking. Print/JSON modes do not dispatch reminders. There are no private loop calls, polling timers or provider changes.
+The extension rechecks input/session ownership, abort, idle state, queued messages, project trust and tool availability at settlement. A real host abort or an unrecovered provider failure pauses unfinished tracking and suppresses automatic reminders. The wake fence is attempt-local: Pi's public `agent_start` retires the previous attempt's failure when internal retry/recovery starts a fresh attempt, even when `before_agent_start` does not run again. A recovered normal completion is not marked interrupted or paused solely because an earlier attempt failed. Print/JSON modes do not dispatch reminders. There are no private loop calls, polling timers or provider changes.
 
 Managed subagent submissions with fresh current-invocation admission telemetry appear as pending facts in the reminder, not a global veto. The main may advance independent work or inspect ready results while siblings execute; if only event-dependent work remains, it can settle without inventing a blocker or updating tasks to renew reminders. Replayed accepted receipts without current admission do not imply live execution. Co-loaded executors and workflow share a thin idle-wake reservation through request preparation: a completion/attention turn carries the useful reminder rather than starting a second unchanged-revision turn. Workflow never turns execution events into task completion, and optional event integration does not require the subagent extension. Pending tracking is session-local and discarded on recovery.
 
@@ -70,6 +70,6 @@ Only the latest workflow snapshot is considered. Unsupported older completion-co
 
 ## Verification Ownership
 
-Focused store tests cover task creation, revision, completion, blockers, cancellation, no-op updates, persistence failure and safe recovery. UI tests cover visible statuses, cancelled counts, clipping, terminal sanitization and read-only controls. Synthetic-host tests cover ordinary work without tracking, current context projection, bounded continuation, public settlement ordering and asynchronous executor coexistence. Provider-schema tests use injected offline transports. Installed-host and TUI probes remain explicit integration lanes; they do not establish live-model adherence or delivery acceptance.
+Focused store tests cover task creation, revision, completion, blockers, cancellation, no-op updates, persistence failure and safe recovery. UI tests cover visible statuses, cancelled counts, clipping, terminal sanitization and read-only controls. Synthetic-host tests cover ordinary work without tracking, current context projection, bounded continuation, public settlement ordering and asynchronous executor coexistence. Recovery regressions exercise provider error followed by internal retry, legal task mutation/control and normal settlement, alongside genuine cancellation and unrecovered failure protection. Provider-schema tests use injected offline transports. Installed-host and TUI probes remain explicit integration lanes; they do not establish live-model adherence or delivery acceptance.
 
 Product source changes do not update the copied daily package or an already running Pi process. Publication, restart/load and any live effectiveness measurement remain separate authorized actions.

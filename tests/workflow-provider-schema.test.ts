@@ -13,7 +13,7 @@ function fixture() {
 	let writes = 0;
 	let calls = 0;
 	const store = createGoalStore(() => { writes += 1; });
-	registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store, () => false);
+	registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store);
 	assert.ok(tool);
 	const ctx = {
 		cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" },

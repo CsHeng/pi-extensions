@@ -1,7 +1,7 @@
 import { Check } from "typebox/value";
 import { goalParameters, goalStateSchema, type GoalOperation, type GoalState, type GoalTask, type GoalView } from "./goal-contracts.ts";
 import { actionable, unfinished } from "./goal-state.ts";
-export interface GoalContext { signal?: AbortSignal; fenced?: () => boolean }
+export interface GoalContext { signal?: AbortSignal }
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
  let unavailable: string | undefined;
@@ -21,7 +21,9 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
    try {
     if (!Check(goalParameters, op)) throw new Error("Invalid task update.");
     if (op.operation === "inspect") return { ok: true, view: view() };
-    if (ctx.signal?.aborted || ctx.fenced?.()) throw new Error("The host interrupted this update; no state changed.");
+    // Cancellation belongs to this invocation, not a previous provider/wake failure.
+    if (ctx.signal?.aborted) return { ok: false, error: { code: "call_cancelled" as const },
+     message: "This task update was cancelled; no state changed. Retry only with an active invocation, not the same cancelled call. Tracking failure does not require repeating completed business work.", view: view() };
     let next: GoalState;
     if (op.operation === "set") {
      if (!op.goal || !op.tasks) throw new Error("set needs a goal and the complete task list.");
