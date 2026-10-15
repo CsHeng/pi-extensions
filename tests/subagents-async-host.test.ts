@@ -57,6 +57,48 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
  assert.deepEqual(h.errors, []);
 });
 
+test("blocked work can resume, yield fully idle, and receive one child terminal without polling", { timeout: 20000 }, async t => {
+ const base = await mkdtemp(join(tmpdir(), "async-blocked-yield-")); const store = new ManagedSessionStore(base);
+ let release!: () => void, ctx!: ExtensionContext, service!: ContinuationService, started = false, terminalWire = "", evidenceWire = "", handle = "", wakes = 0;
+ const gate = new Promise<void>(resolve => { release = resolve; }); const trace = createTrace();
+ const h = await createHostHarness({ mode: "rpc", trace, extensions: [workflow, (pi: ExtensionAPI) => {
+  service = registerContinuationTool({ ...pi, sendMessage(message, options) {
+   if (options?.triggerTurn && message.customType === SUBAGENT_EXECUTION_EVENT) { assert.equal(ctx.isIdle(), true); wakes++; }
+   pi.sendMessage(message, options);
+  } }, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
+   options.onChildStarted?.(); started = true; await gate; options.onChildSettled?.();
+   return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "released child evidence", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
+  } });
+  pi.on("agent_start", (_event, context) => { ctx = context; });
+ }, createTraceObserver(trace)] });
+ t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
+ await exec("git", ["init", "-q", h.workDir]);
+ h.faux.setResponses([
+  tool("csheng_workflow", { operation: "set", goal: "Verify resumed execution", tasks: [{ id: "verify", title: "Verify", status: "blocked", note: "Await user prerequisite" }] }),
+  fauxAssistantMessage("Waiting for the user prerequisite"),
+ ]);
+ await h.session.prompt("Start verification"); assert.equal(h.faux.state.callCount, 2);
+ h.faux.setResponses([
+  tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "doing", note: null }] }),
+  managed({ action: "create", requestId: "yield", tasks: [{ id: "verify", role: "explorer", objective: "inspect fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }),
+  fauxAssistantMessage("Execution is pending; this turn can end without completing the task"),
+  fauxAssistantMessage("No independent work remains; waiting for the execution event"),
+  context => { terminalWire = JSON.stringify(context.messages); return managed({ action: "inspect", handle }); },
+  context => { evidenceWire = JSON.stringify(context.messages); return tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "done" }] }); },
+  fauxAssistantMessage("Execution evidence collected"),
+ ]);
+ await h.session.prompt("Prerequisite resolved; continue");
+ await until(() => started && h.faux.state.callCount === 6 && !h.session.isStreaming);
+ const state = () => h.session.sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state").at(-1) as { data: { state: GoalState } };
+ assert.equal(state().data.state.tasks[0]?.status, "doing"); assert.equal(state().data.state.paused, false); assert.equal(wakes, 0);
+ await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 6, "pending work alone must not keep requesting the provider");
+ handle = (await service.contextIndex(ctx))[0]!.handle;
+ release(); await until(() => h.faux.state.callCount === 9 && !h.session.isStreaming);
+ assert.equal(wakes, 1); assert.ok(terminalWire.includes("Subagent execution evidence is ready")); assert.ok(evidenceWire.includes("released child evidence"));
+ assert.equal(state().data.state.tasks[0]?.status, "done");
+ await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 9); assert.deepEqual(h.errors, []);
+});
+
 for (const boundary of ["settlement", "compaction", "compaction-abort", "compaction-abort-late"] as const) test(`completion waits across a held public ${boundary} boundary`, { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-wake-boundary-")); const store = new ManagedSessionStore(base);
  let releaseChild!: () => void, releaseBoundary!: () => void, entered = false, terminal = false, holding = false, badWake = false, waits = 0, context!: ExtensionContext, service!: ContinuationService, work: Promise<unknown> | undefined;

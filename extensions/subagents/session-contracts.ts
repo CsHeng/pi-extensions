@@ -2,6 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { validateGraphStructure } from "./graph.ts";
+import { observationWaitMilliseconds } from "../shared/observation-budget.ts";
 import { COLLABORATION_CONTRACT_VERSION, HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
 export const SUBAGENT_SESSION_TOOL_NAME = "csheng_subagent_sessions";
@@ -26,7 +27,7 @@ const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
 export const SubagentSessionToolSchema = Type.Object({
-	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create requires requestId/tasks; continue requires episodes. Interactive/RPC submissions default async; mode=foreground joins explicitly. inspect accepts handle or runId; join/cancel require runId (cancel may name taskId); apply requires handle/expectedEpisode/candidateId; refresh/close require handle/expectedEpisode." }),
+	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create requires requestId/tasks; continue requires episodes. Interactive/RPC submissions default async; mode=foreground joins explicitly, with optional waitSeconds (default 180). inspect accepts handle or runId; join/cancel require runId (cancel may name taskId); apply requires handle/expectedEpisode/candidateId; refresh/close require handle/expectedEpisode." }),
 	requestId: Type.Optional(Type.String({ ...opaque, description: "Required for create. Stable caller-selected identity for replay; reuse only for the same request." })),
 	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares access grants. A write grant may name multiple repository roots. Read grants authorize evidence without copying it. Role does not grant or remove permission." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks })),
@@ -34,6 +35,7 @@ export const SubagentSessionToolSchema = Type.Object({
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
 	runId: Type.Optional(opaque),
 	mode: Type.Optional(StringEnum(["async", "foreground"] as const)),
+	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for join or foreground create/continue, default 180 seconds. Explicit finite durations are honored without a product cap. Expiry releases this call, not the execution; inspect remains immediate." })),
 	taskId: Type.Optional(opaque),
 }, { additionalProperties: false });
 export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
@@ -48,12 +50,14 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(SubagentSessionToolSchema, raw)) throw new ManagedError("invalid_session_request");
 	const input = raw as SessionRequest;
 	const fields: Record<SessionRequest["action"], readonly string[]> = {
-		create: ["action", "requestId", "tasks", "mode"], continue: ["action", "episodes", "mode"],
+		create: ["action", "requestId", "tasks", "mode", "waitSeconds"], continue: ["action", "episodes", "mode", "waitSeconds"],
 		inspect: ["action", "handle", "runId"], apply: ["action", "handle", "expectedEpisode", "candidateId"],
 		close: ["action", "handle", "expectedEpisode", "disposition"], refresh: ["action", "handle", "expectedEpisode"],
-		join: ["action", "runId", "mode"], cancel: ["action", "runId", "taskId"],
+		join: ["action", "runId", "mode", "waitSeconds"], cancel: ["action", "runId", "taskId"],
 	};
 	if (Object.keys(input).some((key) => !fields[input.action].includes(key))) throw new ManagedError("invalid_action_fields");
+	if (input.waitSeconds !== undefined) { try { observationWaitMilliseconds(input.waitSeconds); } catch { throw new ManagedError("invalid_wait_seconds"); } }
+	if (input.waitSeconds !== undefined && input.mode === "async") throw new ManagedError("wait_requires_foreground");
 	if (input.action === "create") {
 		if (!input.requestId || !input.tasks) throw new ManagedError("missing_create_fields", [!input.requestId && "requestId", !input.tasks && "tasks"].filter((value): value is string => !!value));
 		const graph = validateGraphStructure({ tasks: input.tasks });
@@ -157,6 +161,8 @@ export interface SessionActionResult {
 	runId?: string;
 	generation?: string;
 	cancelOutcome?: string;
+	/** Observation budget expired; this does not cancel or settle the execution. */
+	wait?: { status: "expired"; waitSeconds: number };
 	sessions: SessionView[];
 	error?: { code: string; missingFields?: string[]; detail?: string };
 }

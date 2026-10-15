@@ -1,4 +1,5 @@
 import { mintProductId } from "./identity.ts";
+import { DEFAULT_OBSERVATION_WAIT_SECONDS } from "../shared/observation-budget.ts";
 import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -219,7 +220,11 @@ export class ContinuationService {
 		}
 		if (request.action === "join" || request.action === "cancel") {
 			const binding = this.binding(request.runId!, owner);
-			if (request.action === "join") { await this.supervisor!.join(request.runId!, signal); return this.runResult(request.runId!, "join", owner); }
+			if (request.action === "join") {
+				await this.supervisor!.join(request.runId!, signal, request.waitSeconds);
+				const result = await this.runResult(request.runId!, "join", owner);
+				return result.status === "accepted" ? { ...result, wait: { status: "expired", waitSeconds: request.waitSeconds ?? DEFAULT_OBSERVATION_WAIT_SECONDS } } : result;
+			}
 			const outcome = request.taskId ? binding.control?.cancelTask(request.taskId) ?? "not-active" : this.supervisor!.cancel(request.runId!) ? "accepted" : "not-active";
 			return { ...(await this.runResult(request.runId!, "cancel", owner)), cancelOutcome: typeof outcome === "string" ? outcome : String(outcome) };
 		}
@@ -253,6 +258,7 @@ export class ContinuationService {
 			signal?.throwIfAborted();
 			foreground = request.mode === "foreground" || !["tui", "rpc"].includes(ctx.mode);
 			if (request.mode === "async" && foreground) throw new ManagedError("async_host_mode_unsupported");
+			if (request.waitSeconds !== undefined && !foreground) throw new ManagedError("wait_requires_foreground");
 			const replays = new Map<string, SessionView>();
 			const graph = request.action === "create" ? validateGraphStructure({ tasks: request.tasks! }) : undefined;
 			if (graph && !graph.ok) throw new ManagedError(graph.error.code);
@@ -393,9 +399,14 @@ export class ContinuationService {
 		const abort = () => { this.supervisor!.cancel(runId!); };
 		signal?.addEventListener("abort", abort, { once: true });
 		if (signal?.aborted) abort();
-		try { await this.supervisor!.join(runId!); }
-		finally { signal?.removeEventListener("abort", abort); }
-		return this.runResult(runId!, request.action, owner);
+		try { await this.supervisor!.join(runId!, undefined, request.waitSeconds); }
+		finally {
+			signal?.removeEventListener("abort", abort);
+			// After this observer returns, later completion belongs to the ordinary async wake path.
+			const binding = this.bindings.get(runId!); if (binding) binding.foreground = false;
+		}
+		const result = await this.runResult(runId!, request.action, owner);
+		return result.status === "accepted" ? { ...result, wait: { status: "expired", waitSeconds: request.waitSeconds ?? DEFAULT_OBSERVATION_WAIT_SECONDS } } : result;
 	}
 	/** A child may request only what its own enclosing grants already cover; a main actor is unrestricted. */
 	private async constrainNestedAccess(tasks: readonly Pick<SubagentTask, "id" | "access">[]): Promise<void> {

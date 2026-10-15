@@ -2,11 +2,30 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import { SessionExecutionSupervisor, type ExecutionEvent, type ExecutionOwner, type SupervisorHooks, type SupervisorLimits } from "../extensions/subagents/session-supervisor.ts";
+import { observationWaitMilliseconds } from "../extensions/shared/observation-budget.ts";
 const owner: ExecutionOwner = { repository: "/repo", sessionId: "session-1", branchAnchor: "anchor" };
 const defaults: SupervisorLimits = { concurrency: 2, roles: { worker: 2, explorer: 1, reviewer: 1 } };
 function deferred<T = void>() { let resolve!: (value: T | PromiseLike<T>) => void; let reject!: (reason?: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 const supervisor = (hooks: SupervisorHooks = {}, limits = defaults) => new SessionExecutionSupervisor(owner, limits, hooks);
 const cancelled = (signal: AbortSignal) => new Promise<void>((_resolve, reject) => { if (signal.aborted) reject(signal.reason); else signal.addEventListener("abort", () => reject(signal.reason), { once: true }); });
+
+test("observation budgets default to 180 seconds without clamping explicit long waits", () => {
+ assert.equal(observationWaitMilliseconds(), 180_000);
+ for (const seconds of [0, 0.125, 1800, 3_000_000]) assert.equal(observationWaitMilliseconds(seconds), seconds * 1000);
+ for (const seconds of [-1, NaN, Infinity, Number.MAX_VALUE]) assert.throws(() => observationWaitMilliseconds(seconds));
+});
+test("join expiry and interruption leave execution alive; long waits end on the actual terminal", async t => {
+ const s = supervisor(); const started = deferred(), finish = deferred(); let signal!: AbortSignal;
+ t.after(async () => { finish.resolve(); await s.shutdown(); });
+ const receipt = await s.submit({ requestId: "budget", requestKey: "budget", prepare: async () => undefined, execute: async (_, context) => context.runTask({ id: "a", role: "worker" }, async current => { signal = current; started.resolve(); await finish.promise; return "done"; }) });
+ await started.promise;
+ assert.equal((await s.join(receipt.runId, undefined, 0)).phase, "running"); assert.equal(signal.aborted, false);
+ const observer = new AbortController(); const interrupted = s.join(receipt.runId, observer.signal, 1800); observer.abort();
+ await assert.rejects(interrupted, /join_cancelled/); assert.equal(signal.aborted, false); assert.equal(s.hasActiveWork, true);
+ let returned = false; const longWait = s.join(receipt.runId, undefined, 3_000_000).then(view => { returned = true; return view; });
+ await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(returned, false, "native timer overflow must not release a long wait immediately");
+ finish.resolve(); assert.equal((await longWait).result, "done"); assert.equal((await s.join(receipt.runId, undefined, 1800)).phase, "completed");
+});
 
 test("submission returns an accepted identity while its child remains unresolved", async () => {
 	const s = supervisor(); const started = deferred(); const finish = deferred<number>();

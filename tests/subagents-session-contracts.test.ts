@@ -6,6 +6,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseSessionRequest, SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
 
+test("waiting budgets are observation-only, finite and not capped to short host windows", () => {
+ for (const waitSeconds of [0, 0.01, 1800, 3_000_000]) assert.equal(parseSessionRequest({ action: "join", runId: "run", waitSeconds }).waitSeconds, waitSeconds);
+ assert.equal(parseSessionRequest({ action: "join", runId: "run", mode: "foreground", waitSeconds: 1800 }).waitSeconds, 1800);
+ for (const waitSeconds of [-1, NaN, Infinity, Number.MAX_VALUE]) assert.throws(() => parseSessionRequest({ action: "join", runId: "run", waitSeconds }));
+ assert.throws(() => parseSessionRequest({ action: "inspect", runId: "run", waitSeconds: 1 }), /invalid_action_fields/);
+ assert.throws(() => parseSessionRequest({ action: "create", mode: "async", requestId: "r", tasks: [], waitSeconds: 1 }));
+});
+
 test("managed actions have strict disjoint fields and bounded opaque identities", () => {
 	assert.equal(SUBAGENT_SESSION_TOOL_NAME, "csheng_subagent_sessions");
 	assert.deepEqual(parseSessionRequest({ action: "inspect" }), { action: "inspect" });

@@ -2,18 +2,15 @@ import { delimiter, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, getShellConfig } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { durationMsFromSeconds, timestampAfter } from "../shared/duration-timer.ts";
 import { registerSettlementBarrier, releaseModelWake, reserveModelWake } from "../shared/settlement.ts";
 
 import { createShellDelivery } from "./delivery.ts";
 import { createShellExecutionOwner, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type ShellStatus } from "./execution.ts";
 import {
-	boundedSeconds,
 	DEFAULT_DEADLINE_SECONDS,
 	DEFAULT_FOREGROUND_SECONDS,
 	DEFAULT_WAIT_SECONDS,
-	MAX_DEADLINE_SECONDS,
-	MAX_FOREGROUND_SECONDS,
-	MAX_WAIT_SECONDS,
 	SHELL_EXECUTION_EVENT,
 	SHELL_OWNER,
 	shellClaim,
@@ -24,19 +21,19 @@ export type { ShellExecutionEvent, ShellExecutionView, ShellStatus };
 
 const parameters = Type.Object({
 	command: Type.Optional(Type.String({ description: "Shell command. Required when starting an execution." })),
-	timeout: Type.Optional(Type.Number({ description: "Execution deadline in seconds. The process is killed at this deadline. It does not only stop waiting." })),
+	timeout: Type.Optional(Type.Number({ description: "Execution deadline in seconds. Omitted uses 600. An explicit positive finite value is honored with no product cap. The process is killed at this deadline. It does not only stop waiting." })),
 	action: Type.Optional(Type.Union([
 		Type.Literal("run"),
 		Type.Literal("inspect"),
 		Type.Literal("wait"),
 		Type.Literal("renew"),
 		Type.Literal("cancel"),
-	], { description: "run starts a command. inspect reads one execution. wait waits without stopping it. renew extends that same execution. cancel stops it." })),
+	], { description: "run starts a command. inspect reads one execution immediately for one concrete progress question, not polling. wait waits without stopping or renewing it. renew extends that same execution. cancel stops it." })),
 	executionId: Type.Optional(Type.String({ description: "Stable execution id returned by run. Not a process id." })),
 	background: Type.Optional(Type.Boolean({ description: "Return as soon as the execution is running. The process keeps going." })),
-	deadlineSeconds: Type.Optional(Type.Number({ description: "Finite execution deadline in seconds for a new run, or the new deadline for renew." })),
-	waitSeconds: Type.Optional(Type.Number({ description: "How long wait may hold this call. Releasing the wait does not stop the execution." })),
-	foregroundSeconds: Type.Optional(Type.Number({ description: "How long a non-background run may hold this call before returning while the execution continues." })),
+	deadlineSeconds: Type.Optional(Type.Number({ description: "Finite execution deadline in seconds for a new run, or the new deadline for renew. Omitted start uses 600. An explicit positive finite value is honored with no product cap and kills the process at that deadline." })),
+	waitSeconds: Type.Optional(Type.Number({ description: "How long wait may hold this call. Omitted uses 180 seconds. An explicit positive finite value is honored with no product cap. Expiry or abort releases this call only and does not cancel or renew the execution." })),
+	foregroundSeconds: Type.Optional(Type.Number({ description: "How long a non-background run may hold this call before returning while the execution continues. Omitted uses 2 seconds. An explicit positive finite value is honored with no product cap." })),
 });
 
 const outputSchema = Type.Object({
@@ -50,7 +47,7 @@ const outputSchema = Type.Object({
 	notification: Type.String(),
 });
 
-const NOTIFICATION = "A later terminal is delivered once on an idle wake or the next model request. This call will not receive a second tool result. inspect still reads it.";
+const NOTIFICATION = "Running is not success and this call will not receive a second tool result. A later terminal is delivered once on an idle wake or the next model request. inspect is for one concrete progress question, not polling. If no independent work can run, end this turn with the execution pending and rely on that notification. Do not claim success or mark the task blocked merely to wait.";
 
 export function bindRetainedShell(pi: ExtensionAPI, owner: ShellExecutionOwner = createDefaultOwner(pi)): void {
 	const delivery = createShellDelivery();
@@ -187,12 +184,14 @@ function createRetainedBashTool(
 	return {
 		name: "bash",
 		label: "bash",
-		description: "Execute a bash command. In TUI/RPC, a command that is still running after the short foreground window returns status running and keeps the same execution. The default execution deadline is 600 seconds; timeout and deadlineSeconds select a finite deadline and the shorter one wins. Use action inspect, wait, renew, or cancel on that execution id. inspect and renew do not start or kill it. wait can be released without stopping it. cancel stops it. A running result is not exit 0 and does not get a second tool result. A later terminal is delivered once on an idle wake or the next model request.",
-		promptSnippet: "Execute bash. A long TUI/RPC command can return while that same execution continues; inspect, wait, renew, and cancel it separately.",
+		description: "Execute a bash command. In TUI/RPC, a command that is still running after the foreground window returns status running and keeps the same execution. The default execution deadline is 600 seconds. timeout and deadlineSeconds select an explicit positive finite deadline, the shorter one wins, and it is not clamped to a product cap. That deadline kills the process. Omitted waitSeconds is 180 and omitted foregroundSeconds is 2; an explicit positive finite value is honored with no product cap. inspect reads one execution immediately for one concrete progress question, not polling, and never waits. wait expiry or abort releases this call only and does not cancel or renew the execution. A running result is not success. If no independent work can run, end the turn with the execution pending and rely on the one terminal notification. Do not claim success or mark the task blocked merely to wait.",
+		promptSnippet: "Execute bash. A long TUI/RPC command can return while that same execution continues. inspect is one concrete progress question, not polling. If no independent work can run, end the turn and rely on the terminal notification.",
 		promptGuidelines: [
 			"A running bash result is not a successful exit and does not get another result on the same call id.",
-			"Read it with action inspect, wait without stopping it with action wait, extend that same execution with action renew, and stop it only with action cancel.",
-			"Do not launch a second command to poll the first. A terminal that this call does not return is delivered once later; it is not a second result.",
+			"inspect reads the current snapshot for one concrete progress question, not polling. It does not wait.",
+			"wait observes without cancelling or renewing. Omitted waitSeconds is 180; an explicit positive finite duration is honored with no product cap.",
+			"If no independent work can run, end the turn with the execution pending and rely on the one terminal notification. Do not claim success or mark the task blocked merely to wait.",
+			"renew extends that same execution. cancel is the only action that stops it. Do not start a second command to poll the first.",
 		],
 		parameters,
 		outputSchema,
@@ -225,22 +224,24 @@ function createRetainedBashTool(
 						try {
 							const view = await owner.wait(executionId, scope, {
 								...(signal ? { signal } : {}),
-								waitMs: boundedSeconds(params.waitSeconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS) * 1000,
+								waitMs: durationMsFromSeconds(params.waitSeconds, DEFAULT_WAIT_SECONDS),
 							});
 							return resultOf(view, false);
 						} finally { openWaits.delete(executionId); }
 					}
 					if (action === "renew") {
 						if (params.deadlineSeconds === undefined) return failed("renew requires deadlineSeconds for the same execution");
-						const deadlineMs = boundedSeconds(params.deadlineSeconds, params.deadlineSeconds, MAX_DEADLINE_SECONDS) * 1000;
+						const deadlineMs = durationMsFromSeconds(params.deadlineSeconds, params.deadlineSeconds);
+						timestampAfter(Date.now(), deadlineMs);
 						return resultOf(owner.renew(executionId, scope, deadlineMs), false);
 					}
 					return resultOf(await owner.cancel(executionId, scope), false);
 				}
 				if (!params.command) return failed("command is required to start a shell execution");
 				const requested = [params.deadlineSeconds, params.timeout].filter((value): value is number => value !== undefined);
-				const deadlineSeconds = boundedSeconds(requested.length === 0 ? undefined : Math.min(...requested), DEFAULT_DEADLINE_SECONDS, MAX_DEADLINE_SECONDS);
-				const foregroundSeconds = params.background ? 0 : boundedSeconds(params.foregroundSeconds, DEFAULT_FOREGROUND_SECONDS, MAX_FOREGROUND_SECONDS);
+				const deadlineMs = durationMsFromSeconds(requested.length === 0 ? undefined : Math.min(...requested), DEFAULT_DEADLINE_SECONDS);
+				timestampAfter(Date.now(), deadlineMs);
+				const foregroundWindowMs = params.background ? 0 : durationMsFromSeconds(params.foregroundSeconds, DEFAULT_FOREGROUND_SECONDS);
 				openStarts.add(toolCallId);
 				try {
 					const view = await owner.start({
@@ -250,8 +251,8 @@ function createRetainedBashTool(
 						sessionId: scope.sessionId,
 						branchAnchor: scope.branchAnchor,
 						toolCallId,
-						deadlineMs: deadlineSeconds * 1000,
-						foregroundWindowMs: foregroundSeconds * 1000,
+						deadlineMs,
+						foregroundWindowMs,
 						...(signal ? { signal } : {}),
 					});
 					return resultOf(view, false);

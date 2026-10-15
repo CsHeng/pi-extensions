@@ -1,4 +1,6 @@
 import { mintProductId } from "./identity.ts";
+import { observationWaitMilliseconds } from "../shared/observation-budget.ts";
+import { DelayExpired, raceBudget } from "../shared/duration-timer.ts";
 
 export type ExecutionRole = "worker" | "reviewer" | "explorer";
 export interface ExecutionOwner { repository: string; sessionId: string; branchAnchor: string | null }
@@ -196,17 +198,16 @@ export class SessionExecutionSupervisor {
 		void job.then(() => entry.jobs.delete(job), () => entry.jobs.delete(job));
 		return job;
 	}
-	/** Join is explicit and can be used by one-shot/foreground hosts without a second executor. */
-	async join(runId: string, signal?: AbortSignal): Promise<RunExecution> {
+	/** Join releases its observer on expiry/abort without cancelling the owned execution. */
+	async join(runId: string, signal?: AbortSignal, waitSeconds?: number): Promise<RunExecution> {
+		const waitMs = observationWaitMilliseconds(waitSeconds);
 		const entry = this.entries.get(runId); if (!entry) throw new SupervisorError("unknown_run");
 		signal?.throwIfAborted();
-		let abort: (() => void) | undefined;
-		try {
-			await Promise.race([entry.completion, new Promise<never>((_resolve, reject) => {
-				abort = () => reject(new SupervisorError("join_cancelled"));
-				signal?.addEventListener("abort", abort, { once: true });
-			})]);
-		} finally { if (abort) signal?.removeEventListener("abort", abort); }
+		try { await raceBudget(entry.completion, waitMs, signal ? { signal } : {}); }
+		catch (error) {
+			if (signal?.aborted) throw new SupervisorError("join_cancelled");
+			if (!(error instanceof DelayExpired)) throw error;
+		}
 		return structuredClone(entry.view);
 	}
 	cancel(runId: string): boolean {

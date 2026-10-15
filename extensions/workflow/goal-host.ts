@@ -12,7 +12,7 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
  let epoch = 0, wakeStopped = false;
  let sessionId: string | undefined;
  const dispatches = new Set<string>(), pending = new Set<string>(), terminal = new Set<string>();
- const reminderContent = () => "Return attention to the tracked work under the user's current instructions. Revise unnecessary inferred steps, advance independent work and inspect ready results. If only event-dependent work remains, leave it unfinished and wait for an execution event; do not invent a blocker or update the list merely to obtain another reminder. Tracking adds no verification or review obligations.\n" + (pending.size ? `${pending.size} managed run(s) remain pending; this does not prevent independent work.\n` : "") + goalReceipt(store.view());
+ const reminderContent = () => "Return attention to the tracked work under the user's current instructions. Revise unnecessary inferred steps, advance independent work and inspect ready results. If only event-dependent work remains, leave it unfinished and end this model turn so the execution event can resume it. Ending a turn is not task completion. Do not poll unchanged status, invent a blocker, pause tracking or update the list merely to obtain another reminder. Tracking adds no verification or review obligations.\n" + (pending.size ? `${pending.size} managed run(s) remain pending; this does not prevent independent work.\n` : "") + goalReceipt(store.view());
  const barrier = registerSettlementBarrier(pi, { command: "csheng-workflow-wait", tool: "csheng_workflow", enabled: () => store.canRemind() });
  const unsubscribe = store.subscribe(() => { barrier.arm(); });
  registerGoalTool(pi, store);

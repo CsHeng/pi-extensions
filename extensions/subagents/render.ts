@@ -193,6 +193,7 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		...(details.generation ? { generation: boundScalar(details.generation) } : {}),
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
 	};
+	if (details.wait) payload.wait = details.wait;
 	if (details.warnings?.length) payload.warnings = details.warnings;
 	if (details.error) payload.error = { code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}), ...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}) };
 	return payload;
@@ -236,6 +237,7 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 	const lines = [
 		`Managed session ${details.action ?? "request"}: ${details.status}${details.runId ? ` run=${boundScalar(details.runId)}` : ""}${details.kind === "submission" ? " (receipt, not completion)" : ""}`,
 	];
+	if (details.wait) lines.push(`Observation budget expired after ${details.wait.waitSeconds}s; execution continues. In TUI/RPC, leave work unfinished and resume on completion notification rather than polling.`);
 	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
 	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {

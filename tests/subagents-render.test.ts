@@ -68,6 +68,12 @@ test("model-visible submission retains join identity after large reports", () =>
  assert.throws(() => parseSessionRequest({ action: "join", mode: "foreground" }), /missing_run_id/);
 });
 
+test("observation expiry stays visible in model content without claiming execution completion", () => {
+ const result = managed([], { action: "join", status: "accepted", kind: "execution", runId: "run", wait: { status: "expired", waitSeconds: 1800 } });
+ const payload = JSON.parse(formatManagedContent(result));
+ assert.equal(payload.status, "accepted"); assert.deepEqual(payload.wait, result.wait);
+});
+
 test("duration rendering is deterministic and compact", () => {
 	assert.equal(formatDuration(0), "0ms");
 	assert.equal(formatDuration(999), "999ms");

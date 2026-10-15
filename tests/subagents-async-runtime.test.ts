@@ -39,6 +39,23 @@ async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) =
 let writeRoot = "/tmp/scope";
 const task = (id: string): import("../extensions/subagents/contracts.ts").SubagentTask => ({ id, role: "worker", objective: "change source", access: [{ permission: "write", scope: writeRoot }] });
 
+test("foreground and join budget expiry release observation, preserve one execution and restore its wake", async t => {
+ const slow = gate(), started = gate(); t.after(() => slow.release());
+ let signal!: AbortSignal, executions = 0;
+ const f = await fixture(t, async options => { executions++; signal = options.signal!; started.release(); await slow.promise; });
+ const request = { action: "create", mode: "foreground", waitSeconds: 0, requestId: "budget", tasks: [task("one")] };
+ const first = await f.service.execute(request, f.ctx); await started.promise;
+ assert.equal(first.status, "accepted"); assert.deepEqual(first.wait, { status: "expired", waitSeconds: 0 }); assert.equal(first.sessions[0]?.reportComplete, false);
+ const second = await f.service.execute({ ...request, waitSeconds: 0.005 }, f.ctx);
+ assert.equal(second.runId, first.runId); assert.equal(executions, 1);
+ const timed = await f.service.execute({ action: "join", runId: first.runId, waitSeconds: 0.005 }, f.ctx);
+ assert.equal(timed.status, "accepted"); assert.equal(timed.wait?.status, "expired"); assert.equal(signal.aborted, false);
+ const inspect = await f.service.execute({ action: "inspect", runId: first.runId }, f.ctx); assert.equal(inspect.status, "accepted"); assert.equal(inspect.wait, undefined);
+ slow.release(); const completed = await f.service.execute({ action: "join", runId: first.runId, waitSeconds: 1800 }, f.ctx);
+ assert.equal(completed.status, "succeeded"); assert.equal(completed.wait, undefined); assert.equal(executions, 1);
+ await new Promise(resolve => setTimeout(resolve, 10)); assert.ok(f.wakes.some(event => event.runId === first.runId && !event.foreground));
+});
+
 test("wake filtering fences observed episodes, late run aggregates, new episodes and owner identity without accepting work", async t => {
  const f = await fixture(t, async () => {});
  const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "wake", tasks: [task("one")] }, f.ctx);

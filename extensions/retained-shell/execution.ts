@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
+import { scheduleDelay, requireDurationMs, timestampAfter, type CancellableDelay } from "../shared/duration-timer.ts";
 import { OUTPUT_MAX_BYTES, SHELL_OWNER } from "./policy.ts";
 
 export type ShellStatus = "running" | "exited" | "cancelled" | "deadline" | "interrupted";
@@ -91,7 +92,7 @@ interface ExecutionRecord {
 	output: BoundedOutput;
 	child: LaunchedProcess | undefined;
 	pid: number | undefined;
-	deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	deadlineTimer: CancellableDelay | undefined;
 	waiters: Array<() => void>;
 	settled: boolean;
 	terminalCause: Exclude<ShellStatus, "running" | "exited"> | undefined;
@@ -192,7 +193,7 @@ export function createShellExecutionOwner(options: {
 		record.settled = true;
 		record.status = status;
 		record.exitCode = exitCode;
-		if (record.deadlineTimer) clearTimeout(record.deadlineTimer);
+		record.deadlineTimer?.cancel();
 		record.deadlineTimer = undefined;
 		releaseHandles(record);
 		const waiters = record.waiters;
@@ -209,13 +210,13 @@ export function createShellExecutionOwner(options: {
 	};
 
 	const armDeadline = (record: ExecutionRecord): void => {
-		if (record.deadlineTimer) clearTimeout(record.deadlineTimer);
+		record.deadlineTimer?.cancel();
 		const delay = Math.max(0, record.deadlineAt - now());
-		record.deadlineTimer = setTimeout(() => {
+		record.deadlineTimer = scheduleDelay(delay, () => {
 			if (record.settled) return;
 			record.terminalCause = "deadline";
 			stop(record);
-		}, delay);
+		});
 	};
 
 	const launch = (spec: ShellSpawnSpec, command: string, input: StartShellInput): LaunchedProcess => {
@@ -235,12 +236,17 @@ export function createShellExecutionOwner(options: {
 		async start(input) {
 			if (input.signal?.aborted) throw new Error(ABORTED_BEFORE_START);
 			if (input.command.trim().length === 0) throw new Error("Shell command is empty");
+			const deadlineMs = requireDurationMs(input.deadlineMs);
+			if (!Number.isFinite(input.foregroundWindowMs) || input.foregroundWindowMs < 0) throw new Error("Invalid foreground window");
+			if (input.foregroundWindowMs > 0) requireDurationMs(input.foregroundWindowMs);
 			try {
 				await access(input.cwd, constants.F_OK);
 			} catch {
 				throw new Error(`Working directory does not exist: ${input.cwd}`);
 			}
 			if (input.signal?.aborted) throw new Error(ABORTED_BEFORE_START);
+			const startedAt = now();
+			const deadlineAt = timestampAfter(startedAt, deadlineMs);
 			const spec = options.spawnSpec();
 			const child = launch(spec, input.command, input);
 			startCount += 1;
@@ -252,8 +258,8 @@ export function createShellExecutionOwner(options: {
 				branchAnchor: input.branchAnchor,
 				toolCallId: input.toolCallId,
 				status: "running",
-				startedAt: now(),
-				deadlineAt: now() + input.deadlineMs,
+				startedAt,
+				deadlineAt,
 				exitCode: null,
 				output: new BoundedOutput(maxOutputBytes),
 				child,
@@ -304,10 +310,11 @@ export function createShellExecutionOwner(options: {
 		wait(executionId, scope, waitOptions) {
 			const record = requireRecord(executionId, scope);
 			if (record.status !== "running") return Promise.resolve(viewOf(record));
+			const waitMs = requireDurationMs(waitOptions.waitMs);
 			return new Promise((resolve) => {
-				let timer: ReturnType<typeof setTimeout> | undefined;
+				let timer: CancellableDelay | undefined;
 				const done = () => {
-					if (timer) clearTimeout(timer);
+					timer?.cancel();
 					waitOptions.signal?.removeEventListener("abort", onAbort);
 					record.waiters = record.waiters.filter((waiter) => waiter !== onTerminal);
 					resolve(viewOf(record));
@@ -315,7 +322,7 @@ export function createShellExecutionOwner(options: {
 				const onTerminal = () => done();
 				const onAbort = () => done();
 				record.waiters.push(onTerminal);
-				timer = setTimeout(done, waitOptions.waitMs);
+				timer = scheduleDelay(waitMs, done);
 				if (record.status !== "running" || waitOptions.signal?.aborted) {
 					onAbort();
 					return;
@@ -326,8 +333,8 @@ export function createShellExecutionOwner(options: {
 		renew(executionId, scope, deadlineMs) {
 			const record = requireRecord(executionId, scope);
 			if (record.status !== "running") throw new Error(`Cannot renew shell execution ${executionId}; status is ${record.status}`);
-			if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new Error("Invalid renewal deadline");
-			record.deadlineAt = now() + deadlineMs;
+			const duration = requireDurationMs(deadlineMs);
+			record.deadlineAt = timestampAfter(now(), duration);
 			armDeadline(record);
 			emit(record, "renewed");
 			return viewOf(record);
@@ -372,17 +379,18 @@ export function inShellScope(record: { sessionId: string | null; branchAnchor: s
 function raceWindow(record: ExecutionRecord, windowMs: number, signal: AbortSignal | undefined): Promise<"terminal" | "window" | "abort"> {
 	return new Promise((resolve) => {
 		let settled = false;
+		let timer: CancellableDelay | undefined;
 		const finish = (outcome: "terminal" | "window" | "abort") => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			timer?.cancel();
 			signal?.removeEventListener("abort", onAbort);
 			record.waiters = record.waiters.filter((waiter) => waiter !== onTerminal);
 			resolve(outcome);
 		};
 		const onTerminal = () => finish("terminal");
 		const onAbort = () => finish("abort");
-		const timer = setTimeout(() => finish("window"), windowMs);
+		timer = scheduleDelay(windowMs, () => finish("window"));
 		record.waiters.push(onTerminal);
 		if (record.settled) {
 			onTerminal();
