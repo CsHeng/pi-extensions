@@ -136,7 +136,7 @@ export const SubagentTaskSchema = Type.Object(
 	{
 		id: Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9]+$" }),
 		role: RoleSchema,
-		objective: Type.String({ minLength: 1 }),
+		objective: Type.String({ minLength: 1, description: "Bounded task instructions and the intended outcome for this child." }),
 		access: Type.Array(Type.Object({
 			permission: StringEnum(["read", "write"] as const),
 			scope: Type.Union([
@@ -146,14 +146,14 @@ export const SubagentTaskSchema = Type.Object(
 		}, { additionalProperties: false }), {
 			minItems: 1,
 			maxItems: 32,
-			description: "Independent read and write grants. Permission is not implied by role or by being a child. Overlapping rules combine. Legacy repository, scope, writePaths and externalReadRoots fields are rejected.",
+			description: "Explicit read and write grants over absolute paths. Overlapping grants combine; write includes read. Role and child identity describe purpose, not permission. Use this access structure rather than legacy repository, scope, writePaths or externalReadRoots fields.",
 		}),
-		inputs: Type.Optional(BoundedStringArray),
+		inputs: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Additional task context supplied as text. Include explicit file references when the child should read source material; entries are not automatically loaded as files." })),
 		dependsOn: Type.Optional(Type.Array(Type.String(), {
 			maxItems: 32,
 			description: "Optional hard predecessor task IDs. Omit for ordinary independent work; use only for an approved implementation order with no intervening parent decision.",
 		})),
-		verification: Type.Optional(BoundedStringArray),
+		verification: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Task-specific verification instructions for the child; the parent judges the returned evidence." })),
 		resourceLocks: Type.Optional(BoundedStringArray),
 		executionProfile: Type.Optional(ExecutionProfileSchema),
 		thinkingProfile: Type.Optional(ThinkingProfileSchema),

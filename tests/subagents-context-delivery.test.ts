@@ -3,7 +3,7 @@ import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { registerManagedContext } from "../extensions/subagents/context.ts";
+import { MANAGED_CONTEXT_TYPE, registerManagedContext } from "../extensions/subagents/context.ts";
 import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
 import type { SessionView } from "../extensions/subagents/session-contracts.ts";
 import {
@@ -148,7 +148,7 @@ test("transformed queued model inputs receive non-authorizing reference without 
 				.join("|");
 			trace.record("context-final", {
 				users,
-				hasIndex: event.messages.some((message) => message.role === "custom" && String(message.content).startsWith("Stored local-task index;")),
+				hasIndex: event.messages.some((message) => message.role === "custom" && message.customType === MANAGED_CONTEXT_TYPE && String(message.content).includes(view.handle)),
 				deliveryUnavailable: event.messages.some((message) => message.role === "custom" && String(message.content).startsWith("Native input delivery identity is unavailable")),
 			});
 		});

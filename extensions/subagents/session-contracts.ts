@@ -27,7 +27,7 @@ const episode = Type.Object({ handle: opaque, requestId: opaque, expectedEpisode
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
 export const SubagentSessionToolSchema = Type.Object({
-	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create requires requestId/tasks; continue requires episodes. Interactive/RPC submissions default async; mode=foreground joins explicitly, with optional waitSeconds (default 180). inspect accepts handle or runId; join/cancel require runId (cancel may name taskId); apply requires handle/expectedEpisode/candidateId; refresh/close require handle/expectedEpisode." }),
+	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "Start work with create(requestId,tasks) or continue(episodes). TUI/RPC defaults to async; use mode=foreground to observe within this call. inspect(handle or runId) returns a snapshot; join(runId) awaits terminal evidence. cancel(runId, optional taskId) stops execution. apply needs handle/expectedEpisode/candidateId; refresh and close need handle/expectedEpisode." }),
 	requestId: Type.Optional(Type.String({ ...opaque, description: "Required for create. Stable caller-selected identity for replay; reuse only for the same request." })),
 	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares access grants. A write grant may name multiple repository roots. Read grants authorize evidence without copying it. Role does not grant or remove permission." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks })),
@@ -35,7 +35,7 @@ export const SubagentSessionToolSchema = Type.Object({
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
 	runId: Type.Optional(opaque),
 	mode: Type.Optional(StringEnum(["async", "foreground"] as const)),
-	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for join or foreground create/continue, default 180 seconds. Explicit finite durations are honored without a product cap. Expiry releases this call, not the execution; inspect remains immediate." })),
+	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for join or foreground create/continue; default 180 seconds, with explicit finite durations honored without a product cap. On expiry the call returns while execution continues. inspect returns immediately." })),
 	taskId: Type.Optional(opaque),
 }, { additionalProperties: false });
 export type SessionRequest = Static<typeof SubagentSessionToolSchema>;

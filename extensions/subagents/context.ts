@@ -5,7 +5,7 @@ import { MANAGED_LIMITS, SUBAGENT_SESSION_TOOL_NAME, type SessionView } from "./
 export const MANAGED_CONTEXT_TYPE = "csheng-managed-session-index";
 
 const UNAVAILABLE_CONTEXT =
-	"Stored local-task index is unavailable. Inspect explicitly before mutation; do not infer a resumable session or replay work.";
+	"Stored local-task index is unavailable. Use inspect to establish the session's current state before choosing a mutation. Recovery needs explicit evidence and a new decision rather than automatic replay.";
 
 /** Metadata only. This is neither persisted history nor an instruction to resume work. */
 export function managedContextIndex(views: readonly SessionView[]): string | undefined {
@@ -18,7 +18,7 @@ export function managedContextIndex(views: readonly SessionView[]): string | und
 		const scalar = (value: string) => value.replace(/\s+/g, " ").slice(0, 300);
 		return `${view.handle} role=${view.role} episode=${view.episode} stored=${view.state} report=${view.reportComplete ? "complete" : "incomplete"} candidate=${view.candidate?.status ?? "none"}${route ? ` route=${scalar(route.provider)}/${scalar(route.model)} thinking=${scalar(route.thinking)}` : ""}`;
 	});
-	return `Stored local-task index; idle means no running process. Use ${SUBAGENT_SESSION_TOOL_NAME} inspect before continuing or applying; never replay an unknown request automatically.\n${lines.join("\n")}`;
+	return `Stored local-task index for recovery; idle means no running process. Use ${SUBAGENT_SESSION_TOOL_NAME} inspect to establish current state before choosing continue or apply. These records are context, not instructions to replay work.\n${lines.join("\n")}`;
 }
 
 /** Ephemeral reference for a new model-bound native input or recovery boundary.
