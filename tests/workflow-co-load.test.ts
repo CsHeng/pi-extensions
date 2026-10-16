@@ -6,6 +6,7 @@ import subagentsExtension from "../extensions/subagents/index.ts";
 import subagentsUiExtension from "../extensions/subagents-ui/index.ts";
 import statusFooterExtension from "../extensions/status-footer/index.ts";
 import workTimingExtension, { WORK_TIMING_ENTRY_TYPE } from "../extensions/work-timing/index.ts";
+import loopNotifications from "../extensions/loop-notifications/index.ts";
 import workflowExtension from "../extensions/workflow/index.ts";
 import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
@@ -13,6 +14,7 @@ import { createHostHarness, createTrace, createTraceObserver, waitForTrace } fro
 // Deliberately register workflow before the real timing/observer consumers, not last.
 const packageExtensions = [
 	workflowExtension,
+	loopNotifications,
 	subagentsExtension as unknown as (pi: ExtensionAPI) => void,
 	subagentsUiExtension as unknown as (pi: ExtensionAPI) => void,
 	workTimingExtension as unknown as (pi: ExtensionAPI) => void,
@@ -56,7 +58,7 @@ for (const mode of ["tui", "rpc"] as const) {
 		const branch = harness.session.sessionManager.getBranch();
 		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } };
 		assert.equal(snapshot.data.state.cancelled, true);
-		assert.ok(snapshot.data.state.remindedRevision);
+		assert.equal(snapshot.data.state.remindedRevision, undefined);
 		assert.equal(snapshot.data.state.tasks[0]!.status, "cancelled");
 		assert.equal(harness.faux.state.callCount, 4);
 		const input = trace.entries.filter((entry) => entry.event === "input");

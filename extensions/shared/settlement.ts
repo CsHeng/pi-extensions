@@ -65,7 +65,7 @@ interface RunWait {
 	request?: { epoch: number; review: (ctx: ExtensionContext) => void };
 }
 
-export function registerSettlementBarrier(pi: ExtensionAPI, options: { command: string; tool: string; enabled: () => boolean; compaction?: boolean }): SettlementBarrier {
+export function registerSettlementBarrier(pi: ExtensionAPI, options: { command: string; tool?: string; enabled: () => boolean; compaction?: boolean }): SettlementBarrier {
 	let current: RunWait | undefined;
 	let active: ExtensionContext | undefined;
 	let activeSignal: AbortSignal | undefined;
@@ -74,7 +74,7 @@ export function registerSettlementBarrier(pi: ExtensionAPI, options: { command: 
 	const arm = (): boolean => {
 		const ctx = active;
 		if (!ctx || !options.enabled() || (ctx.mode !== "tui" && ctx.mode !== "rpc") || !ctx.isProjectTrusted()
-			|| !pi.getActiveTools().includes(options.tool) || !activeSignal || activeSignal.aborted || ctx.isIdle()) return false;
+			|| (options.tool !== undefined && !pi.getActiveTools().includes(options.tool)) || !activeSignal || activeSignal.aborted || ctx.isIdle()) return false;
 		if (current && current.signal === activeSignal && current.sessionId === ctx.sessionManager.getSessionId()) return true;
 		current = { token: randomUUID(), sessionId: ctx.sessionManager.getSessionId(), signal: activeSignal, waiting: false };
 		// Dispatch before settlement, never a timer or a late isIdle surrogate.

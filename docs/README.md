@@ -8,6 +8,7 @@ These documents own self-contained extension behavior, maintenance and removal c
 - [Execution primitives](architecture/subagent-execution-primitives.md)
 - [Subagents UI](architecture/subagents-ui.md)
 - [Workflow](architecture/workflow.md)
+- [Loop notifications](architecture/loop-notifications.md)
 - [Work-timing metrics](architecture/work-timing.md)
 - [Retained shell](architecture/retained-shell.md)
 

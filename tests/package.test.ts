@@ -33,6 +33,9 @@ test("package exposes the maintained extensions and their Pi peers", async () =>
 		"./extensions/work-timing/index.ts",
 		"./extensions/subagents-ui/index.ts",
 		"./extensions/workflow/index.ts",
+		"./extensions/loop-notifications/index.ts",
+		"./extensions/tasks-ui/index.ts",
+		"./extensions/jobs-ui/index.ts",
 		"./extensions/agent-bark.ts",
 		"./extensions/retained-shell/index.ts",
 	]);

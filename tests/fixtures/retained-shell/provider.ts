@@ -10,6 +10,11 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 	let calls = 0;
 	let executionId = "";
 	let firstToolCallId = "";
+	let terminalRequests = 0;
+	let reminderRequests = 0;
+	let reminderInRequest = false;
+	const trackedGoal = "Track the shell";
+	const trackedTitle = "Wait for the shell";
 	const mode = process.env.RETAINED_SHELL_EXPECT ?? "idle";
 	const startedAt = Date.now();
 	const silent = "printf 'start\\n' >> \"$RETAINED_SHELL_MARKER\"; echo $$ > \"$RETAINED_SHELL_PID\"; while [ ! -f \"$RETAINED_SHELL_RELEASE\" ]; do sleep 0.1; done; printf 'finished\\n' >> \"$RETAINED_SHELL_MARKER\"";
@@ -37,6 +42,17 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 	const messageFor = (model: { api: AssistantMessage["api"]; provider: string; id: string }): AssistantMessage => ({
 		role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop", content: [],
 		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	});
+
+	// Observe native user messages before custom task projections are converted for the provider.
+	// Identify this fixture's task data, not the product's reminder wording.
+	pi.on("context", event => {
+		reminderInRequest = event.messages.some(message => {
+			if (message.role !== "user") return false;
+			const content = typeof message.content === "string" ? message.content
+				: message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+			return content.includes(trackedGoal) && content.includes(trackedTitle);
+		});
 	});
 
 	pi.registerProvider("retained-shell-fixture", {
@@ -108,7 +124,7 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 				}
 				if (mode === "coload") {
 					if (call === 0) {
-						emit(stream, message, [{ type: "toolCall", id: "track-call", name: "csheng_workflow", arguments: { operation: "set", goal: "Track the shell", tasks: [{ id: "shell", title: "Wait for the shell", status: "todo" }] } }], "toolUse");
+						emit(stream, message, [{ type: "toolCall", id: "track-call", name: "csheng_workflow", arguments: { operation: "set", goal: trackedGoal, tasks: [{ id: "shell", title: trackedTitle, status: "todo" }] } }], "toolUse");
 						return;
 					}
 					if (call === 1) {
@@ -120,9 +136,11 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 						emit(stream, message, [{ type: "text", text: "independent answer" }], "stop");
 						return;
 					}
-					const reminder = text.includes("Return attention to the tracked work");
+					const reminder = reminderInRequest;
 					const shellTerminal = text.includes("Shell execution");
-					if (reminder && shellTerminal) await writeFile(proofPath(), JSON.stringify({ mode, calls, reminder: true, delivered: true }));
+					if (shellTerminal) terminalRequests += 1;
+					if (reminder) reminderRequests += 1;
+					if (reminder) await writeFile(proofPath(), JSON.stringify({ mode, calls, reminder, delivered: terminalRequests > 0, terminalRequests, reminderRequests }));
 					emit(stream, message, [{ type: "text", text: "shared turn" }], "stop");
 					return;
 				}
@@ -153,7 +171,7 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 				await writeFile(proofPath(), JSON.stringify({
 					mode, calls, executionId,
 					delivered: text.includes(executionId) && text.includes("Shell execution"),
-					reminder: text.includes("Return attention to the tracked work"),
+					reminder: reminderInRequest,
 					firstIdCount: ids.filter((id) => id === firstToolCallId).length,
 					toolCallIds: ids,
 				}));

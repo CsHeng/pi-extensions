@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import test, { after } from "node:test";
 import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/subagents/config.ts";
 import { emptyUsage, HARD_LIMITS, type TaskResult } from "../extensions/subagents/contracts.ts";
+import { registerContinuationTool } from "../extensions/subagents/continuation.ts";
 import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
 import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
@@ -166,34 +167,56 @@ async function emitBeforeAgentStart(state: Harness, event = { systemPrompt: "bas
 	return result as { systemPrompt?: string } | undefined;
 }
 
-test("terminal notices coalesce behind the public waiter; joined results neither wake nor reuse settled progress", async t => {
-	let releaseFast!: () => void, releaseSlow!: () => void, fastTerminal!: () => void, nextTerminal!: () => void, releaseIdle!: () => void, notified!: () => void;
+test("an observed child stays observed after close", async (t) => {
+	const base = await mkdtemp(join(tmpdir(), "subagent-close-observed-"));
+	const store = new ManagedSessionStore(base);
+	const state = harness();
+	const service = registerContinuationTool(state.pi, {
+		store,
+		enclosingCapability: async () => undefined,
+		loadConfig: async () => ({ config: defaultConfig() }),
+		runChild: async (options) => { options.onChildStarted?.(); options.onChildSettled?.(); return successful(options.task); },
+	});
+	t.after(async () => { await service.shutdown(); await rm(base, { recursive: true, force: true }); });
+	const ctx = { ...context(), mode: "rpc", signal: new AbortController().signal, isIdle: () => true, hasPendingMessages: () => false, waitForIdle: async () => {} };
+	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
+	const created = detailsOf(await state.tool.execute("create", createInput("closeObserved", [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, ctx));
+	assert.equal(created.status, "accepted", JSON.stringify(created.error ?? created));
+	const joined = detailsOf(await state.tool.execute("join", { action: "join", runId: created.runId }, undefined, undefined, ctx));
+	service.acknowledge(joined);
+	const handle = joined.sessions[0]!.handle;
+	const before = service.notificationFacts(ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId());
+	assert.equal(before.executions.some((execution) => execution.id.endsWith(":" + handle) && execution.disposition === "pending"), false);
+	const closed = detailsOf(await state.tool.execute("close", { action: "close", handle, expectedEpisode: joined.sessions[0]!.episode, disposition: "discard" }, undefined, undefined, ctx));
+	assert.equal(closed.status, "succeeded");
+	service.acknowledge(closed);
+	const after = service.notificationFacts(ctx.sessionManager.getSessionId(), ctx.sessionManager.getLeafId());
+	assert.equal(after.executions.some((execution) => execution.id.endsWith(":" + handle) && execution.disposition === "pending"), false, "close must not republish an observed terminal");
+});
+
+test("joined results and later terminals do not use a producer-owned model wake", async t => {
+	let releaseFast!: () => void, releaseSlow!: () => void, fastTerminal!: () => void, nextTerminal!: () => void;
 	const fast = new Promise<void>(resolve => { releaseFast = resolve; }), slow = new Promise<void>(resolve => { releaseSlow = resolve; });
-	const terminal = new Promise<void>(resolve => { fastTerminal = resolve; }), nextDone = new Promise<void>(resolve => { nextTerminal = resolve; }), notice = new Promise<void>(resolve => { notified = resolve; });
-	let idleWait = new Promise<void>(resolve => { releaseIdle = resolve; }), waiter: Promise<void> | undefined, idle = false;
-	t.after(() => { releaseFast(); releaseSlow(); releaseIdle(); });
+	const terminal = new Promise<void>(resolve => { fastTerminal = resolve; }), nextDone = new Promise<void>(resolve => { nextTerminal = resolve; });
+	t.after(() => { releaseFast(); releaseSlow(); });
 	const { state } = await registered(t, { onExecution: event => { if (event.kind === "task-terminal") { if (event.sessions[0]?.result?.id === "fast") fastTerminal(); if (event.sessions[0]?.result?.id === "next") nextTerminal(); } }, runChild: async options => { options.onChildStarted?.(); await (options.task.id === "fast" ? fast : slow); options.onChildSettled?.(); return successful(options.task); } });
-	const ctx = { ...context(), mode: "rpc", signal: new AbortController().signal, isIdle: () => idle, hasPendingMessages: () => false, waitForIdle: () => idleWait };
-	const sent: any[] = []; state.pi.sendMessage = (message: unknown) => { assert.equal(idle, true); sent.push(message); notified(); };
-	state.pi.sendUserMessage = (message: string) => { const [name, token] = message.slice(1).split(" "); waiter = state.commands.get(name!).handler(token, ctx); };
+	const ctx = { ...context(), mode: "rpc", signal: new AbortController().signal, isIdle: () => true, hasPendingMessages: () => false, waitForIdle: async () => {} };
+	const sent: unknown[] = []; state.pi.sendMessage = (message: unknown) => { sent.push(message); };
+	state.pi.sendUserMessage = () => { sent.push("user"); };
 	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
 	let updates = 0;
 	const receipt = await state.tool.execute("dispatch", createInput("wake", ["fast", "slow"].map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }))), undefined, () => { updates++; }, ctx);
 	assert.equal(receipt.details.status, "accepted"); releaseFast(); await terminal; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0);
 	releaseSlow(); const joined = await state.tool.execute("join", { action: "join", runId: receipt.details.runId }, undefined, undefined, ctx);
-	// This fixture invokes execute directly. Simulate the actual host result boundary,
-	// not an acknowledgement before a returned pull exists.
 	for (const handler of state.handlers.get("tool_execution_end") ?? []) await handler({ toolName: SUBAGENT_SESSION_TOOL_NAME, result: joined, isError: false }, ctx);
-	idle = true; releaseIdle(); await waiter; await new Promise(resolve => setImmediate(resolve)); assert.equal(sent.length, 0); assert.equal(updates, 0);
-	idle = false; idleWait = new Promise<void>(resolve => { releaseIdle = resolve; });
-	for (const handler of state.handlers.get("agent_start") ?? []) await handler({}, ctx);
+	assert.equal(sent.length, 0); assert.equal(updates, 0);
 	const next = await state.tool.execute("next", createInput("nextwake", [{ id: "next", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, undefined, ctx);
-	await nextDone; await new Promise(resolve => setImmediate(resolve)); idle = true; releaseIdle(); await waiter; await notice;
-	assert.equal(sent.length, 1); assert.ok(sent[0].content.includes(next.details.sessions[0].handle));
-	for (const view of receipt.details.sessions) assert.ok(!sent[0].content.includes(view.handle));
+	await nextDone; await new Promise(resolve => setImmediate(resolve));
+	assert.equal(sent.length, 0, "the executor publishes facts and does not wake the model");
 	const joinedNext = await state.tool.execute("join-next", { action: "join", runId: next.details.runId }, undefined, undefined, ctx);
 	for (const handler of state.handlers.get("tool_execution_end") ?? []) await handler({ toolName: SUBAGENT_SESSION_TOOL_NAME, result: joinedNext, isError: false }, ctx);
 	assert.equal(updates, 0);
+	assert.equal(next.details.sessions[0].handle.length > 0, true);
 });
 
 test("extension registers only the managed tool and a redacted status command", async () => {
@@ -204,7 +227,7 @@ test("extension registers only the managed tool and a redacted status command", 
 	assert.equal(state.tool.name, SUBAGENT_SESSION_TOOL_NAME);
 	assert.deepEqual([...state.tools.keys()], [SUBAGENT_SESSION_TOOL_NAME]);
 	assert.equal(state.tools.has("csheng_subagents"), false);
-	assert.deepEqual([...state.commands.keys()], ["csheng-subagents-wait", "subagents"]);
+	assert.deepEqual([...state.commands.keys()], ["subagents"]);
 	assert.equal(state.commands.has("subagents-debug"), false);
 	const ctx = context();
 	await state.commands.get("subagents").handler("", ctx);

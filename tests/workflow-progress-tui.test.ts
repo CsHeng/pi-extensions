@@ -20,8 +20,9 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], theme, compaction: { enabled: false } }));
  // An explicit alternate source root supports an actual copied-snapshot verification lane.
  const implementation = process.env.CSHENG_WORKFLOW_PROBE_ROOT ?? root;
- const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
-  "-e", join(implementation, "extensions/workflow/index.ts"), "-e", join(root, "tests/fixtures/workflow/progress-tui.ts"),
+ // Tasks observation refuses an untrusted project. --approve trusts this disposable fixture so the renderer oracle still runs.
+ const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
+  "-e", join(implementation, "extensions/workflow/index.ts"), "-e", join(implementation, "extensions/tasks-ui/index.ts"), "-e", join(root, "tests/fixtures/workflow/progress-tui.ts"),
   "--model", "progress-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "progress fixture"];
  const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 42; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
   cwd: base, detached: true, env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color", COLORTERM: "truecolor", FORCE_COLOR: "0" },
@@ -48,6 +49,9 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  assert.match(output, /1\/2 done/);
  assert.match(output, /TRACKING_PAUSED_FIXTURE/); assert.match(output, /2\/2 done/);
  const greyStrike = /\x1b\[38;2;(\d+);(\d+);(\d+)m\x1b\[9mSTRIKE_DONE_A\x1b\[29m/;
+ // Sections intentionally start folded. Exercise the public inline command before inspecting body styles.
+ const beforeExpand = output.length; child.stdin.write("/tasks-ui expand\r");
+ await waitFor(() => greyStrike.test(output.slice(beforeExpand)), "inline expansion did not render the completed task body");
  const widgetStyle = greyStrike.exec(output); assert.ok(widgetStyle, "real terminal stream retains dim+SGR9 even with FORCE_COLOR=0");
  const red = Number(widgetStyle[1]), green = Number(widgetStyle[2]), blue = Number(widgetStyle[3]);
  const tint = Math.max(red, green, blue) - Math.min(red, green, blue);
@@ -68,6 +72,8 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  const beforeReload = output.length; child.stdin.write("/reload\r");
  await waitFor(async () => { try { return (await readFile(join(agent, "starts"), "utf8")).trim().split("\n").length >= 2; } catch { return false; } }, "reload did not rebind fixture");
  await waitFor(() => output.slice(beforeReload).includes("2/2 done"), "replay lost completed contract");
+ child.stdin.write("/tasks-ui expand\r");
+ await waitFor(() => greyStrike.test(output.slice(beforeReload)), "reloaded inline expansion lost the completed title style");
  assert.match(output.slice(beforeReload), /\x1b\[9mSTRIKE_DONE_A\x1b\[29m/);
  child.stdin.write("/quit\r"); await waitFor(() => child.exitCode !== null, "host did not stop"); assert.equal(await exited, 0);
 });

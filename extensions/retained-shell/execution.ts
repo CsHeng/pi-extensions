@@ -1,3 +1,4 @@
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
@@ -40,6 +41,15 @@ export interface ShellExecutionView {
 	toolCallId: string | null;
 	sessionId: string | null;
 	branchAnchor: string | null;
+	/** Executable basename retained for telemetry; preview is human UI only. */
+	label: string;
+	commandPreview: string;
+	/** True only after start returned a still-running execution. */
+	background: boolean;
+	/** Actual close time. Null while running. */
+	terminalAt: number | null;
+	/** Last stdout/stderr time. Null when the process has produced no output. */
+	lastOutputAt: number | null;
 }
 
 export interface ShellExecutionEvent {
@@ -56,6 +66,9 @@ export interface ShellExecutionEvent {
 	truncated: boolean;
 	outputTail: string;
 	notification: ShellNotification;
+	label: string;
+	terminalAt: string | null;
+	lastOutputAt: string | null;
 }
 
 export interface StartShellInput {
@@ -98,12 +111,21 @@ interface ExecutionRecord {
 	terminalCause: Exclude<ShellStatus, "running" | "exited"> | undefined;
 	closed: Promise<number | null>;
 	resolveClosed: (code: number | null) => void;
+	label: string;
+	commandPreview: string;
+	background: boolean;
+	terminalAt: number | null;
+	lastOutputAt: number | null;
 }
 
 export interface ShellExecutionOwner {
 	readonly startCount: number;
 	start(input: StartShellInput): Promise<ShellExecutionView>;
 	inspect(executionId: string, scope: ShellScope): ShellExecutionView | undefined;
+	/** Read-only in-scope snapshot. It does not start, wait, renew, cancel, or trim. */
+	list(scope: ShellScope): ShellExecutionView[];
+	/** Display-fact invalidation only. The listener receives no output and cannot affect execution. */
+	subscribeDisplay(listener: () => void): () => void;
 	wait(executionId: string, scope: ShellScope, options: { signal?: AbortSignal; waitMs: number }): Promise<ShellExecutionView>;
 	renew(executionId: string, scope: ShellScope, deadlineMs: number): ShellExecutionView;
 	cancel(executionId: string, scope: ShellScope): Promise<ShellExecutionView>;
@@ -114,6 +136,32 @@ export interface ShellExecutionOwner {
 
 const ABORTED_BEFORE_START = "Shell start aborted before execution";
 const OUTSIDE_SCOPE = "Shell execution is outside the current session branch";
+const LABEL_LIMIT = 24;
+
+/** Conservative executable basename, or Bash. Arguments, assignments, and shell syntax are not labels. */
+export function commandLabel(command: string): string {
+	const trimmed = command.trim();
+	if (!trimmed || /[\n\r;&|<>`$(){}='"]/.test(trimmed) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(trimmed)) return "Bash";
+	const token = trimmed.split(/\s+/)[0] ?? "";
+	if (!token || token.startsWith("-") || token.includes("=")) return "Bash";
+	const base = token.split(/[/\\]/).filter(Boolean).pop() ?? "";
+	if (!/^[A-Za-z0-9._+-]+$/.test(base) || base === "." || base === "..") return "Bash";
+	return base.length > LABEL_LIMIT ? base.slice(0, LABEL_LIMIT) : base;
+}
+
+/** Bounded first command line for the session-local human view, never telemetry or output. */
+export function commandPreview(command: string): string {
+	const first = stripTerminalSequences(command.trimStart().split(/\r?\n/, 1)[0] ?? "")
+		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
+	// Keep command structure, not assignment values or common credential-bearing options.
+	const safe = first.replace(/\b([A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s;]+)/gu, "$1=…")
+		.replace(/((?:--(?:token|password|secret|api-key|authorization|header|user)|-[Hu])(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/giu, "$1…");
+	return safe.slice(0, 512) || "Bash";
+}
+
+function isoTime(value: number | null): string | null {
+	return value === null ? null : new Date(value).toISOString();
+}
 
 export function createShellExecutionOwner(options: {
 	spawnSpec: () => ShellSpawnSpec;
@@ -125,10 +173,16 @@ export function createShellExecutionOwner(options: {
 	stop?: (pid: number) => void;
 }): ShellExecutionOwner {
 	const records = new Map<string, ExecutionRecord>();
+	const displayListeners = new Set<() => void>();
 	const maxOutputBytes = options.maxOutputBytes ?? OUTPUT_MAX_BYTES;
 	const maxTerminalRecords = options.maxTerminalRecords ?? MAX_TERMINAL_RECORDS;
 	const now = options.now ?? Date.now;
 	let startCount = 0;
+	const notifyDisplay = (): void => {
+		for (const listener of displayListeners) {
+			try { listener(); } catch { /* A display observer cannot change execution. */ }
+		}
+	};
 
 	const emit = (record: ExecutionRecord, phase: ShellPhase): void => {
 		try {
@@ -146,6 +200,9 @@ export function createShellExecutionOwner(options: {
 				truncated: record.output.truncated,
 				outputTail: record.output.text(),
 				notification: phase === "started" || phase === "renewed" ? "not-a-completion" : "idle-wake-or-next-request",
+				label: record.label,
+				terminalAt: isoTime(record.terminalAt),
+				lastOutputAt: isoTime(record.lastOutputAt),
 			});
 		} catch { /* An observer failure must not strand or fail the execution. */ }
 	};
@@ -162,6 +219,11 @@ export function createShellExecutionOwner(options: {
 		toolCallId: record.toolCallId,
 		sessionId: record.sessionId,
 		branchAnchor: record.branchAnchor,
+		label: record.label,
+		commandPreview: record.commandPreview,
+		background: record.background,
+		terminalAt: record.terminalAt,
+		lastOutputAt: record.lastOutputAt,
 	});
 
 	const sameScope = (record: ExecutionRecord, scope: ShellScope): boolean => inShellScope(record, scope);
@@ -188,11 +250,19 @@ export function createShellExecutionOwner(options: {
 		}
 	};
 
+	const noteOutput = (record: ExecutionRecord, chunk: Buffer): void => {
+		if (chunk.length === 0 || record.settled) return;
+		record.output.append(chunk);
+		record.lastOutputAt = now();
+		notifyDisplay();
+	};
+
 	const finish = (record: ExecutionRecord, status: Exclude<ShellStatus, "running">, exitCode: number | null): void => {
 		if (record.settled) return;
 		record.settled = true;
 		record.status = status;
 		record.exitCode = exitCode;
+		record.terminalAt = now();
 		record.deadlineTimer?.cancel();
 		record.deadlineTimer = undefined;
 		releaseHandles(record);
@@ -201,6 +271,7 @@ export function createShellExecutionOwner(options: {
 		for (const waiter of waiters) waiter();
 		emit(record, status);
 		trimTerminals();
+		notifyDisplay();
 		record.resolveClosed(exitCode);
 	};
 
@@ -270,16 +341,21 @@ export function createShellExecutionOwner(options: {
 				terminalCause: undefined,
 				closed,
 				resolveClosed,
+				label: commandLabel(input.command),
+				commandPreview: commandPreview(input.command),
+				background: false,
+				terminalAt: null,
+				lastOutputAt: null,
 			};
 			records.set(record.executionId, record);
-			child.stdout?.on("data", (chunk: Buffer) => { record.output.append(chunk); });
-			child.stderr?.on("data", (chunk: Buffer) => { record.output.append(chunk); });
+			child.stdout?.on("data", (chunk: Buffer) => { noteOutput(record, chunk); });
+			child.stderr?.on("data", (chunk: Buffer) => { noteOutput(record, chunk); });
 			if (spec.commandTransport === "stdin") {
 				child.stdin?.on("error", () => {});
 				child.stdin?.end(input.command);
 			}
 			child.once("error", (error) => {
-				record.output.append(Buffer.from(error.message));
+				noteOutput(record, Buffer.from(error.message));
 				finish(record, record.terminalCause ?? "interrupted", null);
 			});
 			child.once("close", (code) => {
@@ -287,25 +363,40 @@ export function createShellExecutionOwner(options: {
 			});
 			armDeadline(record);
 			emit(record, "started");
+			notifyDisplay();
 			if (input.signal?.aborted && !record.settled) {
 				record.terminalCause = "cancelled";
 				stop(record);
 				await record.closed;
 				return viewOf(record);
 			}
-			if (input.foregroundWindowMs <= 0) return viewOf(record);
+			const release = () => {
+				if (record.status === "running") { record.background = true; notifyDisplay(); }
+				return viewOf(record);
+			};
+			if (input.foregroundWindowMs <= 0) return release();
 			const outcome = await raceWindow(record, input.foregroundWindowMs, input.signal);
 			if (outcome === "abort" && !record.settled) {
 				record.terminalCause = "cancelled";
 				stop(record);
 				await record.closed;
 			}
-			return viewOf(record);
+			return release();
 		},
 		inspect(executionId, scope) {
 			const record = records.get(executionId);
 			if (!record || !sameScope(record, scope)) return undefined;
 			return viewOf(record);
+		},
+		list(scope) {
+			return [...records.values()]
+				.filter((record) => sameScope(record, scope))
+				.sort((left, right) => left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId))
+				.map(viewOf);
+		},
+		subscribeDisplay(listener) {
+			displayListeners.add(listener);
+			return () => { displayListeners.delete(listener); };
 		},
 		wait(executionId, scope, waitOptions) {
 			const record = requireRecord(executionId, scope);

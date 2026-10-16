@@ -81,6 +81,17 @@ export function createShellDelivery() {
 			trimObsolete();
 			return text;
 		},
+		/** In-scope terminals not yet projected or observed. Survives owner output eviction. */
+		pending(scope: ShellScope): ShellFact[] {
+			return [...facts.values()].filter((fact) => deliverable(fact, scope)).map((fact) => ({ ...fact }));
+		},
+		acknowledge(executionIds: readonly string[]): void {
+			for (const executionId of executionIds) {
+				const fact = facts.get(executionId);
+				if (fact) fact.consumed = true;
+			}
+			trimObsolete();
+		},
 		inspectable(executionId: string): ShellFact | undefined {
 			return facts.get(executionId);
 		},

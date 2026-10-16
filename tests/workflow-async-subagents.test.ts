@@ -3,30 +3,34 @@ import test from "node:test";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import loopNotifications from "../extensions/loop-notifications/index.ts";
 import workflow from "../extensions/workflow/index.ts";
-import { SUBAGENT_EXECUTION_EVENT } from "../extensions/shared/subagent-execution.ts";
+import { LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST, type LoopFacts } from "../extensions/shared/loop-facts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 const call = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
 for (const early of [false, true]) test("async completion " + (early ? "before" : "after") + " receipt neither accepts tasks nor creates duplicate wakes", async t => {
  let send!: () => void;
+ const running: LoopFacts = { version: 1, producer: "subagents", availability: "ready", sessionId: null, branchAnchor: null, generation: "live", executions: [{ id: "run", phase: "running", status: "running", exitCode: null, summary: "", disposition: "pending" }] };
  const transport = (pi: ExtensionAPI) => {
+  const publish = () => pi.events.emit(LOOP_FACTS_EVENT, running);
+  pi.events.on(LOOP_SNAPSHOT_REQUEST, (raw: unknown) => (raw as { accept?: (facts: LoopFacts) => void }).accept?.(running));
   pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Synthetic transport", parameters: Type.Object({ action: Type.Literal("create") }),
-   async execute(id, _args, _signal, _update, ctx) {
-    send = () => pi.events.emit(SUBAGENT_EXECUTION_EVENT, { version: 4, kind: "run-terminal", runId: "run", toolCallId: id, owner: { sessionId: ctx.sessionManager.getSessionId() }, sessions: [] });
-    if (early) send();
-    return { content: [{ type: "text", text: "accepted" }], details: { schemaVersion: 4, kind: "submission", status: "accepted", runId: "run", requestTelemetry: { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), admittedTasks: 1 } } };
+   async execute() {
+    publish();
+    send = publish;
+    return { content: [{ type: "text", text: "accepted" }], details: { schemaVersion: 4, kind: "submission", status: "accepted", runId: "run", requestTelemetry: { version: 1, ownerSessionId: "session", admittedTasks: 1 } } };
    } });
  };
- const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [early ? loopNotifications : workflow, early ? workflow : loopNotifications, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
   call("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] }),
   call("csheng_subagent_sessions", { action: "create" }), fauxAssistantMessage("Awaiting result"),
-  fauxAssistantMessage("One reminder, not acceptance"),
+  fauxAssistantMessage("must-not-remind"),
  ]);
  await h.session.prompt("go");
- await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
- assert.equal(h.faux.state.callCount, 4, "a pending run must not veto the one useful reminder");
- if (!early) { send(); assert.equal(h.faux.state.callCount, 4, "the execution event alone is not another workflow reminder"); }
+ await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 1);
+ assert.equal(h.faux.state.callCount, 3, "a pending run vetoes a task-only reminder");
+ send(); assert.equal(h.faux.state.callCount, 3, "republishing the same running fact is not a task reminder");
  const snapshot = h.session.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "csheng-workflow-state") as { data: { state: { tasks: { status: string }[] } } };
  assert.equal(snapshot.data.state.tasks[0]!.status, "doing"); assert.deepEqual(h.errors, []);
 });
@@ -39,7 +43,7 @@ test("replaying an old accepted receipt after recovery cannot wait for a nonexis
      sessions: [{ handle: "old", state: "running" }], requestTelemetry: { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), admittedTasks: null, replayedEpisodes: 1 } } };
    } });
  };
- const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
   call("csheng_workflow", { operation: "set", goal: "Recovered work", tasks: [{ id: "a", title: "Continue", status: "doing" }] }),
   call("csheng_workflow", { operation: "pause", reason: "Recovered session" }), fauxAssistantMessage("Paused"),

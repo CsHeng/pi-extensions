@@ -24,6 +24,7 @@ Capture and apply require coordination with parent file writers. They are not at
 sequenceDiagram
     participant Parent
     participant Host as Managed host
+    participant Notices as Loop notifications
     participant Child as One logical subagent
     participant Inputs as Isolated API and client roots
     participant API as API destination
@@ -33,6 +34,9 @@ sequenceDiagram
     Host->>Child: launch one native session
     Child->>Inputs: edit and verify the real inter-root dependency
     Child-->>Host: report; known writers settle
+    Host-->>Notices: persisted terminal facts
+    Notices-->>Parent: eligible completion notice, independent of running siblings
+    Parent->>Host: inspect or join for terminal evidence
     Host-->>Parent: immutable complete bundle and candidate ID
     Parent->>Host: explicit apply
     Host->>Host: preflight all roots under destination locks
@@ -42,6 +46,9 @@ sequenceDiagram
     Parent->>Host: scoped repair and explicit refresh when needed
     Host->>Child: next episode, same session identity
     Child-->>Host: repaired candidate and check evidence
+    Host-->>Notices: repaired episode terminal facts
+    Notices-->>Parent: eligible completion notice
+    Parent->>Host: inspect or join for the repaired result
     Host-->>Parent: result for integration and acceptance judgment
 ```
 
@@ -53,9 +60,9 @@ Execution/report state, per-root application, parent acceptance and resource rel
 
 The receipt follows input preparation, not child completion. The initial tool signal governs preparation only; each accepted run has its own cancellation signal. One-shot hosts can explicitly `join` the same execution. Runner callbacks must honor cancellation and retain their existing bounded process cleanup. Runs are retained in memory with a finite admission bound; persistent request replay, close/reclaim and cross-process recovery are not supplied by this class.
 
-Terminal facts are recorded in the in-memory view before `onEvent`, which may await persistence. `onEvent` receives old-owner cancellation facts too, so it must filter owner/generation before updating a current workflow or UI. Wake delivery is separately fenced and coalesced; successful task completions do not get a duplicate successful-run wake. A delivery failure does not erase the result or imply the model consumed it.
+Terminal facts are recorded in the in-memory view before `onEvent`, which may await persistence. `onEvent` receives old-owner cancellation facts too, so it must filter owner/generation before updating a current workflow or UI. Parent-model delivery is owned by [loop notifications](loop-notifications.md), not by this supervisor. `onWake` remains a source publication hook; it must not call Pi's message API. A delivery failure does not erase the result or imply the model consumed it.
 
-Use `suppressWake` for a real parent abort/provider error, not ordinary `agent_end` or compaction. `replaceOwner` fences the old generation before cancelling its work. An asynchronous host adapter must recheck owner identity immediately before calling Pi's message API, including after its own awaits. Completion can precede the tool-result consumer, so any pending-run observer must reconcile by owned run identity. Workflow uses this to avoid redundant reminders, without importing execution results as task acceptance.
+Use `suppressWake` for a real parent abort/provider error, not ordinary `agent_end` or compaction. `replaceOwner` fences the old generation before cancelling its work. Completion can precede the tool-result consumer, so any pending-run observer must reconcile by owned run identity. Execution results are not task acceptance.
 
 ## Validation boundary
 

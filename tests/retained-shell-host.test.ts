@@ -26,7 +26,8 @@ async function runPrompt(t: TestContext, mode: string, ready: (proof: Proof) => 
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
 	const shell = join(root, "extensions/retained-shell/index.ts");
-	const ordered = shellFirst ? [shell, ...extensions] : [...extensions, shell];
+	const consumer = join(root, "extensions/loop-notifications/index.ts");
+	const ordered = shellFirst ? [shell, ...extensions, consumer] : [consumer, ...extensions, shell];
 	const child = spawn("pi", [
 		"--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
 		...ordered.flatMap((path) => ["-e", path]),
@@ -102,6 +103,7 @@ test("rpc provider request happens while the same silent command is still alive"
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
 	const child = spawn("pi", [
 		"--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
+		"-e", join(root, "extensions/loop-notifications/index.ts"),
 		"-e", join(root, "extensions/retained-shell/index.ts"),
 		"-e", join(root, "tests/fixtures/retained-shell/provider.ts"),
 		"--model", "retained-shell-fixture/fixture", "--thinking", "off",
@@ -163,12 +165,14 @@ test("busy completion is projected onto the next request and a returned terminal
 	assert.equal(returned.calls, 2);
 });
 
-for (const shellFirst of [false, true]) test(`a shell terminal and workflow reminder share one reserved turn (shell first: ${shellFirst})`, async (t) => {
+for (const shellFirst of [false, true]) test(`a shell terminal precedes one bounded task renewal (shell first: ${shellFirst})`, async (t) => {
 	if (!piAvailable()) { t.skip("requires installed Pi; no installation performed"); return; }
 	const proof = await runPrompt(t, "coload", (value) => value.delivered === true, [join(root, "extensions/workflow/index.ts")], shellFirst);
 	assert.equal(proof.reminder, true);
 	assert.equal(proof.delivered, true);
-	assert.ok((proof.calls ?? 99) <= 5, `shared wake repeated: ${proof.calls}`);
+	assert.equal(proof.terminalRequests, 1);
+	assert.equal(proof.reminderRequests, 1);
+	assert.equal(proof.calls, 5, "one completion turn and one later task renewal");
 });
 
 interface Proof {
@@ -182,6 +186,8 @@ interface Proof {
 	running?: boolean;
 	wake?: boolean;
 	reminder?: boolean;
+	terminalRequests?: number;
+	reminderRequests?: number;
 }
 
 function collect(child: ChildProcessWithoutNullStreams): { settled: number; extensionError: boolean; tail: unknown[] } {

@@ -19,6 +19,8 @@ import { defaultConfig } from "../extensions/subagents/config.ts";
 import { runChild } from "../extensions/subagents/runner.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../extensions/shared/subagent-execution.ts";
 import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
+import loopNotifications from "../extensions/loop-notifications/index.ts";
+import { LOOP_NOTICE_TYPE } from "../extensions/shared/loop-facts.ts";
 import workflow from "../extensions/workflow/index.ts";
 import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
 import nativeFixture from "./fixtures/subagents-native-session.ts";
@@ -27,9 +29,9 @@ const exec = promisify(execFile);
 
 for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real host ${consume} consumes terminal notifications without a stale provider turn`, { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-wake-consumed-")); const store = new ManagedSessionStore(base);
- let release!: () => void, terminal!: () => void, context!: ExtensionContext, service!: ContinuationService, receipt!: SessionActionResult, filtered = false;
+ let release!: () => void, terminal!: () => void, context!: ExtensionContext, service!: ContinuationService, receipt!: SessionActionResult;
  const gate = new Promise<void>(resolve => { release = resolve; }); const completed = new Promise<void>(resolve => { terminal = resolve; }); const wakes: string[] = []; let providerEvidence = "";
- const h = await createHostHarness({ mode: "rpc", extensions: [(pi: ExtensionAPI) => {
+ const h = await createHostHarness({ mode: "rpc", extensions: [loopNotifications, (pi: ExtensionAPI) => {
   service = registerContinuationTool({ ...pi, sendMessage(message, options) {
    if (options?.triggerTurn && message.customType === SUBAGENT_EXECUTION_EVENT) { assert.equal(context.isIdle(), true); wakes.push(String(message.content)); }
    pi.sendMessage(message, options);
@@ -37,7 +39,6 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
    options.onChildStarted?.(); await gate; options.onChildSettled?.();
    return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
-  const filter = service.unobservedWake.bind(service); service.unobservedWake = async (...args) => { const result = await filter(...args); filtered = true; return result; };
   pi.on("agent_start", (_event, ctx) => { context = ctx; });
   pi.on("tool_result", event => { const result = event.details as SessionActionResult; if (event.toolName === "csheng_subagent_sessions" && result.action === "create") receipt = result; });
   pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { if ((event as SubagentExecutionEvent).kind === "run-terminal") terminal(); });
@@ -50,9 +51,9 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
   providerContext => { providerEvidence = JSON.stringify(providerContext.messages); return managed(consume === "join" ? { action: "join", runId: receipt.runId } : consume === "close" ? { action: "close", handle: receipt.sessions[0]!.handle, expectedEpisode: 1, disposition: "discard" } : { action: "inspect", handle: receipt.sessions[0]!.handle }); },
   fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved evidence received"),
  ]);
- await h.session.prompt("bounded notification fixture"); await until(() => filtered); await new Promise(resolve => setImmediate(resolve));
+ await h.session.prompt("bounded notification fixture"); await new Promise(resolve => setImmediate(resolve));
  assert.equal(h.faux.state.callCount, 4); assert.deepEqual(wakes, []);
- assert.ok(providerEvidence.includes("Subagent execution evidence is ready"));
+ assert.ok(providerEvidence.includes("Inspect terminal evidence"));
  for (const view of receipt.sessions) assert.ok(providerEvidence.includes(view.handle), "ready sibling facts must reach the ongoing provider request without an extra wake");
  assert.deepEqual(h.errors, []);
 });
@@ -61,7 +62,7 @@ test("blocked work can resume, yield fully idle, and receive one child terminal 
  const base = await mkdtemp(join(tmpdir(), "async-blocked-yield-")); const store = new ManagedSessionStore(base);
  let release!: () => void, ctx!: ExtensionContext, service!: ContinuationService, started = false, terminalWire = "", evidenceWire = "", handle = "", wakes = 0;
  const gate = new Promise<void>(resolve => { release = resolve; }); const trace = createTrace();
- const h = await createHostHarness({ mode: "rpc", trace, extensions: [workflow, (pi: ExtensionAPI) => {
+ const h = await createHostHarness({ mode: "rpc", trace, extensions: [loopNotifications, workflow, (pi: ExtensionAPI) => {
   service = registerContinuationTool({ ...pi, sendMessage(message, options) {
    if (options?.triggerTurn && message.customType === SUBAGENT_EXECUTION_EVENT) { assert.equal(ctx.isIdle(), true); wakes++; }
    pi.sendMessage(message, options);
@@ -82,21 +83,20 @@ test("blocked work can resume, yield fully idle, and receive one child terminal 
   tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "doing", note: null }] }),
   managed({ action: "create", requestId: "yield", tasks: [{ id: "verify", role: "explorer", objective: "inspect fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }),
   fauxAssistantMessage("Execution is pending; this turn can end without completing the task"),
-  fauxAssistantMessage("No independent work remains; waiting for the execution event"),
   context => { terminalWire = JSON.stringify(context.messages); return managed({ action: "inspect", handle }); },
   context => { evidenceWire = JSON.stringify(context.messages); return tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "done" }] }); },
   fauxAssistantMessage("Execution evidence collected"),
  ]);
  await h.session.prompt("Prerequisite resolved; continue");
- await until(() => started && h.faux.state.callCount === 6 && !h.session.isStreaming);
+ await until(() => started && h.faux.state.callCount === 5 && !h.session.isStreaming);
  const state = () => h.session.sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state").at(-1) as { data: { state: GoalState } };
  assert.equal(state().data.state.tasks[0]?.status, "doing"); assert.equal(state().data.state.paused, false); assert.equal(wakes, 0);
- await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 6, "pending work alone must not keep requesting the provider");
+ await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 5, "pending work alone must not keep requesting the provider");
  handle = (await service.contextIndex(ctx))[0]!.handle;
- release(); await until(() => h.faux.state.callCount === 9 && !h.session.isStreaming);
- assert.equal(wakes, 1); assert.ok(terminalWire.includes("Subagent execution evidence is ready")); assert.ok(evidenceWire.includes("released child evidence"));
+ release(); await until(() => h.faux.state.callCount === 8 && !h.session.isStreaming);
+ assert.equal(wakes, 0, "the executor does not wake; the consumer delivers the terminal"); assert.ok(terminalWire.includes("Inspect terminal evidence")); assert.ok(evidenceWire.includes("released child evidence"));
  assert.equal(state().data.state.tasks[0]?.status, "done");
- await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 9); assert.deepEqual(h.errors, []);
+ await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 8); assert.deepEqual(h.errors, []);
 });
 
 for (const boundary of ["settlement", "compaction", "compaction-abort", "compaction-abort-late"] as const) test(`completion waits across a held public ${boundary} boundary`, { timeout: 20000 }, async t => {
@@ -104,9 +104,10 @@ for (const boundary of ["settlement", "compaction", "compaction-abort", "compact
  let releaseChild!: () => void, releaseBoundary!: () => void, entered = false, terminal = false, holding = false, badWake = false, waits = 0, context!: ExtensionContext, service!: ContinuationService, work: Promise<unknown> | undefined;
  const childGate = new Promise<void>(resolve => { releaseChild = resolve; }), boundaryGate = new Promise<void>(resolve => { releaseBoundary = resolve; });
  let releaseFailure!: () => void, failureEntered = false; const failureGate = new Promise<void>(resolve => { releaseFailure = resolve; });
- const h = await createHostHarness({ mode: "rpc", settings: { compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 1024 } }, extensions: [(pi: ExtensionAPI) => {
+ const h = await createHostHarness({ mode: "rpc", settings: { compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 1024 } }, extensions: [loopNotifications, (pi: ExtensionAPI) => {
   if (boundary === "compaction-abort-late") pi.on("session_compact_failed", async () => { failureEntered = true; holding = true; await failureGate; holding = false; });
-  service = registerContinuationTool({ ...pi, sendUserMessage(message, options) { if (typeof message === "string" && message.startsWith("/csheng-subagents-wait ")) waits++; pi.sendUserMessage(message, options); }, sendMessage(message, options) { if (options?.triggerTurn && holding) badWake = true; pi.sendMessage(message, options); } }, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
+  pi.on("input", event => { if (String(event.text ?? "").startsWith("/csheng-loop-notifications-wait ")) waits++; });
+  service = registerContinuationTool({ ...pi, sendMessage(message, options) { if (options?.triggerTurn && holding) badWake = true; pi.sendMessage(message, options); } }, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
    options.onChildStarted?.(); await childGate; options.onChildSettled?.(); return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
   pi.on("agent_start", (_event, ctx) => { context = ctx; }); pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { if ((event as SubagentExecutionEvent).kind === "run-terminal") terminal = true; });
@@ -118,7 +119,7 @@ for (const boundary of ["settlement", "compaction", "compaction-abort", "compact
  h.faux.setResponses([managed({ action: "create", requestId: "boundary", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved result received")]);
  work = h.session.prompt("bounded fixture");
  if (boundary !== "settlement") { await work; work = h.session.compact("owned fixture only"); }
- await until(() => entered); assert.ok(waits > 0, "outstanding work must have an early public idle waiter");
+ await until(() => entered);
  if (boundary === "compaction-abort-late") {
   const rejected = assert.rejects(work, /cancel/i); const aborting = h.session.abort(); releaseBoundary(); await until(() => failureEntered);
   releaseChild(); await until(() => terminal); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(badWake, false); assert.equal(h.faux.state.callCount, 2);
@@ -175,13 +176,10 @@ for (const aggregate of ["failed", "partial"] as const) test(`returned ${aggrega
 test("queued but dropped completion is not acknowledged, and a new input can explicitly collect it", { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-dropped-notice-")); const store = new ManagedSessionStore(base);
  let release!: () => void, ctx!: ExtensionContext, service!: ContinuationService, receipt!: SessionActionResult;
- let queued = false, terminalEvent!: SubagentExecutionEvent;
+ let terminalEvent!: SubagentExecutionEvent;
  const gate = new Promise<void>(resolve => { release = resolve; });
  const h = await createHostHarness({ mode: "rpc", extensions: [(pi: ExtensionAPI) => {
-  service = registerContinuationTool({ ...pi, sendMessage(message, options) {
-   if (message.customType === SUBAGENT_EXECUTION_EVENT && options?.triggerTurn) { queued = true; return; }
-   pi.sendMessage(message, options);
-  } }, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
+  service = registerContinuationTool(pi, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
    options.onChildStarted?.(); await gate; options.onChildSettled?.();
    return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "one execution", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
@@ -192,20 +190,33 @@ test("queued but dropped completion is not acknowledged, and a new input can exp
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
  h.faux.setResponses([managed({ action: "create", requestId: "dropped", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("waiting for a real event")]);
- await h.session.prompt("start fixture"); release(); await until(() => queued);
- assert.equal((await service.unobservedWake([terminalEvent], ctx)).length, 1, "sendMessage alone must not consume terminal evidence");
+ await h.session.prompt("start fixture"); release(); await until(() => !!terminalEvent);
+ assert.equal((await service.unobservedWake([terminalEvent], ctx)).length, 1, "publication alone must not consume terminal evidence");
  assert.equal(h.faux.state.callCount, 2);
  let wire = "";
  h.faux.setResponses([managed({ action: "inspect", handle: receipt.sessions[0]!.handle }), providerContext => { wire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("explicit result collected"); }]);
  await h.session.prompt("collect explicitly; supersede the dropped queue");
- assert.ok(wire.includes("one execution")); assert.ok(!wire.includes("Subagent execution evidence is ready"), "a superseded queued notice must not reappear from history");
+ assert.ok(wire.includes("one execution")); assert.ok(!wire.includes("Inspect terminal evidence"), "a superseded queued notice must not reappear from history");
  assert.deepEqual(await service.unobservedWake([terminalEvent], ctx), []);
  assert.equal(h.faux.state.callCount, 4); assert.deepEqual(h.errors, []);
 });
 
-for (const order of ["workflow-first", "executor-first"] as const) test(`completion and reminder share one provider turn (${order})`, { timeout: 20000 }, async t => {
+for (const order of ["workflow-first", "executor-first"] as const) test(`completion and task renewal reach separate provider turns (${order})`, { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-reminder-merge-")); const store = new ManagedSessionStore(base);
  let release!: () => void, terminal!: () => void, ctx!: ExtensionContext, service!: ContinuationService, released = false, providerWire = "";
+ const terminalContents: string[] = [], reminderContents: string[] = [];
+ const notifications = (pi: ExtensionAPI) => loopNotifications({ ...pi,
+  sendMessage(message, options) {
+   if (message.customType === LOOP_NOTICE_TYPE && options?.triggerTurn) terminalContents.push(String(message.content));
+   return pi.sendMessage(message, options);
+  },
+  sendUserMessage(content, options) {
+   if (options?.deliverAs === "followUp") {
+    assert.equal(typeof content, "string"); reminderContents.push(content as string);
+   }
+   pi.sendUserMessage(content, options);
+  },
+ });
  const gate = new Promise<void>(resolve => { release = resolve; }), completion = new Promise<void>(resolve => { terminal = resolve; });
  const executor = (pi: ExtensionAPI) => {
   service = registerContinuationTool(pi, { store, loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
@@ -216,15 +227,20 @@ for (const order of ["workflow-first", "executor-first"] as const) test(`complet
   pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { if ((event as SubagentExecutionEvent).kind === "run-terminal") terminal(); });
   pi.on("agent_settled", async () => { if (!released) { released = true; release(); await completion; } });
  };
- const h = await createHostHarness({ mode: "rpc", extensions: order === "workflow-first" ? [workflow, executor] : [executor, workflow] });
+ const h = await createHostHarness({ mode: "rpc", extensions: order === "workflow-first" ? [notifications, workflow, executor] : [executor, workflow, notifications] });
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([contract({ operation: "set", goal: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", requestId: "merge", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("ready facts and independent work received"); }]);
- await h.session.prompt("fixture"); await until(() => h.faux.state.callCount === 4 && !h.session.isStreaming);
+ let reminderWire = "";
+ h.faux.setResponses([contract({ operation: "set", goal: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", requestId: "merge", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("terminal evidence received"); }, providerContext => { reminderWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("independent work resumed"); }]);
+ await h.session.prompt("fixture"); await until(() => h.faux.state.callCount === 5 && !h.session.isStreaming);
  await new Promise(resolve => setImmediate(resolve));
- assert.equal(h.faux.state.callCount, 4, "completion must not be followed by a duplicate unchanged-revision reminder");
- assert.ok(providerWire.includes("Subagent execution evidence is ready")); assert.ok(providerWire.includes("Independent task"));
- assert.ok(providerWire.includes("advance independent work")); assert.deepEqual(h.errors, []);
+ assert.equal(h.faux.state.callCount, 5, "the terminal notice and the later task renewal are separate turns");
+ assert.equal(terminalContents.length, 1);
+ assert.equal(reminderContents.length, 1);
+ assert.ok(providerWire.includes(JSON.stringify(terminalContents[0])), "the terminal notice reaches its provider turn");
+ assert.equal(providerWire.includes(JSON.stringify(reminderContents[0])), false, "the terminal turn has no task renewal payload");
+ assert.ok(reminderWire.includes(JSON.stringify(reminderContents[0])), "the subsequent turn receives the task renewal payload");
+ assert.deepEqual(h.errors, []);
 });
 
 const tool = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
@@ -254,7 +270,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
   pi.on("tool_execution_end", event => { if (event.toolName === "csheng_subagent_sessions") results.push(event.result.details as SessionActionResult); });
  };
  const trace = createTrace();
- const h = await createHostHarness({ mode: "rpc", realSessionFile: true, trace, extensions: [nativeFixture, workflow, extension, createTraceObserver(trace)] });
+ const h = await createHostHarness({ mode: "rpc", realSessionFile: true, trace, extensions: [loopNotifications, nativeFixture, workflow, extension, createTraceObserver(trace)] });
  t.after(async () => {
   await service.shutdown();
   if (ctx) for (const view of await service.contextIndex(ctx)) {
@@ -274,7 +290,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
   contract({ operation: "update", tasks: [{ id: "t", status: "doing" }] }),
   managed({ action: "create", requestId: "pair", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: h.workDir }], model: "subagent-fixture/fixture", thinking: "off" })) }),
   tool("bash", { command: "printf independent > parent-progress" }),
-  contract({ operation: "update", tasks: [{ id: "t", note: "Submitted; parent made independent progress" }] }), fauxAssistantMessage("waiting"), fauxAssistantMessage("Only event-dependent work remains; no new revision"),
+  contract({ operation: "update", tasks: [{ id: "t", note: "Submitted; parent made independent progress" }] }), fauxAssistantMessage("waiting"),
  ]);
  await h.session.prompt("implement fixture");
  await until(() => h.faux.getPendingResponseCount() === 0 && !h.session.isStreaming);
@@ -296,7 +312,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
   contract({ operation: "update", tasks: [{ id: "t", note: "Repair requested" }] }),
   managed({ action: "refresh", handle: fast.handle, expectedEpisode: 1 }),
   managed({ action: "continue", mode: "foreground", episodes: [{ handle: fast.handle, expectedEpisode: 1, requestId: "repair", message: "host-worker-fixture" }] }),
-  () => apply(latest("fast")), fauxAssistantMessage("repair applied; still waiting for sibling"), fauxAssistantMessage("Remaining sibling is event-dependent"),
+  () => apply(latest("fast")), fauxAssistantMessage("repair applied; still waiting for sibling"),
  ]);
  await h.session.prompt("repair fast task explicitly");
  await until(() => h.faux.getPendingResponseCount() === 0 && !h.session.isStreaming);

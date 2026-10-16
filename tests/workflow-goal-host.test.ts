@@ -3,6 +3,7 @@ import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import loopNotifications from "../extensions/loop-notifications/index.ts";
 import workflow from "../extensions/workflow/index.ts";
 import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace, type HostHarness, type Trace } from "./fixtures/workflow/host-fixture.ts";
@@ -23,7 +24,7 @@ test("main directly marks done, independently of checks, reviews or Skills", asy
  assert.equal(state(h).tasks[0]!.status, "done"); assert.equal(h.faux.state.callCount, 3); assert.deepEqual(h.errors, []);
 });
 test("unchanged task list gets one reminder; new input needs no alignment protocol", async t => {
- const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([start(), fauxAssistantMessage("Paused accidentally"), fauxAssistantMessage("Still unchanged")]);
  await h.session.prompt("implement");
  await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
@@ -113,7 +114,7 @@ test("one provider retry still accepts update, resume and cancel, and cancelled 
 });
 test("recovered provider stop leaves unfinished work active and sends one bounded reminder", async t => {
  const trace = createTrace();
- const h = await createHostHarness({ trace, extensions: [workflow, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
   call({ operation: "set", goal: "Useful work", tasks: [{ id: "t", title: "Implement", status: "doing" }] }),
   transient(),

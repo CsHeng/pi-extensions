@@ -8,9 +8,12 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@eare
 import { EventEmitter } from "node:events";
 import { NATIVE_TIMER_MAX_MS } from "../extensions/shared/duration-timer.ts";
 import { createShellDelivery } from "../extensions/retained-shell/delivery.ts";
-import { createShellExecutionOwner, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/retained-shell/execution.ts";
+import { createShellExecutionOwner, MAX_TERMINAL_RECORDS, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/retained-shell/execution.ts";
 import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
-import { shellClaim } from "../extensions/retained-shell/policy.ts";
+import loopNotifications from "../extensions/loop-notifications/index.ts";
+import { shellClaim, SHELL_EXECUTION_EVENT } from "../extensions/retained-shell/policy.ts";
+import { validateShellCall } from "../extensions/retained-shell/validate.ts";
+import { LOOP_FACTS_EVENT, LOOP_NOTICE_TYPE, LOOP_SNAPSHOT_REQUEST, type LoopFacts } from "../extensions/shared/loop-facts.ts";
 
 const shell = { shell: "/bin/sh", args: ["-c"] };
 const scope: ShellScope = { sessionId: "session", branchAnchor: "leaf" };
@@ -322,10 +325,144 @@ test("controls stay in one session branch and a switch interrupts only the old o
 	assert.equal(interrupted?.exitCode, null);
 });
 
+test("branch switch keeps ancestor work and a late old terminal does not enter the new branch", async (t) => {
+	const dir = await scratch();
+	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => void>>();
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const published: LoopFacts[] = [];
+	const pi = {
+		getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin" } }],
+		getActiveTools: () => ["bash"],
+		getSettings: () => ({}),
+		events: {
+			on: (name: string, handler: (data: unknown) => void) => { listeners.set(name, [...(listeners.get(name) ?? []), handler]); return () => {}; },
+			emit: (name: string, data: unknown) => { for (const handler of listeners.get(name) ?? []) handler(data); },
+		},
+		registerTool: () => {},
+		registerCommand: () => {},
+		sendUserMessage: () => {},
+		sendMessage: async () => {},
+		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			return () => {};
+		},
+	};
+	pi.events.on(LOOP_FACTS_EVENT, (data) => { const facts = data as LoopFacts; if (facts.producer === "retained-shell") published.push(facts); });
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
+	const startsBefore = owner.startCount;
+	t.after(async () => { await owner.shutdown(); await rm(dir, { recursive: true, force: true }); });
+	bindRetainedShell(pi as unknown as ExtensionAPI, owner);
+	const ctxFor = (leaf: string, branch: string[]) => ({ mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf, getBranch: () => branch.map((id) => ({ id })) } }) as ExtensionContext;
+	const fire = (event: string, ctx: ExtensionContext) => { for (const handler of handlers.get(event) ?? []) handler({}, ctx); };
+	fire("session_start", ctxFor("old", ["old"]));
+	const started = await owner.start({ command: "sleep 30", cwd: dir, env: process.env, sessionId: "session", branchAnchor: "old", toolCallId: null, deadlineMs: 60_000, foregroundWindowMs: 0 });
+	assert.equal(owner.startCount, startsBefore + 1);
+	const ancestor = ctxFor("child", ["old", "child"]);
+	fire("session_tree", ancestor);
+	const kept = published.at(-1);
+	assert.equal(kept?.availability, "ready");
+	assert.equal(kept?.executions.some((execution) => execution.id === started.executionId && execution.phase === "running"), true, "ancestor-anchor work must stay visible");
+	assert.equal(owner.startCount, startsBefore + 1);
+	const away = ctxFor("other", ["other"]);
+	fire("session_tree", away);
+	await owner.interruptOthers({ sessionId: "session", branchAnchor: "other", branchIds: ["other"] });
+	pi.events.emit(SHELL_EXECUTION_EVENT, { version: 1, executionId: started.executionId, owner: "pi-bash", sessionId: "session", branchAnchor: "old", toolCallId: null, phase: "interrupted", status: "interrupted", exitCode: null, deadlineAt: null, truncated: false, outputTail: "old", notification: "idle-wake-or-next-request", label: "Bash", terminalAt: null, lastOutputAt: null });
+	const replies: LoopFacts[] = [];
+	pi.events.emit(LOOP_SNAPSHOT_REQUEST, { version: 1, accept: (facts: LoopFacts) => replies.push(facts) });
+	assert.equal(replies[0]?.executions.some((execution) => execution.id === started.executionId), false, "a late old-branch terminal must not be relabeled onto the current branch");
+	assert.equal(owner.startCount, startsBefore + 1);
+});
+
+test("an empty execution id does not start a process", async () => {
+	assert.equal(validateShellCall({ command: "echo effect", executionId: "" }).ok, false);
+	assert.equal(validateShellCall({ action: "inspect", executionId: "" }).ok, false);
+	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => void>>();
+	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext) => Promise<{ isError?: boolean }> }>();
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const before = owner.startCount;
+	const pi = {
+		getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin" } }],
+		getActiveTools: () => ["bash"],
+		getSettings: () => ({}),
+		events: { on: () => () => {}, emit: () => {} },
+		registerTool: (tool: { name: string; execute: (id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext) => Promise<{ isError?: boolean }> }) => { tools.set(tool.name, tool); },
+		registerCommand: () => {},
+		sendUserMessage: () => {},
+		sendMessage: async () => {},
+		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); return () => {}; },
+	};
+	bindRetainedShell(pi as unknown as ExtensionAPI, owner);
+	const ctx = { mode: "tui", cwd: "/tmp", sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
+	for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
+	const rejected = await tools.get("bash")!.execute("call", { command: "echo effect", executionId: "" }, undefined, undefined, ctx);
+	assert.equal(rejected.isError, true);
+	assert.equal(owner.startCount, before);
+	await owner.shutdown();
+});
+
+test("nine background terminals still project once after output eviction", async (t) => {
+	const dir = await scratch();
+	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const pi = {
+		getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin" } }],
+		getActiveTools: () => ["bash"],
+		getSettings: () => ({}),
+		appendEntry: () => {},
+		events: {
+			on: (name: string, handler: (data: unknown) => void) => { listeners.set(name, [...(listeners.get(name) ?? []), handler]); return () => {}; },
+			emit: (name: string, data: unknown) => { for (const handler of listeners.get(name) ?? []) handler(data); },
+		},
+		registerTool: () => {},
+		registerCommand: () => {},
+		sendUserMessage: () => {},
+		sendMessage: async () => {},
+		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			return () => {};
+		},
+	};
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
+	t.after(async () => { await owner.shutdown(); await rm(dir, { recursive: true, force: true }); });
+	bindRetainedShell(pi as unknown as ExtensionAPI, owner);
+	loopNotifications(pi as unknown as ExtensionAPI);
+	const exited = new Set<string>();
+	pi.events.on(SHELL_EXECUTION_EVENT, (data) => {
+		const event = data as ShellExecutionEvent;
+		if (event.phase === "exited") exited.add(event.executionId);
+	});
+	const ctx = { mode: "tui", isIdle: () => false, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
+	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+	const ids: string[] = [];
+	for (let index = 0; index < MAX_TERMINAL_RECORDS + 1; index++) {
+		const started = await owner.start({ command: "echo ok", cwd: dir, env: process.env, sessionId: "session", branchAnchor: "leaf", toolCallId: null, deadlineMs: 60_000, foregroundWindowMs: 0 });
+		ids.push(started.executionId);
+	}
+	const deadline = Date.now() + 3_000;
+	while (exited.size < ids.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(exited.size, ids.length);
+	assert.ok(owner.list(scope).filter((view) => view.status !== "running").length <= MAX_TERMINAL_RECORDS);
+	const project = async () => {
+		let text = "";
+		for (const handler of handlers.get("context_with_system") ?? []) {
+			const result = await handler({ messages: [] }, ctx) as { messages?: Array<{ customType?: string; content?: string }> } | undefined;
+			text += (result?.messages ?? []).filter((message) => message.customType === LOOP_NOTICE_TYPE).map((message) => message.content ?? "").join("\n");
+		}
+		return text;
+	};
+	const first = await project();
+	for (const id of ids) assert.equal(first.split(id).length - 1, 1, id);
+	const second = await project();
+	for (const id of ids) assert.equal(second.includes(id), false, id);
+	const replies: LoopFacts[] = [];
+	pi.events.emit(LOOP_SNAPSHOT_REQUEST, { version: 1, accept: (facts: LoopFacts) => replies.push(facts) });
+	assert.equal(replies.some((facts) => facts.producer === "retained-shell" && facts.executions.some((execution) => ids.includes(execution.id) && execution.disposition === "pending")), false);
+});
+
 test("terminal retention is bounded and a dropped wake stays inspectable", () => {
 	const delivery = createShellDelivery();
 	const event = (id: string, status = "exited"): ShellExecutionEvent => ({
-		version: 1, executionId: id, owner: "pi-bash", sessionId: "session", branchAnchor: "leaf", toolCallId: "call", phase: "exited", status: status as "exited", exitCode: 0, deadlineAt: null, truncated: false, outputTail: id, notification: "idle-wake-or-next-request",
+		version: 1, executionId: id, owner: "pi-bash", sessionId: "session", branchAnchor: "leaf", toolCallId: "call", phase: "exited", status: status as "exited", exitCode: 0, deadlineAt: null, truncated: false, outputTail: id, notification: "idle-wake-or-next-request", label: "Bash", terminalAt: null, lastOutputAt: null,
 	});
 	delivery.noteReady(event("exec-a"));
 	delivery.noteReturning(event("exec-b"));
@@ -378,6 +515,37 @@ test("terminal records stay bounded", async (t) => {
 	assert.equal(owner.inspect(ids[2]!, unscoped)?.status, "exited");
 });
 
+test("display notification sees retention after a failed record is evicted", async (t) => {
+	const dir = await scratch();
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell, maxTerminalRecords: 2 });
+	t.after(async () => {
+		await owner.shutdown();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const snapshots: string[][] = [];
+	owner.subscribeDisplay(() => {
+		snapshots.push(owner.list(unscoped).map((view) => view.executionId));
+	});
+	const ids: string[] = [];
+	for (const command of ["exit 1", "printf 'two\n'", "printf 'three\n'"]) {
+		const view = await owner.start({
+			command,
+			cwd: dir,
+			env: process.env,
+			sessionId: null,
+			branchAnchor: null,
+			toolCallId: null,
+			deadlineMs: 5_000,
+			foregroundWindowMs: 2_000,
+		});
+		ids.push(view.executionId);
+	}
+	const last = snapshots.at(-1) ?? [];
+	assert.equal(last.length, 2);
+	assert.equal(last.includes(ids[0]!), false);
+	assert.deepEqual(owner.list(unscoped).map((view) => view.executionId), last);
+});
+
 test("omitted wait is 180 seconds and an explicit duration above the old caps is honored", async () => {
 	const waits: number[] = [];
 	const starts: StartShellInput[] = [];
@@ -391,6 +559,8 @@ test("omitted wait is 180 seconds and an explicit duration above the old caps is
 		async cancel() { return { ...runningView(), status: "cancelled" }; },
 		async interruptOthers() {},
 		async shutdown() {},
+		list() { return []; },
+		subscribeDisplay() { return () => {}; },
 	};
 	const tool = retainedTool(owner);
 	const ctx = toolContext();
@@ -555,6 +725,11 @@ function runningView(): ShellExecutionView {
 		toolCallId: "call",
 		sessionId: "session",
 		branchAnchor: "leaf",
+		label: "Bash",
+		commandPreview: "sleep 60",
+		background: true,
+		terminalAt: null,
+		lastOutputAt: null,
 	};
 }
 

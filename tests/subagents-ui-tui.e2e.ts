@@ -16,7 +16,7 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 type Frame = { sequence: number; width: number; lines: string[] };
 
-async function host(t: test.TestContext, history: boolean) {
+async function host(t: test.TestContext, history: boolean, panels = false) {
 	try { await access("/usr/bin/script"); } catch { t.skip("requires util-linux script; no installation performed"); return; }
 	const installedDirs = (process.env.PATH ?? "").split(":").filter(entry => entry.length > 0 && !entry.includes("node_modules/.bin"));
 	let installedPi = false;
@@ -27,14 +27,17 @@ async function host(t: test.TestContext, history: boolean) {
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], tuiMode: "fullscreen" }));
 	const columns = history ? 80 : 120;
+	const rows = panels ? 36 : 24;
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
-		"-e", join(packageRoot, "extensions/subagents-ui/index.ts"), "-e", join(root, "tests/fixtures/subagents-observer-tui.ts"),
-		"--model", "observer-fixture/fixture", "--thinking", "off", "--", "observer fixture"];
-	const child = spawn("script", ["-q", "-e", "-f", "-c", `set -eu; stty cols ${columns} rows 24; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
+		"-e", join(packageRoot, "extensions/subagents-ui/index.ts"),
+		...(panels ? ["-e", join(packageRoot, "extensions/tasks-ui/index.ts"), "-e", join(packageRoot, "extensions/jobs-ui/index.ts"),
+			"-e", join(root, "tests/fixtures/above-editor-panels.ts")]
+			: ["-e", join(root, "tests/fixtures/subagents-observer-tui.ts"), "--model", "observer-fixture/fixture", "--thinking", "off", "--", "observer fixture"])];
+	const child = spawn("script", ["-q", "-e", "-f", "-c", `set -eu; stty cols ${columns} rows ${rows}; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
 		cwd: base, detached: true, env: { PATH: installedDirs.join(":"), HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0",
 			TERM: "xterm-256color", COLORTERM: "truecolor", CSHENG_UI_PACKAGE_ROOT: packageRoot, CSHENG_UI_HISTORY_FIXTURE: history ? "1" : "0" },
 	});
-	const terminal = new Terminal({ cols: columns, rows: 24, allowProposedApi: true, scrollback: 0 });
+	const terminal = new Terminal({ cols: columns, rows, allowProposedApi: true, scrollback: 0 });
 	terminal.onData(data => child.stdin.write(data));
 	let sequence = 0;
 	let output = "";
@@ -71,8 +74,10 @@ async function host(t: test.TestContext, history: boolean) {
 	};
 	await waitFor(async () => { try { return (await readFile(join(agent, "observer-ready"), "utf8")) === "ready"; } catch { return false; } }, "fixture did not start");
 	await delay(150);
-	child.stdin.write("\u001b\u0006");
-	await waitFor(() => output.includes("Subagents"), "observer overlay did not open");
+	if (!panels) {
+		child.stdin.write("\u001b\u0006");
+		await waitFor(() => output.includes("Subagents"), "observer overlay did not open");
+	}
 	const resize = async (cols: number, rows: number) => {
 		// Resize only the slave belonging to this owned script process, never the caller's TTY.
 		const children = (await readFile(`/proc/${child.pid}/task/${child.pid}/children`, "utf8")).trim().split(/\s+/);
@@ -87,6 +92,83 @@ async function host(t: test.TestContext, history: boolean) {
 	};
 	return { child, exited, waitFor, frame, resize, agent, get output() { return output; } };
 }
+
+test("installed Pi fullscreen: three bottom sections expand independently without opening dialogs", { timeout: 45_000 }, async t => {
+	const f = await host(t, false, true);
+	if (!f) return;
+	const names = ["Tasks", "Jobs", "Subagents"] as const;
+	type Section = typeof names[number];
+	const expanded: Record<Section, boolean> = { Tasks: false, Jobs: false, Subagents: false };
+	const heading = (lines: string[], name: Section) => lines.findIndex(line => new RegExp(`[▸▾].*${name}`).test(line));
+	const check = async (hidden?: Section) => {
+		await f.waitFor(async () => {
+			const { lines, width } = await f.frame();
+			let previous = -1;
+			for (const name of names) {
+				const row = heading(lines, name);
+				if (name === hidden) { if (row !== -1) return false; continue; }
+				if (row <= previous || !lines[row]?.includes(expanded[name] ? "▾" : "▸")) return false;
+				previous = row;
+			}
+			return lines.every(line => visibleWidth(line) <= width);
+		}, "independent section headings did not match expected order/fold state");
+	};
+	const click = async (name: Section) => {
+		const frame = await f.frame();
+		const row = heading(frame.lines, name);
+		assert.ok(row >= 0, `${name} title is visible`);
+		const column = visibleWidth(frame.lines[row]!.split(/[▸▾]/)[0]!) + 1;
+		f.child.stdin.write(`\u001b[<0;${column};${row + 1}M`);
+		await delay(60);
+		f.child.stdin.write(`\u001b[<0;${column};${row + 1}m`);
+		expanded[name] = !expanded[name];
+		await check();
+	};
+	await check();
+	for (const name of names) await click(name);
+	await f.waitFor(async () => {
+		const text = (await f.frame()).lines.join("\n");
+		return text.includes("Task inline detail") && text.includes("Job inline detail") && text.includes("AgentInline");
+	}, "all three inline detail groups must coexist in the same physical frame");
+	// A slash command must still reach the editor: no list/overlay may have taken input focus.
+	f.child.stdin.write("/panels-update\r");
+	await f.waitFor(async () => (await f.frame()).lines.join("\n").includes("Task inline updated"), "header interaction took editor focus or refresh lost inline detail");
+	await check();
+	await click("Jobs");
+	await click("Tasks");
+	await click("Subagents");
+	f.child.stdin.write("/jobs-ui hide\r");
+	await check("Jobs");
+	f.child.stdin.write("/panels-update\r");
+	await delay(150);
+	await check("Jobs");
+	f.child.stdin.write("/jobs-ui show\r");
+	await check();
+	await f.resize(50, 36);
+	await check();
+	await click("Tasks");
+	await click("Subagents");
+	await f.resize(120, 36);
+	for (const [command, title] of [["tasks-ui", "Tasks · workflow"], ["jobs-ui", "Jobs · retained shell"], ["subagents-ui", "Subagents · session"]]) {
+		f.child.stdin.write(`/${command} list\r`);
+		await f.waitFor(async () => {
+			const { lines } = await f.frame();
+			const row = lines.findIndex(line => line.includes(title!));
+			return row > 0 && row < 24;
+		}, `${command} list did not open a central overlay`);
+		f.child.stdin.write(command === "subagents-ui" ? "\u001b\u0006" : "\u001b");
+		await f.waitFor(async () => !(await f.frame()).lines.some(line => line.includes(title!)), `${command} list did not close with its keyboard action`);
+	}
+	for (const [command, title] of [["tasks-ui", "Tasks"], ["jobs-ui", "Jobs"], ["subagents-ui", "Subagents"]]) {
+		for (const state of ["off", "on"]) {
+			f.child.stdin.write(`/${command}\r`);
+			await f.waitFor(async () => (await f.frame()).lines.join("\n").includes(`${title} UI ${state}.`), `${command} did not acknowledge its visibility toggle`);
+		}
+	}
+	f.child.stdin.write("/quit\r");
+	await f.waitFor(() => f.child.exitCode !== null, "host did not quit from the still-focused editor", 8_000);
+	assert.equal(await f.exited, 0);
+});
 
 test("installed Pi fullscreen: clicking the observer close marker dismisses the overlay", { timeout: 40_000 }, async t => {
 	const f = await host(t, false);

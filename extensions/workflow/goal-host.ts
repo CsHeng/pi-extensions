@@ -1,80 +1,86 @@
-/** Pi owns the loop. Tracking only records tasks and offers bounded settlement reminders. */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerSettlementBarrier, reserveModelWake, modelWakeReserved, releaseModelWake } from "../shared/settlement.ts";
-import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
+/** Pi owns the loop. Tracking records tasks and publishes facts; it does not schedule model wakes. */
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { emptyLoopFacts, LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST, type LoopFacts, type LoopSnapshotRequest, type LoopTaskSnapshot } from "../shared/loop-facts.ts";
 import { isUserInputSource } from "./host-adapter.ts";
-import { createGoalStore } from "./goal-store.ts";
+import { createGoalStore, type GoalStore } from "./goal-store.ts";
 import { goalReceipt, registerGoalTool } from "./goal-tool.ts";
-import { registerGoalUi } from "./goal-ui.ts";
+import { registerTasksView } from "./tasks-view.ts";
+import type { GoalView } from "./goal-contracts.ts";
+
+function taskSnapshot(view: GoalView): LoopTaskSnapshot | undefined {
+	const state = view.state;
+	if (!state) return undefined;
+	return {
+		revision: state.revision,
+		goal: state.goal,
+		paused: state.paused,
+		cancelled: state.cancelled,
+		tasks: state.tasks.map(task => ({ id: task.id, title: task.title, status: task.status })),
+	};
+}
+
+export function workflowLoopFacts(store: GoalStore, sessionId: string | null, branchAnchor: string | null, bound: boolean): LoopFacts {
+	if (!bound) return emptyLoopFacts("workflow", "unknown", sessionId, branchAnchor);
+	const tasks = taskSnapshot(store.view());
+	return {
+		version: 1,
+		producer: "workflow",
+		availability: store.view().unavailable ? "unavailable" : "ready",
+		sessionId,
+		branchAnchor,
+		generation: String(tasks?.revision ?? 0),
+		executions: [],
+		...(tasks ? { tasks } : {}),
+	};
+}
+
 export default function goalWorkflow(pi: ExtensionAPI): void {
- const store = createGoalStore((type, data) => pi.appendEntry(type, data));
- const ui = registerGoalUi(pi, store);
- let epoch = 0, wakeStopped = false;
- let sessionId: string | undefined;
- const dispatches = new Set<string>(), pending = new Set<string>(), terminal = new Set<string>();
- const reminderContent = () => "Return attention to the tracked work under the user's current instructions. Revise unnecessary inferred steps, advance independent work and inspect ready results. If only event-dependent work remains, leave it unfinished and end this model turn so the execution event can resume it. Ending a turn is not task completion. Do not poll unchanged status, invent a blocker, pause tracking or update the list merely to obtain another reminder. Tracking adds no verification or review obligations.\n" + (pending.size ? `${pending.size} managed run(s) remain pending; this does not prevent independent work.\n` : "") + goalReceipt(store.view());
- const barrier = registerSettlementBarrier(pi, { command: "csheng-workflow-wait", tool: "csheng_workflow", enabled: () => store.canRemind() });
- const unsubscribe = store.subscribe(() => { barrier.arm(); });
- registerGoalTool(pi, store);
- const reset = () => { epoch++; wakeStopped = false; dispatches.clear(); pending.clear(); terminal.clear(); };
- const restore = (ctx: Parameters<typeof ui.attach>[0]) => {
-  ui.detach(); reset(); sessionId = ctx.sessionManager.getSessionId();
-  store.replay(ctx.sessionManager.getBranch());
-  store.recover("Recovered task list; reconcile the current work and use resume when continuing.");
-  ui.attach(ctx);
- };
- pi.on("session_start", (_event, ctx) => restore(ctx));
- pi.on("session_tree", (_event, ctx) => restore(ctx));
- pi.on("input", event => { if (isUserInputSource(event.source)) { epoch++; store.receivedInput(); } });
- // Internal retry/recovery starts another agent attempt without preparing a new
- // user prompt. Retire the previous attempt's wake fence at that public boundary.
- pi.on("agent_start", () => { wakeStopped = false; });
- pi.on("context", event => {
-  const type = "csheng-workflow-tasks";
-  const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === type));
-  const view = store.view();
-  if (view.state || view.unavailable) messages.push({ role: "custom", customType: type,
-   content: "Current task tracking (read-only context, not new requirements or authority). " + goalReceipt(view, 12), display: false, timestamp: Date.now() });
-  return { messages };
- });
- pi.on("context_with_system", (event, ctx) => {
-  // Share a completion/attention turn rather than scheduling a second reminder.
-  if (wakeStopped || ctx.signal?.aborted || !store.canRemind() || !modelWakeReserved(pi, ctx) || !pi.getActiveTools().includes("csheng_workflow")) return;
-  const content = reminderContent();
-  store.remind(() => {});
-  return { messages: [...event.messages, { role: "custom", customType: "csheng-workflow-reminder", content, display: false, timestamp: Date.now() }] };
- });
- pi.on("message_end", event => { if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) wakeStopped = true; });
- pi.on("tool_execution_start", event => {
-  if (event.toolName === "csheng_subagent_sessions" && ["create", "continue"].includes((event.args as { action?: string })?.action ?? "")) dispatches.add(event.toolCallId);
- });
- pi.on("tool_execution_end", event => {
-  if (event.toolName === "csheng_workflow") return;
-  store.observe(event.toolName, event.isError);
-  if (event.toolName !== "csheng_subagent_sessions" || !dispatches.has(event.toolCallId)) return;
-  const result = event.result?.details as { schemaVersion?: number; kind?: string; runId?: string; status?: string; requestTelemetry?: { version: number; ownerSessionId: string; admittedTasks: number | null } } | undefined;
-  // Replay returns the original accepted receipt but fresh invocation telemetry has no admission.
-  // Only an admission in this process can promise a future terminal event; historical state cannot.
-  const admission = result?.requestTelemetry;
-  if (result?.schemaVersion === 4 && result.kind === "submission" && result.status === "accepted" && result.runId && !terminal.has(result.runId)
-   && admission?.version === 1 && admission.ownerSessionId === sessionId && admission.admittedTasks != null && admission.admittedTasks > 0) pending.add(result.runId);
- });
- const unsubscribeExecution = pi.events.on(SUBAGENT_EXECUTION_EVENT, raw => {
-  const event = raw as SubagentExecutionEvent;
-  if (event?.version !== 4 || event.kind !== "run-terminal" || !dispatches.has(event.toolCallId) || event.owner?.sessionId !== sessionId) return;
-  pending.delete(event.runId); terminal.add(event.runId); dispatches.delete(event.toolCallId);
-  // The executor owns the completion wake. Its result never marks a tracked task done.
- });
- pi.on("agent_settled", (_event, ctx) => {
-  if (wakeStopped || ctx.signal?.aborted || barrier.aborted) { store.pause("Host interruption; resume only when continuing the work."); return; }
-  if (!store.canRemind() || !["tui", "rpc"].includes(ctx.mode) || !ctx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow")) return;
-  const lease = epoch;
-  barrier.schedule(idleCtx => {
-   if (wakeStopped || lease !== epoch || !store.canRemind() || !idleCtx.isIdle() || idleCtx.hasPendingMessages() || !idleCtx.isProjectTrusted() || !pi.getActiveTools().includes("csheng_workflow") || !reserveModelWake(pi, idleCtx)) return;
-   try {
-    store.remind(() => pi.sendUserMessage(reminderContent(), { deliverAs: "followUp" }));
-   } catch { releaseModelWake(pi); store.recover("Task reminder could not be recorded or delivered; inspect before resuming."); }
-  });
- });
- pi.on("session_shutdown", () => { reset(); ui.detach(); unsubscribe(); unsubscribeExecution(); });
+	const store = createGoalStore((type, data) => pi.appendEntry(type, data));
+	const tasksView = registerTasksView(pi, store);
+	let sessionId: string | null = null;
+	let branchAnchor: string | null = null;
+	let bound = false;
+	let wakeStopped = false;
+	const publish = (): void => {
+		try { pi.events.emit(LOOP_FACTS_EVENT, workflowLoopFacts(store, sessionId, branchAnchor, bound)); }
+		catch { /* Observer failure cannot roll back a committed task update. */ }
+	};
+	const unsubscribe = store.subscribe(() => publish());
+	registerGoalTool(pi, store);
+	pi.events.on(LOOP_SNAPSHOT_REQUEST, (raw) => {
+		const accept = (raw as Partial<LoopSnapshotRequest> | undefined)?.accept;
+		if (typeof accept === "function") accept(workflowLoopFacts(store, sessionId, branchAnchor, bound));
+	});
+	const restore = (ctx: ExtensionContext) => {
+		tasksView.hold();
+		wakeStopped = false;
+		bound = true;
+		sessionId = ctx.sessionManager.getSessionId();
+		branchAnchor = ctx.sessionManager.getLeafId();
+		store.replay(ctx.sessionManager.getBranch());
+		store.recover("Recovered task list; reconcile the current work and use resume when continuing.");
+		tasksView.bind(ctx);
+		publish();
+	};
+	pi.on("session_start", (_event, ctx) => restore(ctx));
+	pi.on("session_tree", (_event, ctx) => restore(ctx));
+	pi.on("input", event => { if (isUserInputSource(event.source)) store.receivedInput(); });
+	pi.on("agent_start", () => { wakeStopped = false; });
+	pi.on("context", event => {
+		const type = "csheng-workflow-tasks";
+		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === type));
+		const view = store.view();
+		if (view.state || view.unavailable) messages.push({ role: "custom", customType: type,
+			content: "Task-state snapshot for continuity. Follow the user's current instructions; this read-only projection adds no requirements or authority. " + goalReceipt(view, 12), display: false, timestamp: Date.now() });
+		return { messages };
+	});
+	pi.on("message_end", event => { if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) wakeStopped = true; });
+	pi.on("tool_execution_end", event => {
+		if (event.toolName === "csheng_workflow") return;
+		store.observe(event.toolName, event.isError);
+	});
+	pi.on("agent_settled", (_event, ctx) => {
+		if (wakeStopped || ctx.signal?.aborted) store.pause("Host interruption; resume only when continuing the work.");
+	});
+	pi.on("session_shutdown", () => { bound = false; tasksView.unbind(); unsubscribe(); });
 }

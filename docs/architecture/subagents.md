@@ -1,6 +1,6 @@
 # Subagents
 
-`extensions/subagents/index.ts` registers `csheng_subagent_sessions`. The parent delegates bounded business outcomes; Pi owns each native agent loop and session append; the extension owns execution, isolated input, retained state and transport. It does not decide the business plan, accept a candidate, install dependencies, publish changes or turn a successful report into delivery acceptance.
+`extensions/subagents/index.ts` registers `csheng_subagent_sessions`. The parent delegates bounded business outcomes; Pi owns each native agent loop and session append; the extension owns execution, isolated input, retained state and transport. It does not decide the business plan, accept a candidate, install dependencies, publish changes, schedule the parent-model wake, or turn a successful report into delivery acceptance. Admission and terminal facts go to [loop notifications](loop-notifications.md).
 
 [Managed Subagent Execution](subagent-execution.md) owns the current action, authority, process, persistence, candidate and observation contracts. [Execution Primitives](subagent-execution-primitives.md) owns the Git and supervisor mechanics. [Subagents UI](subagents-ui.md) owns display behavior. Keep those explanations with the implementation rather than copying executable rules into shared architecture or portable Skills.
 
@@ -24,7 +24,7 @@ Routing comes from the task's explicit invocation override or the user's configu
 
 ## Scheduling and integration
 
-A create call may submit a flat batch. Use hard predecessor edges only for outputs a successor actually needs, and explicit locks for genuinely shared mutable resources. Reports do not transport candidate files. When a successor needs changed files in its fixed input, the parent explicitly applies the relevant candidate and supplies a fresh input binding before dispatch.
+A create call may submit a flat batch. Each task's `objective` supplies its bounded instructions and intended outcome; `inputs` adds context text rather than automatically loading files, and `verification` supplies task-specific check instructions. Use hard predecessor edges only for outputs a successor actually needs, and explicit locks for genuinely shared mutable resources. Reports do not transport candidate files. When a successor needs changed files in its fixed input, the parent explicitly applies the relevant candidate and supplies a fresh input binding before dispatch.
 
 Separate private workspaces can execute concurrently even when their selected paths overlap. Application coordinates actual destinations: shared mutation targets serialize, disjoint destinations need not wait behind one global apply flag. A conflict or interrupted root leaves truthful partial progress; repair stays within the authorized outcome and is verified before acceptance. There is no distributed cross-repository commit or automatic rollback of unrelated changes.
 
