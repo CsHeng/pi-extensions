@@ -358,7 +358,7 @@ Usage: ${PROBE_GATE_ENV}=1 bun scripts/run-delegation-probe.ts [options]
 
 Options:
   --shapes <list>       ${PROBE_SHAPES.join(",")} (default: production)
-  --guidance <list>     ${PROBE_GUIDANCE_LEVELS.join(",")} (default: aggressive)
+  --guidance <list>     ${PROBE_GUIDANCE_LEVELS.join(",")} (default: off; balanced/aggressive are historical treatments)
   --modes <list>        print,rpc (default: print)
   --prompts <list>      all,target,control, or explicit ids (default: all)
   --trials <n>          runs per cell (default: 6)
@@ -374,7 +374,7 @@ Every cell always includes the control prompts; report sensitivity and specifici
 async function main(argv: readonly string[]): Promise<void> {
 	const { values } = parseArgs({ args: [...argv], options: {
 		shapes: { type: "string", default: "production" },
-		guidance: { type: "string", default: "aggressive" },
+		guidance: { type: "string", default: "off" },
 		modes: { type: "string", default: "print" },
 		prompts: { type: "string", default: "all" },
 		trials: { type: "string", default: "6" },

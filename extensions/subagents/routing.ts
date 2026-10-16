@@ -1,7 +1,7 @@
 import type {
 	EffectiveRoute,
 	ExecutionProfile,
-	ReasoningProfile,
+	ThinkingProfile,
 	RoleName,
 	TaskError,
 	ThinkingLevel,
@@ -30,7 +30,7 @@ export interface RouteContext {
 
 export interface TaskRouteProfiles {
 	executionProfile?: ExecutionProfile;
-	reasoningProfile?: ReasoningProfile;
+	thinkingProfile?: ThinkingProfile;
 	model?: string;
 	thinking?: ThinkingLevel;
 }
@@ -152,23 +152,23 @@ function resolveExplicitModelRoute(
 	const matched = matchExplicitModel(profiles.model!, allModels, availableModels);
 	if (!matched.ok) return matched;
 
-	const reasoningThinking = profiles.reasoningProfile === undefined
+	const profileThinking = profiles.thinkingProfile === undefined
 		? undefined
-		: config.reasoningProfiles[profiles.reasoningProfile];
-	const thinking = profiles.thinking ?? reasoningThinking ?? context.parentThinking;
+		: config.thinkingProfiles[profiles.thinkingProfile];
+	const thinking = profiles.thinking ?? profileThinking ?? context.parentThinking;
 	if (!thinking || !supportsThinking(matched.model, thinking)) {
 		return thinkingUnavailable(
 			`The exact requested thinking level is unavailable for explicit model ${canonicalModel(matched.model)}.`,
 		);
 	}
 
-	const reasoningApplied = profiles.thinking === undefined && reasoningThinking !== undefined;
+	const profileApplied = profiles.thinking === undefined && profileThinking !== undefined;
 	const profileFallbacks: EffectiveRoute["profileFallbacks"] = [];
-	if (profiles.thinking === undefined && profiles.reasoningProfile !== undefined && reasoningThinking === undefined) {
-		profileFallbacks.push("reasoning-role-default");
+	if (profiles.thinking === undefined && profiles.thinkingProfile !== undefined && profileThinking === undefined) {
+		profileFallbacks.push("thinking-role-default");
 	}
-	const reasoningSource = reasoningApplied && profiles.reasoningProfile !== undefined
-		? config.reasoningProfileSources[profiles.reasoningProfile]
+	const profileSource = profileApplied && profiles.thinkingProfile !== undefined
+		? config.thinkingProfileSources[profiles.thinkingProfile]
 		: undefined;
 
 	return {
@@ -177,12 +177,12 @@ function resolveExplicitModelRoute(
 			provider: matched.model.provider,
 			model: matched.model.id,
 			thinking,
-			source: reasoningSource ?? "parent",
+			source: profileSource ?? "parent",
 			candidateIndex: 0,
 			...(profiles.executionProfile === undefined ? {} : { executionProfileRequested: profiles.executionProfile }),
 			executionProfileApplied: false,
-			...(profiles.reasoningProfile === undefined ? {} : { reasoningProfileRequested: profiles.reasoningProfile }),
-			reasoningProfileApplied: reasoningApplied,
+			...(profiles.thinkingProfile === undefined ? {} : { thinkingProfileRequested: profiles.thinkingProfile }),
+			thinkingProfileApplied: profileApplied,
 			profileFallbacks,
 			selectionSource: "explicit-task",
 			modelOverrideRequested: true,
@@ -206,12 +206,12 @@ export function resolveRoute(
 	const roleRoute = config.routes[role];
 	const executionRoute = profiles.executionProfile === undefined ? undefined : roleRoute.executionProfiles[profiles.executionProfile];
 	const candidates = executionRoute?.candidates ?? roleRoute.candidates;
-	const mappedReasoning = profiles.reasoningProfile === undefined ? undefined : config.reasoningProfiles[profiles.reasoningProfile];
-	const reasoningThinking = profiles.thinking === undefined ? mappedReasoning : undefined;
+	const mappedThinkingProfile = profiles.thinkingProfile === undefined ? undefined : config.thinkingProfiles[profiles.thinkingProfile];
+	const profileThinking = profiles.thinking === undefined ? mappedThinkingProfile : undefined;
 	const profileFallbacks: EffectiveRoute["profileFallbacks"] = [];
 	if (profiles.executionProfile !== undefined && executionRoute === undefined) profileFallbacks.push("execution-role-default");
-	if (profiles.thinking === undefined && profiles.reasoningProfile !== undefined && mappedReasoning === undefined) {
-		profileFallbacks.push("reasoning-role-default");
+	if (profiles.thinking === undefined && profiles.thinkingProfile !== undefined && mappedThinkingProfile === undefined) {
+		profileFallbacks.push("thinking-role-default");
 	}
 
 	const availableByCanonical = new Map(uniqueCanonical(availableModels).map((model) => [canonicalModel(model), model]));
@@ -230,13 +230,13 @@ export function resolveRoute(
 		const model = availableByCanonical.get(canonical);
 		if (!model) continue;
 
-		const thinking = profiles.thinking ?? resolveConfiguredThinking(candidate, reasoningThinking, context);
+		const thinking = profiles.thinking ?? resolveConfiguredThinking(candidate, profileThinking, context);
 		if (profiles.thinking !== undefined) exactThinkingCandidateSeen = true;
 		if (!thinking || !supportsThinking(model, thinking)) continue;
 
-		const reasoningApplied = profiles.thinking === undefined && mappedReasoning !== undefined;
-		const reasoningSource = reasoningApplied && profiles.reasoningProfile !== undefined
-			? config.reasoningProfileSources[profiles.reasoningProfile]
+		const profileApplied = profiles.thinking === undefined && mappedThinkingProfile !== undefined;
+		const profileSource = profileApplied && profiles.thinkingProfile !== undefined
+			? config.thinkingProfileSources[profiles.thinkingProfile]
 			: undefined;
 		return {
 			ok: true,
@@ -244,12 +244,12 @@ export function resolveRoute(
 				provider: model.provider,
 				model: model.id,
 				thinking,
-				source: reasoningSource ?? executionRoute?.source ?? roleRoute.source,
+				source: profileSource ?? executionRoute?.source ?? roleRoute.source,
 				candidateIndex: index,
 				...(profiles.executionProfile === undefined ? {} : { executionProfileRequested: profiles.executionProfile }),
 				executionProfileApplied: executionRoute !== undefined,
-				...(profiles.reasoningProfile === undefined ? {} : { reasoningProfileRequested: profiles.reasoningProfile }),
-				reasoningProfileApplied: reasoningApplied,
+				...(profiles.thinkingProfile === undefined ? {} : { thinkingProfileRequested: profiles.thinkingProfile }),
+				thinkingProfileApplied: profileApplied,
 				profileFallbacks,
 				selectionSource: "role-default",
 				modelOverrideRequested: false,

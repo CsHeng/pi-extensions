@@ -123,8 +123,8 @@ function managedRoute(route: EffectiveRoute): Record<string, unknown> {
 		selectionSource: route.selectionSource ?? null,
 		executionProfileRequested: route.executionProfileRequested ?? null,
 		executionProfileApplied: route.executionProfileApplied,
-		reasoningProfileRequested: route.reasoningProfileRequested ?? null,
-		reasoningProfileApplied: route.reasoningProfileApplied,
+		thinkingProfileRequested: route.thinkingProfileRequested ?? null,
+		thinkingProfileApplied: route.thinkingProfileApplied,
 		profileFallbacks: route.profileFallbacks,
 	};
 }
@@ -275,7 +275,7 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 		if (route) {
 			parts.push(`route=${boundScalar(route.provider)}/${boundScalar(route.model)} thinking=${boundScalar(route.thinking)} source=${route.source} selection=${route.selectionSource ?? "unknown"}`);
 			if (route.executionProfileRequested !== undefined) parts.push(`executionProfile=${route.executionProfileRequested} applied=${route.executionProfileApplied}`);
-			if (route.reasoningProfileRequested !== undefined) parts.push(`reasoningProfile=${route.reasoningProfileRequested} applied=${route.reasoningProfileApplied}`);
+			if (route.thinkingProfileRequested !== undefined) parts.push(`thinkingProfile=${route.thinkingProfileRequested} applied=${route.thinkingProfileApplied}`);
 			if (route.profileFallbacks.length > 0) parts.push(`profileFallbacks=${route.profileFallbacks.join(",")}`);
 		}
 		lines.push(parts.join(" "));

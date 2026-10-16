@@ -315,3 +315,43 @@ test("inventory treats missing storage as empty and invalid storage as unavailab
 	await symlink(join(base, "real"), linked.root);
 	assert.deepEqual(await linked.inventory(owner), { available: false, reason: "managed_storage_invalid" });
 });
+
+test("legacy profile fields are excluded without rewrite or profile-less success", async (t) => {
+	const { store, owner, tasks } = await setup(t);
+	const taskRecord = (await store.allocate(owner, "legacytask", tasks)).records[0]!;
+	const routeRecord = (await store.allocate(owner, "legacyroute", [{ ...tasks[0]!, id: "legacyroute" }])).records[0]!;
+	const stamp = async (handle: string, mutate: (stored: { task: Record<string, unknown>; route?: unknown }) => void) => {
+		const path = join(store.path(handle), "registry.json");
+		const stored = JSON.parse(await readFile(path, "utf8")) as { task: Record<string, unknown>; route?: unknown };
+		mutate(stored);
+		const original = JSON.stringify(stored);
+		await writeFile(path, original, { mode: 0o600 });
+		return { path, original };
+	};
+	const taskFile = await stamp(taskRecord.handle, (stored) => { stored.task.reasoningProfile = "deep"; });
+	const routeFile = await stamp(routeRecord.handle, (stored) => {
+		stored.route = {
+			provider: "fixture", model: "fixture", thinking: "high",
+			reasoningProfileRequested: "deep", reasoningProfileApplied: true,
+			profileFallbacks: ["reasoning-role-default"],
+		};
+	});
+	await assert.rejects(store.load(taskRecord.handle, owner), /legacy_profile_field/);
+	await assert.rejects(store.load(routeRecord.handle, owner), /legacy_profile_field/);
+	assert.equal(await readFile(taskFile.path, "utf8"), taskFile.original);
+	assert.equal(await readFile(routeFile.path, "utf8"), routeFile.original);
+	assert.deepEqual(await store.list(owner), []);
+	const inventory = await store.inventory(owner);
+	assert.equal(inventory.available, true);
+	if (!inventory.available) throw new Error("fixture");
+	assert.equal(inventory.entries.some((entry) => entry.handle === taskRecord.handle || entry.handle === routeRecord.handle), false);
+	assert.equal(inventory.problems.unreadableRecords, 0);
+	assert.equal(inventory.complete, true);
+	const next = await store.allocate(owner, "freshprofile", [{ ...tasks[0]!, id: "freshprofile" }]);
+	assert.equal(next.fresh, true);
+	const listed = (await store.list(owner)).map((view) => view.handle);
+	assert.equal(listed.includes(taskRecord.handle), false);
+	assert.equal(listed.includes(routeRecord.handle), false);
+	assert.equal(await readFile(taskFile.path, "utf8"), taskFile.original);
+	assert.equal(await readFile(routeFile.path, "utf8"), routeFile.original);
+});

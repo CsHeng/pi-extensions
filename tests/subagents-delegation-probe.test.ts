@@ -5,11 +5,12 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../extensions/subagents/guidance.ts";
+import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../scripts/fixtures/delegation-probe-guidance.ts";
 import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../extensions/subagents/tool-surface.ts";
 import {
 	PROBE_GUIDANCE_LEVELS,
 	PROBE_SHAPES,
+	parseProbeGuidance,
 	probeGuidanceLines,
 	probeShapeDefinition,
 	probeRequestedTasks,
@@ -50,7 +51,9 @@ test("probe variants reference the production parent-visible surface instead of 
 	assert.deepEqual(Object.keys((agentShape.parameters as { properties?: Record<string, unknown> }).properties ?? {}), ["description", "prompt", "subagent_type", "model", "run_in_background"]);
 });
 
-test("probe guidance levels mirror the production level mapping", () => {
+test("probe keeps historical treatments separate from the unaugmented production surface", () => {
+	assert.equal(parseProbeGuidance(undefined), "off");
+	assert.deepEqual(probeGuidanceLines(parseProbeGuidance(undefined)), []);
 	assert.deepEqual(PROBE_GUIDANCE_LEVELS, ["off", "balanced", "aggressive"]);
 	assert.deepEqual(probeGuidanceLines("off"), []);
 	assert.deepEqual(probeGuidanceLines("balanced"), [BASE_DELEGATION_GUIDANCE]);

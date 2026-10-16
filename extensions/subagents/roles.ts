@@ -28,7 +28,7 @@ export const ROLES: Readonly<Record<RoleName, RoleDefinition>> = Object.freeze({
 	}),
 	worker: Object.freeze({
 		tools: WRITE_TOOLS,
-		systemPrompt: `${COMMON_BOUNDARY}\nImplement only inside write grants. Additions, deletions and renames inside those grants are allowed. Do not edit Git administration or paths outside the grants. Use relevant unit tests, compilation or narrow reproduction for local feedback and repair. The parent coordinates integration, E2E and full-suite checks; run those only when assigned, rather than starting a separate delivery lifecycle. Return the candidate, checks actually performed, known problems and unverified parts so the parent can reuse applicable evidence.`,
+		systemPrompt: `${COMMON_BOUNDARY}\nImplement only inside write grants. Additions, deletions and renames inside those grants are allowed. Do not edit Git administration or paths outside the grants. Perform the implementation and verification assigned in the task; a worker result is a candidate, not source integration or final acceptance. Return the candidate, checks actually performed, known problems and unverified parts so the parent can reuse applicable evidence.`,
 	}),
 });
 

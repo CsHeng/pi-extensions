@@ -35,8 +35,8 @@ function task(index: number, output: string): TaskResult {
 			candidateIndex: 0,
 			executionProfileRequested: "deep",
 			executionProfileApplied: false,
-			reasoningProfileRequested: "deep",
-			reasoningProfileApplied: true,
+			thinkingProfileRequested: "deep",
+			thinkingProfileApplied: true,
 			profileFallbacks: ["execution-role-default"],
 			selectionSource: "role-default",
 			modelOverrideRequested: false,
@@ -54,13 +54,13 @@ test("model-visible submission retains join identity after large reports", () =>
  assert.equal(payload.kind, "submission"); assert.equal(payload.runId, runId); assert.equal(payload.generation, generation);
  assert.equal(payload.sessions[0].route.executionProfileRequested, "deep");
  assert.equal(payload.sessions[0].route.executionProfileApplied, false);
- assert.equal(payload.sessions[0].route.reasoningProfileRequested, "deep");
- assert.equal(payload.sessions[0].route.reasoningProfileApplied, true);
+ assert.equal(payload.sessions[0].route.thinkingProfileRequested, "deep");
+ assert.equal(payload.sessions[0].route.thinkingProfileApplied, true);
  assert.deepEqual(payload.sessions[0].route.profileFallbacks, ["execution-role-default"]);
  for (const expanded of [false, true]) {
   const rendered = formatManagedResult(result, expanded);
   assert.match(rendered, /executionProfile=deep applied=false/);
-  assert.match(rendered, /reasoningProfile=deep applied=true/);
+  assert.match(rendered, /thinkingProfile=deep applied=true/);
   assert.match(rendered, /profileFallbacks=execution-role-default/);
  }
  assert.deepEqual(parseSessionRequest({ action: "join", runId, mode: "foreground" }), { action: "join", runId });

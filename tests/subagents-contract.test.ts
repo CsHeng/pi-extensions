@@ -53,7 +53,7 @@ test("model-facing string choices serialize as provider-compatible enums", () =>
 	}).properties;
 	assert.deepEqual(properties.role?.enum, ROLE_NAMES);
 	assert.deepEqual(properties.executionProfile?.enum, ["fast", "balanced", "deep"]);
-	assert.deepEqual(properties.reasoningProfile?.enum, ["light", "standard", "deep"]);
+	assert.deepEqual(properties.thinkingProfile?.enum, ["light", "standard", "deep"]);
 	assert.deepEqual(properties.thinking?.enum, THINKING_LEVELS);
 	assert.equal(properties.role?.anyOf, undefined);
 });
@@ -65,7 +65,7 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		objective: "Find evidence",
 		access: [{ permission: "read", scope: "/tmp/src" }],
 		executionProfile: "fast",
-		reasoningProfile: "light",
+		thinkingProfile: "light",
 	};
 	const createRequest = (tasks: unknown[]) => ({ action: "create", requestId: "request", tasks });
 	assert.equal(Check(SubagentTaskSchema, valid), true);
@@ -79,7 +79,7 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 				verification: ["focused test"],
 		resourceLocks: ["src/file.ts"],
 		executionProfile: "balanced",
-		reasoningProfile: "standard",
+		thinkingProfile: "standard",
 	}), true);
 	// The managed tool schema keeps the same closed batch shape.
 	assert.equal(Check(SubagentSessionToolSchema, { ...createRequest([valid]), model: "some-model" }), false);
@@ -89,6 +89,7 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		assert.equal(Check(SubagentTaskSchema, { ...valid, thinking }), true);
 	}
 	assert.equal(Check(SubagentTaskSchema, { ...valid, cwd: "/tmp" }), false);
+	assert.equal(Check(SubagentTaskSchema, { ...valid, reasoningProfile: "light" }), false);
 	assert.equal(Check(SubagentTaskSchema, { ...valid, executionProfile: "extreme" }), false);
 	assert.equal(Check(SubagentTaskSchema, { ...valid, thinking: "extreme" }), false);
 	assert.equal(Check(SubagentTaskSchema, { ...valid, model: "provider/model", unknown: true }), false);
@@ -145,19 +146,19 @@ test("telemetry schema v2 freezes run counters, route attribution, and stable er
 		source: "user-config",
 		candidateIndex: 0,
 		executionProfileRequested: "fast",
-		reasoningProfileRequested: "deep",
+		thinkingProfileRequested: "deep",
 		selectionSource: "explicit-task",
 		modelOverrideRequested: true,
 		thinkingOverrideRequested: true,
 		executionProfileApplied: false,
-		reasoningProfileApplied: false,
+		thinkingProfileApplied: false,
 		profileFallbacks: [],
 	};
 	assert.equal(TELEMETRY_SCHEMA_VERSION_V2, 2);
 	assert.equal(TELEMETRY_SCHEMA_VERSION, 4);
 	assert.equal(telemetry.schemaVersion, 2);
 	assert.deepEqual(ROUTE_SELECTION_SOURCES, ["role-default", "explicit-task"]);
-	assert.deepEqual(PROFILE_FALLBACKS, ["execution-role-default", "reasoning-role-default"]);
+	assert.deepEqual(PROFILE_FALLBACKS, ["execution-role-default", "thinking-role-default"]);
 	assert.equal(telemetry.requestedDependencyEdges, 1);
 	assert.equal(routeEvidence.selectionSource, "explicit-task");
 	assert.equal(routeEvidence.source, "user-config");

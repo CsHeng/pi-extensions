@@ -4,11 +4,11 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	EXECUTION_PROFILES,
-	REASONING_PROFILES,
+	THINKING_PROFILES,
 	ROLE_NAMES,
 	THINKING_LEVELS,
 	type ExecutionProfile,
-	type ReasoningProfile,
+	type ThinkingProfile,
 	type RoleName,
 	type RouteSource,
 	type ThinkingLevel,
@@ -17,7 +17,6 @@ import {
 export { THINKING_LEVELS } from "./contracts.ts";
 export const ROUTE_CONFIG_FILE = "csheng-subagents.json";
 export type ConfiguredThinking = "$parent" | ThinkingLevel;
-export type DelegationGuidance = "off" | "balanced" | "aggressive";
 
 const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/csheng-subagents.json", import.meta.url));
 const DEFAULT_GLOBAL_CONCURRENCY = 10;
@@ -45,12 +44,11 @@ export interface RoleRouteConfig {
 }
 
 export interface EffectiveSubagentConfig {
-	guidance: DelegationGuidance;
 	maxConcurrency: number;
 	routes: Record<RoleName, RoleRouteConfig>;
 	roles: Record<RoleName, { inheritSkills: boolean }>;
-	reasoningProfiles: Partial<Record<ReasoningProfile, ConfiguredThinking>>;
-	reasoningProfileSources: Partial<Record<ReasoningProfile, RouteSource>>;
+	thinkingProfiles: Partial<Record<ThinkingProfile, ConfiguredThinking>>;
+	thinkingProfileSources: Partial<Record<ThinkingProfile, RouteSource>>;
 }
 
 export interface ConfigLoadResult {
@@ -80,7 +78,6 @@ function neutralRoute(role: RoleName): RoleRouteConfig {
 
 export function defaultConfig(): EffectiveSubagentConfig {
 	return {
-		guidance: "aggressive",
 		maxConcurrency: DEFAULT_GLOBAL_CONCURRENCY,
 		roles: { explorer: { inheritSkills: true }, reviewer: { inheritSkills: true }, worker: { inheritSkills: true } },
 		routes: {
@@ -88,14 +85,13 @@ export function defaultConfig(): EffectiveSubagentConfig {
 			reviewer: neutralRoute("reviewer"),
 			worker: neutralRoute("worker"),
 		},
-		reasoningProfiles: {},
-		reasoningProfileSources: {},
+		thinkingProfiles: {},
+		thinkingProfileSources: {},
 	};
 }
 
 function cloneConfig(config: EffectiveSubagentConfig): EffectiveSubagentConfig {
 	return {
-		guidance: config.guidance,
 		maxConcurrency: config.maxConcurrency,
 		roles: Object.fromEntries(ROLE_NAMES.map(role => [role, { ...config.roles[role] }])) as EffectiveSubagentConfig["roles"],
 		routes: Object.fromEntries(ROLE_NAMES.map((role) => [role, {
@@ -106,8 +102,8 @@ function cloneConfig(config: EffectiveSubagentConfig): EffectiveSubagentConfig {
 				{ ...route, candidates: route.candidates.map((candidate) => ({ ...candidate })) },
 			])),
 		}])) as Record<RoleName, RoleRouteConfig>,
-		reasoningProfiles: { ...config.reasoningProfiles },
-		reasoningProfileSources: { ...config.reasoningProfileSources },
+		thinkingProfiles: { ...config.thinkingProfiles },
+		thinkingProfileSources: { ...config.thinkingProfileSources },
 	};
 }
 
@@ -192,27 +188,29 @@ function parseRoute(value: unknown, role: RoleName, source: RouteSource, base: R
 	};
 }
 
+function rejectLegacyProfileConfig(value: Record<string, unknown>): void {
+	// Typed rejection only. Do not alias, apply, or rewrite a legacy reasoningProfiles mapping.
+	if ("reasoningProfiles" in value) {
+		throw new Error("reasoningProfiles is not accepted; use thinkingProfiles. The configuration file was not rewritten.");
+	}
+}
+
 export function parseConfig(value: unknown, options: ParseOptions = {}): EffectiveSubagentConfig {
 	if (!isRecord(value)) throw new Error("route configuration must be an object");
-	assertKnownKeys(value, ["guidance", "maxConcurrency", "routes", "roles", "reasoningProfiles"], "configuration");
+	rejectLegacyProfileConfig(value);
+	assertKnownKeys(value, ["maxConcurrency", "routes", "roles", "thinkingProfiles"], "configuration");
 	const source = options.source ?? "user-config";
 	const base = cloneConfig(options.base ?? defaultConfig());
-	if (value.guidance !== undefined) {
-		if (value.guidance !== "off" && value.guidance !== "balanced" && value.guidance !== "aggressive") {
-			throw new Error("guidance must be off, balanced, or aggressive");
-		}
-		base.guidance = value.guidance;
-	}
 	if (value.maxConcurrency !== undefined) {
 		base.maxConcurrency = parsePositiveLimit(value.maxConcurrency, "maxConcurrency");
 	}
-	if (value.reasoningProfiles !== undefined) {
-		if (!isRecord(value.reasoningProfiles)) throw new Error("reasoningProfiles must be an object");
-		assertKnownKeys(value.reasoningProfiles, REASONING_PROFILES, "reasoningProfiles");
-		for (const profile of REASONING_PROFILES) {
-			if (value.reasoningProfiles[profile] === undefined) continue;
-			base.reasoningProfiles[profile] = parseThinking(value.reasoningProfiles[profile], `reasoningProfiles.${profile}`);
-			base.reasoningProfileSources[profile] = source;
+	if (value.thinkingProfiles !== undefined) {
+		if (!isRecord(value.thinkingProfiles)) throw new Error("thinkingProfiles must be an object");
+		assertKnownKeys(value.thinkingProfiles, THINKING_PROFILES, "thinkingProfiles");
+		for (const profile of THINKING_PROFILES) {
+			if (value.thinkingProfiles[profile] === undefined) continue;
+			base.thinkingProfiles[profile] = parseThinking(value.thinkingProfiles[profile], `thinkingProfiles.${profile}`);
+			base.thinkingProfileSources[profile] = source;
 		}
 	}
 	if (value.roles !== undefined) {

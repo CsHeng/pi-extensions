@@ -63,7 +63,7 @@ test("packaged route configuration owns role preferences and ten-way global capa
 	assert.equal(config.routes.worker.candidates[0]?.model, "openai-codex/gpt-5.6-terra");
 	assert.equal(config.routes.reviewer.candidates[0]?.model, "openai-codex/gpt-5.6-sol");
 	assert.equal(config.routes.explorer.source, "package-default");
-	assert.deepEqual(config.reasoningProfiles, { light: "low", standard: "medium", deep: "high" });
+	assert.deepEqual(config.thinkingProfiles, { light: "low", standard: "medium", deep: "high" });
 });
 
 test("neutral configuration inherits the exact parent route when overrides are omitted", () => {
@@ -77,7 +77,7 @@ test("neutral configuration inherits the exact parent route when overrides are o
 			source: "parent",
 			candidateIndex: 0,
 			executionProfileApplied: false,
-			reasoningProfileApplied: false,
+			thinkingProfileApplied: false,
 			profileFallbacks: [],
 			selectionSource: "role-default",
 			modelOverrideRequested: false,
@@ -112,7 +112,7 @@ test("ordered user candidates skip missing and unauthenticated models without co
 
 test("semantic profiles select configured candidates and visibly fall back when unmapped", () => {
 	const config = parseConfig({
-		reasoningProfiles: { deep: "high" },
+		thinkingProfiles: { deep: "high" },
 		routes: {
 			explorer: {
 				candidates: [{ model: "synthetic/fast", thinking: "medium" }],
@@ -124,25 +124,25 @@ test("semantic profiles select configured candidates and visibly fall back when 
 	});
 	const mapped = resolveRoute("explorer", config, context([fast, deep]), {
 		executionProfile: "deep",
-		reasoningProfile: "deep",
+		thinkingProfile: "deep",
 	});
 	assert.equal(mapped.ok, true);
 	if (mapped.ok) {
 		assert.equal(mapped.route.model, "deep");
 		assert.equal(mapped.route.thinking, "high");
 		assert.equal(mapped.route.executionProfileApplied, true);
-		assert.equal(mapped.route.reasoningProfileApplied, true);
+		assert.equal(mapped.route.thinkingProfileApplied, true);
 		assert.deepEqual(mapped.route.profileFallbacks, []);
 	}
 	const fallback = resolveRoute("explorer", config, context([fast, deep]), {
 		executionProfile: "fast",
-		reasoningProfile: "light",
+		thinkingProfile: "light",
 	});
 	assert.equal(fallback.ok, true);
 	if (fallback.ok) {
 		assert.equal(fallback.route.model, "fast");
 		assert.equal(fallback.route.thinking, "medium");
-		assert.deepEqual(fallback.route.profileFallbacks, ["execution-role-default", "reasoning-role-default"]);
+		assert.deepEqual(fallback.route.profileFallbacks, ["execution-role-default", "thinking-role-default"]);
 	}
 });
 
@@ -295,7 +295,7 @@ test("ambiguous and unavailable diagnostics sort, cap at eight, and report omitt
 	}
 });
 
-test("an explicit model inherits the parent turn's exact thinking when no reasoning override exists", () => {
+test("an explicit model inherits the parent turn's exact thinking when no thinking profile is requested", () => {
 	const selected: RouteModel = { provider: "synthetic", id: "selected", reasoning: true };
 	const result = resolveRoute("worker", defaultConfig(), context([parent, selected], [], undefined, "xhigh"), {
 		model: "synthetic/selected",
@@ -354,7 +354,7 @@ test("explicit model and thinking supersede semantic profiles with accurate evid
 	const profileDefault: RouteModel = { provider: "synthetic", id: "profile", reasoning: true };
 	const selected: RouteModel = { provider: "synthetic", id: "selected", reasoning: true };
 	const config = parseConfig({
-		reasoningProfiles: { deep: "max" },
+		thinkingProfiles: { deep: "max" },
 		routes: { worker: {
 			candidates: [{ model: canonical(roleDefault), thinking: "low" }],
 			executionProfiles: { deep: { candidates: [{ model: canonical(profileDefault), thinking: "xhigh" }] } },
@@ -363,7 +363,7 @@ test("explicit model and thinking supersede semantic profiles with accurate evid
 	const before = JSON.stringify(config);
 	const result = resolveRoute("worker", config, context([roleDefault, profileDefault, selected]), {
 		executionProfile: "deep",
-		reasoningProfile: "deep",
+		thinkingProfile: "deep",
 		model: "synthetic/selected",
 		thinking: "medium",
 	});
@@ -373,24 +373,24 @@ test("explicit model and thinking supersede semantic profiles with accurate evid
 		assert.equal(result.route.thinking, "medium");
 		assert.equal(result.route.executionProfileRequested, "deep");
 		assert.equal(result.route.executionProfileApplied, false);
-		assert.equal(result.route.reasoningProfileRequested, "deep");
-		assert.equal(result.route.reasoningProfileApplied, false);
+		assert.equal(result.route.thinkingProfileRequested, "deep");
+		assert.equal(result.route.thinkingProfileApplied, false);
 		assert.deepEqual(result.route.profileFallbacks, []);
 	}
 	assert.equal(JSON.stringify(config), before);
 });
 
-test("mapped reasoning applies to an explicit model when exact thinking is omitted", () => {
+test("a mapped thinking profile applies to an explicit model when exact thinking is omitted", () => {
 	const selected: RouteModel = { provider: "synthetic", id: "selected", reasoning: true };
-	const config = parseConfig({ reasoningProfiles: { deep: "high" } });
+	const config = parseConfig({ thinkingProfiles: { deep: "high" } });
 	const result = resolveRoute("explorer", config, context([parent, selected]), {
 		model: "synthetic/selected",
-		reasoningProfile: "deep",
+		thinkingProfile: "deep",
 	});
 	assert.equal(result.ok, true);
 	if (result.ok) {
 		assert.equal(result.route.thinking, "high");
-		assert.equal(result.route.reasoningProfileApplied, true);
+		assert.equal(result.route.thinkingProfileApplied, true);
 		assert.equal(result.route.source, "user-config");
 	}
 });
@@ -462,14 +462,14 @@ test("parent and semantic-profile routes use all accessible models", () => {
 	assert.equal(inherited.ok, true);
 	if (inherited.ok) assert.equal(inherited.route.model, "parent");
 	const config = parseConfig({
-		reasoningProfiles: { deep: "high" },
+		thinkingProfiles: { deep: "high" },
 		routes: { explorer: {
 			candidates: [{ model: "synthetic/fast", thinking: "low" }],
 			executionProfiles: { deep: { candidates: [{ model: "synthetic/deep", thinking: "medium" }] } },
 		} },
 	});
 	const profiled = resolveRoute("explorer", config, context([parent, fast, deep], [{ model: parent }]), {
-		executionProfile: "deep", reasoningProfile: "deep",
+		executionProfile: "deep", thinkingProfile: "deep",
 	});
 	assert.equal(profiled.ok, true);
 	if (profiled.ok) {
@@ -519,7 +519,10 @@ test("configuration accepts user concurrency and rejects invalid values or unkno
 	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 1.5 } } }), /positive safe integer/);
 	assert.throws(() => parseConfig({ routes: { worker: { maxConcurrency: Number.MAX_SAFE_INTEGER + 1 } } }), /positive safe integer/);
 	assert.throws(() => parseConfig({ model: "synthetic/fast" }), /unsupported fields/);
-	assert.throws(() => parseConfig({ reasoningProfiles: { extreme: "max" } }), /unsupported fields/);
+	assert.throws(() => parseConfig({ thinkingProfiles: { extreme: "max" } }), /unsupported fields/);
+	assert.throws(() => parseConfig({ guidance: "aggressive" }), /unsupported fields/);
+	assert.throws(() => parseConfig({ reasoningProfiles: { deep: "max" } }), /reasoningProfiles is not accepted/);
+	assert.throws(() => parseConfig({ thinkingProfiles: { deep: "high" }, reasoningProfiles: { deep: "high" } }), /not rewritten/);
 });
 
 test("loader isolates malformed and symlinked user configuration", async (t) => {
@@ -536,6 +539,21 @@ test("loader isolates malformed and symlinked user configuration", async (t) => 
 	await symlink(join(root, "actual", "config.json"), join(root, "csheng-subagents.json"));
 	const linked = await loadConfig(root);
 	assert.match(linked.diagnostic?.message ?? "", /non-symlink/);
+});
+
+test("retired profile and policy config fields fail without rewriting user files", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "subagent-retired-config-"));
+	t.after(async () => rm(root, { recursive: true, force: true }));
+	const path = join(root, "csheng-subagents.json");
+	for (const [field, value] of [["reasoningProfiles", { deep: "max" }], ["guidance", "aggressive"]] as const) {
+		const original = JSON.stringify({ [field]: value, maxConcurrency: 3 });
+		await writeFile(path, original);
+		const loaded = await loadConfig(root);
+		assert.equal(loaded.config, undefined);
+		assert.equal(loaded.diagnostic?.code, "invalid_route_config");
+		assert.match(loaded.diagnostic?.message ?? "", new RegExp(field));
+		assert.equal(await readFile(path, "utf8"), original);
+	}
 });
 
 test("packaged JSON parses through the strict package source", async () => {

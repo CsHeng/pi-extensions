@@ -21,7 +21,7 @@ const provider = fileURLToPath(new URL("fixtures/subagents-native-session.ts", i
 const guard = fileURLToPath(new URL("../extensions/subagents/child-capability-guard.ts", import.meta.url));
 const workerGuard = fileURLToPath(new URL("../extensions/subagents/worker-tools.ts", import.meta.url));
 const invocation = process.env.CSHENG_GUIDANCE_HOST_PI === "installed" ? { command: "pi", args: ["-e", provider] } : { command: process.execPath, args: [cli, "-e", provider] };
-const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
+const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
 test("native append selection merges with child roles and survives session continuation", { timeout: 30000 }, async t => {
 	const base = await mkdtemp(join(tmpdir(), "subagent-native-append-"));

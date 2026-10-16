@@ -4,7 +4,7 @@
 // (scripts/run-delegation-probe.ts) and is not part of the shipped package.
 import { Type, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../../extensions/subagents/guidance.ts";
+import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "./delegation-probe-guidance.ts";
 import { SubagentTaskSchema } from "../../extensions/subagents/contracts.ts";
 import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest } from "../../extensions/subagents/session-contracts.ts";
 import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/subagents/tool-surface.ts";
@@ -42,7 +42,7 @@ export function parseProbeShape(value: string | undefined): ProbeShape {
 }
 
 export function parseProbeGuidance(value: string | undefined): ProbeGuidance {
-	const guidance = (value ?? "aggressive") as ProbeGuidance;
+	const guidance = (value ?? "off") as ProbeGuidance;
 	if (!PROBE_GUIDANCE_LEVELS.includes(guidance)) throw new Error(`unknown probe guidance: ${value}`);
 	return guidance;
 }

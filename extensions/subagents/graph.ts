@@ -3,12 +3,12 @@ import { isProductId } from "./identity.ts";
 import {
 	EXECUTION_PROFILES,
 	HARD_LIMITS,
-	REASONING_PROFILES,
+	THINKING_PROFILES,
 	ROLE_NAMES,
 	isSafePathGrammar,
 	utf8Bytes,
 	type ExecutionProfile,
-	type ReasoningProfile,
+	type ThinkingProfile,
 	type RoleName,
 	type SubagentTask,
 	type SubagentToolInput,
@@ -18,7 +18,7 @@ import {
 // Kept local to avoid making filesystem policy depend on graph topology.
 const ROLE_SET = new Set<RoleName>(ROLE_NAMES);
 const EXECUTION_PROFILE_SET = new Set<ExecutionProfile>(EXECUTION_PROFILES);
-const REASONING_PROFILE_SET = new Set<ReasoningProfile>(REASONING_PROFILES);
+const THINKING_PROFILE_SET = new Set<ThinkingProfile>(THINKING_PROFILES);
 const SAFE_LOCK = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
 
 export interface NormalizedTask extends SubagentTask {
@@ -71,8 +71,8 @@ export function validateGraphStructure(input: SubagentToolInput): GraphValidatio
 		if (task.executionProfile !== undefined && !EXECUTION_PROFILE_SET.has(task.executionProfile)) {
 			return fail("invalid_execution_profile", `Task ${task.id} has an unsupported execution profile.`);
 		}
-		if (task.reasoningProfile !== undefined && !REASONING_PROFILE_SET.has(task.reasoningProfile)) {
-			return fail("invalid_reasoning_profile", `Task ${task.id} has an unsupported reasoning profile.`);
+		if (task.thinkingProfile !== undefined && !THINKING_PROFILE_SET.has(task.thinkingProfile)) {
+			return fail("invalid_thinking_profile", `Task ${task.id} has an unsupported thinking profile.`);
 		}
 		const inputs = task.inputs ?? [];
 		if (utf8Bytes(inputs.join("")) > HARD_LIMITS.maxInputBytes) {

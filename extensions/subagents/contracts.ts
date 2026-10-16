@@ -41,7 +41,7 @@ export const HARD_LIMITS = Object.freeze({
 
 export const ROLE_NAMES = ["explorer", "reviewer", "worker"] as const;
 export const EXECUTION_PROFILES = ["fast", "balanced", "deep"] as const;
-export const REASONING_PROFILES = ["light", "standard", "deep"] as const;
+export const THINKING_PROFILES = ["light", "standard", "deep"] as const;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const STABLE_TASK_ERROR_CODES = [
 	"invalid_access",
@@ -66,7 +66,7 @@ export const COLLABORATION_CONTRACT_VERSION = 4 as const;
 export const CHILD_CAPABILITY_MANIFEST_VERSION = COLLABORATION_CONTRACT_VERSION;
 export type RoleName = (typeof ROLE_NAMES)[number];
 export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
-export type ReasoningProfile = (typeof REASONING_PROFILES)[number];
+export type ThinkingProfile = (typeof THINKING_PROFILES)[number];
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type StableTaskErrorCode = (typeof STABLE_TASK_ERROR_CODES)[number];
 export type TaskStatus = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
@@ -126,9 +126,9 @@ export interface ChildActivity {
 
 const RoleSchema = StringEnum(ROLE_NAMES);
 const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES);
-const ReasoningProfileSchema = StringEnum(REASONING_PROFILES);
+const ThinkingProfileSchema = StringEnum(THINKING_PROFILES);
 const ThinkingLevelSchema = Object.assign(StringEnum(THINKING_LEVELS), {
-	description: "Exact ephemeral Pi thinking level supplied only for an explicit user choice; it overrides reasoning-profile and route defaults.",
+	description: "Exact ephemeral Pi thinking level supplied only for an explicit user choice; it overrides thinking-profile and route defaults.",
 });
 const BoundedStringArray = Type.Array(Type.String(), { maxItems: 32 });
 
@@ -156,7 +156,7 @@ export const SubagentTaskSchema = Type.Object(
 		verification: Type.Optional(BoundedStringArray),
 		resourceLocks: Type.Optional(BoundedStringArray),
 		executionProfile: Type.Optional(ExecutionProfileSchema),
-		reasoningProfile: Type.Optional(ReasoningProfileSchema),
+		thinkingProfile: Type.Optional(ThinkingProfileSchema),
 		model: Type.Optional(Type.String({
 			minLength: 1,
 			description: "Exact ephemeral model selector supplied only for an explicit user model choice; it overrides default model routing for this task.",
@@ -176,7 +176,7 @@ export interface SubagentTask {
 	verification?: string[];
 	resourceLocks?: string[];
 	executionProfile?: ExecutionProfile;
-	reasoningProfile?: ReasoningProfile;
+	thinkingProfile?: ThinkingProfile;
 	model?: string;
 	thinking?: ThinkingLevel;
 }
@@ -196,7 +196,7 @@ export interface UsageTotals {
 
 export type RouteSource = "parent" | "package-default" | "user-config";
 export const ROUTE_SELECTION_SOURCES = ["role-default", "explicit-task"] as const;
-export const PROFILE_FALLBACKS = ["execution-role-default", "reasoning-role-default"] as const;
+export const PROFILE_FALLBACKS = ["execution-role-default", "thinking-role-default"] as const;
 export type RouteSelectionSource = (typeof ROUTE_SELECTION_SOURCES)[number];
 export type ProfileFallback = (typeof PROFILE_FALLBACKS)[number];
 
@@ -206,7 +206,7 @@ export interface TaskRouteEvidenceV2 {
 	modelOverrideRequested: boolean;
 	thinkingOverrideRequested: boolean;
 	executionProfileApplied: boolean;
-	reasoningProfileApplied: boolean;
+	thinkingProfileApplied: boolean;
 	profileFallbacks: ProfileFallback[];
 }
 
@@ -218,8 +218,8 @@ export interface EffectiveRoute {
 	candidateIndex: number;
 	executionProfileRequested?: ExecutionProfile;
 	executionProfileApplied: boolean;
-	reasoningProfileRequested?: ReasoningProfile;
-	reasoningProfileApplied: boolean;
+	thinkingProfileRequested?: ThinkingProfile;
+	thinkingProfileApplied: boolean;
 	profileFallbacks: ProfileFallback[];
 	/** Added by schema-v2 routing; optional until the route decision is made. */
 	selectionSource?: RouteSelectionSource;

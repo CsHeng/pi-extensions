@@ -19,6 +19,30 @@ function withoutObservation(result: TaskResult): TaskResult {
 	const copy = { ...result }; delete copy.observation; return copy;
 }
 
+const LEGACY_PROFILE_KEYS = new Set([
+	"reasoningProfile",
+	"reasoningProfiles",
+	"reasoningProfileRequested",
+	"reasoningProfileApplied",
+	"reasoningProfileSources",
+]);
+
+/** Current-version records that still name the retired profile concept are excluded, not interpreted or rewritten. */
+function hasLegacyProfileField(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	if (Array.isArray(value)) return value.some((item) => hasLegacyProfileField(item));
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		if (LEGACY_PROFILE_KEYS.has(key)) return true;
+		if (key === "profileFallbacks" && Array.isArray(item) && item.includes("reasoning-role-default")) return true;
+		if (hasLegacyProfileField(item)) return true;
+	}
+	return false;
+}
+
+function excludedListError(error: unknown): boolean {
+	return !(error instanceof ManagedError) || error.code === "managed_owner_mismatch" || error.code === "unsupported_contract" || error.code === "legacy_profile_field";
+}
+
 export interface ManagedRootState {
 	id: string;
 	source: string;
@@ -283,6 +307,7 @@ export class ManagedSessionStore {
 		return record;
 	}
 	private validateRecord(handle: string, directory: string, record: ManagedRecord): void {
+		if (hasLegacyProfileField(record)) throw new ManagedError("legacy_profile_field");
 		if (!Check(recordSchema, record) || record.version !== MANAGED_SESSION_VERSION || record.handle !== handle) throw new ManagedError("managed_registry_invalid");
 		if (!validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] }).ok) throw new ManagedError("managed_registry_invalid");
 		if (record.roots.some((root) => root.permission === "write" && (!root.git || !root.target || root.inputs && root.inputs.gitWorkspace?.path !== join(directory, "roots", root.id)))) throw new ManagedError("managed_registry_invalid");
@@ -347,7 +372,7 @@ export class ManagedSessionStore {
 			try {
 				const record = await this.load(entry.name, owner);
 				if (record.state !== "closed") views.push(this.view(record));
-			} catch (error) { if (!(error instanceof ManagedError) || error.code === "managed_owner_mismatch" || error.code === "unsupported_contract") continue; throw error; }
+			} catch (error) { if (excludedListError(error)) continue; throw error; }
 			if (views.length > MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_session_limit");
 		}
 		return views;
@@ -366,7 +391,7 @@ export class ManagedSessionStore {
 		let unreadableRecords = 0;
 		for (const name of names) {
 			try { entries.push(await this.inventoryEntry(name, owner)); }
-			catch (error) { if (error instanceof OutOfScopeRecord || (error instanceof ManagedError && error.code === "unsupported_contract")) continue; unreadableRecords++; }
+			catch (error) { if (error instanceof OutOfScopeRecord || (error instanceof ManagedError && (error.code === "unsupported_contract" || error.code === "legacy_profile_field"))) continue; unreadableRecords++; }
 		}
 		entries.sort((left, right) => left.handle < right.handle ? -1 : left.handle > right.handle ? 1 : 0);
 		const states: Record<ManagedState, number> = { idle: 0, queued: 0, running: 0, interrupted: 0, closed: 0 };
@@ -417,6 +442,7 @@ export class ManagedSessionStore {
 		let batch: BatchRecord;
 		try { await this.ensure(false); batch = await readJson<BatchRecord>(this.batchPath(owner, requestId)); }
 		catch (error) { if (missing(error)) return undefined; throw error; }
+		if (hasLegacyProfileField(batch)) throw new ManagedError("legacy_profile_field");
 		if (!Check(batchSchema, batch)) throw new ManagedError("managed_registry_invalid");
 		if (!batch.complete) throw new ManagedError("request_outcome_unknown");
 		const records = await Promise.all(batch.handles.map((handle) => this.load(handle, owner)));
@@ -455,6 +481,7 @@ export class ManagedSessionStore {
 			let prior: BatchRecord | undefined;
 			try { prior = await readJson<BatchRecord>(requestPath); } catch (error) { if (!missing(error)) throw error; }
 			if (prior !== undefined) {
+				if (hasLegacyProfileField(prior)) throw new ManagedError("legacy_profile_field");
 				if (!prior || typeof prior !== "object" || prior.version !== MANAGED_SESSION_VERSION || typeof prior.complete !== "boolean" || typeof prior.fingerprint !== "string" || !Array.isArray(prior.handles) || prior.handles.length !== tasks.length || new Set(prior.handles).size !== prior.handles.length || prior.handles.some((handle) => typeof handle !== "string" || !safeHandle(handle))) throw new ManagedError("managed_registry_invalid");
 				if (prior.fingerprint !== digest) throw new ManagedError("request_id_conflict");
 				if (!prior.complete) throw new ManagedError("request_outcome_unknown");
@@ -467,7 +494,7 @@ export class ManagedSessionStore {
 				if (!safeHandle(entry)) continue;
 				await privateDirectory(this.path(entry), false);
 				const stored = await readJson<unknown>(join(this.path(entry), "registry.json"));
-				if (shallowVersion(stored) !== MANAGED_SESSION_VERSION) continue;
+				if (shallowVersion(stored) !== MANAGED_SESSION_VERSION || hasLegacyProfileField(stored)) continue;
 				if (!Check(recordSchema, stored)) throw new ManagedError("managed_registry_invalid");
 				if (stored.state !== "closed" && stored.owner.repo === owner.repo && stored.owner.parentSessionId === owner.parentSessionId) count++;
 			}

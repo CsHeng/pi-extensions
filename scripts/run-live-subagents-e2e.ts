@@ -42,7 +42,7 @@ interface SessionView {
 		thinking?: unknown;
 		source?: unknown;
 		executionProfileRequested?: unknown;
-		reasoningProfileRequested?: unknown;
+		thinkingProfileRequested?: unknown;
 	};
 	result?: { status?: unknown; output?: unknown; usage?: unknown };
 	candidate?: SessionCandidate;
@@ -142,7 +142,7 @@ function validateRoute(session: SessionView, role: "explorer" | "reviewer" | "wo
 		fail(`role_${role}_route_missing`);
 	}
 	if (`${route.provider}/${route.model}:${route.thinking}` !== EXPECTED_ROLE_ROUTES[role]) fail(`role_${role}_route_mismatch`);
-	if (route.executionProfileRequested !== undefined || route.reasoningProfileRequested !== undefined) {
+	if (route.executionProfileRequested !== undefined || route.thinkingProfileRequested !== undefined) {
 		fail(`role_${role}_unexpected_profile`);
 	}
 }

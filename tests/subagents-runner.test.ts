@@ -30,7 +30,7 @@ const route: EffectiveRoute = {
 	source: "user-config",
 	candidateIndex: 0,
 	executionProfileApplied: false,
-	reasoningProfileApplied: false,
+	thinkingProfileApplied: false,
 	profileFallbacks: [],
 };
 const task: NormalizedTask = {

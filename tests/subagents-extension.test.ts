@@ -209,7 +209,6 @@ test("extension registers only the managed tool and a redacted status command", 
 	const ctx = context();
 	await state.commands.get("subagents").handler("", ctx);
 	assert.match(ctx.notifications[0]?.message ?? "", /tool=csheng_subagent_sessions/);
-	assert.match(ctx.notifications[0]?.message ?? "", /guidance=aggressive/);
 	assert.doesNotMatch(ctx.notifications[0]?.message ?? "", /\/tmp\/agent/);
 });
 
@@ -359,7 +358,7 @@ test("a failed predecessor does not launch its dependent", async (t) => {
 test("task semantic profiles are projected into route resolution without plan coupling", async (t) => {
 	const deepModel = { provider: "synthetic", id: "deep", reasoning: true };
 	const config = parseConfig({
-		reasoningProfiles: { deep: "high" },
+		thinkingProfiles: { deep: "high" },
 		routes: {
 			explorer: {
 				executionProfiles: {
@@ -384,13 +383,13 @@ test("task semantic profiles are projected into route resolution without plan co
 		objective: "scan",
 		access: [{ permission: "read", scope: "/tmp/scope" }],
 		executionProfile: "deep",
-		reasoningProfile: "deep",
+		thinkingProfile: "deep",
 	}]), undefined, undefined, context(true, [parentModel, deepModel])));
 	assert.equal(details.status, "succeeded");
 	assert.equal(route?.model, "deep");
 	assert.equal(route?.thinking, "high");
 	assert.equal(route?.executionProfileApplied, true);
-	assert.equal(route?.reasoningProfileApplied, true);
+	assert.equal(route?.thinkingProfileApplied, true);
 	assert.equal(details.requestTelemetry?.launchedChildren, 1);
 });
 
@@ -422,7 +421,7 @@ test("explicit route success and failure leave the user route file byte-identica
 	const agentDir = await mkdtemp(join(tmpdir(), "subagent-ephemeral-route-"));
 	t.after(async () => rm(agentDir, { recursive: true, force: true }));
 	const configPath = join(agentDir, ROUTE_CONFIG_FILE);
-	const configBytes = `${JSON.stringify({ guidance: "balanced" }, null, 2)}\n`;
+	const configBytes = `${JSON.stringify({ maxConcurrency: 10 }, null, 2)}\n`;
 	await writeFile(configPath, configBytes, { mode: 0o600 });
 	const explicitModel = { provider: "synthetic", id: "explicit-4.6", name: "Explicit 4.6", reasoning: true };
 	let calls = 0;
@@ -494,39 +493,22 @@ test("a concurrent duplicate submission returns its receipt without launching an
 	assert.equal(detailsOf(await first).status, "succeeded");
 });
 
-test("managed guidance appears only while the tool is active and follows the configured level", async () => {
-	const options = () => ({ systemPromptOptions: { promptGuidelines: [] as string[] } });
+test("managed tool capability registration leaves caller prompt policy unchanged", async () => {
 	const state = harness();
 	createSubagentsExtension({
 		loadConfig: async () => ({ config: defaultConfig() }),
 	})(state.pi);
-	const aggressiveEvent = { systemPrompt: "base", ...options() };
-	assert.equal(await emitBeforeAgentStart(state, aggressiveEvent), undefined);
-	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
-	assert.equal(aggressiveEvent.systemPromptOptions.promptGuidelines.length, 2);
-	assert.ok(aggressiveEvent.systemPromptOptions.promptGuidelines.every((line) => !line.includes("csheng_subagents")));
-	await emitBeforeAgentStart(state, aggressiveEvent);
-	assert.equal(aggressiveEvent.systemPromptOptions.promptGuidelines.length, 2);
-	const balancedState = harness();
-	createSubagentsExtension({
-		loadConfig: async () => ({ config: { ...defaultConfig(), guidance: "balanced" } }),
-	})(balancedState.pi);
-	const balancedEvent = { systemPrompt: "base", ...options() };
-	await emitBeforeAgentStart(balancedState, balancedEvent);
-	assert.ok(balancedEvent.systemPromptOptions.promptGuidelines.some((line) => line.includes("flat csheng_subagent_sessions create batch")));
-	assert.equal(balancedEvent.systemPromptOptions.promptGuidelines.length, 1);
-	const fallback = await emitBeforeAgentStart(state);
-	assert.match(fallback?.systemPrompt ?? "", /flat csheng_subagent_sessions create batch/);
-	assert.match(fallback?.systemPrompt ?? "", /explicit parent apply/);
-	assert.equal(fallback?.systemPrompt?.includes("three or more independent files"), false);
-	assert.doesNotMatch(fallback?.systemPrompt ?? "", /csheng_subagents/);
+	assert.ok(state.tool.description.length > 0);
+	assert.ok(state.tool.promptSnippet.length > 0);
+	assert.ok(state.tool.promptGuidelines.length > 0);
+	const event = { systemPrompt: "caller prompt", systemPromptOptions: { promptGuidelines: ["caller policy"] } };
+	assert.equal(await emitBeforeAgentStart(state, event), undefined);
+	assert.equal(await emitBeforeAgentStart(state, event), undefined);
+	assert.deepEqual(event, { systemPrompt: "caller prompt", systemPromptOptions: { promptGuidelines: ["caller policy"] } });
+	assert.equal(await emitBeforeAgentStart(state), undefined);
 	state.pi.getActiveTools = () => [];
-	assert.equal(await emitBeforeAgentStart(state, { systemPrompt: "base", ...options() }), undefined);
-	const off = harness();
-	createSubagentsExtension({
-		loadConfig: async () => ({ config: { ...defaultConfig(), guidance: "off" } }),
-	})(off.pi);
-	assert.equal(await emitBeforeAgentStart(off, { systemPrompt: "base", ...options() }), undefined);
+	assert.equal(await emitBeforeAgentStart(state, event), undefined);
+	assert.deepEqual(event.systemPromptOptions.promptGuidelines, ["caller policy"]);
 });
 
 test("session shutdown waits for the aborted run before a later create", async (t) => {

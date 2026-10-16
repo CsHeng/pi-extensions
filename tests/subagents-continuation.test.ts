@@ -32,7 +32,7 @@ function assertReplay(actual: SessionActionResult, expected: SessionActionResult
 	assert.equal(current?.configurationEpoch, null, "replay does not resolve current routes");
 }
 
-const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
+const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
 test("real native worker reopens one history and edits the same state with host bash", async (t) => {
 	const base = await mkdtemp(join(tmpdir(), "managed-native-worker-"));

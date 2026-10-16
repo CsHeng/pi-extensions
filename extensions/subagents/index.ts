@@ -1,7 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, sep } from "node:path";
 import { loadConfig } from "./config.ts";
-import { delegationGuidanceLines } from "./guidance.ts";
 import { SUBAGENT_STATUS_COMMAND } from "./contracts.ts";
 import { createProvenance, type ProvenanceCore } from "./provenance.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
@@ -41,7 +40,7 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 					ctx.ui.notify(`Subagents unavailable: ${loaded.diagnostic?.message ?? "invalid configuration"}`, "error");
 					return;
 				}
-				const lines = [`tool=${SUBAGENT_SESSION_TOOL_NAME}`, `guidance=${loaded.config.guidance}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
+				const lines = [`tool=${SUBAGENT_SESSION_TOOL_NAME}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
 				for (const role of ["explorer", "reviewer", "worker"] as const) {
 					const selected = resolveRoute(role, loaded.config, routeContext(ctx));
 					lines.push(selected.ok
@@ -57,17 +56,6 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 				parentSkills = event.systemPromptOptions.skills.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo } }));
 				parentSkillCwd = ctx.cwd;
 			}
-			const loaded = await config();
-			if (!loaded.config) return;
-			const lines = delegationGuidanceLines(loaded.config.guidance);
-			if (!lines) return;
-			const guidelines = event.systemPromptOptions?.promptGuidelines;
-			if (Array.isArray(guidelines)) {
-				for (const line of lines) if (!guidelines.includes(line)) guidelines.push(line);
-				return;
-			}
-			// Hosts without structured prompt options still receive the same text as one appended block.
-			return { systemPrompt: `${event.systemPrompt}\n\n${lines.join("\n")}` };
 		});
 	};
 }

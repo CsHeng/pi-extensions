@@ -13,7 +13,7 @@ import { commandCorrelationKey } from "../extensions/subagents/command-correlati
 import { collectNativeObservation, normalizeCommandCorrelation, isNativeObservation } from "../extensions/subagents/observability.ts";
 import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
 
-const route: EffectiveRoute = { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", candidateIndex: 0, selectionSource: "role-default", executionProfileApplied: false, reasoningProfileApplied: false, profileFallbacks: [] };
+const route: EffectiveRoute = { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", candidateIndex: 0, selectionSource: "role-default", executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
 test("managed refusals keep action and missing fields without launching or reading config", async () => {
 	let configReads = 0;
@@ -46,7 +46,7 @@ test("managed results and index retain actual model/reasoning even on failed and
 		assert.deepEqual(content.sessions[0].route, {
 			provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", selectionSource: "role-default",
 			executionProfileRequested: null, executionProfileApplied: false,
-			reasoningProfileRequested: null, reasoningProfileApplied: false, profileFallbacks: [],
+			thinkingProfileRequested: null, thinkingProfileApplied: false, profileFallbacks: [],
 		});
 		for (const expanded of [false, true]) {
 			const text = formatManagedResult(details, expanded);
