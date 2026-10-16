@@ -95,7 +95,7 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 		} });
 		createSubagentsUiExtension()(pi);
 		const event = async (name: string) => { for (const fn of handlers.get(name) ?? []) await fn({}, ctx); };
-		return { ctx, service, event, get reply() { return reply; }, get panel() { return panel!; }, open: async () => { void commands.get("subagents-ui")!.handler("", ctx); await until(() => !!panel && !!reply); } };
+		return { ctx, service, event, get reply() { return reply; }, get panel() { return panel!; }, open: async () => { void commands.get("subagents-ui")!.handler("list", ctx); await until(() => !!panel && !!reply); } };
 	};
 	const mounted = mount();
 	t.after(async () => { release(); await mounted.event("session_shutdown"); });

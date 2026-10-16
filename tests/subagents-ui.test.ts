@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor } from "../extensions/shared/above-editor.ts";
 import { ManagedObserver } from "../extensions/subagents/managed-observer.ts";
 import {
 	createSubagentsUiExtension,
@@ -19,9 +20,11 @@ import {
 	formatSessionTitle,
 	formatLiveRow,
 	formatSessionUsage,
+	formatSubagentsInline,
 	sessionCounts,
 	sessionHelpText,
 	shortLabel,
+	subagentsInlineBudget,
 	taskColumns,
 } from "../extensions/subagents-ui/render.ts";
 import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
@@ -175,16 +178,16 @@ function install(options: Parameters<typeof createSubagentsUiExtension>[0] = {})
 async function openWith(
 	pi: FakePi,
 	ctx: ExtensionContext,
-	via: "command" | "shortcut" = "command",
+	via: "details" | "shortcut" = "details",
 ): Promise<void> {
-	if (via === "command") {
-		const command = pi.commands.get(SUBAGENTS_UI_COMMAND);
-		assert.ok(command);
-		void command.handler("", ctx);
-	} else {
+	if (via === "shortcut") {
 		const shortcut = pi.shortcuts.get("ctrl+alt+f");
 		assert.ok(shortcut);
 		void shortcut.handler(ctx);
+	} else {
+		const command = pi.commands.get(SUBAGENTS_UI_COMMAND);
+		assert.ok(command);
+		void command.handler("list", ctx);
 	}
 	await new Promise((resolve) => setImmediate(resolve));
 }
@@ -340,7 +343,7 @@ test("session-scoped title, counts and recorded usage stay distinct from live tu
 	assert.equal(awaitingHistory.limitedLive, true);
 	assert.match(formatSessionCounts(awaitingHistory).text, /limited live observation/);
 	const usage = formatSessionUsage(usageProjection());
-	assert.match(usage?.text ?? "", /^recorded Σ537 turns · ↑12k ↓2\.0k · \$1\.25$/);
+	assert.match(usage?.text ?? "", /^recorded Σ537 turns · ↑12k ↓2\.0k R0 CH\? \$1\.250$/);
 	assert.match(formatSessionUsage(usageProjection({ status: "incomplete", usage: { input: 100, output: null, cacheRead: 0, cacheWrite: 0, totalTokens: null, cost: null }, assistantTurns: 12 }))?.text ?? "", /partial/);
 	assert.match(formatSessionUsage(usageProjection({ status: "unavailable", usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null }, assistantTurns: null, metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" }, turnsCoverage: "unavailable" }))?.text ?? "", /\$/);
 	assert.equal(compactCount(null), "?");
@@ -775,15 +778,15 @@ test("widget and status stay off unless explicitly enabled", async () => {
 	assert.deepEqual(widgets, []);
 });
 
-test("explicit widget opt-in mirrors the live hierarchy in status and panel", async () => {
+test("explicit summary opt-in does not mount the retired below-editor live list", async () => {
 	const pi = install({ enableWidget: true });
 	const statuses: Array<string | undefined> = [];
 	const widgets: Array<{ key: string; lines: string[] | undefined }> = [];
 	const ctx = context({ statuses, widgets });
 	await pi.handlers.get("session_start")?.({}, ctx);
 	pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.equal(statuses.at(-1) !== undefined, true);
-	assert.equal(widgets.at(-1)?.key, SUBAGENTS_UI_PANEL_KEY);
+	assert.deepEqual(statuses, []);
+	assert.equal(widgets.some(widget => widget.key === SUBAGENTS_UI_PANEL_KEY), false);
 });
 
 test("headless modes ignore observer snapshots and session-view traffic", async () => {
@@ -904,7 +907,7 @@ test("themable rows keep hierarchy colors across the session layout", () => {
 	assert.ok(lines.every(line => line.startsWith("{selectedBg}")), "panel rows keep the selected background");
 });
 
-test("registered command and shortcut open the overlay without closing on stray keys", async () => {
+test("list command and shortcut open the overlay without closing on stray keys", async () => {
 	const pi = install();
 	const held: { overlay?: SubagentsOverlay } = {};
 	const ctx = captureCtx(held);
@@ -923,4 +926,399 @@ test("registered command and shortcut open the overlay without closing on stray 
 	await openWith(pi, closeCtx);
 	later.overlay?.handleInput("ctrl+alt+f");
 	assert.equal(closed, 1, "ctrl+alt+f closes");
+});
+
+function summaryHost(options: { enableWidget?: boolean; now?: () => number; mode?: string; hasUI?: boolean } = {}) {
+	const composer = createAboveEditor();
+	const mounts: Array<{ key: string; value: unknown; placement?: string }> = [];
+	const statuses: Array<string | undefined> = [];
+	const timers = new Map<number, () => void>();
+	let sequence = 0;
+	let panel: SubagentsOverlay | undefined;
+	let closePanel: (() => void) | undefined;
+	const pi = install({
+		composer,
+		...(options.enableWidget === undefined ? {} : { enableWidget: options.enableWidget }),
+		now: options.now ?? (() => 0),
+		setInterval(callback) { const id = ++sequence; timers.set(id, callback); return id; },
+		clearInterval(handle) { timers.delete(handle as number); },
+	});
+	const ctx = {
+		mode: options.mode ?? "tui",
+		hasUI: options.hasUI ?? true,
+		isProjectTrusted: () => true,
+		sessionManager: owner(),
+		ui: {
+			setStatus(key: string, text: string | undefined) { statuses.push(key === SUBAGENTS_UI_STATUS_KEY ? text : `other:${key}`); },
+			setWidget(key: string, value: unknown, widgetOptions?: { placement?: string }) {
+				mounts.push(widgetOptions?.placement === undefined ? { key, value } : { key, value, placement: widgetOptions.placement });
+			},
+			setWorkingMessage() {}, setFooter() {}, notify() {},
+			custom(factory: (tui: TUI, theme: unknown, kb: unknown, done: (value: null) => void) => unknown) {
+				return new Promise<null>(resolve => {
+					closePanel = () => resolve(null);
+					panel = factory({ requestRender() {}, terminal: { rows: 24, columns: 120 } } as TUI, undefined, undefined, () => { panel = undefined; resolve(null); }) as SubagentsOverlay;
+				});
+			},
+		},
+	} as unknown as ExtensionContext;
+	const content = (width = 80) => {
+		const widget = mounts.at(-1)?.value;
+		if (typeof widget !== "function") return [];
+		return (widget as (tui: unknown, theme: unknown) => { render(width: number): string[] })({ terminal: { rows: 24 } }, undefined).render(width);
+	};
+	return {
+		pi, ctx, mounts, statuses, composer, content,
+		get panel() { return panel; },
+		tick() { for (const callback of [...timers.values()]) callback(); },
+		async closeDetails() { panel?.handleInput("ctrl+alt+f"); await new Promise(resolve => setImmediate(resolve)); void closePanel; },
+	};
+}
+
+test("subagents summary is one line and does not copy live rows, history, or costs", async () => {
+	const host = summaryHost({ enableWidget: true });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	const live = snapshot({ requestedTasks: 2, admittedTasks: 2, launchedChildren: 2, activeChildren: 2, tasks: [task(), task({ id: "wait", ordinal: 2, status: "pending", elapsedMs: 1_000 })] });
+	host.pi.events.emit(OBSERVER_EVENT, live);
+	const requestsBeforeHeartbeat = requestCount(host.pi);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot({ ...live, revision: 2 }));
+	assert.equal(requestCount(host.pi), requestsBeforeHeartbeat, "observer heartbeats do not scan history");
+	answer(host.pi, sessionReply({
+		requestId: lastRequest(host.pi).requestId,
+		summary: { agents: 7, acceptedEpisodes: 40, states: { idle: 4, queued: 1, running: 1, interrupted: 0, closed: 1 }, liveAgents: 0 },
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 40, totalPages: 2, rows: [historyRow()] },
+	}));
+	const shown = host.content(80).filter(line => line.trim().length > 0);
+	assert.equal(shown.length, 1);
+	assert.equal(shown[0]?.includes("\n"), false);
+	assert.match(shown[0] ?? "", /1 running/);
+	assert.match(shown[0] ?? "", /1 queued/);
+	assert.match(shown[0] ?? "", /7 agents/);
+	assert.doesNotMatch(shown[0] ?? "", /2 running|40 agents|scan the bounded|gpt-4|\$|\bread\b/);
+	assert.ok(host.content(10).every(line => visibleWidth(line) <= 10));
+	assert.equal(host.content(10).filter(line => line.trim().length > 0).length, 1);
+	assert.equal(host.mounts.every(mount => mount.key === ABOVE_EDITOR_WIDGET_KEY && mount.placement === "aboveEditor"), true);
+	assert.equal(host.mounts.some(mount => mount.key === SUBAGENTS_UI_PANEL_KEY), false);
+	assert.deepEqual(host.statuses, []);
+});
+
+function clickHeader(host: ReturnType<typeof summaryHost>, y: number): { focus?: boolean } | undefined {
+	const widget = host.mounts.at(-1)?.value;
+	const view = (widget as (tui: unknown) => { render(width: number): string[]; handleMouse?(event: unknown): { focus?: boolean } | undefined })({ mode: "fullscreen", terminal: { rows: 24 } });
+	view.render(80);
+	view.handleMouse?.({ type: "press", button: "left", x: 1, y, width: 80, height: 8 });
+	return view.handleMouse?.({ type: "click", button: "left", x: 1, y, width: 80, height: 8 });
+}
+
+test("title click toggles inline expansion and never opens the overlay", async () => {
+	const host = summaryHost({ enableWidget: true });
+	const selects: string[] = [];
+	(host.ctx.ui as unknown as { select?: (title: string) => Promise<unknown> }).select = async (title: string) => {
+		selects.push(title);
+		return undefined;
+	};
+	let tasksClicks = 0;
+	host.composer.set("tasks", { render: () => ["Tasks"], activate() { tasksClicks += 1; } });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot({ requestedTasks: 2, admittedTasks: 2, launchedChildren: 2, activeChildren: 1, tasks: [task(), task({ id: "wait", ordinal: 2, status: "pending" })] }));
+	answer(host.pi, sessionReply({
+		requestId: lastRequest(host.pi).requestId,
+		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 1, queued: 1, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 },
+	}));
+	const subagentLines = () => host.content(80).filter(line => /Subagents|explorer |worker /.test(line));
+	const folded = subagentLines();
+	assert.equal(folded.length, 1);
+	assert.match(folded[0] ?? "", /▸ Subagents/);
+	const clicked = clickHeader(host, 2);
+	assert.equal(clicked?.focus, undefined);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(host.panel, undefined, "title click does not open details");
+	assert.equal(selects.length, 0, "title click does not open a select");
+	assert.equal(tasksClicks, 0, "subagents title click does not activate Tasks");
+	const expanded = subagentLines();
+	assert.match(expanded[0] ?? "", /▾ Subagents/);
+	assert.match(expanded.join("\n"), /explorer scan ep0 running/);
+	assert.match(expanded.join("\n"), /explorer wait ep0 queued/);
+	assert.match(expanded.join("\n"), /worker 11111111 ep1 idle/);
+	assert.match(expanded.join("\n"), /openai gpt-4.1 off/);
+	assert.match(expanded.join("\n"), /\$0\.500/);
+	assert.doesNotMatch(expanded.join("\n"), /scan the bounded/);
+	assert.ok(expanded.length > 1);
+	clickHeader(host, 2);
+	const collapsed = subagentLines();
+	assert.equal(collapsed.length, 1);
+	assert.match(collapsed[0] ?? "", /▸ Subagents/);
+	assert.equal(host.panel, undefined);
+	clickHeader(host, 0);
+	assert.equal(tasksClicks, 1);
+	assert.equal(subagentLines().length, 1, "Tasks click does not expand Subagents");
+});
+
+test("bare subagents-ui toggles summary visibility and does not rotate into details", async () => {
+	const host = summaryHost();
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	assert.equal(host.mounts.length, 0);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	assert.match(host.content().join("\n"), /Subagents/);
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("", host.ctx);
+	assert.equal(host.content().length, 0);
+	assert.equal(host.panel, undefined);
+	const hidden = requestCount(host.pi);
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("show", host.ctx);
+	assert.ok(requestCount(host.pi) >= hidden);
+	assert.match(host.content().join("\n"), /Subagents/);
+	const shown = requestCount(host.pi);
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("show", host.ctx);
+	assert.equal(requestCount(host.pi), shown, "show is idempotent");
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("", host.ctx);
+	assert.equal(host.content().length, 0);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	assert.equal(host.content().length, 0, "manual hide survives observer updates");
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("hide", host.ctx);
+	assert.equal(host.content().length, 0, "hide is idempotent");
+	assert.equal(host.panel, undefined, "visibility commands do not open details");
+});
+
+test("removed details command neither opens the overlay nor changes section state", async () => {
+	const host = summaryHost({ enableWidget: true });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	const before = host.content();
+	const requests = requestCount(host.pi);
+	void host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("details", host.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(host.panel, undefined);
+	assert.deepEqual(host.content(), before);
+	assert.equal(requestCount(host.pi), requests);
+});
+
+test("list opens the existing overlay while the summary stays hidden", async () => {
+	const host = summaryHost();
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("hide", host.ctx);
+	void host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("list", host.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.ok(host.panel);
+	assert.equal(host.content().length, 0);
+	const request = lastRequest(host.pi);
+	answer(host.pi, sessionReply({ requestId: request.requestId }));
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	const overlay = host.panel.render(120).join("\n");
+	assert.match(overlay, /scan the bounded facts/);
+	assert.match(overlay, /1 live/);
+	assert.doesNotMatch(host.content().join("\n"), /scan the bounded facts/);
+	await host.closeDetails();
+	assert.equal(host.panel, undefined);
+	assert.equal(host.content().length, 0, "closing details does not show the summary");
+});
+
+test("opening and closing details leaves summary visibility unchanged", async () => {
+	const host = summaryHost({ enableWidget: true });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	answer(host.pi, sessionReply({ requestId: lastRequest(host.pi).requestId, summary: { agents: 3, acceptedEpisodes: 3, states: { idle: 2, queued: 0, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 } }));
+	const before = host.content(80).filter(line => line.trim().length > 0).join("\n");
+	assert.match(before, /3 agents/);
+	void host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("list", host.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.ok(host.panel);
+	assert.match(host.content(80).join("\n"), /3 agents/);
+	await host.closeDetails();
+	assert.match(host.content(80).join("\n"), /3 agents/);
+	assert.equal(host.panel, undefined);
+});
+
+test("unavailable inventory keeps total unknown even with a fresh running numerator", async () => {
+	const host = summaryHost({ enableWidget: true });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	const waiting = host.content(80).filter(line => line.trim().length > 0).join("\n");
+	assert.match(waiting, /1 running/);
+	assert.match(waiting, /agents unknown/);
+	answer(host.pi, sessionReply({
+		requestId: lastRequest(host.pi).requestId,
+		inventory: { state: "unavailable", reason: "history_query_failed", complete: false, unreadableRecords: 0 },
+		summary: null,
+		usage: null,
+		history: { state: "unavailable", reason: "history_query_failed", pageSize: 20, page: 0, totalRows: 4, totalPages: 1, rows: [] },
+	}));
+	const line = host.content(80).filter(line => line.trim().length > 0).join("\n");
+	assert.match(line, /1 running/);
+	assert.match(line, /agents unknown/);
+	assert.doesNotMatch(line, /4 agents|2 agents|1 agents/);
+	host.pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.equal(requestCount(host.pi), 2, "lifecycle invalidation queries once");
+	host.pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+	assert.equal(requestCount(host.pi), 2, "a pending invalidation does not scan again");
+});
+
+test("stale live facts show unknown instead of a running claim", async () => {
+	let clock = 5_000;
+	const host = summaryHost({ enableWidget: true, now: () => clock });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	answer(host.pi, sessionReply({ requestId: lastRequest(host.pi).requestId, summary: { agents: 4, acceptedEpisodes: 4, states: { idle: 3, queued: 0, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 } }));
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	assert.match(host.content(80).join("\n"), /1 running/);
+	const requests = requestCount(host.pi);
+	clock += OBSERVER_STALE_MS + 1;
+	host.tick();
+	const line = host.content(80).filter(line => line.trim().length > 0).join("\n");
+	assert.match(line, /running unknown/);
+	assert.match(line, /4 agents/);
+	assert.doesNotMatch(line, /1 running|1\.0s|\u25cf/);
+	assert.equal(requestCount(host.pi), requests, "becoming stale does not scan history");
+});
+
+test("late-mounted inline view uses correlated session live facts without an observer push", async () => {
+	let clock = 5_000;
+	const host = summaryHost({ now: () => clock });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	answer(host.pi, sessionReply({ requestId: lastRequest(host.pi).requestId, live: [task({ id: "LateAgent" })],
+		summary: { agents: 1, acceptedEpisodes: 1, liveAgents: 1, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 0 } },
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 0, totalPages: 0, rows: [] },
+	}));
+	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("expand", host.ctx);
+	assert.match(host.content(80).join("\n"), /LateAgent.*running/);
+	assert.equal(host.panel, undefined);
+	clock += OBSERVER_STALE_MS + 1;
+	host.tick();
+	assert.doesNotMatch(host.content(80).join("\n"), /LateAgent.*running/, "query-only live facts expire without a new query or observer push");
+});
+
+test("inline settlement and history show a handle only once and prefer its newest episode", () => {
+	const model = { counts: { running: 0, queued: 0, agents: 1 }, tasks: [settledTask({ id: "SameAgent" })],
+		history: [historyRow({ handle: "SameAgent" })], historyTotal: 1 };
+	let lines = formatSubagentsInline(model, 120, 6, { folded: false });
+	assert.equal(lines.length, 2, "observer settlement must not duplicate its retained row");
+	model.history = [historyRow({ handle: "SameAgent", episode: 2, latestOutcome: "failed" })];
+	lines = formatSubagentsInline(model, 120, 6, { folded: false });
+	assert.equal(lines.length, 2);
+	assert.match(lines[1]!, /failed/);
+	assert.doesNotMatch(lines[1]!, /succeeded/);
+});
+
+test("headless modes mount no summary and leave subagent tools alone", async () => {
+	for (const mode of ["rpc", "print", "json"]) {
+		const host = summaryHost({ mode, enableWidget: true });
+		await host.pi.handlers.get("session_start")?.({}, host.ctx);
+		await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("", host.ctx);
+		await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("expand", host.ctx);
+		await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("collapse", host.ctx);
+		await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("list", host.ctx);
+		host.pi.events.emit(OBSERVER_EVENT, snapshot());
+		host.pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
+		assert.equal(host.mounts.length, 0, mode);
+		assert.equal(requestCount(host.pi), 0, mode);
+		assert.equal(host.panel, undefined, mode);
+	}
+});
+
+test("session shutdown releases only the subagents summary slot", async () => {
+	const host = summaryHost({ enableWidget: true });
+	host.composer.set("tasks", { render: () => ["Tasks"] });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	assert.match(host.content(80).join("\n"), /Tasks/);
+	assert.match(host.content(80).join("\n"), /Subagents/);
+	await host.pi.handlers.get("session_shutdown")?.({});
+	assert.match(host.content(80).join("\n"), /Tasks/);
+	assert.doesNotMatch(host.content(80).join("\n"), /Subagents/);
+	assert.deepEqual(host.composer.slots(), ["tasks"]);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	assert.doesNotMatch(host.content(80).join("\n"), /running/);
+});
+
+test("expand and collapse stay inline, independent of visibility, and do not open details", async () => {
+	const host = summaryHost({ enableWidget: true });
+	await host.pi.handlers.get("session_start")?.({}, host.ctx);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot());
+	answer(host.pi, sessionReply({ requestId: lastRequest(host.pi).requestId, summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 1, queued: 0, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 } }));
+	const command = host.pi.commands.get(SUBAGENTS_UI_COMMAND)!;
+	await command.handler("expand", host.ctx);
+	assert.equal(host.panel, undefined, "expand does not open the overlay");
+	assert.match(host.content(80)[0] ?? "", /▾ Subagents/);
+	assert.match(host.content(80).join("\n"), /explorer scan ep0 running/);
+	const narrowWidget = host.mounts.at(-1)?.value;
+	const narrow = (narrowWidget as (tui: unknown, theme: unknown) => { render(width: number): string[] })({ terminal: { rows: 8 } }, undefined).render(12)
+		.filter(line => line.trim().length > 0);
+	assert.ok(narrow.length > 0 && narrow.length <= subagentsInlineBudget(8));
+	assert.match(narrow[0] ?? "", /▾/);
+	assert.ok(narrow.every(line => visibleWidth(line) <= 12));
+	const expandedRequests = requestCount(host.pi);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, tasks: [task({ id: "next", status: "pending" })] }));
+	assert.match(host.content(80).join("\n"), /explorer next ep0 queued/);
+	assert.match(host.content(80)[0] ?? "", /▾/, "status updates keep the expanded fold");
+	assert.equal(requestCount(host.pi), expandedRequests, "same-generation updates do not rescan");
+	await command.handler("hide", host.ctx);
+	host.pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 3, tasks: [task({ id: "hidden", status: "running" })] }));
+	assert.equal(host.content().length, 0, "hide survives status updates");
+	await command.handler("show", host.ctx);
+	assert.match(host.content(80)[0] ?? "", /▾/, "show restores the previous expansion");
+	assert.match(host.content(80).join("\n"), /hidden/);
+	await command.handler("collapse", host.ctx);
+	assert.equal(host.content(80).filter(line => line.trim().length > 0).length, 1);
+	assert.match(host.content(80)[0] ?? "", /▸ Subagents/);
+	assert.equal(host.panel, undefined);
+	await command.handler("", host.ctx);
+	assert.equal(host.content().length, 0);
+	await command.handler("show", host.ctx);
+	assert.equal(host.content(80).filter(line => line.trim().length > 0).length, 1, "bare visibility does not expand");
+	await command.handler("hide", host.ctx);
+	await command.handler("expand", host.ctx);
+	assert.match(host.content(80)[0] ?? "", /▾/, "expand shows a hidden summary without opening details");
+	assert.equal(host.panel, undefined);
+	void command.handler("list", host.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.ok(host.panel, "list still opens the existing overlay");
+	assert.match(host.content(80)[0] ?? "", /▾/, "details leaves the inline expansion alone");
+	await host.closeDetails();
+	assert.equal(host.panel, undefined);
+	assert.match(host.content(80)[0] ?? "", /▾/);
+	void host.pi.shortcuts.get("ctrl+alt+f")!.handler(host.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.ok(host.panel, "the shortcut still opens the overlay");
+	assert.equal(host.content(80).filter(line => line.trim().length > 0).length > 1, true);
+});
+
+test("expanded inline rows keep the title first and stay inside width and row bounds", () => {
+	const tasks = Array.from({ length: 8 }, (_, index) => task({
+		id: `agent${index}`,
+		ordinal: index + 1,
+		status: index === 0 ? "running" : "pending",
+		headline: "scan the bounded facts",
+		route: { provider: "openai", model: "gpt-4.1", thinking: "off" },
+	}));
+	const history = [historyRow({ handle: "session_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", state: "interrupted", latestOutcome: "failed" })];
+	const model = {
+		counts: { running: 1, queued: 7, agents: 40 },
+		tasks,
+		history,
+		historyTotal: 40,
+	};
+	const lines = formatSubagentsInline(model, 80, 4, { folded: false });
+	assert.equal(lines.length, 4);
+	assert.match(lines[0] ?? "", /^▾ Subagents \(1 running · 7 queued \/ 40 agents\)/);
+	assert.match(lines[1] ?? "", /explorer agent0 ep0 running/);
+	assert.match(lines[2] ?? "", /explorer agent1 ep0 queued/);
+	assert.match(lines[3] ?? "", /more · \/subagents-ui list/);
+	assert.match(lines.join("\n"), /openai gpt-4.1 off/);
+	assert.doesNotMatch(lines.join("\n"), /scan the bounded/);
+	const narrow = formatSubagentsInline(model, 28, 4, { folded: false });
+	assert.equal(narrow.length, 4);
+	assert.match(narrow[0] ?? "", /^▾/);
+	assert.ok(narrow.every(line => visibleWidth(line) <= 28));
+	const folded = formatSubagentsInline(model, 80, 6, { folded: true });
+	assert.equal(folded.length, 1);
+	assert.match(folded[0] ?? "", /^▸ Subagents/);
+	assert.doesNotMatch(folded[0] ?? "", /agent0/);
+	const theme = { fg: (color: "accent" | "warning", text: string) => `<${color}>${text}</${color}>` };
+	const warned = formatSubagentsInline({ counts: { running: "unknown", queued: 0, agents: "unknown" } }, 80, 4, { folded: true, theme });
+	assert.match(warned[0] ?? "", /<warning>▸ ! Subagents \(running unknown \/ agents unknown\)/);
+	assert.doesNotMatch(warned[0] ?? "", /! !|▸ ▸/);
+	const unconfirmed = formatSubagentsInline({
+		counts: { running: 0, queued: 0, agents: 1 },
+		history: [historyRow({ state: "running", latestOutcome: "unknown" })],
+	}, 80, 4, { folded: false });
+	assert.match(unconfirmed.join("\n"), /running\?/);
+	assert.equal(subagentsInlineBudget(24), 6);
+	assert.equal(subagentsInlineBudget(8), 2);
+	assert.equal(subagentsInlineBudget(3), 1);
+	assert.equal(formatSubagentsInline(model, 0, 4, { folded: false }).length, 0);
 });

@@ -3,6 +3,7 @@ import { formatDuration } from "../subagents/render.ts";
 import type { ObserverSnapshot, ObserverTask, ObserverToolCall } from "../subagents/observer-events.ts";
 import type { SessionViewHistoryRow, SessionViewReply } from "../subagents/session-view.ts";
 import type { RecordedUsageProjection } from "../subagents/observability.ts";
+import { panelHeading, type PanelHeadingOptions } from "../shared/panel-heading.ts";
 
 export const SUBAGENTS_UI_STATUS_KEY = "csheng.subagents.status";
 export const SUBAGENTS_UI_PANEL_KEY = "csheng.subagents.panel";
@@ -288,6 +289,154 @@ export function formatStatus(snapshot: ObserverSnapshot): string {
 	return `SA ${live}${parts.finished} finished · ${parts.elapsedText}`;
 }
 
+import { formatTokens } from "../shared/usage-format.ts";
+
+export interface SubagentsSummaryCounts {
+	running: number | "unknown";
+	queued: number;
+	agents: number | "unknown";
+}
+
+/** Accepted facts already held by the summary. Omitted tasks or history are not invented. */
+export interface SubagentsInlineModel {
+	counts: SubagentsSummaryCounts;
+	tasks?: readonly ObserverTask[];
+	history?: readonly SessionViewHistoryRow[];
+	historyTotal?: number;
+}
+
+export interface SubagentsInlineOptions {
+	folded?: boolean;
+	theme?: unknown;
+}
+
+function summaryWarning(counts: SubagentsSummaryCounts): boolean {
+	return counts.running === "unknown" || counts.agents === "unknown";
+}
+
+/** Count text only. Disclosure and warning markers belong to the shared heading. */
+function summaryContent(counts: SubagentsSummaryCounts): string {
+	const running = counts.running === "unknown" ? "running unknown" : `${counts.running} running`;
+	const queued = counts.running !== "unknown" && counts.queued > 0 ? ` · ${counts.queued} queued` : "";
+	const agents = counts.agents === "unknown" ? "agents unknown" : `${counts.agents} agents`;
+	return `Subagents (${running}${queued} / ${agents})`;
+}
+
+function headingTheme(value: unknown): PanelHeadingOptions["theme"] | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	return typeof (value as { fg?: unknown }).fg === "function" ? value as PanelHeadingOptions["theme"] : undefined;
+}
+
+/**
+ * Above-editor row budget. Folded stays one title line; expanded adds a few agent rows
+ * and leaves the editor plus the other sections room.
+ */
+export function subagentsInlineBudget(terminalRows: number): number {
+	const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 36;
+	return Math.max(1, Math.min(6, Math.floor(rows / 4)));
+}
+
+function taskRank(task: ObserverTask): number {
+	if (task.status === "running") return 0;
+	if (task.status === "pending") return 1;
+	if (task.status === "failed" || task.status === "blocked" || task.status === "aborted") return 2;
+	return 3;
+}
+
+function historyRank(row: SessionViewHistoryRow): number {
+	if (row.state === "interrupted") return 0;
+	if (row.state === "running" || row.state === "queued") return 1;
+	if (row.state === "idle") return 2;
+	return 3;
+}
+
+function taskStatusLabel(task: ObserverTask): string {
+	return task.status === "pending" ? "queued" : task.status;
+}
+
+export function formatAgentUsage(usage: RecordedUsageProjection | null | undefined): string {
+	if (!usage || usage.status === "unavailable") return "↑? ↓? R? CH? $? (unavailable)";
+	const count = (value: number | null) => value === null ? "?" : formatTokens(value);
+	const parts = [`↑${count(usage.usage.input)}`, `↓${count(usage.usage.output)}`, `R${count(usage.usage.cacheRead)}`];
+	if (usage.usage.cacheWrite === null || usage.usage.cacheWrite > 0) parts.push(`W${count(usage.usage.cacheWrite)}`);
+	parts.push(usage.cacheHitPercent === undefined ? "CH?" : `CH${usage.cacheHitPercent.toFixed(1)}%`);
+	parts.push(usage.usage.cost === null ? "$?" : `$${usage.usage.cost.toFixed(3)}`);
+	const coverage = usageCoverageTag(usage);
+	return parts.join(" ") + (coverage ? ` (${coverage})` : "");
+}
+
+function inlineAgents(model: SubagentsInlineModel): string[] {
+	const historyRows = model.history ?? [];
+	// Retained rows carry the episode state/outcome, route and recorded usage. Prefer
+	// them for a settled observer's same episode; fresh live facts still take priority.
+	const taskRows = (model.tasks ?? []).filter(task => !historyRows.some(row => row.handle === task.id
+		&& (task.episode === null || row.episode > task.episode || (row.episode === task.episode && !isLiveTask(task)))));
+	const tasks = taskRows.map((task, index) => ({ task, index }))
+		.sort((a, b) => taskRank(a.task) - taskRank(b.task) || a.index - b.index)
+		.map(({ task }) => `${task.role} ${task.id} ep${task.episode ?? "?"} ${taskStatusLabel(task)} t${task.assistantTurns} usage pending`
+			+ (task.route ? ` ${task.route.provider} ${task.route.model} ${task.route.thinking}` : " route unavailable"));
+	const history = historyRows.filter(row => !taskRows.some(task => task.id === row.handle)).map((row, index) => ({ row, index }))
+		.sort((a, b) => historyRank(a.row) - historyRank(b.row) || a.index - b.index);
+	const labels = shortLabelMap(history.map(({ row }) => row.handle));
+	return [...tasks, ...history.map(({ row }) => `${row.role} ${labels.get(row.handle) ?? row.handle} ep${row.episode} ${historyStateLabel(row)} ${row.latestOutcome} ${formatAgentUsage(row.recordedUsage)}`
+		+ (row.route ? ` ${row.route.provider} ${row.route.model} ${row.route.thinking}` : " route unavailable"))];
+}
+
+function shortLabelMap(handles: readonly string[]): Map<string, string> {
+	return new Map(handles.map(handle => [handle, shortLabel(handle, handles)]));
+}
+
+function inlineAgentLines(model: SubagentsInlineModel, width: number, room: number): string[] {
+	if (room <= 0) return [];
+	const agents = inlineAgents(model);
+	const unloaded = Math.max(0, (model.historyTotal ?? model.history?.length ?? 0) - (model.history?.length ?? 0));
+	const overflow = agents.length + unloaded > room;
+	const hint = overflow && room >= 2;
+	const shown = agents.slice(0, Math.max(0, room - (hint ? 1 : 0)));
+	const lines = shown.map((agent, index) => {
+		const branch = index === shown.length - 1 && !hint ? "└─ " : "├─ ";
+		return truncateToWidth(`${branch}${agent}`, width, "…");
+	});
+	if (hint) {
+		const more = agents.length - shown.length + unloaded;
+		lines.push(truncateToWidth(`… ${more} more · /${SUBAGENTS_UI_COMMAND} list`, width, "…"));
+	}
+	return lines;
+}
+
+/**
+ * Folded heading, or the same heading plus bounded agent/status rows.
+ * The title stays first. Agent metadata is shared with the central list; long rows clip safely.
+ */
+export function formatSubagentsInline(
+	model: SubagentsInlineModel,
+	width: number,
+	maxRows = 1,
+	options: SubagentsInlineOptions = {},
+): string[] {
+	width = Math.max(0, Math.floor(width));
+	maxRows = Math.max(0, Math.floor(maxRows));
+	if (!Number.isFinite(width) || !width || !Number.isFinite(maxRows) || !maxRows) return [];
+	const folded = options.folded !== false;
+	const theme = headingTheme(options.theme);
+	const heading = panelHeading(summaryContent(model.counts), width, {
+		folded,
+		warning: summaryWarning(model.counts),
+		...(theme ? { theme } : {}),
+	});
+	if (folded || maxRows < 2) return [heading];
+	return [heading, ...inlineAgentLines(model, width, maxRows - 1)];
+}
+
+/** One session-inventory line, using the same collapsed grammar as Tasks. */
+export function formatSubagentsSummary(counts: SubagentsSummaryCounts, width: number): string {
+	return formatSubagentsInline({ counts }, width, 1, { folded: true })[0] ?? "";
+}
+
+export function subagentsSummaryHasState(counts: SubagentsSummaryCounts): boolean {
+	return (typeof counts.running === "number" && counts.running > 0) || counts.queued > 0 || (typeof counts.agents === "number" && counts.agents > 0);
+}
+
 export function formatPanel(snapshot: ObserverSnapshot): string[] {
 	const parts = countParts(snapshot, "live", snapshot.elapsedMs);
 	const lines = [formatCountsText(parts)];
@@ -333,8 +482,7 @@ function usageCoverageTag(usage: RecordedUsageProjection): string {
 export function formatSessionUsage(usage: RecordedUsageProjection | null): OverlayRow | undefined {
 	if (!usage) return undefined;
 	const turns = usage.assistantTurns === null ? "?" : String(usage.assistantTurns);
-	const text = `recorded Σ${turns} turns · ↑${compactCount(usage.usage.input)} ↓${compactCount(usage.usage.output)} · $${compactCost(usage.usage.cost)}`
-		+ (usageCoverageTag(usage) ? ` (${usageCoverageTag(usage)})` : "");
+	const text = `recorded Σ${turns} turns · ${formatAgentUsage(usage)}`;
 	return { kind: "summary", text, segments: [{ text, color: "dim" }] };
 }
 
@@ -455,9 +603,7 @@ function historyGlyph(row: SessionViewHistoryRow): string {
 
 export function formatHistoryRow(row: SessionViewHistoryRow, label: string, columns: HistoryColumns): OverlayRow {
 	const badges = [row.onCurrentBranch ? "" : "off-branch", row.legacy ? "legacy" : ""].filter(Boolean).join(" ");
-	const turns = row.recordedUsage.assistantTurns === null ? "?" : String(row.recordedUsage.assistantTurns);
-	const coverage = usageCoverageTag(row.recordedUsage);
-	const usage = `Σ${turns}t ↑${compactCount(row.recordedUsage.usage.input)} $${compactCost(row.recordedUsage.usage.cost)}${coverage ? `·${coverage}` : ""}`;
+	const usage = formatAgentUsage(row.recordedUsage);
 	const primary = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)}`;
 	const route = row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "";
 	// Bounded per-root outcome line: destination, apply status, recovery need and this root's own release fact.

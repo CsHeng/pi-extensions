@@ -131,9 +131,11 @@ function parseUsageFields(value: unknown): ObservedUsage | undefined {
 }
 
 export function parseRecordedUsageProjection(value: unknown): RecordedUsageProjection | undefined {
-	if (!isRecord(value) || !keysExact(value, USAGE_KEYS.slice(0, 7), ["reason"])) return undefined;
+	if (!isRecord(value) || !keysExact(value, USAGE_KEYS.slice(0, 7), ["reason", "cacheHitPercent"])) return undefined;
 	if (!COVERAGES.includes(value.status as RecordedCoverage) || !COVERAGES.includes(value.turnsCoverage as RecordedCoverage)) return undefined;
 	if (!nonNegativeInt(value.conflicts)) return undefined;
+	if (value.cacheHitPercent !== undefined && (typeof value.cacheHitPercent !== "number" || !Number.isFinite(value.cacheHitPercent)
+		|| value.cacheHitPercent < 0 || value.cacheHitPercent > 100 || value.status === "unavailable")) return undefined;
 	const usage = parseUsageFields(value.usage);
 	if (usage === undefined || !intOrNull(value.assistantTurns)) return undefined;
 	const metrics = value.metrics;
@@ -149,7 +151,8 @@ export function parseRecordedUsageProjection(value: unknown): RecordedUsageProje
 		if (!METRIC_KEYS.every((field) => metrics[field] === "unavailable") || value.turnsCoverage !== "unavailable") return undefined;
 	}
 	if (value.reason !== undefined && value.status !== "unavailable") return undefined;
-	return { status: value.status as RecordedCoverage, usage, assistantTurns: value.assistantTurns as number | null,
+	return { status: value.status as RecordedCoverage, usage,
+		...(value.cacheHitPercent === undefined ? {} : { cacheHitPercent: value.cacheHitPercent as number }), assistantTurns: value.assistantTurns as number | null,
 		metrics: metrics as Record<RecordedUsageMetric, RecordedCoverage>, turnsCoverage: value.turnsCoverage as RecordedCoverage,
 		episodes: { recorded: value.episodes.recorded, missing: value.episodes.missing, orphaned: value.episodes.orphaned, unprovable: value.episodes.unprovable },
 		conflicts: value.conflicts, ...(value.reason === undefined ? {} : { reason: value.reason as RecordedUsageFailure }) };

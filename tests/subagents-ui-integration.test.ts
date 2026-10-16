@@ -107,7 +107,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	assert.deepEqual(widgets, []);
 	const command = commands.get(SUBAGENTS_UI_COMMAND);
 	assert.ok(command);
-	void command.handler("", ctx);
+	void command.handler("list", ctx);
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(overlayFlag, true);
 	// Opening the session-scoped overlay queries retained history through the core contract.

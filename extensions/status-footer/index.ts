@@ -109,13 +109,8 @@ function numberOrZero(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-export function formatTokens(count: number): string {
-	if (count < 1_000) return count.toString();
-	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
-	if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
-	if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-	return `${Math.round(count / 1_000_000)}M`;
-}
+export { formatTokens } from "../shared/usage-format.ts";
+import { formatTokens, promptCacheHit } from "../shared/usage-format.ts";
 
 export function formatWorkdir(cwd: string, home: string | undefined = homedir()): string {
 	if (!home) return cwd;
@@ -151,12 +146,7 @@ export function collectUsageTotals(entries: readonly unknown[]): UsageSnapshot {
 		if (record.type === "message" && record.message?.role === "assistant") {
 			fields = record.message.usage;
 			if (fields) {
-				const promptTokens =
-					numberOrZero(fields.input) +
-					numberOrZero(fields.cacheRead) +
-					numberOrZero(fields.cacheWrite);
-				usage.cacheHitPercent =
-					promptTokens > 0 ? (numberOrZero(fields.cacheRead) / promptTokens) * 100 : undefined;
+				usage.cacheHitPercent = promptCacheHit(numberOrZero(fields.input), numberOrZero(fields.cacheRead), numberOrZero(fields.cacheWrite));
 			}
 		} else if (record.type === "message" && record.message?.role === "toolResult") {
 			fields = record.message.usage;

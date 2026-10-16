@@ -14,6 +14,7 @@ import {
 	SESSION_VIEW_VERSION,
 	parseSessionViewReply,
 } from "../subagents/session-view.ts";
+import { sharedAboveEditor, type AboveEditorComposer } from "../shared/above-editor.ts";
 import { SubagentsOverlay, type OverlaySnapshot, type OverlayTheme, type SessionViewState } from "./component.ts";
 import {
 	OBSERVER_STALE_MS,
@@ -21,8 +22,11 @@ import {
 	SUBAGENTS_UI_COMMAND,
 	SUBAGENTS_UI_PANEL_KEY,
 	SUBAGENTS_UI_STATUS_KEY,
-	formatPanel,
-	formatStatus,
+	formatSubagentsInline,
+	subagentsInlineBudget,
+	subagentsSummaryHasState,
+	type SubagentsInlineModel,
+	type SubagentsSummaryCounts,
 } from "./render.ts";
 
 export {
@@ -34,6 +38,7 @@ export {
 
 export interface SubagentsUiOptions {
 	enableWidget?: boolean;
+	composer?: AboveEditorComposer;
 	now?: () => number;
 	setInterval?: (callback: () => void, intervalMs: number) => unknown;
 	clearInterval?: (handle: unknown) => void;
@@ -117,6 +122,7 @@ export function createSubagentsUiExtension(
 	const cancelTimer = options.clearInterval ?? defaultClearInterval;
 
 	return (pi: ExtensionAPI): void => {
+		const composer = options.composer ?? sharedAboveEditor(pi);
 		let ctx: ExtensionContext | undefined;
 		let current: CachedObservation | undefined;
 		let latestTerminal: CachedObservation | undefined;
@@ -131,11 +137,18 @@ export function createSubagentsUiExtension(
 		let overlayLayout: OverlayOptions | undefined;
 		let overlayTui: TUI | undefined;
 		let intervalHandle: unknown;
+		let staleHandle: unknown;
 		let dismissOverlay: (() => void) | undefined;
 		let overlayVersion = 0;
 		let retiredGeneration: string | undefined;
+		let summaryVisible = true;
+		let summaryFolded = true;
+		let summaryMounted = false;
+		let summaryFailed = false;
 
 		const tui = () => ctx?.mode === "tui";
+		const interactive = () => tui() && ctx?.hasUI === true;
+		const summaryWanted = () => summaryVisible && interactive();
 
 		const stopRepaint = (): void => {
 			if (intervalHandle === undefined) return;
@@ -161,21 +174,99 @@ export function createSubagentsUiExtension(
 			return { snapshot, receivedAt, session: sessionView };
 		};
 
-		const clearWidget = (): void => {
-			if (!enableWidget || !tui() || !ctx) return;
-			ctx.ui.setStatus(SUBAGENTS_UI_STATUS_KEY, undefined);
-			ctx.ui.setWidget(SUBAGENTS_UI_PANEL_KEY, undefined);
+		const stopStale = (): void => {
+			if (staleHandle === undefined) return;
+			cancelTimer(staleHandle);
+			staleHandle = undefined;
 		};
 
-		const renderWidget = (): void => {
-			if (!enableWidget || !tui() || !ctx) return;
-			const snapshot = current?.snapshot;
-			if (!snapshot || isSettled(snapshot)) {
-				clearWidget();
+		const releaseSummary = (): void => {
+			stopStale();
+			if (!summaryMounted) return;
+			summaryMounted = false;
+			composer.set("subagents", undefined);
+		};
+
+		const summaryCounts = (): SubagentsSummaryCounts => {
+			if (!ctx?.isProjectTrusted()) return { running: "unknown", queued: 0, agents: "unknown" };
+			let running: SubagentsSummaryCounts["running"] = "unknown";
+			let queued = 0;
+			if (current) {
+				const fresh = isSettled(current.snapshot) || !isStaleCache(current, now());
+				if (fresh) {
+					running = current.snapshot.tasks.filter(task => task.status === "running").length;
+					queued = current.snapshot.tasks.filter(task => task.status === "pending").length;
+				}
+			}
+			const reply = sessionView.reply;
+			const inventoryReady = sessionView.kind !== "unavailable" && sessionView.kind !== "idle"
+				&& reply?.inventory.state === "ready" && reply.summary != null;
+			return { running, queued, agents: inventoryReady && reply?.summary ? reply.summary.agents : "unknown" };
+		};
+
+		const armStale = (): void => {
+			stopStale();
+			const model = displayed();
+			if (!summaryWanted() || !model.snapshot || isSettled(model.snapshot)) return;
+			const remaining = OBSERVER_STALE_MS - (now() - model.receivedAt);
+			if (remaining <= 0) return;
+			staleHandle = schedule(() => {
+				const handle = staleHandle;
+				staleHandle = undefined;
+				if (handle !== undefined) cancelTimer(handle);
+				publishSummary();
+			}, remaining);
+		};
+
+		const inlineModel = (): SubagentsInlineModel => {
+			const counts = summaryCounts();
+			if (!ctx?.isProjectTrusted()) return { counts };
+			const model = displayed();
+			const fresh = model.snapshot && (isSettled(model.snapshot) || now() - model.receivedAt < OBSERVER_STALE_MS);
+			const reply = sessionView.reply;
+			const historyReady = sessionView.kind !== "unavailable" && sessionView.kind !== "idle"
+				&& reply?.inventory.state === "ready" && reply.history.state === "ready" && reply.summary != null;
+			return {
+				counts,
+				...(fresh && model.snapshot ? { tasks: model.snapshot.tasks } : {}),
+				...(historyReady && reply ? { history: reply.history.rows, historyTotal: reply.history.totalRows } : {}),
+			};
+		};
+
+		const publishSummary = (): void => {
+			const counts = summaryCounts();
+			if (!summaryWanted() || !ctx || summaryFailed || !(enableWidget || subagentsSummaryHasState(counts))) {
+				releaseSummary();
 				return;
 			}
-			ctx.ui.setStatus(SUBAGENTS_UI_STATUS_KEY, formatStatus(snapshot));
-			ctx.ui.setWidget(SUBAGENTS_UI_PANEL_KEY, formatPanel(snapshot), { placement: "belowEditor" });
+			composer.attach(ctx);
+			const ok = composer.set("subagents", {
+				render(width, terminalRows, theme) {
+					try {
+						const bounded = Math.min(120, Math.max(0, Math.floor(Number(width) || 0)));
+						return formatSubagentsInline(inlineModel(), bounded, subagentsInlineBudget(terminalRows), {
+							folded: summaryFolded,
+							theme,
+						});
+					} catch {
+						summaryFailed = true;
+						queueMicrotask(() => { if (summaryFailed) releaseSummary(); });
+						return [];
+					}
+				},
+				activate() {
+					summaryFolded = !summaryFolded;
+					summaryFailed = false;
+					publishSummary();
+				},
+			});
+			if (!ok) {
+				summaryFailed = true;
+				releaseSummary();
+				return;
+			}
+			summaryMounted = true;
+			armStale();
 		};
 
 		const overlayNeedsClock = (): boolean => {
@@ -233,7 +324,7 @@ export function createSubagentsUiExtension(
 		}
 
 		const requestSessionView = (page: number): void => {
-			if (!tui() || !ctx || !overlay) return;
+			if (!tui() || !ctx || (!overlay && !summaryWanted())) return;
 			if (!ctx.isProjectTrusted()) { forgetPendingView(); sessionView = { kind: "unavailable", reason: "project_trust_required" }; publishOverlay(); return; }
 			const owner = readOwner(ctx);
 			if (!owner) {
@@ -269,10 +360,12 @@ export function createSubagentsUiExtension(
 		};
 
 		const publishOverlay = (): void => {
-			if (!overlay) return;
-			overlay.update(displayed());
-			syncOverlayWidth();
-			startRepaint();
+			if (overlay) {
+				overlay.update(displayed());
+				syncOverlayWidth();
+				startRepaint();
+			}
+			publishSummary();
 		};
 
 		const accept = (incoming: ObserverSnapshot, receivedAt: number): void => {
@@ -329,6 +422,9 @@ export function createSubagentsUiExtension(
 				dismissOverlay = undefined;
 				stopRepaint();
 				forgetPendingView();
+				const recoverInventory = summaryWanted() && sessionView.kind !== "ready" && sessionView.reply?.summary == null;
+				publishSummary();
+				if (recoverInventory) requestSessionView(0);
 			});
 		};
 
@@ -345,11 +441,12 @@ export function createSubagentsUiExtension(
 				accept(parsed.value, now());
 				const generationChanged = previousGeneration !== undefined && current !== undefined && current.snapshot.generation !== previousGeneration;
 				if (generationChanged) { forgetPendingView(); sessionView = { kind: "idle" }; }
-				renderWidget();
 				publishOverlay();
 				if (overlayOpen && (before !== liveKey() || generationChanged)) {
 					if (pending && !pending.timedOut) requeryArmed = true;
 					else requestSessionView(sessionView.reply?.history.page ?? 0);
+				} else if (!overlayOpen && summaryWanted() && generationChanged) {
+					requestSessionView(0);
 				}
 			} catch {
 				/* Display-only observer. */
@@ -358,7 +455,7 @@ export function createSubagentsUiExtension(
 
 		pi.events.on(SESSION_VIEW_EVENT, (data) => {
 			try {
-				if (!tui() || !overlayOpen) return;
+				if (!tui() || (!overlayOpen && !summaryWanted())) return;
 				const parsed = parseSessionViewReply(data);
 				if (!parsed.ok) return;
 				const reply = parsed.value;
@@ -402,20 +499,53 @@ export function createSubagentsUiExtension(
 
 		pi.events.on(SESSION_VIEW_CHANGED_EVENT, () => {
 			try {
-				if (!tui() || !overlayOpen) return;
+				if (!tui() || (!overlayOpen && !summaryWanted())) return;
 				// Coalesce lifecycle invalidations into one requery of the current scope.
 				if (pending && !pending.timedOut) requeryArmed = true;
-				else requestSessionView(sessionView.reply?.history.page ?? 0);
+				else requestSessionView(overlayOpen ? (sessionView.reply?.history.page ?? 0) : 0);
 			} catch {
 				/* Display-only consumer. */
 			}
 		});
 
+		const showSummary = (opening: boolean): void => {
+			summaryVisible = true;
+			summaryFailed = false;
+			publishSummary();
+			if (opening && !overlayOpen) requestSessionView(0);
+		};
+
+		const hideSummary = (): void => {
+			summaryVisible = false;
+			if (!overlayOpen) forgetPendingView();
+			releaseSummary();
+		};
+
+		const reveal = (folded: boolean): void => {
+			summaryFolded = folded;
+			summaryFailed = false;
+			if (!summaryVisible) showSummary(true);
+			else publishSummary();
+		};
+
 		pi.registerCommand(SUBAGENTS_UI_COMMAND, {
-			description: "Inspect observed subagent work",
-			handler: async (_args, commandCtx) => {
+			description: "Show, hide, or fold the subagent summary; list opens the inspector",
+			handler: async (args, commandCtx) => {
 				ctx = commandCtx;
-				await openOverlay();
+				const arg = args.trim();
+				if (arg === "list") {
+					await openOverlay();
+					return;
+				}
+				if (!interactive()) return;
+				if (arg === "hide") { hideSummary(); ctx.ui.notify("Subagents UI off.", "info"); return; }
+				if (arg === "show") { if (!summaryVisible) showSummary(true); ctx.ui.notify("Subagents UI on.", "info"); return; }
+				if (arg === "expand") { reveal(false); return; }
+				if (arg === "collapse") { reveal(true); return; }
+				if (arg !== "") return;
+				if (summaryVisible) hideSummary();
+				else showSummary(true);
+				ctx.ui.notify(`Subagents UI ${summaryVisible ? "on" : "off"}.`, "info");
 			},
 		});
 
@@ -435,25 +565,21 @@ export function createSubagentsUiExtension(
 			stopRepaint(); dismiss?.();
 		};
 
-		pi.on("session_start", (_event, sessionCtx) => {
+		const resetOwner = (sessionCtx: ExtensionContext): void => {
 			ctx = sessionCtx;
 			ownerEpoch++;
 			forgetPendingView();
 			sessionView = { kind: "idle" };
 			resetCache();
 			closeOverlay();
-			clearWidget();
-		});
+			summaryFailed = false;
+			publishSummary();
+			if (summaryWanted()) requestSessionView(0);
+		};
 
-		pi.on("session_tree", (_event, sessionCtx) => {
-			ctx = sessionCtx;
-			ownerEpoch++;
-			forgetPendingView();
-			sessionView = { kind: "idle" };
-			resetCache();
-			closeOverlay();
-			clearWidget();
-		});
+		pi.on("session_start", (_event, sessionCtx) => { resetOwner(sessionCtx); });
+
+		pi.on("session_tree", (_event, sessionCtx) => { resetOwner(sessionCtx); });
 
 		pi.on("session_shutdown", () => {
 			ownerEpoch++;
@@ -461,7 +587,7 @@ export function createSubagentsUiExtension(
 			sessionView = { kind: "idle" };
 			closeOverlay();
 			resetCache();
-			clearWidget();
+			releaseSummary();
 			ctx = undefined;
 		});
 	};

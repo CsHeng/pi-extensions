@@ -456,6 +456,21 @@ const row = (ownerSessionId: string, entryId: string, usage: Partial<ObservedUsa
 const syntheticObservation = (ownerSessionId: string, entries: NativeUsageRow[]): NativeObservation =>
 	({ available: true, ownerSessionId, entries, commands: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, contextWindow: null, toolNames: null, capabilityKey: null });
 
+test("single-agent cache hit matches the footer's latest assistant prompt, not cumulative traffic", () => {
+	const observation = syntheticObservation("native", [
+		row("native", "old", { input: 100, cacheRead: 900, cacheWrite: 0 }),
+		row("native", "latest", { input: 80, cacheRead: 20, cacheWrite: 0 }),
+		row("native", "summary", { input: 1000, cacheRead: 0, cacheWrite: 0 }, "compaction"),
+	]);
+	const handle = recordedHandle("agent", 1, [{ episode: 1, observation }]);
+	const value = projectRecordedUsage([handle]);
+	assert.equal(value.cacheHitPercent, 20);
+	assert.equal(value.usage.input, 1180, "traffic still includes all recorded usage");
+	assert.equal(value.usage.cacheRead, 920);
+	assert.equal(projectRecordedUsage([handle, { ...handle, handle: "other" }]).cacheHitPercent, undefined, "cross-agent totals have no shared latest prompt");
+	assert.equal(projectRecordedUsage([{ ...handle, expectedEpisodes: 2 }]).cacheHitPercent, undefined, "missing latest episode cannot reuse older CH");
+});
+
 test("recorded usage overflow cannot be labeled as a complete metric", () => {
 	const observation = syntheticObservation("overflow", [row("overflow", "a", { input: Number.MAX_VALUE }), row("overflow", "b", { input: Number.MAX_VALUE })]);
 	const result = projectRecordedUsage([recordedHandle("h-overflow", 1, [{ episode: 1, observation }])]);

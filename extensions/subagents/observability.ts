@@ -1,3 +1,4 @@
+import { promptCacheHit } from "../shared/usage-format.ts";
 import { commandCorrelationKey } from "./command-correlation.ts";
 import { CHILD_CAPABILITY_FAILURE_EVENT } from "./contracts.ts";
 import { createHash } from "node:crypto";
@@ -176,6 +177,8 @@ export interface RecordedUsageHandleInput {
 }
 
 export interface RecordedUsageProjection {
+	/** Latest recorded assistant prompt, only for a provable single-handle projection; never a cumulative ratio. */
+	cacheHitPercent?: number;
 	status: RecordedCoverage;
 	/** Null-aware deduplicated totals over recorded rows; unknown fields stay null, never zero. */
 	usage: ObservedUsage;
@@ -244,7 +247,21 @@ export function projectRecordedUsage(handles: readonly RecordedUsageHandleInput[
 	const coverages: RecordedCoverage[] = [...USAGE_METRICS.map((field) => metrics[field]), turnsCoverage];
 	const status: RecordedCoverage = coverages.every((value) => value === "complete") ? "complete"
 		: coverages.every((value) => value === "unavailable") ? "unavailable" : "incomplete";
-	return { status,
+	// A cross-agent total has no single latest prompt. For one handle, use the latest
+	// accepted episode's final assistant row only when all available copies agree.
+	let cacheHitPercent: number | undefined;
+	if (parsed.size === 1 && !gaps) {
+		const item = [...parsed.values()][0]!;
+		const latest = item.expected === null ? [] : (item.observations.get(item.expected) ?? []);
+		const rows = latest.filter(observation => observation.available)
+			.map(observation => observation.entries.findLast(row => row.kind === "assistant"));
+		const last = rows[0];
+		if (last && rows.every(row => row?.entryId === last.entryId && row.ownerSessionId === last.ownerSessionId)) {
+			const { input, cacheRead, cacheWrite } = last.usage;
+			if (input !== null && cacheRead !== null && cacheWrite !== null) cacheHitPercent = promptCacheHit(input, cacheRead, cacheWrite);
+		}
+	}
+	return { status, ...(cacheHitPercent === undefined ? {} : { cacheHitPercent }),
 		usage, assistantTurns: turnsCoverage === "unavailable" ? null : assistantTurns, metrics, turnsCoverage,
 		episodes: { recorded, missing, orphaned, unprovable }, conflicts };
 }
