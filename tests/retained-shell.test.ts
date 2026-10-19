@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@eare
 import { EventEmitter } from "node:events";
 import { NATIVE_TIMER_MAX_MS } from "../extensions/shared/duration-timer.ts";
 import { createShellDelivery } from "../extensions/retained-shell/delivery.ts";
-import { createShellExecutionOwner, MAX_TERMINAL_RECORDS, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/retained-shell/execution.ts";
+import { createShellExecutionOwner, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/retained-shell/execution.ts";
 import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
 import loopNotifications from "../extensions/loop-notifications/index.ts";
 import { shellClaim, SHELL_EXECUTION_EVENT } from "../extensions/retained-shell/policy.ts";
@@ -400,7 +400,7 @@ test("an empty execution id does not start a process", async () => {
 	await owner.shutdown();
 });
 
-test("nine background terminals still project once after output eviction", async (t) => {
+test("nine background terminals remain listed and project once", async (t) => {
 	const dir = await scratch();
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
 	const listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -434,14 +434,15 @@ test("nine background terminals still project once after output eviction", async
 	const ctx = { mode: "tui", isIdle: () => false, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 	const ids: string[] = [];
-	for (let index = 0; index < MAX_TERMINAL_RECORDS + 1; index++) {
+	for (let index = 0; index < 9; index++) {
 		const started = await owner.start({ command: "echo ok", cwd: dir, env: process.env, sessionId: "session", branchAnchor: "leaf", toolCallId: null, deadlineMs: 60_000, foregroundWindowMs: 0 });
 		ids.push(started.executionId);
 	}
 	const deadline = Date.now() + 3_000;
 	while (exited.size < ids.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(exited.size, ids.length);
-	assert.ok(owner.list(scope).filter((view) => view.status !== "running").length <= MAX_TERMINAL_RECORDS);
+	assert.equal(owner.list(scope).filter((view) => view.status !== "running").length, ids.length);
+	for (const id of ids) assert.equal(owner.inspect(id, scope)?.status, "exited");
 	const project = async () => {
 		let text = "";
 		for (const handler of handlers.get("context_with_system") ?? []) {
@@ -490,9 +491,9 @@ test("terminal retention is bounded and a dropped wake stays inspectable", () =>
 	assert.equal(delivery.inspectable("needed")?.outputTail, "");
 });
 
-test("terminal records stay bounded", async (t) => {
+test("terminal records stay inspectable after later terminals finish", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, maxTerminalRecords: 2 });
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -511,13 +512,14 @@ test("terminal records stay bounded", async (t) => {
 		});
 		ids.push(view.executionId);
 	}
-	assert.equal(owner.inspect(ids[0]!, unscoped), undefined);
+	assert.equal(owner.inspect(ids[0]!, unscoped)?.status, "exited");
 	assert.equal(owner.inspect(ids[2]!, unscoped)?.status, "exited");
+	assert.equal(owner.list(unscoped).length, 3);
 });
 
-test("display notification sees retention after a failed record is evicted", async (t) => {
+test("display notification sees every finished record", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, maxTerminalRecords: 2 });
+	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -541,8 +543,8 @@ test("display notification sees retention after a failed record is evicted", asy
 		ids.push(view.executionId);
 	}
 	const last = snapshots.at(-1) ?? [];
-	assert.equal(last.length, 2);
-	assert.equal(last.includes(ids[0]!), false);
+	assert.equal(last.length, 3);
+	assert.equal(last.includes(ids[0]!), true);
 	assert.deepEqual(owner.list(unscoped).map((view) => view.executionId), last);
 });
 

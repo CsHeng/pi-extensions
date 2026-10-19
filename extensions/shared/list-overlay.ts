@@ -2,18 +2,27 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, SelectList, Text, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 
+export interface ListOverlayOptions { pageSize?: number }
+
+function isPageKey(data: string, name: "pageUp" | "pageDown"): boolean {
+	return data === name || matchesKey(data, Key[name]);
+}
+
 export async function openListOverlay(
 	ctx: ExtensionContext,
 	title: string,
 	rows: (width: number, theme: Theme) => string[],
+	options?: ListOverlayOptions,
 ): Promise<void> {
+	const pageSize = options?.pageSize && options.pageSize > 0 ? Math.floor(options.pageSize) : 0;
 	await ctx.ui.custom<void>((tui, theme, _keys, done) => {
 		let width = -1;
 		let height = -1;
+		let page = 0;
 		let container: Container;
 		let list: SelectList;
 		let previousRows = "";
-		const rebuild = (nextWidth: number, content: string[]) => {
+		const rebuild = (nextWidth: number, content: string[], footer: string) => {
 			const selected = list?.getSelectedItem()?.value;
 			width = nextWidth;
 			height = tui.terminal.rows;
@@ -33,14 +42,30 @@ export async function openListOverlay(
 			const titleText = truncateToWidth(title, Math.max(0, bodyWidth - 2), "…");
 			container.addChild(new Text(theme.fg("accent", titleText + " ".repeat(Math.max(0, bodyWidth - visibleWidth(titleText) - 1)) + "×"), 0, 0));
 			container.addChild(list);
-			container.addChild(new Text(theme.fg("dim", "↑↓ navigate · Enter/Esc close"), 0, 0));
+			container.addChild(new Text(theme.fg("dim", footer), 0, 0));
+		};
+		const pageOf = (content: string[]) => {
+			if (pageSize <= 0) return { visible: content, footer: "↑↓ navigate · Enter/Esc close", pages: 1 };
+			const pinned = content.length > 0 ? content[0] : undefined;
+			const body = pinned !== undefined ? content.slice(1) : content;
+			const pages = Math.max(1, Math.ceil(body.length / pageSize));
+			page = Math.min(page, pages - 1);
+			const start = page * pageSize;
+			const slice = body.slice(start, start + pageSize);
+			const from = body.length === 0 ? 0 : start + 1;
+			const to = Math.min(body.length, start + slice.length);
+			const footer = pages > 1
+				? `↑↓ navigate · pgup/pgdn · ${from}–${to} of ${body.length} · Enter/Esc close`
+				: "↑↓ navigate · Enter/Esc close";
+			return { visible: pinned !== undefined ? [pinned, ...slice] : slice, footer, pages };
 		};
 		return {
 			render(nextWidth: number) {
 				const content = rows(Math.max(1, nextWidth - 6), theme);
-				const serialized = content.join("\n");
+				const paged = pageOf(content);
+				const serialized = `${page}\n${paged.visible.join("\n")}`;
 				if (width !== nextWidth || height !== tui.terminal.rows || previousRows !== serialized) {
-					rebuild(nextWidth, content); previousRows = serialized;
+					rebuild(nextWidth, paged.visible, paged.footer); previousRows = serialized;
 				}
 				const innerWidth = Math.max(0, width - 4);
 				const border = theme.fg("border", "─".repeat(Math.max(0, width - 2)));
@@ -62,6 +87,11 @@ export async function openListOverlay(
 			},
 			handleInput(data: string) {
 				if (matchesKey(data, Key.escape)) { done(); return; }
+				if (pageSize > 0 && (isPageKey(data, "pageDown") || isPageKey(data, "pageUp"))) {
+					page = Math.max(0, page + (isPageKey(data, "pageDown") ? 1 : -1));
+					tui.requestRender();
+					return;
+				}
 				list?.handleInput(data); tui.requestRender();
 			},
 		};

@@ -18,7 +18,7 @@ const CHANGED_KEYS = ["version", "generation"];
 const RESET_KEYS = ["version", "generation"];
 const RESET_OPTIONAL = ["ownerSessionId", "anchor"];
 const REPLY_KEYS = ["version", "requestId", "ownerSessionId", "anchor", "generation", "availability"];
-const REPLY_OPTIONAL = ["reason", "records", "retained"];
+const REPLY_OPTIONAL = ["reason", "records"];
 const RECORD_KEYS = ["executionId", "label", "status", "exitCode", "startedAt", "terminalAt", "lastOutputAt"];
 
 export type JobsClaim = "ready" | "other-owner" | "inactive";
@@ -45,10 +45,8 @@ export interface JobsViewReply {
 	generation: string;
 	availability: "ready" | "unavailable";
 	reason?: JobsViewReason;
-	/** Inline Jobs projection: background work only, with brief successful exits omitted. */
+	/** Background jobs for the current session and branch. Not durable history. */
 	records?: JobsViewRecord[];
-	/** Every owner-retained record in the current session and branch. Not durable history. */
-	retained?: JobsViewRecord[];
 }
 export interface JobsViewSource {
 	list(scope: ShellScope): ShellExecutionView[];
@@ -142,23 +140,33 @@ export function parseJobsViewReply(value: unknown): { ok: true; value: JobsViewR
 	if (value.anchor !== null && !boundedText(value.anchor, 256)) return { ok: false };
 	if (!boundedText(value.generation, 32) || (value.availability !== "ready" && value.availability !== "unavailable")) return { ok: false };
 	if (value.availability === "unavailable") {
-		if (!("reason" in value) || typeof value.reason !== "string" || !REASONS.includes(value.reason as JobsViewReason) || "records" in value || "retained" in value) return { ok: false };
+		if (!("reason" in value) || typeof value.reason !== "string" || !REASONS.includes(value.reason as JobsViewReason) || "records" in value) return { ok: false };
 		return { ok: true, value: { version: JOBS_VIEW_VERSION, requestId: value.requestId, ownerSessionId: value.ownerSessionId, anchor: value.anchor, generation: value.generation, availability: "unavailable", reason: value.reason as JobsViewReason } };
 	}
 	if ("reason" in value) return { ok: false };
 	const records = parseRecords(value.records);
 	if (!records) return { ok: false };
-	if (!("retained" in value)) return { ok: true, value: { version: JOBS_VIEW_VERSION, requestId: value.requestId, ownerSessionId: value.ownerSessionId, anchor: value.anchor, generation: value.generation, availability: "ready", records } };
-	const retained = parseRecords(value.retained);
-	if (!retained) return { ok: false };
-	return { ok: true, value: { version: JOBS_VIEW_VERSION, requestId: value.requestId, ownerSessionId: value.ownerSessionId, anchor: value.anchor, generation: value.generation, availability: "ready", records, retained } };
+	return { ok: true, value: { version: JOBS_VIEW_VERSION, requestId: value.requestId, ownerSessionId: value.ownerSessionId, anchor: value.anchor, generation: value.generation, availability: "ready", records } };
 }
 
-/** Running detached work is visible immediately. Brief successful background work disappears on close. */
-export function isVisibleBackgroundJob(view: ShellExecutionView): boolean {
+/** Successful background exits shorter than this stay out of Jobs. Zero shows every background job. */
+export const JOBS_MIN_VISIBLE_SUCCESS_MS = 0;
+
+/** Foreground work stays out. A positive threshold can hide short successful background exits. */
+export function isVisibleBackgroundJob(view: ShellExecutionView, minSuccessMs = JOBS_MIN_VISIBLE_SUCCESS_MS): boolean {
 	if (!view.background) return false;
 	if (view.status === "running" || view.status !== "exited" || view.exitCode !== 0) return true;
-	return view.terminalAt !== null && view.terminalAt - view.startedAt >= 30_000;
+	if (minSuccessMs <= 0) return true;
+	return view.terminalAt !== null && view.terminalAt - view.startedAt >= minSuccessMs;
+}
+
+function statusRank(status: ShellStatus): number {
+	return status === "running" ? 0 : 1;
+}
+
+/** Running jobs first, then every stopped state, each by start time. */
+export function compareJobsViewRecords(left: JobsViewRecord, right: JobsViewRecord): number {
+	return statusRank(left.status) - statusRank(right.status) || left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId);
 }
 
 function project(view: ShellExecutionView): JobsViewRecord {
@@ -200,7 +208,7 @@ export function registerJobsView(pi: ExtensionAPI, source: JobsViewSource, claim
 		const listed = reason ? undefined : source.list(scopeOf(ctx));
 		const reply: JobsViewReply = reason
 			? { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "unavailable", reason }
-			: { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "ready", records: listed?.filter(isVisibleBackgroundJob).map(project) ?? [], retained: listed?.map(project) ?? [] };
+			: { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "ready", records: listed?.filter((view) => isVisibleBackgroundJob(view)).map(project).sort(compareJobsViewRecords) ?? [] };
 		const parsed = parseJobsViewReply(reply);
 		if (parsed.ok) emit(JOBS_VIEW_EVENT, parsed.value);
 	};

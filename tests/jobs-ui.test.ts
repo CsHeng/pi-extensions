@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAboveEditor } from "../extensions/shared/above-editor.ts";
-import { createJobsUi } from "../extensions/jobs-ui/index.ts";
+import { createJobsUi, JOBS_LIST_PAGE_SIZE } from "../extensions/jobs-ui/index.ts";
 import { formatJobDuration, jobRows, jobsRenderBudget } from "../extensions/jobs-ui/render.ts";
 import { commandLabel, commandPreview, createShellExecutionOwner, type ShellExecutionView, type ShellScope } from "../extensions/retained-shell/execution.ts";
 import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
@@ -17,6 +17,7 @@ import {
 	JOBS_VIEW_REQUEST_EVENT,
 	JOBS_VIEW_VERSION,
 	parseJobsViewReply,
+	JOBS_MIN_VISIBLE_SUCCESS_MS,
 	isVisibleBackgroundJob,
 	registerJobsView,
 	type JobsViewRecord,
@@ -187,7 +188,7 @@ test("owner metadata is a bounded executable label plus actual close and output 
 	assert.equal(JSON.stringify(quietClosed).includes("token"), false);
 });
 
-test("Jobs excludes foreground completions and brief successful background work, not live work or failures", async (t) => {
+test("Jobs excludes foreground completions and keeps background work while the duration threshold is zero", async (t) => {
 	const dir = await scratch();
 	const child = fakeChild();
 	const owner = createShellExecutionOwner({ spawnSpec: () => shell, launch: () => {
@@ -197,11 +198,13 @@ test("Jobs excludes foreground completions and brief successful background work,
 	const completed = await owner.start({ command: "true", cwd: dir, env: process.env, ...scope, toolCallId: null, deadlineMs: 60_000, foregroundWindowMs: 5_000 });
 	assert.equal(completed.status, "exited");
 	assert.equal(completed.background, false);
+	assert.equal(JOBS_MIN_VISIBLE_SUCCESS_MS, 0);
 	assert.equal(isVisibleBackgroundJob(completed), false);
 	const detached = { ...completed, background: true, startedAt: 0 };
 	assert.equal(isVisibleBackgroundJob({ ...detached, status: "running", terminalAt: null, exitCode: null }), true);
-	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 29_999 }), false);
-	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 30_000 }), true);
+	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 100 }), true);
+	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 29_999 }, 30_000), false);
+	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 30_000 }, 30_000), true);
 	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 100, exitCode: 1 }), true);
 	assert.equal(formatJobDuration(230), "230ms");
 	assert.equal(commandPreview("mise exec -- python3 - <<'PY'\nprint('private body')"), "mise exec -- python3 - <<'PY'");
@@ -270,7 +273,32 @@ test("jobs query returns the current branch snapshot and does not control or wak
 	assert.equal(JSON.stringify(changed).includes("later"), false);
 });
 
-test("jobs list projection keeps every retained same-scope record while inline records stay filtered", async (t) => {
+test("jobs view sorts running jobs before stopped jobs and keeps start time ascending", () => {
+	const h = harness();
+	const view = (executionId: string, status: ShellExecutionView["status"], startedAt: number, background = true): ShellExecutionView => ({
+		...record({ executionId, status, startedAt, terminalAt: status === "running" ? null : startedAt + 10, exitCode: status === "exited" ? 0 : null }),
+		owner: "pi-bash", sessionId: "session-a", branchAnchor: "leaf-a", toolCallId: null,
+		commandPreview: executionId, deadlineAt: 60_000, output: "", truncated: false, background,
+	});
+	const jobs = registerJobsView(h.pi, {
+		list: () => [
+			view("exec_stopped_late", "exited", 40),
+			view("exec_running_late", "running", 30),
+			view("exec_running_early", "running", 5),
+			view("exec_stopped_early", "cancelled", 10),
+			view("exec_foreground", "exited", 1, false),
+		],
+		subscribeDisplay: () => () => {},
+	}, () => "ready");
+	jobs.bind(h.ctx);
+	const replies: JobsViewReply[] = [];
+	h.events.on(JOBS_VIEW_EVENT, (data) => { const parsed = parseJobsViewReply(data); if (parsed.ok) replies.push(parsed.value); });
+	h.events.emit(JOBS_VIEW_REQUEST_EVENT, { version: JOBS_VIEW_VERSION, requestId: "sort" });
+	assert.deepEqual(replies[0]?.records?.map((item) => item.executionId), ["exec_running_early", "exec_running_late", "exec_stopped_early", "exec_stopped_late"]);
+	jobs.dispose();
+});
+
+test("jobs list projection keeps same-scope background jobs and drops foreground work", async (t) => {
 	const dir = await scratch();
 	const children = new Map<string, ReturnType<typeof fakeChild>>();
 	const owner = createShellExecutionOwner({
@@ -300,22 +328,21 @@ test("jobs list projection keeps every retained same-scope record while inline r
 	h.events.on(JOBS_VIEW_EVENT, (data) => { const parsed = parseJobsViewReply(data); if (parsed.ok) seen.push(parsed.value); });
 	h.events.emit(JOBS_VIEW_REQUEST_EVENT, { version: JOBS_VIEW_VERSION, requestId: "req-all" });
 	assert.equal(seen.length, 1);
-	assert.deepEqual(seen[0]?.records?.map((item) => item.executionId), [running.executionId]);
-	assert.equal(seen[0]?.retained?.some((item) => item.executionId === foreground.executionId), true);
-	assert.equal(seen[0]?.retained?.some((item) => item.commandPreview === "true-brief"), true);
-	assert.equal(seen[0]?.retained?.some((item) => item.commandPreview === "sleep-other"), false);
-	assert.equal(seen[0]?.records?.some((item) => item.commandPreview === "true-foreground" || item.commandPreview === "true-brief"), false);
-	assert.equal(parseJobsViewReply({ ...seen[0], retained: "no" }).ok, false);
+	assert.deepEqual(seen[0]?.records?.map((item) => item.executionId), [running.executionId, brief.executionId]);
+	assert.equal(seen[0]?.records?.some((item) => item.executionId === foreground.executionId), false);
+	assert.equal(seen[0]?.records?.some((item) => item.commandPreview === "sleep-other"), false);
+	assert.equal("retained" in (seen[0] ?? {}), false);
+	assert.equal(parseJobsViewReply({ ...seen[0], retained: [brief] }).ok, false);
 	assert.equal(h.wakes.length, 0);
 });
 
-test("retained snapshots remain complete across display-size boundaries", () => {
+test("background snapshots remain complete across display-size boundaries", () => {
 	for (const count of [256, 257, 1001]) {
 		const h = harness();
 		const views: ShellExecutionView[] = Array.from({ length: count }, (_, index) => {
 			const background = index < count - 8;
 			return {
-				...record({ executionId: `exec_${index}`, status: background ? "running" : "exited", exitCode: background ? null : 0, terminalAt: background ? null : 2_000 }),
+				...record({ executionId: `exec_${String(index).padStart(4, "0")}`, status: background ? "running" : "exited", exitCode: background ? null : 0, terminalAt: background ? null : 2_000, startedAt: index }),
 				owner: "pi-bash", sessionId: "session-a", branchAnchor: "leaf-a", toolCallId: null,
 				commandPreview: `command-${index}`, deadlineAt: 60_000, output: "", truncated: false, background,
 			};
@@ -333,9 +360,8 @@ test("retained snapshots remain complete across display-size boundaries", () => 
 		const reply = replies.at(-1)!;
 		assert.equal(reply.availability, "ready");
 		assert.equal(reply.records?.length, count - 8);
-		assert.equal(reply.retained?.length, count);
-		assert.equal(reply.retained?.at(-1)?.executionId, `exec_${count - 1}`);
-		assert.equal(parseJobsViewReply({ ...reply, retained: [...reply.retained!, { ...reply.retained![0], status: "invalid" }] }).ok, false, "all records still require validation");
+		assert.equal(reply.records?.at(-1)?.executionId, `exec_${String(count - 9).padStart(4, "0")}`);
+		assert.equal(parseJobsViewReply({ ...reply, records: [...reply.records!, { ...reply.records![0], status: "invalid" }] }).ok, false, "all records still require validation");
 		jobs.dispose();
 	}
 });
@@ -479,44 +505,41 @@ test("hide survives fact updates and list reaches rows that do not fit", async (
 	assert.ok(jobsRenderBudget(36) < 12);
 });
 
-test("jobs list shows retained foreground and brief successes without changing the filtered bottom section", async () => {
+test("jobs list shows the same background jobs as the bottom section without changing it", async () => {
 	const h = harness();
 	createJobsUi({ composer: createAboveEditor(), setTimer: h.setTimer, clearTimer: h.clearTimer, now: () => 50_000 })(h.pi);
 	const ids: string[] = [];
 	h.events.on(JOBS_VIEW_REQUEST_EVENT, (data) => ids.push((data as { requestId: string }).requestId));
 	h.fire("session_start");
 	const visible = record({ executionId: "exec_visible11", status: "running", label: "visible", startedAt: 1_000, terminalAt: null, commandPreview: "sleep-visible" });
-	const foreground = record({ executionId: "exec_foregrnd1", status: "exited", label: "foreground", commandPreview: "true-foreground" });
 	const brief = record({ executionId: "exec_brief0001", status: "exited", label: "brief", commandPreview: "true-brief", startedAt: 1_000, terminalAt: 1_100 });
 	h.events.emit(JOBS_VIEW_EVENT, {
 		version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready",
-		records: [visible], retained: [foreground, brief, visible],
+		records: [visible, brief],
 	});
 	const collapsed = lines(h.widget, 36, 80).join("\n");
-	assert.match(collapsed, /1 running \/ 1 total/);
-	assert.doesNotMatch(collapsed, /true-foreground|true-brief|sleep-visible/);
+	assert.match(collapsed, /1 running \/ 2 total/);
+	assert.doesNotMatch(collapsed, /true-brief|sleep-visible/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
 	const requests = ids.length;
 	await h.commands.get("jobs-ui")!("list", h.ctx);
 	const overlay = h.selects.at(-1)!.join("\n");
-	assert.match(overlay, /true-foreground/);
 	assert.match(overlay, /true-brief/);
 	assert.match(overlay, /sleep-visible/);
 	assert.equal(ids.length, requests);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
-	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /true-foreground|true-brief/);
+	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /true-brief/);
 	await h.commands.get("jobs-ui")!("expand", h.ctx);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /sleep-visible/);
-	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /true-foreground|true-brief/);
+	assert.match(lines(h.widget, 36, 80).join("\n"), /true-brief/);
 	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /sleep-visible/);
-	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /true-foreground|true-brief/);
 	await h.commands.get("jobs-ui")!("hide", h.ctx);
 	assert.equal(h.widget, undefined);
 	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.equal(h.widget, undefined);
-	assert.match(h.selects.at(-1)!.join("\n"), /true-foreground/);
+	assert.match(h.selects.at(-1)!.join("\n"), /true-brief/);
 	assert.equal(h.wakes.length, 0);
 });
 
@@ -527,14 +550,16 @@ function clickHeader(widget: unknown, y = 0, mode: "fullscreen" | "regular" = "f
 	return view.handleMouse?.({ type: "click", button: "left", x: 1, y, width: 80, height: 8 });
 }
 
-test("jobs list navigation reaches the last retained record beyond the old row budget", async () => {
+test("jobs list pages through every background job without dropping later rows", async () => {
 	const h = harness();
-	const retained = Array.from({ length: 1001 }, (_, index) => record({ executionId: `exec_${index}`, status: "running", commandPreview: index === 1000 ? "last-retained-job" : `command-${index}` }));
+	const records = Array.from({ length: 1001 }, (_, index) => record({ executionId: `exec_${index}`, status: "running", commandPreview: index === 1000 ? "last-background-job" : `command-${index}` }));
+	let firstPage = "";
 	let overlayRows: string[] = [];
 	h.ctx.ui.custom = async factory => {
 		const component = await factory({ terminal: { rows: 120, columns: 160 }, requestRender() {} } as never, { fg: (_color: string, text: string) => text } as never, {} as never, () => {});
-		component.render(160);
-		for (let index = 0; index < retained.length; index++) component.handleInput?.("\u001b[B");
+		firstPage = component.render(160).join("\n");
+		const pages = Math.ceil(records.length / JOBS_LIST_PAGE_SIZE);
+		for (let index = 1; index < pages; index++) component.handleInput?.("pageDown");
 		overlayRows = component.render(160);
 		return undefined as never;
 	};
@@ -544,10 +569,12 @@ test("jobs list navigation reaches the last retained record beyond the old row b
 	h.fire("session_start");
 	h.events.emit(JOBS_VIEW_EVENT, {
 		version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready",
-		records: retained, retained,
+		records,
 	});
 	await h.commands.get("jobs-ui")!("list", h.ctx);
-	assert.match(overlayRows.join("\n"), /last-retained-job/);
+	assert.doesNotMatch(firstPage, /last-background-job/);
+	assert.match(overlayRows.join("\n"), /last-background-job/);
+	assert.match(overlayRows.join("\n"), /1001–1001 of 1001/);
 	h.fire("session_shutdown");
 });
 

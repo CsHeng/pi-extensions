@@ -13,9 +13,6 @@ export type ShellStatus = "running" | "exited" | "cancelled" | "deadline" | "int
 export type ShellPhase = "started" | "renewed" | "exited" | "cancelled" | "deadline" | "interrupted" | "unavailable";
 export type ShellNotification = "idle-wake-or-next-request" | "wake-unavailable" | "not-a-completion";
 
-/** Oldest terminal records beyond this cap are dropped. Live processes are not. */
-export const MAX_TERMINAL_RECORDS = 8;
-
 export interface ShellSpawnSpec {
 	shell: string;
 	args: string[];
@@ -167,7 +164,6 @@ export function createShellExecutionOwner(options: {
 	spawnSpec: () => ShellSpawnSpec;
 	onEvent?: (event: ShellExecutionEvent) => void;
 	maxOutputBytes?: number;
-	maxTerminalRecords?: number;
 	now?: () => number;
 	launch?: (spec: ShellSpawnSpec, command: string, input: { cwd: string; env: NodeJS.ProcessEnv }) => LaunchedProcess;
 	stop?: (pid: number) => void;
@@ -175,7 +171,6 @@ export function createShellExecutionOwner(options: {
 	const records = new Map<string, ExecutionRecord>();
 	const displayListeners = new Set<() => void>();
 	const maxOutputBytes = options.maxOutputBytes ?? OUTPUT_MAX_BYTES;
-	const maxTerminalRecords = options.maxTerminalRecords ?? MAX_TERMINAL_RECORDS;
 	const now = options.now ?? Date.now;
 	let startCount = 0;
 	const notifyDisplay = (): void => {
@@ -242,14 +237,6 @@ export function createShellExecutionOwner(options: {
 		record.pid = undefined;
 	};
 
-	const trimTerminals = (): void => {
-		const terminals = [...records.values()].filter((record) => record.status !== "running").sort((left, right) => left.startedAt - right.startedAt);
-		while (terminals.length > maxTerminalRecords) {
-			const oldest = terminals.shift();
-			if (oldest) records.delete(oldest.executionId);
-		}
-	};
-
 	const noteOutput = (record: ExecutionRecord, chunk: Buffer): void => {
 		if (chunk.length === 0 || record.settled) return;
 		record.output.append(chunk);
@@ -270,7 +257,6 @@ export function createShellExecutionOwner(options: {
 		record.waiters = [];
 		for (const waiter of waiters) waiter();
 		emit(record, status);
-		trimTerminals();
 		notifyDisplay();
 		record.resolveClosed(exitCode);
 	};

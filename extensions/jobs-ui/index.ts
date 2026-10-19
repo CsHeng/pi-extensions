@@ -18,6 +18,7 @@ import {
 import { jobRows, jobsRenderBudget, type JobsUiTheme, type JobsUiView } from "./render.ts";
 
 export const JOBS_UI_COMMAND = "jobs-ui";
+export const JOBS_LIST_PAGE_SIZE = 20;
 export const JOBS_VIEW_TIMEOUT_MS = 4_000;
 const TICK_MS = 1_000;
 
@@ -33,7 +34,7 @@ type Display =
 	| { kind: "idle" }
 	| { kind: "waiting" }
 	| { kind: "unavailable"; reason: string }
-	| { kind: "ready"; records: JobsViewRecord[]; retained?: JobsViewRecord[] };
+	| { kind: "ready"; records: JobsViewRecord[] };
 
 interface PendingQuery { requestId: string; sessionId: string; anchor: string | null }
 
@@ -82,10 +83,6 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			if (display.kind === "ready") return { records: display.records };
 			if (display.kind === "unavailable" || display.kind === "waiting") return { unavailable: display.kind === "waiting" ? "unreachable" : display.reason };
 			return {};
-		};
-		const listView = (): JobsUiView => {
-			if (display.kind === "ready") return { records: display.retained ?? display.records };
-			return currentView();
 		};
 		const needsTick = () => visible && tui() && display.kind === "ready" && display.records.some((record) => record.status === "running");
 		const armTick = () => {
@@ -153,7 +150,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 				clearTimer();
 				pinned = reply.generation;
 				display = reply.availability === "ready"
-					? { kind: "ready", records: reply.records ?? [], ...(reply.retained !== undefined ? { retained: reply.retained } : {}) }
+					? { kind: "ready", records: reply.records ?? [] }
 					: { kind: "unavailable", reason: reply.reason ?? "unavailable" };
 				publish();
 			} catch { /* Display-only consumer. */ }
@@ -214,9 +211,9 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 		const openList = async () => {
 			if (!tui() || !ctx) return;
 			await openListOverlay(ctx, "Jobs · retained shell", (width, theme) => {
-				const view = listView();
+				const view = currentView();
 				return jobRows(view, width, (view.records?.length ?? 0) + 1, now(), themeOf(theme));
-			});
+			}, { pageSize: JOBS_LIST_PAGE_SIZE });
 		};
 		const handle = async (args: string, commandCtx: ExtensionContext) => {
 			ctx = commandCtx;
@@ -234,7 +231,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			publish();
 		};
 		listen();
-		pi.registerCommand(JOBS_UI_COMMAND, { description: "Show, hide, fold, or list retained shell jobs", handler: handle });
+		pi.registerCommand(JOBS_UI_COMMAND, { description: "Show, hide, fold, or list background jobs", handler: handle });
 		pi.on("session_start", (_event, sessionCtx) => bind(sessionCtx));
 		pi.on("session_tree", (_event, sessionCtx) => bind(sessionCtx));
 		pi.on("session_shutdown", shutdown);

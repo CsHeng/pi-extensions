@@ -1,6 +1,8 @@
-import { MAX_TERMINAL_RECORDS, inShellScope, type ShellExecutionEvent, type ShellScope } from "./execution.ts";
+import { inShellScope, type ShellExecutionEvent, type ShellScope } from "./execution.ts";
 
 const TERMINAL = new Set(["exited", "cancelled", "deadline", "interrupted"]);
+/** Consumed wake copies only. This is not the Jobs list. */
+const MAX_OBSOLETE_SHELL_FACTS = 8;
 
 function textOf(facts: ShellFact[]): string | undefined {
 	if (facts.length === 0) return undefined;
@@ -30,7 +32,7 @@ export function createShellDelivery() {
 		// Durable inspect belongs to the execution owner; delivered/suppressed
 		// notification metadata must not retain another copy of terminal output.
 		for (const fact of obsolete) fact.outputTail = "";
-		for (const fact of obsolete.slice(0, Math.max(0, obsolete.length - MAX_TERMINAL_RECORDS))) facts.delete(fact.executionId);
+		for (const fact of obsolete.slice(0, Math.max(0, obsolete.length - MAX_OBSOLETE_SHELL_FACTS))) facts.delete(fact.executionId);
 	};
 
 	const scoped = (fact: ShellFact, scope: ShellScope): boolean => inShellScope(fact, scope);
