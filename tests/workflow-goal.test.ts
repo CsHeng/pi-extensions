@@ -12,7 +12,7 @@ function fixture() {
 test("a task completes directly from main-agent judgment without execution or evidence gates", () => {
  const f = fixture(); assert.equal(f.set().ok, true);
  assert.equal(f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done", note: "inspected" }, { id: "b", status: "done" }] }).ok, true);
- assert.equal(taskOutcome(f.store.current()!), "done"); assert.equal(f.store.canRemind(), false);
+ assert.equal(taskOutcome(f.store.current()!), "done");
  assert.deepEqual(Object.keys(f.store.current()!).sort(), ["cancelled", "goal", "paused", "revision", "tasks", "version"]);
 });
 test("set revises decomposition and removes inferred work; update changes existing items atomically", () => {
@@ -27,45 +27,42 @@ test("blocked work needs a real explanation; independent tasks remain actionable
  const f = fixture(); f.set();
  assert.equal(f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "blocked" }] }).ok, false);
  f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "blocked", note: "Waiting for supplied input" }] });
- assert.equal(f.store.canRemind(), true);
+ assert.equal(taskOutcome(f.store.current()!), "active");
  f.store.mutate({ operation: "update", tasks: [{ id: "b", status: "done" }] });
- assert.equal(taskOutcome(f.store.current()!), "blocked"); assert.equal(f.store.canRemind(), false);
+ assert.equal(taskOutcome(f.store.current()!), "blocked");
  f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "doing", note: null }] });
- assert.equal(f.store.current()!.tasks[0]!.note, undefined); assert.equal(f.store.canRemind(), true);
+ assert.equal(f.store.current()!.tasks[0]!.note, undefined);
 });
 test("cancel preserves completed items and cannot masquerade as completion or resume", () => {
  const f = fixture(); f.set(); f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }] });
  f.store.mutate({ operation: "cancel", reason: "User cancelled" });
  assert.equal(taskOutcome(f.store.current()!), "cancelled");
  assert.deepEqual(f.store.current()!.tasks.map(t => t.status), ["done", "cancelled"]);
- assert.equal(f.store.mutate({ operation: "resume" }).ok, false); assert.equal(f.store.canRemind(), false);
+ assert.equal(f.store.mutate({ operation: "resume" }).ok, false);
  f.store.mutate({ operation: "set", goal: "Revised task", tasks: [{ id: "c", title: "Continue explicitly" }] });
- assert.equal(f.store.canRemind(), true);
+ assert.equal(f.store.current()!.cancelled, false);
 });
 test("all cancelled or mixed terminal items are not reported as all done", () => {
  const f = fixture(); f.set();
  f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }, { id: "b", status: "cancelled" }] });
- assert.equal(taskOutcome(f.store.current()!), "closed with cancelled work"); assert.equal(f.store.canRemind(), false);
+ assert.equal(taskOutcome(f.store.current()!), "closed with cancelled work");
 });
-test("one reminder for unchanged progress; inspection, observation and no-op updates cannot spin", () => {
- const f = fixture(); f.set(); let messages = 0;
- const send = () => { messages++; };
- assert.equal(f.store.remind(send), true);
- f.set(); assert.equal(f.store.remind(send), false, "identical set must not renew progress");
- f.store.observe("bash", false); f.store.mutate({ operation: "inspect" }); f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "todo" }] });
- assert.equal(f.store.remind(send), false);
- f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "doing" }] }); assert.equal(f.store.remind(send), true);
- f.store.receivedInput(); assert.equal(f.store.remind(send), true); assert.equal(f.store.remind(send), false);
- assert.equal(messages, 3);
+test("inspection, observation and no-op updates do not persist artificial progress", () => {
+ const f = fixture(); f.set(); const revision = f.store.current()!.revision, entries = f.entries.length;
+ f.set(); f.store.observe("bash", false); f.store.mutate({ operation: "inspect" });
+ f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "todo" }] });
+ assert.equal(f.store.current()!.revision, revision); assert.equal(f.entries.length, entries);
+ f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "doing" }] });
+ assert.equal(f.store.current()!.revision, revision + 1);
  assert.equal(f.store.current()!.tasks[0]!.status, "doing", "tool observation cannot complete work");
 });
-test("pause stops reminders without blocking ordinary updates; replay is visible but requires resume", () => {
+test("pause preserves ordinary updates; replay is visible but requires resume", () => {
  const f = fixture(); f.set(); f.store.mutate({ operation: "pause", reason: "User pause" });
- assert.equal(f.store.canRemind(), false);
+ assert.equal(f.store.current()!.paused, true);
  f.store.mutate({ operation: "update", tasks: [{ id: "a", status: "done" }] }); assert.equal(f.store.current()!.paused, true);
  const restored = createGoalStore(() => {}); restored.replay(f.entries); restored.recover("Recovered");
- assert.equal(restored.current()!.tasks[0]!.status, "done"); assert.equal(restored.canRemind(), false);
- restored.mutate({ operation: "resume" }); assert.equal(restored.canRemind(), true);
+ assert.equal(restored.current()!.tasks[0]!.status, "done"); assert.equal(restored.current()!.paused, true);
+ restored.mutate({ operation: "resume" }); assert.equal(restored.current()!.paused, false);
 });
 test("latest old or malformed snapshots are ignored with a diagnostic, without migration or older fallback", () => {
  const f = fixture(); f.set();

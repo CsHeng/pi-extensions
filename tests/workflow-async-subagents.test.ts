@@ -49,8 +49,9 @@ test("replaying an old accepted receipt after recovery cannot wait for a nonexis
   call("csheng_workflow", { operation: "pause", reason: "Recovered session" }), fauxAssistantMessage("Paused"),
  ]);
  await h.session.prompt("restore tracked work");
- h.faux.setResponses([call("csheng_workflow", { operation: "resume" }), call("csheng_subagent_sessions", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("One useful reminder")]);
+ h.faux.setResponses([call("csheng_workflow", { operation: "resume" }), call("csheng_subagent_sessions", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("must-not-run")]);
  await h.session.prompt("continue current work");
- await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 3);
- assert.equal(h.faux.state.callCount, 7); assert.deepEqual(h.errors, []);
+ await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
+ await new Promise(resolve => setTimeout(resolve, 100));
+ assert.equal(h.faux.state.callCount, 6); assert.deepEqual(h.errors, []);
 });

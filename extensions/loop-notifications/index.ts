@@ -1,7 +1,7 @@
-/** Sole owner of main-model notification delivery for workflow, retained shell, and subagents. */
+/** Sole owner of main-model completion notification delivery for retained shell and subagents. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { LOOP_FACTS_EVENT, LOOP_NOTICE_ACK, LOOP_NOTICE_TYPE, LOOP_SNAPSHOT_REQUEST, parseLoopFacts, type LoopFacts, type LoopNoticeAck, type LoopSnapshotRequest } from "../shared/loop-facts.ts";
-import { modelWakeReserved, registerSettlementBarrier, releaseModelWake, reserveModelWake } from "../shared/settlement.ts";
+import { registerSettlementBarrier, releaseModelWake, reserveModelWake } from "../shared/settlement.ts";
 import { decideDelivery, noticeKey, type DeliveryDecision, type DeliveryView } from "./policy.ts";
 
 const WAIT_COMMAND = "csheng-loop-notifications-wait";
@@ -11,12 +11,11 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 	const seen = new Set<string>();
 	const consumed = new Set<string>();
 	const suppressed = new Set<string>();
-	let remindedSignature: string | null = null;
 	let wakeStopped = false;
 	let sendBlocked = false;
 	let deliveryEpoch = 0;
 	let context: ExtensionContext | undefined;
-	const view = (): DeliveryView => ({ facts, seen, consumed, suppressed, remindedSignature });
+	const view = (): DeliveryView => ({ facts, seen, consumed, suppressed });
 	const requestSnapshots = (): void => {
 		pi.events.emit(LOOP_SNAPSHOT_REQUEST, { version: 1, accept: (reply: LoopFacts) => remember(reply) } satisfies LoopSnapshotRequest);
 	};
@@ -25,21 +24,20 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 		facts.set(reply.producer, reply);
 		seen.add(reply.producer);
 	};
-	const decision = (reason: "project" | "settle"): DeliveryDecision => {
+	const decision = (): DeliveryDecision => {
 		requestSnapshots();
-		return decideDelivery(view(), reason);
+		return decideDelivery(view());
 	};
 	const allowed = (next: DeliveryDecision): DeliveryDecision => {
 		if (next.kind !== "notices") return next;
 		const tools = pi.getActiveTools();
 		const notices = next.notices.filter(notice => tools.includes(notice.producer === "retained-shell" ? "bash" : "csheng_subagent_sessions"));
 		if (notices.length === next.notices.length) return next;
-		if (notices.length === 0) return { kind: "none", text: "", notices: [], reminderSignature: null };
-		return { kind: "notices", text: notices.map(notice => notice.summary.trim()).join("\n"), notices, reminderSignature: null };
+		if (notices.length === 0) return { kind: "none", text: "", notices: [] };
+		return { kind: "notices", text: notices.map(notice => notice.summary.trim()).join("\n"), notices };
 	};
 	const consume = (next: DeliveryDecision): void => {
 		for (const notice of next.notices) consumed.add(noticeKey(notice.producer, notice.id));
-		if (next.reminderSignature) remindedSignature = next.reminderSignature;
 		sendBlocked = false;
 	};
 	const eligibleHost = (ctx: ExtensionContext): boolean => ctx.mode === "tui" || ctx.mode === "rpc";
@@ -48,14 +46,13 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 		compaction: true,
 		enabled: () => {
 			if (!context || wakeStopped || !eligibleHost(context)) return false;
-			return allowed(decision("settle")).kind !== "none";
+			return allowed(decision()).kind !== "none";
 		},
 	});
 	const send = (ctx: ExtensionContext): void => {
 		if (wakeStopped || sendBlocked || ctx.signal?.aborted || barrier.aborted || !ctx.isIdle() || ctx.hasPendingMessages() || !ctx.isProjectTrusted() || !eligibleHost(ctx)) return;
-		const next = allowed(decision("settle"));
+		const next = allowed(decision());
 		if (next.kind === "none") return;
-		if (next.kind === "reminder" && !pi.getActiveTools().includes("csheng_workflow")) return;
 		if (!reserveModelWake(pi, ctx)) return;
 		const attemptEpoch = deliveryEpoch;
 		const fail = (): void => {
@@ -66,12 +63,7 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 			try { pi.appendEntry("csheng.loop-notifications.delivery-error", { reason: "send-failed" }); } catch { /* notification failure must not stop execution */ }
 		};
 		try {
-			if (next.kind === "reminder") {
-				pi.sendUserMessage(next.text, { deliverAs: "followUp" });
-				remindedSignature = next.reminderSignature;
-			} else {
-				void Promise.resolve(pi.sendMessage({ customType: LOOP_NOTICE_TYPE, content: next.text, display: false, details: { version: 1 } }, { triggerTurn: true })).catch(fail);
-			}
+			void Promise.resolve(pi.sendMessage({ customType: LOOP_NOTICE_TYPE, content: next.text, display: false, details: { version: 1 } }, { triggerTurn: true })).catch(fail);
 		} catch { fail(); }
 	};
 	const schedule = (ctx: ExtensionContext): void => {
@@ -94,7 +86,6 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 		seen.clear();
 		consumed.clear();
 		suppressed.clear();
-		remindedSignature = null;
 		wakeStopped = false;
 		sendBlocked = false;
 	};
@@ -117,7 +108,6 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 		deliveryEpoch += 1;
 		wakeStopped = false;
 		sendBlocked = false;
-		remindedSignature = null;
 		for (const notice of pendingKeys()) suppressed.add(notice);
 	});
 	pi.on("message_end", (event) => {
@@ -137,7 +127,7 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 	pi.on("context_with_system", (event, ctx) => {
 		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === LOOP_NOTICE_TYPE));
 		if (ctx.signal?.aborted || !ctx.isProjectTrusted() || wakeStopped || !eligibleHost(ctx)) return { messages };
-		const next = allowed(decision("project"));
+		const next = allowed(decision());
 		if (next.kind === "notices") {
 			messages.push({ role: "custom", customType: LOOP_NOTICE_TYPE, content: next.text, display: false, timestamp: Date.now() });
 			consume(next);
@@ -145,15 +135,12 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 			if (ids.length > 0) {
 				try { pi.events.emit(LOOP_NOTICE_ACK, { version: 1, producer: "retained-shell", ids } satisfies LoopNoticeAck); } catch { /* Ack failure leaves the notice pending for a later projection. */ }
 			}
-		} else if (modelWakeReserved(pi, ctx)) {
-			const reminder = allowed(decision("settle"));
-			if (reminder.kind === "reminder") consume(reminder);
 		}
 		return { messages };
 	});
 	pi.on("session_shutdown", () => { reset(); context = undefined; });
 
 	function pendingKeys(): string[] {
-		return decideDelivery(view(), "project").notices.map(notice => noticeKey(notice.producer, notice.id));
+		return decideDelivery(view()).notices.map(notice => noticeKey(notice.producer, notice.id));
 	}
 }

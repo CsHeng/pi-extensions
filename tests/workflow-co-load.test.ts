@@ -22,7 +22,7 @@ const packageExtensions = [
 ];
 
 for (const mode of ["tui", "rpc"] as const) {
-	test(`real host ${mode} co-load: bounded reconciliation starts after every settlement consumer`, async (t) => {
+	test(`real host ${mode} co-load: only explicit input continues after every settlement consumer`, async (t) => {
 		const trace = createTrace();
 		let release!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -54,6 +54,10 @@ for (const mode of ["tui", "rpc"] as const) {
 		assert.equal(harness.faux.state.callCount, 2, "no new interaction starts while a later consumer is pending");
 		release();
 		await running;
+		await new Promise(resolve => setTimeout(resolve, 100));
+		assert.equal(harness.faux.state.callCount, 2, "settled unfinished tracking does not continue itself");
+		assert.equal(trace.entries.filter(entry => entry.event === "input").length, 1);
+		await harness.session.prompt("cancel the tracked fixture");
 		await waitForTrace(trace, () => trace.entries.filter((entry) => entry.event === "native:agent_settled").length === 2);
 		const branch = harness.session.sessionManager.getBranch();
 		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } };
@@ -63,7 +67,7 @@ for (const mode of ["tui", "rpc"] as const) {
 		assert.equal(harness.faux.state.callCount, 4);
 		const input = trace.entries.filter((entry) => entry.event === "input");
 		assert.equal(input.length, 2);
-		assert.equal(input[1]!.detail?.source, "extension");
+		assert.notEqual(input[1]!.detail?.source, "extension");
 		assert.ok(trace.entries.indexOf(input[1]!) > trace.entries.findIndex((entry) => entry.event === "native:agent_settled"));
 		const before = trace.entries.filter((entry) => entry.event === "co-load:before");
 		assert.equal(before.length, 2);

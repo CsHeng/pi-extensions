@@ -201,8 +201,8 @@ test("queued but dropped completion is not acknowledged, and a new input can exp
  assert.equal(h.faux.state.callCount, 4); assert.deepEqual(h.errors, []);
 });
 
-for (const order of ["workflow-first", "executor-first"] as const) test(`completion and task renewal reach separate provider turns (${order})`, { timeout: 20000 }, async t => {
- const base = await mkdtemp(join(tmpdir(), "async-reminder-merge-")); const store = new ManagedSessionStore(base);
+for (const order of ["workflow-first", "executor-first"] as const) test(`completion reaches one provider turn without task-only renewal (${order})`, { timeout: 20000 }, async t => {
+ const base = await mkdtemp(join(tmpdir(), "async-completion-only-")); const store = new ManagedSessionStore(base);
  let release!: () => void, terminal!: () => void, ctx!: ExtensionContext, service!: ContinuationService, released = false, providerWire = "";
  const terminalContents: string[] = [], reminderContents: string[] = [];
  const notifications = (pi: ExtensionAPI) => loopNotifications({ ...pi,
@@ -230,16 +230,13 @@ for (const order of ["workflow-first", "executor-first"] as const) test(`complet
  const h = await createHostHarness({ mode: "rpc", extensions: order === "workflow-first" ? [notifications, workflow, executor] : [executor, workflow, notifications] });
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- let reminderWire = "";
- h.faux.setResponses([contract({ operation: "set", goal: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", requestId: "merge", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("terminal evidence received"); }, providerContext => { reminderWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("independent work resumed"); }]);
- await h.session.prompt("fixture"); await until(() => h.faux.state.callCount === 5 && !h.session.isStreaming);
- await new Promise(resolve => setImmediate(resolve));
- assert.equal(h.faux.state.callCount, 5, "the terminal notice and the later task renewal are separate turns");
+ h.faux.setResponses([contract({ operation: "set", goal: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", requestId: "merge", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("terminal evidence received"); }, fauxAssistantMessage("must-not-run")]);
+ await h.session.prompt("fixture"); await until(() => h.faux.state.callCount === 4 && !h.session.isStreaming);
+ await new Promise(resolve => setTimeout(resolve, 100));
+ assert.equal(h.faux.state.callCount, 4, "the terminal notice starts one turn, not a later task-only renewal");
  assert.equal(terminalContents.length, 1);
- assert.equal(reminderContents.length, 1);
+ assert.equal(reminderContents.length, 0);
  assert.ok(providerWire.includes(JSON.stringify(terminalContents[0])), "the terminal notice reaches its provider turn");
- assert.equal(providerWire.includes(JSON.stringify(reminderContents[0])), false, "the terminal turn has no task renewal payload");
- assert.ok(reminderWire.includes(JSON.stringify(reminderContents[0])), "the subsequent turn receives the task renewal payload");
  assert.deepEqual(h.errors, []);
 });
 

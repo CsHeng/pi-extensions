@@ -140,7 +140,7 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 					const shellTerminal = text.includes("Shell execution");
 					if (shellTerminal) terminalRequests += 1;
 					if (reminder) reminderRequests += 1;
-					if (reminder) await writeFile(proofPath(), JSON.stringify({ mode, calls, reminder, delivered: terminalRequests > 0, terminalRequests, reminderRequests }));
+					await writeFile(proofPath(), JSON.stringify({ mode, calls, reminder, delivered: terminalRequests > 0, terminalRequests, reminderRequests }));
 					emit(stream, message, [{ type: "text", text: "shared turn" }], "stop");
 					return;
 				}

@@ -1,6 +1,6 @@
 import { Check } from "typebox/value";
 import { goalParameters, goalStateSchema, type GoalOperation, type GoalState, type GoalTask, type GoalView } from "./goal-contracts.ts";
-import { actionable, unfinished } from "./goal-state.ts";
+import { unfinished } from "./goal-state.ts";
 export interface GoalContext { signal?: AbortSignal }
 export function createGoalStore(append: (type: string, data: unknown) => void) {
  let state: GoalState | undefined;
@@ -79,9 +79,6 @@ export function createGoalStore(append: (type: string, data: unknown) => void) {
   recover(reason: string) { if (state && !state.cancelled && unfinished(state).length) { state = { ...state, paused: true, reason }; notify(); } },
   pause(reason: string) { if (state && !state.cancelled && unfinished(state).length) return this.mutate({ operation: "pause", reason }); },
   observe(tool: string, failed: boolean) { if (state) { observation = { tool, failed }; notify(); } },
-  receivedInput() { if (state) delete state.remindedRevision; },
-  canRemind() { return !!state && !state.paused && !state.cancelled && actionable(state) && state.remindedRevision !== state.revision; },
-  remind(send: () => void) { if (!this.canRemind() || !state) return false; commit({ ...state, remindedRevision: state.revision }); send(); return true; },
  };
 }
 export type GoalStore = ReturnType<typeof createGoalStore>;

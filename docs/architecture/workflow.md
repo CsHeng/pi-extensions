@@ -52,9 +52,9 @@ The latest non-workflow tool name and failure flag are observed in memory and ex
 
 ## Continuation And Interruption
 
-Workflow publishes the committed task list and does not schedule a model wake. [Loop notifications](loop-notifications.md) may continue an active unpaused todo/doing list once after settlement, and only when no retained-shell or subagent execution is unfinished or unknown. That continuation adds no checks or review and does not invoke children or apply candidates. A running execution blocks the task-list continuation; its terminal is still delivered.
+Workflow publishes the committed task list and does not schedule a model wake. Task-list-only automatic continuation is temporarily disabled at the user's request because it was unstable, could trigger while design confirmation was still pending, and offered limited benefit. This includes active unpaused todo/doing work, task changes, resume, and new interactive/RPC input. The list remains available for tracking, context and recovery; an unfinished item is not user confirmation to continue a design or implementation. Whether to re-enable or redesign this capability is deferred in `$AGENT_ARCHITECTURE_DIR/docs/architecture/open-questions.md` (OQ-1), not decided by the current disablement.
 
-An unchanged list, a note-only update, inspect, and tool observations do not renew a consumed opportunity. A real task change or new interactive/RPC input can permit another one. Paused, cancelled, all-terminal and wholly blocked lists do not renew. Print/JSON modes do not renew.
+[Loop notifications](loop-notifications.md) still delivers unobserved retained-shell and subagent terminal results, even if a sibling is still running. A completion notice supplies evidence, not approval, task acceptance or permission to apply a candidate. Print/JSON modes do not receive these wakes.
 
 A real host abort or an unrecovered provider failure pauses unfinished tracking. The notification fence is attempt-local. A recovered normal completion is not marked interrupted solely because an earlier attempt failed. Replayed accepted receipts are not live executions. Workflow never turns execution events into task completion.
 
@@ -62,7 +62,7 @@ If only event-dependent work remains, the model may end the turn with tasks unfi
 
 ## Persistence And Recovery
 
-Each changed list is appended as a schema-v5 `csheng-workflow-state` snapshot before replacing its in-memory state. A failed append preserves the prior record and returns a tracking error. Read-only observations are not persisted. Reminder disposition belongs to loop-notifications and is not a second policy in the task snapshot. A historical `remindedRevision` field remains readable and is not migrated.
+Each changed list is appended as a schema-v5 `csheng-workflow-state` snapshot before replacing its in-memory state. A failed append preserves the prior record and returns a tracking error. Read-only observations are not persisted. A historical `remindedRevision` field remains readable as inert data; it neither schedules a wake nor requires migration.
 
 On session/branch recovery, unfinished current-version tasks remain inspectable and visible but start paused. The main agent reconciles present intent and may resume. Recovery does not replay business operations, restart children or infer permission.
 
@@ -70,6 +70,6 @@ Only the latest workflow snapshot is considered. Unsupported older completion-co
 
 ## Verification Ownership
 
-Focused store tests cover task creation, revision, completion, blockers, cancellation, no-op updates, persistence failure and safe recovery. UI tests cover visible statuses, cancelled counts, clipping, terminal sanitization and read-only controls. Synthetic-host tests cover ordinary work without tracking, current context projection, bounded continuation, public settlement ordering and asynchronous executor coexistence. Recovery regressions exercise provider error followed by internal retry, legal task mutation/control and normal settlement, alongside genuine cancellation and unrecovered failure protection. Provider-schema tests use injected offline transports. Installed-host and TUI probes remain explicit integration lanes; they do not establish live-model adherence or delivery acceptance.
+Focused store tests cover task creation, revision, completion, blockers, cancellation, no-op updates, persistence failure and safe recovery. UI tests cover visible statuses, cancelled counts, clipping, terminal sanitization and read-only controls. Synthetic-host tests cover ordinary work without tracking, current context projection, the absence of task-only continuation, public settlement ordering and asynchronous executor coexistence. Recovery regressions exercise provider error followed by internal retry, legal task mutation/control and normal settlement, alongside genuine cancellation and unrecovered failure protection. Provider-schema tests use injected offline transports. Installed-host and TUI probes remain explicit integration lanes; they do not establish live-model adherence or delivery acceptance.
 
 Product source changes do not update the copied daily package or an already running Pi process. Publication, restart/load and any live effectiveness measurement remain separate authorized actions.

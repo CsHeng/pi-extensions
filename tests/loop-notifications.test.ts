@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import loopNotifications from "../extensions/loop-notifications/index.ts";
-import { canRemind, decideDelivery, pendingNotices, reminderSignature, type DeliveryView } from "../extensions/loop-notifications/policy.ts";
+import { decideDelivery, pendingNotices, type DeliveryView } from "../extensions/loop-notifications/policy.ts";
 import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
 import { validateShellCall } from "../extensions/retained-shell/validate.ts";
 import type { ShellExecutionOwner } from "../extensions/retained-shell/execution.ts";
@@ -24,39 +24,33 @@ function execution(producer: "retained-shell" | "subagents", phase: "running" | 
 	}] };
 }
 function view(partial: Partial<Record<"workflow" | "retained-shell" | "subagents", LoopFacts>>, seen = Object.keys(partial)): DeliveryView {
-	return { facts: new Map(Object.entries(partial)), seen: new Set(seen), consumed: new Set(), suppressed: new Set(), remindedSignature: null };
+	return { facts: new Map(Object.entries(partial)), seen: new Set(seen), consumed: new Set(), suppressed: new Set() };
 }
 
-test("combined policy delivers a terminal beside a running sibling and withholds task renewal", () => {
+test("combined policy delivers actual terminals beside a running sibling, never a task-only wake", () => {
 	const running = view({ workflow: tasks("doing"), "retained-shell": execution("retained-shell", "running"), subagents: execution("subagents", "queued", "pending", "child") });
-	assert.equal(decideDelivery(running, "settle").kind, "none");
-	assert.equal(canRemind(running), false);
+	assert.equal(decideDelivery(running).kind, "none");
 	const terminal = view({ workflow: tasks("doing"), "retained-shell": execution("retained-shell", "terminal"), subagents: execution("subagents", "running") });
-	const notice = decideDelivery(terminal, "settle");
+	const notice = decideDelivery(terminal);
 	assert.equal(notice.kind, "notices");
 	assert.match(notice.text, /retained-shell/);
 	assert.equal(notice.notices.length, 1);
 	const both = view({ workflow: tasks("doing"), "retained-shell": execution("retained-shell", "terminal"), subagents: execution("subagents", "terminal", "pending", "child") });
-	assert.equal(decideDelivery(both, "settle").notices.length, 2);
-	assert.equal(decideDelivery(both, "settle").text.split("\n").length, 2);
+	assert.equal(decideDelivery(both).notices.length, 2);
+	assert.equal(decideDelivery(both).text.split("\n").length, 2);
 	const returned = view({ workflow: tasks("doing"), "retained-shell": execution("retained-shell", "terminal", "returning"), subagents: execution("subagents", "terminal", "observed", "child") });
 	assert.equal(pendingNotices(returned).length, 0);
-	assert.equal(decideDelivery(returned, "settle").kind, "reminder");
-	const noted = tasks("doing");
-	noted.tasks!.tasks[0] = { ...noted.tasks!.tasks[0]!, title: "Task" };
-	const reminded = view({ workflow: tasks("doing") });
-	const signature = reminderSignature(reminded.facts.get("workflow")!.tasks!);
-	const consumed = { ...reminded, remindedSignature: signature };
-	assert.equal(canRemind(consumed), false, "unchanged list does not renew");
-	const noteOnly = tasks("doing");
-	assert.equal(reminderSignature(noteOnly.tasks!), signature, "notes are outside the reminder identity");
-	assert.equal(canRemind(view({ workflow: tasks("blocked") })), false);
-	assert.equal(canRemind(view({ workflow: tasks("done") })), false);
-	assert.equal(canRemind(view({ workflow: tasks("doing", { paused: true }) })), false);
-	assert.equal(canRemind(view({ workflow: tasks("doing", { cancelled: true }) })), false);
-	const unknown = view({ workflow: tasks("doing"), subagents: { ...execution("subagents", "running"), availability: "unknown", executions: [] } });
-	assert.equal(canRemind(unknown), false);
-	assert.equal(canRemind(view({ workflow: tasks("doing") }, ["workflow"])), true, "an absent execution producer is not unknown");
+	assert.equal(decideDelivery(returned).kind, "none");
+	for (const status of ["todo", "doing", "blocked", "done", "cancelled"]) {
+		for (const extra of [{}, { revision: 2 }, { goal: "Revised design" }, { paused: true }, { cancelled: true }]) {
+			assert.equal(decideDelivery(view({ workflow: tasks(status, extra) })).kind, "none");
+		}
+	}
+	for (const availability of ["unknown", "unavailable", "inactive"] as const) {
+		const unavailable = { ...execution("subagents", "running"), availability, executions: [] };
+		assert.equal(decideDelivery(view({ workflow: tasks("doing"), subagents: unavailable })).kind, "none");
+		assert.equal(decideDelivery(view({ workflow: tasks("doing"), subagents: unavailable, "retained-shell": execution("retained-shell", "terminal") })).kind, "notices");
+	}
 });
 
 test("malformed bash control calls name the correction and do not describe a started process", () => {
@@ -149,7 +143,7 @@ test("consumer co-load delivers one combined notice and does not task-renew whil
 	for (const handler of host.handlers.get("before_provider_request") ?? []) await handler({}, host.ctx);
 	host.sent.length = 0;
 	for (const handler of host.handlers.get("agent_settled") ?? []) await handler({}, host.ctx);
-	assert.equal(host.sent.length, 1, "one reminder after both terminals were projected");
+	assert.equal(host.sent.length, 0, "no task-only wake after both terminals were projected");
 	host.sent.length = 0;
 	for (const handler of host.handlers.get("agent_settled") ?? []) await handler({}, host.ctx);
 	assert.equal(host.sent.length, 0, "unchanged settlement does not loop");
@@ -197,7 +191,6 @@ for (const consumerFirst of [true, false]) test("host " + (consumerFirst ? "cons
 		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
 		fauxAssistantMessage("yield"),
 		fauxAssistantMessage("saw terminal"),
-		fauxAssistantMessage("continued"),
 		fauxAssistantMessage("must-not-run"),
 	]);
 	await h.session.prompt("go");
@@ -205,11 +198,49 @@ for (const consumerFirst of [true, false]) test("host " + (consumerFirst ? "cons
 	assert.equal(h.faux.state.callCount, 2, "running subagent prevents a task-only wake");
 	board.facts = execution("subagents", "terminal", "pending", "child");
 	board.emit?.();
-	await waitForTrace(trace, () => h.faux.state.callCount >= 4);
-	assert.equal(h.faux.state.callCount, 4);
+	await waitForTrace(trace, () => h.faux.state.callCount >= 3);
+	assert.equal(h.faux.state.callCount, 3);
 	assert.equal(notices.length, 1);
 	assert.match(notices[0]!, /child finished/);
 	await new Promise(resolve => setTimeout(resolve, 200));
-	assert.equal(h.faux.state.callCount, 4, "one delivery does not loop");
+	assert.equal(h.faux.state.callCount, 3, "one completion delivery does not create a task-only wake");
+	assert.deepEqual(h.errors, []);
+});
+
+test("a completion arriving inside a later settlement consumer waits for that consumer, without task renewal", async t => {
+	const trace = createTrace();
+	let release!: () => void;
+	const gate = new Promise<void>(resolve => { release = resolve; });
+	let first = true;
+	const producer = (pi: ExtensionAPI) => {
+		pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Enroll completion", parameters: Type.Object({}), async execute() {
+			pi.events.emit(LOOP_FACTS_EVENT, execution("subagents", "running", "pending", "child"));
+			return { content: [], details: undefined };
+		} });
+		pi.on("agent_settled", async () => {
+			if (!first) return;
+			first = false;
+			trace.record("late:blocked");
+			pi.events.emit(LOOP_FACTS_EVENT, execution("subagents", "terminal", "pending", "child"));
+			await gate;
+			trace.record("late:finished");
+		});
+	};
+	const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, producer, createTraceObserver(trace)] });
+	t.after(async () => { release(); await h.dispose(); });
+	h.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
+		fauxAssistantMessage(fauxToolCall("csheng_subagent_sessions", {})),
+		fauxAssistantMessage("yield"), fauxAssistantMessage("saw terminal"), fauxAssistantMessage("must-not-run"),
+	]);
+	const running = h.session.prompt("start the fixture");
+	await waitForTrace(trace, entry => entry.event === "late:blocked");
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.equal(h.faux.state.callCount, 3, "completion cannot race later settlement consumers");
+	release();
+	await running;
+	await waitForTrace(trace, () => trace.entries.filter(entry => entry.event === "native:agent_settled").length >= 2);
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.equal(h.faux.state.callCount, 4, "one completion, no subsequent task-only wake");
 	assert.deepEqual(h.errors, []);
 });

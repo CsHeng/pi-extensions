@@ -165,14 +165,14 @@ test("busy completion is projected onto the next request and a returned terminal
 	assert.equal(returned.calls, 2);
 });
 
-for (const shellFirst of [false, true]) test(`a shell terminal precedes one bounded task renewal (shell first: ${shellFirst})`, async (t) => {
+for (const shellFirst of [false, true]) test(`a shell terminal is delivered without task-only renewal (shell first: ${shellFirst})`, async (t) => {
 	if (!piAvailable()) { t.skip("requires installed Pi; no installation performed"); return; }
 	const proof = await runPrompt(t, "coload", (value) => value.delivered === true, [join(root, "extensions/workflow/index.ts")], shellFirst);
-	assert.equal(proof.reminder, true);
+	assert.equal(proof.reminder, false);
 	assert.equal(proof.delivered, true);
 	assert.equal(proof.terminalRequests, 1);
-	assert.equal(proof.reminderRequests, 1);
-	assert.equal(proof.calls, 5, "one completion turn and one later task renewal");
+	assert.equal(proof.reminderRequests, 0);
+	assert.equal(proof.calls, 4, "one completion turn and no later task-only renewal");
 });
 
 interface Proof {

@@ -23,14 +23,21 @@ test("main directly marks done, independently of checks, reviews or Skills", asy
  await h.session.prompt("implement");
  assert.equal(state(h).tasks[0]!.status, "done"); assert.equal(h.faux.state.callCount, 3); assert.deepEqual(h.errors, []);
 });
-test("unchanged task list gets one reminder; new input needs no alignment protocol", async t => {
- const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, createTraceObserver(trace)] }); t.after(() => h.dispose());
- h.faux.setResponses([start(), fauxAssistantMessage("Paused accidentally"), fauxAssistantMessage("Still unchanged")]);
- await h.session.prompt("implement");
- await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
- assert.equal(h.faux.state.callCount, 3); assert.equal(state(h).tasks[0]!.status, "todo");
+for (const mode of ["tui", "rpc"] as const) test(mode + " design awaiting confirmation is not continued by todo/doing tracking or new input", async t => {
+ const trace = createTrace(); const h = await createHostHarness({ mode, trace, extensions: [workflow, loopNotifications, createTraceObserver(trace)] }); t.after(() => h.dispose());
+ h.faux.setResponses([start(), fauxAssistantMessage("Review this design before I implement it."), fauxAssistantMessage("must-not-run")]);
+ await h.session.prompt("discuss the design, do not implement before confirmation");
+ await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 1);
+ await new Promise(resolve => setTimeout(resolve, 100));
+ assert.equal(h.faux.state.callCount, 2); assert.equal(state(h).tasks[0]!.status, "todo");
+ assert.equal(extensionFollowUps(trace).length, 0);
+ h.faux.setResponses([call({ operation: "update", tasks: [{ id: "t", status: "doing", title: "Revise design" }] }), fauxAssistantMessage("Here is the revised design; please confirm."), fauxAssistantMessage("must-not-run")]);
+ await h.session.prompt("revise the design; still do not implement");
+ await new Promise(resolve => setTimeout(resolve, 100));
+ assert.equal(h.faux.state.callCount, 4); assert.equal(state(h).tasks[0]!.status, "doing");
+ assert.equal(extensionFollowUps(trace).length, 0);
  h.faux.setResponses([call({ operation: "update", tasks: [{ id: "t", status: "done" }] }), fauxAssistantMessage("Done")]);
- await h.session.prompt("finish the same work"); assert.equal(state(h).tasks[0]!.status, "done"); assert.deepEqual(h.errors, []);
+ await h.session.prompt("now implement the agreed design"); assert.equal(state(h).tasks[0]!.status, "done"); assert.deepEqual(h.errors, []);
 });
 test("context contains one bounded current task projection across repeated preparations", async t => {
  const projections: string[][] = [];
@@ -112,14 +119,13 @@ test("one provider retry still accepts update, resume and cancel, and cancelled 
  assert.equal(extensionFollowUps(trace).length, 0);
  assert.deepEqual(h.errors, []);
 });
-test("recovered provider stop leaves unfinished work active and sends one bounded reminder", async t => {
+test("recovered provider stop leaves unfinished work active without a task-only wake", async t => {
  const trace = createTrace();
  const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
   call({ operation: "set", goal: "Useful work", tasks: [{ id: "t", title: "Implement", status: "doing" }] }),
   transient(),
   fauxAssistantMessage("Recovered"),
-  fauxAssistantMessage("Reminder consumed"),
   fauxAssistantMessage("must-not-run"),
  ]);
  await h.session.prompt("recover and continue");
@@ -127,12 +133,12 @@ test("recovered provider stop leaves unfinished work active and sends one bounde
  assert.equal(current.paused, false);
  assert.equal(current.cancelled, false);
  assert.equal(current.tasks[0]!.status, "doing");
- await waitForTrace(trace, () => trace.entries.filter(entry => entry.event === "native:agent_settled").length === 2);
- assert.equal(h.faux.state.callCount, 4);
- assert.equal(extensionFollowUps(trace).length, 1);
+ await waitForTrace(trace, () => trace.entries.filter(entry => entry.event === "native:agent_settled").length === 1);
+ assert.equal(h.faux.state.callCount, 3);
+ assert.equal(extensionFollowUps(trace).length, 0);
  await pause(250);
- assert.equal(h.faux.state.callCount, 4);
- assert.equal(extensionFollowUps(trace).length, 1);
+ assert.equal(h.faux.state.callCount, 3);
+ assert.equal(extensionFollowUps(trace).length, 0);
  assert.equal(state(h).paused, false);
  assert.equal(state(h).tasks[0]!.status, "doing");
  assert.deepEqual(h.errors, []);

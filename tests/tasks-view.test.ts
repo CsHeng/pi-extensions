@@ -50,7 +50,7 @@ test("query reads the committed snapshot and does not mutate, append, wake, or e
  assert.equal(h.appended.length, appends);
  assert.deepEqual(h.wakes, []);
  assert.deepEqual(h.contexts, []);
- assert.equal(store.canRemind(), true);
+ assert.equal(store.current()!.tasks[0]!.status, "todo");
  view.unbind();
 });
 test("invalidation is emitted only after the owner commit and late queries see it", () => {

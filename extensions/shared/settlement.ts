@@ -54,7 +54,6 @@ export function reserveModelWake(pi: ExtensionAPI, ctx: ExtensionContext): boole
 	state.sessionId = sessionId;
 	return true;
 }
-export function modelWakeReserved(pi: ExtensionAPI, ctx: ExtensionContext): boolean { return wakeState(pi).sessionId === ctx.sessionManager.getSessionId(); }
 export function releaseModelWake(pi: ExtensionAPI): void { delete wakeState(pi).sessionId; }
 
 interface RunWait {

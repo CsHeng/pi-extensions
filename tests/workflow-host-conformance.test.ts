@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isUserInputSource } from "../extensions/workflow/host-adapter.ts";
 import { createPreparedInputTracker } from "../extensions/shared/prepared-input.ts";
 import {
 	createHostHarness,
@@ -227,7 +226,6 @@ test("real host commits prepared ordinary and queued occurrences without inventi
 	assert.deepEqual(detailOf(trace, "input", 1), { source: "interactive", text: "steer-1", imageCount: 0, streamingBehavior: "steer" });
 	assert.deepEqual(detailOf(trace, "input", 2), { source: "interactive", text: "follow-1", imageCount: 0, streamingBehavior: "followUp" });
 	assert.equal(trace.entries.filter((entry) => entry.event === "before_agent_start").length, 6, "queued deliveries bypass before_agent_start");
-	assert.ok(isUserInputSource("interactive") && isUserInputSource("rpc") && !isUserInputSource("extension"));
 });
 
 test("input sees raw text and before_agent_start sees the expanded prompt", async (t) => {

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-test("installed Pi RPC: actual co-loaded public command waiter produces one bounded continuation", { timeout: 30_000 }, async (t) => {
+test("installed Pi RPC: active task list awaiting design confirmation does not start another turn", { timeout: 30_000 }, async (t) => {
 	if (spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 5000 }).status !== 0) {
 		t.skip("requires installed Pi; no installation performed"); return;
 	}
@@ -24,6 +24,7 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 	let bytes = 0;
 	let extensionError = false;
 	let pending = "";
+	let closeTimer: ReturnType<typeof setTimeout> | undefined;
 	const events: unknown[] = [];
 	child.stdout.on("data", (data: Buffer) => {
 		bytes += data.length;
@@ -35,6 +36,8 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 			try {
 				const event = JSON.parse(line);
 				if (event.type === "extension_error") extensionError = true;
+				// Observe beyond settlement instead of shutting down inside the hook and hiding a renewal.
+				if (event.type === "agent_settled" && !closeTimer) closeTimer = setTimeout(() => child.stdin.end(), 250);
 				if (event.type !== "message_update") {
 					events.push({ type: event.type, command: event.command, success: event.success, role: event.message?.role, stop: event.message?.stopReason, code: event.result?.details?.code });
 					if (events.length > 30) events.shift();
@@ -47,20 +50,21 @@ test("installed Pi RPC: actual co-loaded public command waiter produces one boun
 	const timer = setTimeout(() => child.kill("SIGKILL"), 25_000);
 	t.after(async () => {
 		clearTimeout(timer);
+		if (closeTimer) clearTimeout(closeTimer);
 		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 		await exited.catch(() => {});
 		await rm(base, { recursive: true, force: true });
 	});
-	child.stdin.write(`${JSON.stringify({ id: "fixture", type: "prompt", message: "track and continue the fixture" })}\n`);
+	child.stdin.write(`${JSON.stringify({ id: "fixture", type: "prompt", message: "discuss the design and wait for confirmation" })}\n`);
 	const exitCode = await exited;
 	if (exitCode !== 0) {
 		t.diagnostic(JSON.stringify(events));
 		try { t.diagnostic(await readFile(join(agent, "continuation-proof.json"), "utf8")); } catch { /* no fixture proof */ }
 	}
-	assert.equal(exitCode, 0, "offline installed-host continuation must settle and shut down cleanly");
+	assert.equal(exitCode, 0, "offline installed-host no-renewal check must settle and shut down cleanly");
 	assert.equal(extensionError, false);
 	const proof = JSON.parse(await readFile(join(agent, "continuation-proof.json"), "utf8"));
-	assert.deepEqual(proof, { calls: 4, settled: 2, starts: [0, 1], sources: ["rpc", "extension"], disposition: "cancelled",
-		facts: [{ mode: "rpc", trusted: true, signal: true, idle: false }, { mode: "rpc", trusted: true, signal: true, idle: false }],
+	assert.deepEqual(proof, { calls: 2, settled: 1, starts: [0], sources: ["rpc"], disposition: "active",
+		facts: [{ mode: "rpc", trusted: true, signal: true, idle: false }],
 	});
 });

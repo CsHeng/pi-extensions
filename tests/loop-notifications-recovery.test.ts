@@ -37,23 +37,19 @@ function harness() {
 	};
 }
 
-const tasks: LoopFacts = {
-	version: 1, producer: "workflow", generation: "g", sessionId: "s", branchAnchor: "b", availability: "ready", executions: [],
-	tasks: { revision: 1, paused: false, cancelled: false, goal: "Finish", tasks: [{ id: "a", title: "Work", status: "doing" }] },
-};
 const terminal = (id: string): LoopFacts => ({
 	version: 1, producer: "retained-shell", generation: "g", sessionId: "s", branchAnchor: "b", availability: "ready",
 	executions: [{ id, phase: "terminal", status: "exited", exitCode: 0, disposition: "pending", summary: `${id} finished` }],
 });
 
-test("failed renewal is inspectable and retries only after a legitimate new agent run", async () => {
+test("failed completion delivery is inspectable and retries only after a legitimate new agent run", async () => {
 	const h = harness();
 	h.setSender(() => { throw new Error("send failed"); });
 	await h.emit("session_start");
-	h.publish(tasks);
+	h.publish(terminal("result"));
 	assert.equal(h.sends, 1);
 	assert.deepEqual(h.diagnostics, [{ reason: "send-failed" }]);
-	h.publish(tasks);
+	h.publish(terminal("result"));
 	await h.emit("agent_settled");
 	assert.equal(h.sends, 1, "facts and settlement must not retry a failed attempt");
 	h.setSender(() => {});

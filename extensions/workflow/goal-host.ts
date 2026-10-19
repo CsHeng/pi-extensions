@@ -1,7 +1,6 @@
 /** Pi owns the loop. Tracking records tasks and publishes facts; it does not schedule model wakes. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { emptyLoopFacts, LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST, type LoopFacts, type LoopSnapshotRequest, type LoopTaskSnapshot } from "../shared/loop-facts.ts";
-import { isUserInputSource } from "./host-adapter.ts";
 import { createGoalStore, type GoalStore } from "./goal-store.ts";
 import { goalReceipt, registerGoalTool } from "./goal-tool.ts";
 import { registerTasksView } from "./tasks-view.ts";
@@ -64,7 +63,6 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
 	};
 	pi.on("session_start", (_event, ctx) => restore(ctx));
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
-	pi.on("input", event => { if (isUserInputSource(event.source)) store.receivedInput(); });
 	pi.on("agent_start", () => { wakeStopped = false; });
 	pi.on("context", event => {
 		const type = "csheng-workflow-tasks";

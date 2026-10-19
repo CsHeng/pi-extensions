@@ -19,7 +19,6 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 		settled += 1;
 		const last = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: { cancelled: boolean } } };
 		await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "continuation-proof.json"), JSON.stringify({ calls, settled, starts, sources, disposition: last.data.state.cancelled ? "cancelled" : "active", facts }));
-		if (settled === 2) ctx.shutdown();
 	});
 	pi.registerProvider("workflow-installed-fixture", {
 		baseUrl: "http://invalid.invalid", apiKey: "synthetic-not-a-credential", api: "openai-completions",
@@ -30,10 +29,8 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 			const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop", content: [],
 				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 			stream.push({ type: "start", partial: message });
-			if (call === 0 || call === 2) {
-				const args = call === 0
-					? { operation: "set", goal: "Installed continuation", tasks: [{ id: "t", title: "task" }] }
-					: { operation: "cancel", reason: "fixture explicitly cancels" };
+			if (call === 0) {
+				const args = { operation: "set", goal: "Design awaiting user confirmation", tasks: [{ id: "t", title: "Review design", status: "doing" }] };
 				const toolCall = { type: "toolCall" as const, id: `fixture-${call}`, name: "csheng_workflow", arguments: args };
 				message.content = [toolCall]; message.stopReason = "toolUse";
 				stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
@@ -41,7 +38,7 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
 				stream.push({ type: "done", reason: "toolUse", message });
 			} else {
-				const text = call === 1 ? "premature stop" : "explicitly paused";
+				const text = call === 1 ? "Please confirm the design before implementation." : "unexpected automatic continuation";
 				message.content = [{ type: "text", text }];
 				stream.push({ type: "text_start", contentIndex: 0, partial: message });
 				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });

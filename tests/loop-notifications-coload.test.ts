@@ -70,7 +70,6 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 		fauxAssistantMessage("yield"),
 		fauxAssistantMessage("shell completion observed while child remains"),
 		fauxAssistantMessage("child completion observed"),
-		fauxAssistantMessage("one task-only renewal"),
 		fauxAssistantMessage("must not run"),
 	]);
 	await h.session.prompt("exercise the three tools");
@@ -87,11 +86,11 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	assert.equal(projections.length, 1);
 	assert.ok(projections[0]!.includes(running.executionId));
 	releaseChild();
-	await waitForTrace(trace, () => h.faux.state.callCount >= 8 && trace.entries.filter(entry => entry.event === "native:agent_settled").length >= 4);
-	assert.equal(h.faux.state.callCount, 8, "one child completion followed by one bounded renewal");
+	await waitForTrace(trace, () => h.faux.state.callCount >= 7 && trace.entries.filter(entry => entry.event === "native:agent_settled").length >= 3);
+	assert.equal(h.faux.state.callCount, 7, "one child completion with no task-only renewal");
 	assert.equal(projections.length, 2);
 	assert.match(projections[1]!, /Subagent task child/);
 	await new Promise(resolve => setTimeout(resolve, 50));
-	assert.equal(h.faux.state.callCount, 8);
+	assert.equal(h.faux.state.callCount, 7);
 	assert.deepEqual(h.errors, []);
 });
