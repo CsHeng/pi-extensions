@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type AssistantMessage, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import loopNotifications from "../extensions/loop-notifications/index.ts";
@@ -39,16 +39,78 @@ for (const mode of ["tui", "rpc"] as const) test(mode + " design awaiting confir
  h.faux.setResponses([call({ operation: "update", tasks: [{ id: "t", status: "done" }] }), fauxAssistantMessage("Done")]);
  await h.session.prompt("now implement the agreed design"); assert.equal(state(h).tasks[0]!.status, "done"); assert.deepEqual(h.errors, []);
 });
-test("context contains one bounded current task projection across repeated preparations", async t => {
- const projections: string[][] = [];
- const observer = (pi: ExtensionAPI) => { pi.on("context", event => {
-  projections.push(event.messages.flatMap(m => m.role === "custom" && m.customType === "csheng-workflow-tasks" ? [String(m.content)] : []));
- }); };
- const h = await createHostHarness({ mode: "print", extensions: [workflow, observer] }); t.after(() => h.dispose());
- h.faux.setResponses([start(), call({ operation: "update", tasks: [{ id: "t", status: "done" }] }), fauxAssistantMessage("Done")]);
+const noop = () => fauxAssistantMessage(fauxToolCall("wf_noop", {}));
+const noopTool = (pi: ExtensionAPI) => { pi.registerTool({
+ name: "wf_noop", label: "Noop", description: "Ordinary fixture tool.", parameters: Type.Object({}),
+ async execute() { return { content: [{ type: "text", text: "Ordinary result" }], details: {} }; },
+}); };
+const capture = (inputs: TranscriptContext[], response: AssistantMessage) => (context: TranscriptContext) => {
+ inputs.push(structuredClone(context)); return response;
+};
+const appendOnly = (before: TranscriptContext, after: TranscriptContext) => {
+ assert.deepEqual(after.messages.slice(0, before.messages.length), before.messages, "the provider's complete previous input remains an unchanged prefix, including prompt and tools");
+};
+const snapshotEntries = (h: HostHarness) => h.session.sessionManager.getBranch().filter(e => e.type === "custom_message" && e.customType === "csheng-workflow-tasks");
+const inputText = (context: TranscriptContext) => JSON.stringify(context.messages);
+const fixedCompaction = (pi: ExtensionAPI) => { pi.on("session_before_compact", (event, ctx) => ({ compaction: {
+ summary: "Synthetic background summary without the task list.", firstKeptEntryId: ctx.sessionManager.getLeafId()!, tokensBefore: event.preparation.tokensBefore,
+} })); };
+test("ordinary task receipts and tools preserve the full provider input prefix without snapshots", async t => {
+ const inputs: TranscriptContext[] = [];
+ const h = await createHostHarness({ mode: "print", extensions: [workflow, noopTool] }); t.after(() => h.dispose());
+ h.faux.setResponses([start(), call({ operation: "update", tasks: [{ id: "t", status: "doing" }] }), noop(), fauxAssistantMessage("In progress")].map(response => capture(inputs, response)));
  await h.session.prompt("implement");
- assert.ok(projections.every(items => items.length <= 1));
- assert.match(projections.at(-1)![0]!, /\[done\] Implement/); assert.deepEqual(h.errors, []);
+ for (let i = 1; i < inputs.length; i++) appendOnly(inputs[i - 1]!, inputs[i]!);
+ assert.equal(snapshotEntries(h).length, 0); assert.deepEqual(h.errors, []);
+});
+test("recovery snapshot survives provider retries and ordinary tools, then remains historical after resume", async t => {
+ const h = await createHostHarness({ mode: "print", extensions: [workflow] }); t.after(() => h.dispose());
+ h.faux.setResponses([start(), fauxAssistantMessage("In progress")]); await h.session.prompt("implement");
+ const recovered = await createHostHarness({ mode: "print", sessionManager: h.session.sessionManager, extensions: [workflow, noopTool] }); t.after(() => recovered.dispose());
+ assert.equal(recovered.faux.state.callCount, 0, "recovery never starts a task-only turn");
+ assert.equal(snapshotEntries(recovered).length, 1);
+ const inputs: TranscriptContext[] = [];
+ recovered.faux.setResponses([transient(), noop(), fauxAssistantMessage("Investigated")].map(response => capture(inputs, response)));
+ await recovered.session.prompt("investigate before resuming");
+ assert.equal(inputs.length, 3);
+ for (const input of inputs) { assert.match(inputText(input), /\(paused\)/); assert.match(inputText(input), /\[todo\] Implement/); }
+ appendOnly(inputs[0]!, inputs[1]!); appendOnly(inputs[1]!, inputs[2]!);
+ recovered.faux.setResponses([call({ operation: "resume" }), fauxAssistantMessage("Resumed")].map(response => capture(inputs, response)));
+ await recovered.session.prompt("resume");
+ appendOnly(inputs[2]!, inputs[3]!); appendOnly(inputs[3]!, inputs[4]!);
+ assert.equal(state(recovered).paused, false); assert.equal(snapshotEntries(recovered).length, 1);
+ assert.deepEqual(h.errors, []); assert.deepEqual(recovered.errors, []);
+});
+for (const reason of ["manual", "threshold", "overflow"] as const) test(reason + " compaction preserves a native task snapshot across following tool requests without an extra wake", async t => {
+ let h: HostHarness;
+ const compactOnce = (pi: ExtensionAPI) => { pi.on("session_compact", () => h.session.setAutoCompactionEnabled(false)); };
+ h = await createHostHarness({ mode: "print", extensions: [workflow, noopTool, fixedCompaction, compactOnce], settings: { compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: reason === "threshold" ? 1_000_000 : 1024 } } }); t.after(() => h.dispose());
+ h.faux.setResponses([start(), fauxAssistantMessage("Ready")]); await h.session.prompt("record work");
+ const inputs: TranscriptContext[] = [];
+ if (reason === "manual") {
+  await h.session.compact();
+ } else {
+  if (reason === "overflow") h.session.setAutoCompactionEnabled(true);
+  const boundary = reason === "overflow" ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }) : fauxAssistantMessage("Ready");
+  h.faux.setResponses(reason === "overflow" ? [boundary, capture(inputs, noop()), capture(inputs, fauxAssistantMessage("Recovered"))] : [() => {
+   // Enable only once this request starts, exercising post-run threshold compaction
+   // followed by settlement rather than pre-prompt compaction.
+   h.session.setAutoCompactionEnabled(true); return boundary;
+  }]);
+  await h.session.prompt("reach compaction boundary");
+  h.session.setAutoCompactionEnabled(false);
+ }
+ assert.equal(h.session.sessionManager.getBranch().filter(e => e.type === "compaction").length, 1);
+ if (reason !== "overflow") {
+  assert.equal(h.faux.state.callCount, reason === "manual" ? 2 : 3, "snapshot does not wake an idle or threshold-compacted host");
+  h.faux.setResponses([noop(), fauxAssistantMessage("Continued")].map(response => capture(inputs, response)));
+  await h.session.prompt("inspect first, then continue");
+ }
+ assert.equal(inputs.length, 2);
+ for (const input of inputs) assert.match(inputText(input), /\[todo\] Implement/);
+ appendOnly(inputs[0]!, inputs[1]!);
+ assert.equal(snapshotEntries(h).length, 1); assert.equal(state(h).paused, false);
+ assert.deepEqual(h.errors, []);
 });
 test("blocked tasks do not spin and cancellation remains terminal", async t => {
  const h = await createHostHarness({ extensions: [workflow] }); t.after(() => h.dispose());
@@ -160,6 +222,10 @@ test("user abort and tool-signal abort pause unfinished work without an automati
  await pause(250);
  assert.equal(user.faux.state.callCount, 2);
  assert.equal(extensionFollowUps(userTrace).length, 0);
+ assert.equal(snapshotEntries(user).length, 1);
+ const userInputs: TranscriptContext[] = [];
+ user.faux.setResponses([capture(userInputs, fauxAssistantMessage("Continuing"))]); await user.session.prompt("continue");
+ assert.match(inputText(userInputs[0]!), /\(paused\)/);
  assert.deepEqual(user.errors, []);
 
  const toolTrace = createTrace();
@@ -178,6 +244,10 @@ test("user abort and tool-signal abort pause unfinished work without an automati
  await pause(250);
  assert.equal(tool.faux.state.callCount, 2);
  assert.equal(extensionFollowUps(toolTrace).length, 0);
+ assert.equal(snapshotEntries(tool).length, 1);
+ const toolInputs: TranscriptContext[] = [];
+ tool.faux.setResponses([capture(toolInputs, fauxAssistantMessage("Continuing"))]); await tool.session.prompt("continue");
+ assert.match(inputText(toolInputs[0]!), /\(paused\)/);
  assert.deepEqual(tool.errors, []);
 });
 test("a final unrecovered provider error pauses unfinished work without an automatic wake", async t => {
@@ -192,5 +262,16 @@ test("a final unrecovered provider error pauses unfinished work without an autom
  await pause(250);
  assert.equal(h.faux.state.callCount, 3);
  assert.equal(extensionFollowUps(trace).length, 0);
+ assert.equal(snapshotEntries(h).length, 1);
+ const inputs: TranscriptContext[] = [];
+ h.faux.setResponses([capture(inputs, fauxAssistantMessage("Investigating"))]); await h.session.prompt("continue");
+ assert.match(inputText(inputs[0]!), /\(paused\)/);
+ // A repeated settlement without a new state change must not append another notice.
+ await h.session.extensionRunner?.emit({ type: "agent_settled", aborted: false });
+ assert.equal(snapshotEntries(h).length, 1);
+ h.faux.setResponses([call({ operation: "resume" }), fauxAssistantMessage("Resumed")].map(response => capture(inputs, response)));
+ await h.session.prompt("resume the paused task list");
+ appendOnly(inputs[0]!, inputs[1]!); appendOnly(inputs[1]!, inputs[2]!);
+ assert.equal(state(h).paused, false); assert.equal(snapshotEntries(h).length, 1);
  assert.deepEqual(h.errors, []);
 });

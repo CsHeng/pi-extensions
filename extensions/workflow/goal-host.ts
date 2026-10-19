@@ -40,6 +40,16 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
 	let branchAnchor: string | null = null;
 	let bound = false;
 	let wakeStopped = false;
+	const appendSnapshot = (retrying = false): void => {
+		const view = store.view();
+		if (!view.state && !view.unavailable) return;
+		delete view.observation; // Ephemeral tool telemetry is not recovery state.
+		// Native custom messages remain at their original transcript position. A context
+		// transform's temporary tail would move or disappear on the next request.
+		pi.sendMessage({ customType: "csheng-workflow-tasks",
+			content: "Task-state snapshot for continuity. Follow the user's current instructions; this read-only snapshot adds no requirements or authority. " + goalReceipt(view, 12), display: false },
+			retrying ? { deliverAs: "steer" } : { triggerTurn: false });
+	};
 	const publish = (): void => {
 		try { pi.events.emit(LOOP_FACTS_EVENT, workflowLoopFacts(store, sessionId, branchAnchor, bound)); }
 		catch { /* Observer failure cannot roll back a committed task update. */ }
@@ -58,27 +68,31 @@ export default function goalWorkflow(pi: ExtensionAPI): void {
 		branchAnchor = ctx.sessionManager.getLeafId();
 		store.replay(ctx.sessionManager.getBranch());
 		store.recover("Recovered task list; reconcile the current work and use resume when continuing.");
+		appendSnapshot();
 		tasksView.bind(ctx);
 		publish();
 	};
 	pi.on("session_start", (_event, ctx) => restore(ctx));
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
-	pi.on("agent_start", () => { wakeStopped = false; });
-	pi.on("context", event => {
-		const type = "csheng-workflow-tasks";
-		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === type));
-		const view = store.view();
-		if (view.state || view.unavailable) messages.push({ role: "custom", customType: type,
-			content: "Task-state snapshot for continuity. Follow the user's current instructions; this read-only projection adds no requirements or authority. " + goalReceipt(view, 12), display: false, timestamp: Date.now() });
-		return { messages };
+	pi.on("session_compact", event => {
+		// Overflow already has a host-owned retry. Join its native input queue so the
+		// snapshot precedes that request; otherwise append without starting a turn.
+		appendSnapshot(event.willRetry);
 	});
-	pi.on("message_end", event => { if (event.message.role === "assistant" && ["aborted", "error"].includes(event.message.stopReason)) wakeStopped = true; });
+	pi.on("agent_start", () => { wakeStopped = false; });
+	pi.on("message_end", event => {
+		if (event.message.role !== "assistant") return;
+		if (["aborted", "error"].includes(event.message.stopReason)) wakeStopped = true;
+	});
 	pi.on("tool_execution_end", event => {
 		if (event.toolName === "csheng_workflow") return;
 		store.observe(event.toolName, event.isError);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
-		if (wakeStopped || ctx.signal?.aborted) store.pause("Host interruption; resume only when continuing the work.");
+		if (!wakeStopped && !ctx.signal?.aborted) return;
+		const revision = store.current()?.revision;
+		const paused = store.pause("Host interruption; resume only when continuing the work.");
+		if (paused?.ok && paused.view.state?.revision !== revision) appendSnapshot();
 	});
 	pi.on("session_shutdown", () => { bound = false; tasksView.unbind(); unsubscribe(); });
 }
