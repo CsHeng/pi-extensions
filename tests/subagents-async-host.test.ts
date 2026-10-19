@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerContinuationTool, type ContinuationService } from "../extensions/subagents/continuation.ts";
 import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
@@ -298,12 +298,22 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  await until(async () => { const inspected = await service.execute({ action: "inspect", runId }, ctx); slowView = inspected.sessions.find(view => view.handle === results[0]!.sessions[1]!.handle)!; return slowView?.liveActivity?.calls.some(call => call.tool === "bash" && call.status === "running") === true; });
  assert.equal(slowView.state, "running"); assert.equal(slowView.candidate, undefined, "an active writer cannot expose an applicable candidate");
  assert.ok(slowView.liveActivity!.calls.every(call => call.id && call.startedMs !== null));
+ const liveInputs: TranscriptContext[] = [];
+ h.faux.setResponses([
+  tool("bash", { command: "printf first > parent-progress" }),
+  providerContext => { liveInputs.push(structuredClone(providerContext)); return tool("bash", { command: "printf second > parent-progress" }); },
+  providerContext => { liveInputs.push(structuredClone(providerContext)); return fauxAssistantMessage("independent work; children still running"); },
+ ]);
+ await h.session.prompt("continue independent work while both children remain active");
+ assert.equal(liveInputs.length, 2);
+ assert.deepEqual(liveInputs[1]!.messages.slice(0, liveInputs[0]!.messages.length), liveInputs[0]!.messages, "ordinary tool turns with active workflow and live children preserve the complete previous provider input prefix");
+ assert.equal(JSON.stringify(liveInputs).includes("Current child tool activity"), false);
  let liveWire = "";
  h.faux.setResponses([providerContext => { liveWire = JSON.stringify(providerContext.messages); return apply(latest("fast")); }, fauxAssistantMessage("early apply; sibling still running")]);
  await writeFile(join(base, "release-fast"), "go");
  await until(async () => (await readFile(join(h.workDir, "fast.txt"), "utf8")) === "candidate-1" && h.session.isStreaming === false);
  assert.equal(events.some(event => event.kind === "run-terminal"), false); assert.notEqual(state().tasks[0]!.status, "done");
- assert.ok(liveWire.includes("Current child tool activity")); assert.ok(liveWire.includes(slowView.handle)); assert.ok(liveWire.includes(slowView.liveActivity!.calls[0]!.id), "same live native call must reach the actual provider while its writer is still running");
+ assert.equal(liveWire.includes("Current child tool activity"), false, "running sibling must not inject volatile live activity into parent provider context");
  const fast = latest("fast"), before = await store.load(fast.handle, { repo: h.workDir, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) });
  h.faux.setResponses([
   contract({ operation: "update", tasks: [{ id: "t", note: "Repair requested" }] }),
