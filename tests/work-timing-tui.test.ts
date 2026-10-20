@@ -75,3 +75,73 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 	const lastToolLine = lines.findLastIndex(line => line.text.includes("⚙ "));
 	assert.ok(lines.slice(lastToolLine + 1).some(line => !line.text.includes("⚙ ")), "the tool field disappears when the tool ends");
 });
+
+for (const mode of ["timing-first", "notifications-first", "no-notifications"] as const) test(`installed Pi ${mode}: one interaction spans real Bash and Agent lifetimes and idle result handoffs`, { timeout: 40_000 }, async t => {
+	try { await access("/usr/bin/script"); } catch { t.skip("requires util-linux script"); return; }
+	const installedPath = (process.env.PATH ?? "").split(":").filter(entry => !entry.includes("node_modules/.bin")).join(":");
+	if (spawnSync("pi", ["--version"], { env: { PATH: installedPath }, timeout: 5000 }).status !== 0) { t.skip("requires installed Pi"); return; }
+	const base = await mkdtemp(join(tmpdir(), "work-timing-async-"));
+	const agent = join(base, "agent"); await mkdir(agent);
+	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
+	const git = spawnSync("git", ["init", "-q", base], { env: { PATH: installedPath, HOME: base, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+	assert.equal(git.status, 0);
+	const timing = join(root, "extensions/work-timing/index.ts");
+	const notifications = join(root, "extensions/job-notifications/index.ts");
+	const observers = mode === "notifications-first" ? [notifications, timing] : mode === "timing-first" ? [timing, notifications] : [timing];
+	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
+		"-e", join(root, "extensions/async-bash/index.ts"), "-e", join(root, "extensions/tasklist/index.ts"),
+		...observers.flatMap(path => ["-e", path]), "-e", join(root, "tests/fixtures/work-timing-async.ts"),
+		"--model", "timing-async-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "timing fixture"];
+	const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
+		cwd: base, detached: true, env: { PATH: installedPath, HOME: base, TMPDIR: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color", TIMING_NOTIFICATIONS: mode === "no-notifications" ? "0" : "1" },
+	});
+	let bytes = 0;
+	let tail = "";
+	const capture = (data: Buffer) => {
+		bytes += data.length;
+		tail = (tail + data.toString()).slice(-5000);
+		if (bytes > 1024 * 1024) child.kill("SIGTERM");
+		if (data.toString().includes("\u001b[6n")) child.stdin.write("\u001b[1;1R");
+	};
+	child.stdout.on("data", capture); child.stderr.on("data", capture);
+	const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
+	let timedOut = false;
+	const timeout = setTimeout(() => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch { /* stopped */ } } }, 30_000);
+	t.after(async () => {
+		clearTimeout(timeout);
+		if (child.exitCode === null && child.signalCode === null && child.pid) {
+			try { process.kill(-child.pid, "SIGTERM"); } catch { /* stopped */ }
+			await Promise.race([exited.catch(() => {}), delay(500)]);
+			if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* stopped */ } }
+		}
+		await exited.catch(() => {});
+		await rm(base, { recursive: true, force: true });
+		assert.ok(child.exitCode !== null || child.signalCode !== null, "owned PTY process reaped");
+	});
+	const exitCode = await exited;
+	if (timedOut || exitCode !== 0) {
+		try { t.diagnostic(await readFile(join(agent, "timing-trace.json"), "utf8")); } catch { /* startup failed */ }
+		t.diagnostic(tail.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""));
+	}
+	assert.equal(timedOut, false, "controlled offline fixture must reach its own finish boundary");
+	assert.equal(exitCode, 0, "controlled offline fixture must exit normally");
+	const proof = JSON.parse(await readFile(join(agent, "timing-proof.json"), "utf8"));
+	assert.equal(proof.counts[0], 0, "native main settlement while jobs run is not an interaction completion");
+	if (proof.entries.length !== 1) t.diagnostic(tail.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""));
+	assert.equal(proof.entries.length, 1, `one external request has one final timing entry: ${JSON.stringify(proof)}`);
+	assert.equal(proof.entries[0].version, 4);
+	assert.equal(proof.entries[0].scope, "interaction");
+	assert.equal(proof.entries[0].status, "settled");
+	assert.ok(proof.entries[0].totalMs >= 500, "autonomous idle gaps belong to elapsed work");
+	assert.ok(proof.entries[0].totalMs >= proof.elapsed - 100, "the timer spans actual native runs rather than adding their active durations");
+	assert.equal(proof.timingLeaked, false, "timing observations never enter provider messages");
+	if (mode === "no-notifications") {
+		assert.deepEqual(proof.kinds, ["user"]);
+		assert.equal(proof.providerCalls, 4, "measurement starts no result run when the notification consumer is absent");
+	} else {
+		assert.deepEqual(proof.kinds, ["user", "custom", "custom"]);
+		assert.equal(proof.counts[1], 0, "a delivered result beside a running sibling does not finish timing");
+		assert.equal(proof.bashSeen, true); assert.equal(proof.agentSeen, true);
+		assert.equal(proof.providerCalls, 6, "unfinished Tasklist data starts no extra continuation");
+	}
+});
