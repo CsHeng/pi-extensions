@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
+import { JsonlProtocolParser } from "../extensions/agents/protocol.ts";
 import { installedHostEnvironment } from "../scripts/installed-host-env.ts";
 const exec = promisify(execFile);
 const hostEnv = installedHostEnvironment();

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
-import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, type SessionViewReply } from "../extensions/subagents/session-view.ts";
-import { createSubagentsUiExtension, SUBAGENTS_UI_COMMAND } from "../extensions/subagents-ui/index.ts";
-import { SubagentsOverlay } from "../extensions/subagents-ui/component.ts";
+import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/agents/observer-events.ts";
+import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, type SessionViewReply } from "../extensions/agents/session-view.ts";
+import { createSubagentsUiExtension, SUBAGENTS_UI_COMMAND } from "../extensions/agents-ui/index.ts";
+import { SubagentsOverlay } from "../extensions/agents-ui/component.ts";
 
 class FakeEvents {
 	readonly listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -126,7 +126,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	events.emit(SESSION_VIEW_EVENT, reply);
 	const text = overlay?.render(80).join("\n") ?? "";
 	assert.match(text, /running\s+1\.0s\s+openai gpt-4\.1 thinking:medium/, "the route shares the primary row with status and elapsed");
-	assert.match(text, /Subagents · session parent…/, "the title identifies the session, never a batch or run");
+	assert.match(text, /Agents · session parent…/, "the title identifies the session, never a batch or run");
 	assert.match(text, /1 live \(t1\)/);
 	assert.match(text, /2 agents · 2 episodes · 0 idle · 0 int · 1 closed/);
 	assert.match(text, /recorded Σ1 turns/);

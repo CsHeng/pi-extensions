@@ -11,7 +11,8 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
 /** Retired one-shot dispatch tool: every historical envelope is excluded before any payload interpretation. */
 const TOOL_NAME = "csheng_subagents";
 /** Registered managed tool: only its current schema is interpreted by the current-only reducers. */
-const MANAGED_TOOL_NAME = "csheng_subagent_sessions";
+/** Current public name plus the retained historical name; both are current-schema evidence sources. */
+const MANAGED_TOOL_NAMES = new Set(["agent", "csheng_subagent_sessions"]);
 const MANAGED_SCHEMA_VERSION = 4;
 const MAX_WALK_DEPTH = 8;
 const MAX_WALK_ENTRIES = 20_000;
@@ -105,7 +106,7 @@ function scanEnvelopes(text: string): { selected: number; excluded: number } {
 		const item = record(event);
 		const message = record(item?.message);
 		if (item?.type !== "message" || message?.role !== "toolResult") continue;
-		if (message.toolName === MANAGED_TOOL_NAME) {
+		if (typeof message.toolName === "string" && MANAGED_TOOL_NAMES.has(message.toolName)) {
 			const version = record(message.details)?.schemaVersion;
 			if (version === MANAGED_SCHEMA_VERSION) selected += 1;
 			else excluded += 1;

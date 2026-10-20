@@ -1,4 +1,4 @@
-import type { SessionView } from "../subagents/session-contracts.ts";
+import type { SessionView } from "../agents/session-contracts.ts";
 
 /** Execution transport only: never a verification judgment or a workflow command. */
 export const SUBAGENT_EXECUTION_EVENT = "csheng.subagents.execution.v4";
@@ -14,5 +14,5 @@ export interface SubagentExecutionEvent {
 	sessions: SessionView[];
 	foreground?: boolean;
 	timing?: { clockKey: string; submittedAtMs: number; preparedAtMs: number | null; finishedAtMs: number | null; queuedAtMs?: number; startedAtMs?: number | null };
-	runObservation?: import("../subagents/observation-hooks.ts").ObservedRun;
+	runObservation?: import("../agents/observation-hooks.ts").ObservedRun;
 }

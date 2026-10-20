@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChildActivity } from "../extensions/subagents/contracts.ts";
-import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
+import type { ChildActivity } from "../extensions/agents/contracts.ts";
+import { JsonlProtocolParser } from "../extensions/agents/protocol.ts";
 
 function line(value: unknown): string {
 	return `${JSON.stringify(value)}\n`;

@@ -28,15 +28,18 @@ description: Isolated beta probe skill.
 Beta probe body.
 EOF
 
+# Counts only; this probe reports the grouped envelope shape, not prompt text.
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function probe(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event) => {
 		const blocks = event.prompt.match(/^<skill name=/gm)?.length ?? 0;
-		const alpha = event.prompt.includes('<skill name="probe-alpha"') ? 1 : 0;
-		const beta = event.prompt.includes('<skill name="probe-beta"') ? 1 : 0;
-		process.stderr.write(`MULTI_SKILL_PROBE blocks=${blocks} alpha=${alpha} beta=${beta}\n`);
+		const names = event.prompt.includes('name="probe-alpha, probe-beta"') ? 1 : 0;
+		const bodies = (event.prompt.match(/Alpha probe body\./g)?.length ?? 0)
+			+ (event.prompt.match(/Beta probe body\./g)?.length ?? 0);
+		const tail = event.prompt.endsWith("\n\nverify installed expansion") ? 1 : 0;
+		process.stderr.write(`MULTI_SKILL_PROBE blocks=${blocks} names=${names} bodies=${bodies} tail=${tail}\n`);
 	});
 }
 EOF
@@ -53,7 +56,7 @@ installed_output=$(
 		--extension "${probe_extension}" \
 		-p "${installed_prompt}" 2>&1 || true
 )
-grep -Fxq 'MULTI_SKILL_PROBE blocks=2 alpha=1 beta=1' <<<"${installed_output}"
+grep -Fxq 'MULTI_SKILL_PROBE blocks=1 names=1 bodies=2 tail=1' <<<"${installed_output}"
 
 off_output=$(
 	cd -- "${work_root}"
@@ -68,6 +71,6 @@ off_output=$(
 		--extension "${probe_extension}" \
 		-p "${off_prompt}" 2>&1 || true
 )
-grep -Fxq 'MULTI_SKILL_PROBE blocks=0 alpha=0 beta=0' <<<"${off_output}"
+grep -Fxq 'MULTI_SKILL_PROBE blocks=0 names=0 bodies=0 tail=0' <<<"${off_output}"
 
-jq -cn '{result:"pass",source:"installed",skill_blocks:2,extension_off_blocks:0}'
+jq -cn '{result:"pass",source:"installed",skill_blocks:1,grouped_names:1,extension_off_blocks:0}'

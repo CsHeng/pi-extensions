@@ -25,8 +25,8 @@ async function runPrompt(t: TestContext, mode: string, ready: (proof: Proof) => 
 	const agent = join(base, "agent");
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
-	const shell = join(root, "extensions/retained-shell/index.ts");
-	const consumer = join(root, "extensions/loop-notifications/index.ts");
+	const shell = join(root, "extensions/async-bash/index.ts");
+	const consumer = join(root, "extensions/job-notifications/index.ts");
 	const ordered = shellFirst ? [shell, ...extensions, consumer] : [consumer, ...extensions, shell];
 	const child = spawn("pi", [
 		"--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
@@ -65,7 +65,7 @@ for (const mode of ["drain", "reject"] as const) test(`print/json ${mode === "dr
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
 	const result = spawnSync("pi", [
 		"--mode", "json", "-p", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
-		"-e", join(root, "extensions/retained-shell/index.ts"),
+		"-e", join(root, "extensions/async-bash/index.ts"),
 		"-e", join(root, "tests/fixtures/retained-shell/provider.ts"),
 		"--model", "retained-shell-fixture/fixture", "--thinking", "off",
 		"drain the shell",
@@ -103,8 +103,8 @@ test("rpc provider request happens while the same silent command is still alive"
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
 	const child = spawn("pi", [
 		"--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
-		"-e", join(root, "extensions/loop-notifications/index.ts"),
-		"-e", join(root, "extensions/retained-shell/index.ts"),
+		"-e", join(root, "extensions/job-notifications/index.ts"),
+		"-e", join(root, "extensions/async-bash/index.ts"),
 		"-e", join(root, "tests/fixtures/retained-shell/provider.ts"),
 		"--model", "retained-shell-fixture/fixture", "--thinking", "off",
 	], {
@@ -167,13 +167,55 @@ test("busy completion is projected onto the next request and a returned terminal
 
 for (const shellFirst of [false, true]) test(`a shell terminal is delivered without task-only renewal (shell first: ${shellFirst})`, async (t) => {
 	if (!piAvailable()) { t.skip("requires installed Pi; no installation performed"); return; }
-	const proof = await runPrompt(t, "coload", (value) => value.delivered === true, [join(root, "extensions/workflow/index.ts")], shellFirst);
+	const proof = await runPrompt(t, "coload", (value) => value.delivered === true, [join(root, "extensions/tasklist/index.ts")], shellFirst);
 	assert.equal(proof.reminder, false);
 	assert.equal(proof.delivered, true);
 	assert.equal(proof.terminalRequests, 1);
 	assert.equal(proof.reminderRequests, 0);
 	assert.equal(proof.calls, 4, "one completion turn and no later task-only renewal");
 });
+
+test("installed host exposes the native bash seam the wrapper runs on", async (t) => {
+	if (!piAvailable()) { t.skip("requires installed Pi; no installation performed"); return; }
+	const base = await scratch();
+	const agent = join(base, "agent");
+	await mkdir(agent);
+	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false }, retry: { enabled: false } }));
+	const child = spawn("pi", [
+		"--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve",
+		"-e", join(root, "tests/fixtures/retained-shell/native-seam.ts"),
+		"-e", join(root, "tests/fixtures/retained-shell/provider.ts"),
+		"--model", "retained-shell-fixture/fixture", "--thinking", "off",
+	], {
+		cwd: base,
+		env: { ...hostEnv, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "dumb" },
+	});
+	const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
+	const timer = setTimeout(() => child.kill("SIGKILL"), 25_000);
+	t.after(async () => {
+		clearTimeout(timer);
+		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+		await exited.catch(() => undefined);
+		await rm(base, { recursive: true, force: true });
+	});
+	const proof = await waitForProofFile<NativeSeamProof>(join(agent, "native-seam-proof.json"));
+	assert.equal(proof.createLocalBashOperations, "function", "the wrapper's seam must be exported by the installed host");
+	assert.equal(proof.exitCode, 0);
+	assert.equal(proof.output, "native\n");
+	assert.equal(proof.aborted, true, "an aborted native operation must reject so cancel and deadline settle");
+	assert.ok((proof.abortMs ?? 10_000) < 3_000, `abort took ${proof.abortMs}ms`);
+	child.kill("SIGTERM");
+});
+
+interface NativeSeamProof {
+	version?: string;
+	createLocalBashOperations?: string;
+	exitCode?: number | null;
+	output?: string;
+	aborted?: boolean;
+	abortError?: string;
+	abortMs?: number;
+}
 
 interface Proof {
 	whileAlive?: { toolResultPresent: boolean; releaseExists: boolean; marker: string; elapsedMs: number };
@@ -213,6 +255,17 @@ function collect(child: ChildProcessWithoutNullStreams): { settled: number; exte
 	});
 	child.stderr.on("data", () => {});
 	return state;
+}
+
+async function waitForProofFile<T>(path: string): Promise<T> {
+	const started = Date.now();
+	while (Date.now() - started < 20_000) {
+		try {
+			return JSON.parse(await readFile(path, "utf8")) as T;
+		} catch { /* proof not written yet */ }
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	throw new Error(`host proof was not written: ${path}`);
 }
 
 async function waitForProof(agent: string, ready: (proof: Proof) => boolean): Promise<Proof> {

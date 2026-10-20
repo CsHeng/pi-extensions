@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateLiveRun } from "../scripts/run-live-subagents-e2e.ts";
+import { validateLiveRun } from "../scripts/run-live-agents-e2e.ts";
 
 const tokens = {
 	explore: "EXPLORE_fixture",
@@ -82,9 +82,9 @@ function result(action: string, invocationId: string, extra: Record<string, unkn
 
 function toolEvents(details: object): string[] {
 	return [
-		JSON.stringify({ type: "tool_execution_start", toolName: "csheng_subagent_sessions" }),
-		JSON.stringify({ type: "tool_execution_end", toolName: "csheng_subagent_sessions", result: { details } }),
-		JSON.stringify({ type: "message_end", message: { role: "toolResult", toolName: "csheng_subagent_sessions", details } }),
+		JSON.stringify({ type: "tool_execution_start", toolName: "agent" }),
+		JSON.stringify({ type: "tool_execution_end", toolName: "agent", result: { details } }),
+		JSON.stringify({ type: "message_end", message: { role: "toolResult", toolName: "agent", details } }),
 	];
 }
 

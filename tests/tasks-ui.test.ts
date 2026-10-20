@@ -4,10 +4,10 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor, sharedAboveEditor } from "../extensions/shared/above-editor.ts";
 import { createTasksUi } from "../extensions/tasks-ui/index.ts";
-import { goalRows } from "../extensions/tasks-ui/render.ts";
-import workflow from "../extensions/workflow/index.ts";
-import { createGoalStore } from "../extensions/workflow/goal-store.ts";
-import { registerTasksView, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT } from "../extensions/workflow/tasks-view.ts";
+import { taskRows } from "../extensions/tasks-ui/render.ts";
+import workflow from "../extensions/tasklist/index.ts";
+import { createTasklistStore } from "../extensions/tasklist/goal-store.ts";
+import { registerTasksView, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT, TASKS_VIEW_VERSION } from "../extensions/tasklist/tasks-view.ts";
 
 function harness(mode = "tui") {
  const listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -30,14 +30,14 @@ function lines(widget: unknown, rows = 24, width = 80): string[] {
  return (widget as (tui: unknown) => { render(width: number): string[] })({ terminal: { rows } }).render(width);
 }
 
-test("fold summary distinguishes done from cancelled and does not look successful when paused, blocked, or unavailable", async () => {
+test("fold summary distinguishes done from cancelled and reports blocked items without runtime-control state", async () => {
  const h = harness();
- const store = createGoalStore(() => {});
+ const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
  const composer = createAboveEditor();
  createTasksUi({ composer })(h.pi);
  view.bind(h.ctx); h.fire("session_start");
- store.mutate({ operation: "set", goal: "Visible progress", tasks: [{ id: "a", title: "Completed task", status: "done" }, { id: "b", title: "Removed method", status: "cancelled" }] });
+ store.mutate({ operation: "set", title: "Visible progress", tasks: [{ id: "a", title: "Completed task", status: "done" }, { id: "b", title: "Removed method", status: "cancelled" }] });
  await h.commands.get("tasks-ui")!("collapse", h.ctx);
  const folded = lines(h.widget);
  assert.equal(folded.length, 2);
@@ -61,10 +61,12 @@ test("fold summary distinguishes done from cancelled and does not look successfu
  await h.commands.get("tasks-ui")!("list", h.ctx);
  assert.match(h.selected.join("\n"), /Updated task/);
  assert.match(lines(h.widget).join("\n"), /Updated task/);
- store.mutate({ operation: "pause", reason: "Need a decision" });
+ // A blocked item is item data: it is reported, and no list-level pause/resume row can appear.
+ store.mutate({ operation: "update", tasks: [{ id: "b", status: "blocked", note: "Need a decision" }] });
  await h.commands.get("tasks-ui")!("collapse", h.ctx);
- assert.match(lines(h.widget)[0]!, /! paused/);
+ assert.match(lines(h.widget)[0]!, /! blocked/);
  assert.doesNotMatch(lines(h.widget)[0]!, / · done/);
+ assert.doesNotMatch(lines(h.widget).join("\n"), /paused|resumed/);
  assert.doesNotMatch(lines(h.widget).join("\n"), /Updated task/);
  view.unbind();
 });
@@ -77,35 +79,35 @@ test("unavailable, foreign, and stale replies are not a successful empty list", 
  h.fire("session_start");
  assert.equal(h.widget, undefined);
  const first = requestId;
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId: first, ownerSessionId: "session-a", anchor: "other-leaf", generation: "1", availability: "ready", state: { revision: 1, goal: "Other", paused: false, cancelled: false, tasks: [{ id: "y", title: "Other branch", status: "todo" }] } });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId: first, ownerSessionId: "session-a", anchor: "other-leaf", generation: "1", availability: "ready", state: { revision: 1, title: "Other", tasks: [{ id: "y", title: "Other branch", status: "todo" }] } });
  assert.equal(h.widget, undefined);
- h.events.emit(TASKS_VIEW_RESET_EVENT, { version: 1, generation: "2", ownerSessionId: "session-a", anchor: "leaf-a" });
+ h.events.emit(TASKS_VIEW_RESET_EVENT, { version: TASKS_VIEW_VERSION, generation: "2", ownerSessionId: "session-a", anchor: "leaf-a" });
  const second = requestId;
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId: second, ownerSessionId: "other-session", anchor: "leaf-a", generation: "2", availability: "ready", state: { revision: 1, goal: "Foreign", paused: false, cancelled: false, tasks: [{ id: "x", title: "Foreign title", status: "done" }] } });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId: second, ownerSessionId: "other-session", anchor: "leaf-a", generation: "2", availability: "ready", state: { revision: 1, title: "Foreign", tasks: [{ id: "x", title: "Foreign title", status: "done" }] } });
  assert.equal(h.widget, undefined);
- h.events.emit(TASKS_VIEW_RESET_EVENT, { version: 1, generation: "3", ownerSessionId: "session-a", anchor: "leaf-a" });
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId, ownerSessionId: "session-a", anchor: "leaf-a", generation: "3", availability: "ready", state: { revision: 3, goal: "Fixture", paused: false, cancelled: false, tasks: [{ id: "a", title: "Owned task", status: "todo" }] } });
+ h.events.emit(TASKS_VIEW_RESET_EVENT, { version: TASKS_VIEW_VERSION, generation: "3", ownerSessionId: "session-a", anchor: "leaf-a" });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId, ownerSessionId: "session-a", anchor: "leaf-a", generation: "3", availability: "ready", state: { revision: 3, title: "Fixture", tasks: [{ id: "a", title: "Owned task", status: "todo" }] } });
  assert.match(lines(h.widget).join("\n"), /▸ Tasks/);
  assert.doesNotMatch(lines(h.widget).join("\n"), /Owned task|Foreign title|Other branch/);
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId: first, ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, goal: "Old", paused: false, cancelled: false, tasks: [{ id: "z", title: "Stale title", status: "done" }] } });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId: first, ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, title: "Old", tasks: [{ id: "z", title: "Stale title", status: "done" }] } });
  assert.doesNotMatch(lines(h.widget).join("\n"), /Stale title|Owned task/);
  assert.match(lines(h.widget).join("\n"), /▸ Tasks/);
 });
-test("workflow-ui remains a show/hide/list alias and does not keep a second renderer", async () => {
+test("tasklist-ui remains a show/hide/list alias and does not keep a second renderer", async () => {
  const h = harness();
- const store = createGoalStore(() => {});
+ const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
  createTasksUi({ composer: createAboveEditor() })(h.pi);
  view.bind(h.ctx); h.fire("session_start");
- store.mutate({ operation: "set", goal: "Fixture", tasks: [{ id: "a", title: "Task" }] });
- await h.commands.get("workflow-ui")!("expand", h.ctx);
+ store.mutate({ operation: "set", title: "Fixture", tasks: [{ id: "a", title: "Task" }] });
+ await h.commands.get("tasklist-ui")!("expand", h.ctx);
  assert.equal(h.widget, undefined);
- await h.commands.get("workflow-ui")!("show", h.ctx);
+ await h.commands.get("tasklist-ui")!("show", h.ctx);
  assert.match(lines(h.widget).join("\n"), /Task/);
  let title = "";
  h.ctx.ui.custom = captureListOverlay(rows => { title = rows.join("\n"); assert.match(title, /Task/); });
- await h.commands.get("workflow-ui")!("list", h.ctx);
- assert.match(title, /Tasks · workflow/);
+ await h.commands.get("tasklist-ui")!("list", h.ctx);
+ assert.match(title, /Tasklist/);
  assert.equal(h.key, ABOVE_EDITOR_WIDGET_KEY);
  view.unbind();
 });
@@ -116,13 +118,13 @@ test("session shutdown releases the tasks slot and its listeners", () => {
  let requestId = "";
  h.events.on(TASKS_VIEW_REQUEST_EVENT, data => { requestId = (data as { requestId: string }).requestId; });
  h.fire("session_start");
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId, ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, goal: "Live", paused: false, cancelled: false, tasks: [{ id: "a", title: "Live task", status: "todo" }] } });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId, ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, title: "Live", tasks: [{ id: "a", title: "Live task", status: "todo" }] } });
  assert.equal(typeof h.widget, "function");
  h.fire("session_shutdown");
  assert.equal(h.widget, undefined);
  assert.equal(cleared > 0, true);
  const before = h.key;
- h.events.emit(TASKS_VIEW_EVENT, { version: 1, requestId: "late", ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, goal: "After", paused: false, cancelled: false, tasks: [{ id: "a", title: "After shutdown", status: "todo" }] } });
+ h.events.emit(TASKS_VIEW_EVENT, { version: TASKS_VIEW_VERSION, requestId: "late", ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", state: { revision: 1, title: "After", tasks: [{ id: "a", title: "After shutdown", status: "todo" }] } });
  assert.equal(h.widget, undefined);
  assert.equal(h.key, before);
  assert.doesNotMatch(String(h.widget), /After shutdown/);
@@ -132,7 +134,8 @@ test("headless tasks-ui mounts nothing and does not disable workflow", () => {
  workflow(h.pi);
  createTasksUi({ composer: createAboveEditor() })(h.pi);
  h.fire("session_start");
- assert.equal(h.tools.includes("csheng_workflow"), true);
+ assert.equal(h.tools.includes("tasklist"), true);
+ assert.equal(h.tools.includes("csheng_workflow"), false, "no legacy duplicate tool remains");
  assert.equal(h.widget, undefined);
  assert.equal(h.key, "");
 });
@@ -159,11 +162,11 @@ test("above-editor helper keeps Tasks, Jobs, Subagents order and isolates remova
  assert.deepEqual(composer.slots(), []);
 });
 test("collapsed blocked state stays a warning and the expanded oracle still has its fields", () => {
- const blocked = goalRows({ state: { version: 5, revision: 1, goal: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }], paused: false, cancelled: false } }, 80, 4, undefined, { folded: true });
+ const blocked = taskRows({ state: { version: 6, revision: 1, title: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }] } }, 80, 4, undefined, { folded: true });
  assert.equal(blocked.length, 1);
  assert.match(blocked[0]!, /! blocked · Tasks/);
  assert.doesNotMatch(blocked[0]!, /Waiting/);
- const expanded = goalRows({ state: { version: 5, revision: 1, goal: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }], paused: false, cancelled: false } }, 80, 4);
+ const expanded = taskRows({ state: { version: 6, revision: 1, title: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }] } }, 80, 4);
  assert.match(expanded.join("\n"), /Waiting/);
  assert.match(expanded.join("\n"), /Needs input/);
 });
@@ -194,11 +197,11 @@ test("co-loaded extensions share one above-editor widget", () => {
 });
 test("fullscreen header click toggles Tasks inline and does not open a dialog", async () => {
  const h = harness();
- const store = createGoalStore(() => {});
+ const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
  createTasksUi({ composer: createAboveEditor() })(h.pi);
  view.bind(h.ctx); h.fire("session_start");
- store.mutate({ operation: "set", goal: "Visible progress", tasks: [{ id: "a", title: "Completed task", status: "done" }] });
+ store.mutate({ operation: "set", title: "Visible progress", tasks: [{ id: "a", title: "Completed task", status: "done" }] });
  assert.match(lines(h.widget).join("\n"), /▸ Tasks/);
  assert.doesNotMatch(lines(h.widget).join("\n"), /Completed task/);
  const before = h.selects;

@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { defaultConfig, loadConfig, parseConfig } from "../extensions/subagents/config.ts";
-import { resolveRoute, type RouteModel, type RouteRegistry } from "../extensions/subagents/routing.ts";
+import { defaultConfig, loadConfig, parseConfig } from "../extensions/agents/config.ts";
+import { resolveRoute, type RouteModel, type RouteRegistry } from "../extensions/agents/routing.ts";
 
 function canonical(model: RouteModel): string {
 	return `${model.provider}/${model.id}`;
@@ -557,7 +557,7 @@ test("retired profile and policy config fields fail without rewriting user files
 });
 
 test("packaged JSON parses through the strict package source", async () => {
-	const value = JSON.parse(await readFile(new URL("../config/csheng-subagents.json", import.meta.url), "utf8")) as unknown;
+	const value = JSON.parse(await readFile(new URL("../config/csheng-agents.json", import.meta.url), "utf8")) as unknown;
 	const parsed = parseConfig(value, { source: "package-default" });
 	assert.equal(parsed.routes.worker.source, "package-default");
 });

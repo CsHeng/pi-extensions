@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
-import { SessionExecutionSupervisor, type ExecutionEvent, type ExecutionOwner, type SupervisorHooks, type SupervisorLimits } from "../extensions/subagents/session-supervisor.ts";
+import { SessionExecutionSupervisor, type ExecutionEvent, type ExecutionOwner, type SupervisorHooks, type SupervisorLimits } from "../extensions/agents/session-supervisor.ts";
 import { observationWaitMilliseconds } from "../extensions/shared/observation-budget.ts";
 const owner: ExecutionOwner = { repository: "/repo", sessionId: "session-1", branchAnchor: "anchor" };
 const defaults: SupervisorLimits = { concurrency: 2, roles: { worker: 2, explorer: 1, reviewer: 1 } };

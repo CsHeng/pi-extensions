@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import { admitRepositoryTasks } from "../extensions/subagents/repository-policy.ts";
-import { ManagedSessionStore, type ManagedRecord } from "../extensions/subagents/managed-sessions.ts";
-import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
-import { applyCandidate, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "../extensions/subagents/candidates.ts";
-import { discardGitWorkspace, discardGitInput, planGitApply } from "../extensions/subagents/git-workspace.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import { admitRepositoryTasks } from "../extensions/agents/repository-policy.ts";
+import { ManagedSessionStore, type ManagedRecord } from "../extensions/agents/managed-sessions.ts";
+import { MANAGED_LIMITS } from "../extensions/agents/session-contracts.ts";
+import { applyCandidate, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "../extensions/agents/candidates.ts";
+import { discardGitWorkspace, discardGitInput, planGitApply } from "../extensions/agents/git-workspace.ts";
 const exec = promisify(execFile);
 /** A real store whose persistence can be interrupted deterministically at a chosen save. */
 class InterruptingStore extends ManagedSessionStore {

@@ -3,8 +3,8 @@ import test from "node:test";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
-import workflow from "../extensions/workflow/index.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
+import workflow from "../extensions/tasklist/index.ts";
 import { LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST, type LoopFacts } from "../extensions/shared/loop-facts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 const call = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
@@ -14,7 +14,7 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
  const transport = (pi: ExtensionAPI) => {
   const publish = () => pi.events.emit(LOOP_FACTS_EVENT, running);
   pi.events.on(LOOP_SNAPSHOT_REQUEST, (raw: unknown) => (raw as { accept?: (facts: LoopFacts) => void }).accept?.(running));
-  pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Synthetic transport", parameters: Type.Object({ action: Type.Literal("create") }),
+  pi.registerTool({ name: "agent", label: "Fixture", description: "Synthetic transport", parameters: Type.Object({ action: Type.Literal("create") }),
    async execute() {
     publish();
     send = publish;
@@ -23,8 +23,8 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
  };
  const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [early ? loopNotifications : workflow, early ? workflow : loopNotifications, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
-  call("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] }),
-  call("csheng_subagent_sessions", { action: "create" }), fauxAssistantMessage("Awaiting result"),
+  call("tasklist", { operation: "set", title: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] }),
+  call("agent", { action: "create" }), fauxAssistantMessage("Awaiting result"),
   fauxAssistantMessage("must-not-remind"),
  ]);
  await h.session.prompt("go");
@@ -37,7 +37,7 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
 
 test("replaying an old accepted receipt after recovery cannot wait for a nonexistent live run", async t => {
  const transport = (pi: ExtensionAPI) => {
-  pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Persisted accepted receipt replay", parameters: Type.Object({ action: Type.Literal("create") }),
+  pi.registerTool({ name: "agent", label: "Fixture", description: "Persisted accepted receipt replay", parameters: Type.Object({ action: Type.Literal("create") }),
    async execute(_id, _args, _signal, _update, ctx) {
     return { content: [{ type: "text", text: "old accepted receipt" }], details: { schemaVersion: 4, kind: "submission", status: "accepted", runId: "prior-process-run",
      sessions: [{ handle: "old", state: "running" }], requestTelemetry: { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), admittedTasks: null, replayedEpisodes: 1 } } };
@@ -45,13 +45,13 @@ test("replaying an old accepted receipt after recovery cannot wait for a nonexis
  };
  const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
-  call("csheng_workflow", { operation: "set", goal: "Recovered work", tasks: [{ id: "a", title: "Continue", status: "doing" }] }),
-  call("csheng_workflow", { operation: "pause", reason: "Recovered session" }), fauxAssistantMessage("Paused"),
+  call("tasklist", { operation: "set", title: "Recovered work", tasks: [{ id: "a", title: "Continue", status: "doing" }] }),
+  fauxAssistantMessage("Restored without a resume step"),
  ]);
  await h.session.prompt("restore tracked work");
- h.faux.setResponses([call("csheng_workflow", { operation: "resume" }), call("csheng_subagent_sessions", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("must-not-run")]);
+ h.faux.setResponses([call("tasklist", { operation: "update", tasks: [{ id: "a", note: "continuing" }] }), call("agent", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("must-not-run")]);
  await h.session.prompt("continue current work");
  await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
  await new Promise(resolve => setTimeout(resolve, 100));
- assert.equal(h.faux.state.callCount, 6); assert.deepEqual(h.errors, []);
+ assert.equal(h.faux.state.callCount, 5); assert.deepEqual(h.errors, []);
 });

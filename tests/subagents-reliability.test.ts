@@ -5,13 +5,12 @@ ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ContinuationService } from "../extensions/subagents/continuation.ts";
-import { formatManagedContent, formatManagedResult } from "../extensions/subagents/render.ts";
-import { managedContextIndex } from "../extensions/subagents/context.ts";
-import { emptyUsage, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
-import { commandCorrelationKey } from "../extensions/subagents/command-correlation.ts";
-import { collectNativeObservation, normalizeCommandCorrelation, isNativeObservation } from "../extensions/subagents/observability.ts";
-import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
+import { ContinuationService } from "../extensions/agents/continuation.ts";
+import { formatManagedContent, formatManagedResult } from "../extensions/agents/render.ts";
+import { emptyUsage, type EffectiveRoute } from "../extensions/agents/contracts.ts";
+import { commandCorrelationKey } from "../extensions/agents/command-correlation.ts";
+import { collectNativeObservation, normalizeCommandCorrelation, isNativeObservation } from "../extensions/agents/observability.ts";
+import type { SessionActionResult, SessionView } from "../extensions/agents/session-contracts.ts";
 
 const route: EffectiveRoute = { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", candidateIndex: 0, selectionSource: "role-default", executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
@@ -20,9 +19,9 @@ test("managed refusals keep action and missing fields without launching or readi
 	const service = new ContinuationService({ loadConfig: async () => { configReads++; throw new Error("must not read"); } });
 	const ctx = { isProjectTrusted: () => false, sessionManager: { getSessionId: () => "owner" } } as unknown as ExtensionContext;
 	for (const [request, action, fields] of [
-		[{ action: "create", tasks: [{ id: "a", role: "reviewer", objective: "fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, "create", ["requestId"]],
+		[{ action: "create" }, "create", ["tasks"]],
 		[{ action: "close", handle: "h" }, "close", ["expectedEpisode"]],
-		[{ action: "untrusted arbitrary action" }, null, undefined],
+		[{ action: "untrusted arbitrary action" }, null, ["action"]],
 	] as const) {
 		const result = await service.execute(request, ctx);
 		assert.equal(result.schemaVersion, 4);
@@ -37,7 +36,7 @@ test("managed refusals keep action and missing fields without launching or readi
 	assert.equal(configReads, 0);
 });
 
-test("managed results and index retain actual model/reasoning even on failed and historical results", () => {
+test("managed results retain actual model/thinking even on failed and historical results", () => {
 	const view: SessionView = { handle: "h", role: "worker", episode: 1, state: "interrupted", reportComplete: false, route,
 		result: { id: "task", role: "worker", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 10, changedPaths: [], convergence: "not-applied", route, error: { code: "timeout", message: "fixture" } } };
 	for (const schemaVersion of [4] as const) {
@@ -55,7 +54,6 @@ test("managed results and index retain actual model/reasoning even on failed and
 			assert.doesNotMatch(text, /acceptance/);
 		}
 	}
-	assert.match(managedContextIndex([view])!, /route=fixture\/actual-model thinking=high/);
 });
 
 test("command correlation preserves punctuation and normalizes legacy evidence exactly once", () => {

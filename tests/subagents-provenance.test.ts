@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseConfigSources, readConfigSources } from "../extensions/subagents/config.ts";
-import { createProvenance, fingerprintConfig, fingerprintSources, PROVENANCE_DIR, PROVENANCE_MANIFEST } from "../extensions/subagents/provenance.ts";
+import { parseConfigSources, readConfigSources } from "../extensions/agents/config.ts";
+import { createProvenance, fingerprintConfig, fingerprintSources, PROVENANCE_DIR, PROVENANCE_MANIFEST } from "../extensions/agents/provenance.ts";
 
 test("identical source and configuration fingerprints reuse opaque epochs", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-provenance-"));

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { isLocalTiming } from "../extensions/subagents/telemetry.ts";
-import { isNativeObservation, mergeOwnedUsage, type NativeObservation } from "../extensions/subagents/observability.ts";
+import { isLocalTiming } from "../extensions/agents/telemetry.ts";
+import { isNativeObservation, mergeOwnedUsage, type NativeObservation } from "../extensions/agents/observability.ts";
 import { extractSessionMetrics } from "../.agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts";
-import type { ParentObservation } from "../extensions/subagents/observation-hooks.ts";
+import type { ParentObservation } from "../extensions/agents/observation-hooks.ts";
 
 for (const installed of [false, true]) test(`native ${installed ? "installed" : "development"} parent and child observations survive continuation and inert replay without double accounting`, async (t) => {
 	const base = await mkdtemp(join(tmpdir(), "native-observation-")); t.after(() => rm(base, { recursive: true, force: true }));
@@ -26,11 +26,11 @@ for (const installed of [false, true]) test(`native ${installed ? "installed" : 
 	], { cwd: repo, env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", CSHENG_NATIVE_INSTALLED: installed ? "1" : "0" }, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
 	execution.child.stdin?.end(); const { stdout } = await execution;
 	const stream = stdout.trim().split("\n").map((line) => JSON.parse(line));
-	assert.ok(stream.some((event) => event.type === "tool_execution_update" && event.toolName === "csheng_subagent_sessions" && event.partialResult?.content?.some((part: { text?: string }) => part.text?.startsWith("Subagents "))), "managed activity is visible through the host tool-update channel");
+	assert.ok(stream.some((event) => event.type === "tool_execution_update" && event.toolName === "agent" && event.partialResult?.content?.some((part: { text?: string }) => part.text?.startsWith("Agents "))), "managed activity is visible through the host tool-update channel");
 	const entries = (await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 	const parents: ParentObservation[] = entries.filter((entry) => entry.type === "custom" && entry.customType === "csheng-parent-observation").map((entry) => entry.data);
 	assert.equal(parents.length, 3, JSON.stringify({ observations: parents.length, users: entries.filter((entry) => entry.message?.role === "user").length, toolResults: entries.filter((entry) => entry.message?.role === "toolResult").length, runs: parents.map((parent) => parent.runs.length), ownInput: parents.map((parent) => parent.native.usage.input) }));
-	const toolMessages = entries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "csheng_subagent_sessions").map((entry) => entry.message);
+	const toolMessages = entries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "agent").map((entry) => entry.message);
 	assert.ok(toolMessages.every(message => message.usage === undefined), "no native billing forwarding on fresh calls or replay");
 	const results = toolMessages.map(message => message.details);
 	assert.equal(results.length, 3); assert.ok(results.every((result) => result.status === "succeeded"));

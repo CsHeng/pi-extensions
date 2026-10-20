@@ -2,11 +2,10 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { panelHeading } from "../shared/panel-heading.ts";
-import type { GoalState, GoalTask, GoalView } from "../workflow/goal-contracts.ts";
-import { taskOutcome } from "../workflow/goal-state.ts";
+import type { TasklistState, TasklistTask, TasklistView } from "../tasklist/goal-contracts.ts";
 
-export type GoalUiTheme = Pick<Theme, "fg" | "strikethrough">;
-const plainTheme: GoalUiTheme = { fg: (_color, text) => text, strikethrough: text => text };
+export type TasklistUiTheme = Pick<Theme, "fg" | "strikethrough">;
+const plainTheme: TasklistUiTheme = { fg: (_color, text) => text, strikethrough: text => text };
 export const TASKS_UI_LIST_HINT = "/tasks-ui list";
 
 /** Task text is terminal data, never markup. Preserve emoji joiners. */
@@ -14,17 +13,17 @@ function clean(text: string): string {
 	return stripTerminalSequences(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
-type Progress = GoalTask["status"];
-export function taskProgress(_state: GoalState, task: GoalTask): Progress { return task.status; }
+type Progress = TasklistTask["status"];
+export function taskProgress(_state: TasklistState, task: TasklistTask): Progress { return task.status; }
 
 /** The host has already selected a TUI: ambient stdout/Chalk detection must not erase SGR 9. */
-function strike(title: string, theme: GoalUiTheme): string {
+function strike(title: string, theme: TasklistUiTheme): string {
 	if (theme === plainTheme || !title) return title;
 	const styled = theme.strikethrough(title);
 	return styled.includes("\x1b[9m") ? styled : `\x1b[9m${styled}\x1b[29m`;
 }
 
-export interface GoalRowOptions { folded?: boolean; affordance?: boolean }
+export interface TasklistRowOptions { folded?: boolean; affordance?: boolean }
 
 /** Above-editor Tasks budget. A short terminal keeps the header and clips the body before Jobs. */
 export function tasksRenderBudget(terminalRows: number): number {
@@ -32,11 +31,11 @@ export function tasksRenderBudget(terminalRows: number): number {
 	return Math.min(12, Math.max(1, Math.floor(rows / 3)));
 }
 
-function headingTheme(theme: GoalUiTheme): { fg(color: "accent" | "warning", text: string): string } {
+function headingTheme(theme: TasklistUiTheme): { fg(color: "accent" | "warning", text: string): string } {
 	return { fg: (color, text) => theme.fg(color, text) };
 }
 
-export function goalRows(view: GoalView, width: number, maxRows = 12, theme: GoalUiTheme = plainTheme, options?: GoalRowOptions): string[] {
+export function taskRows(view: TasklistView, width: number, maxRows = 12, theme: TasklistUiTheme = plainTheme, options?: TasklistRowOptions): string[] {
 	width = Math.max(0, Math.floor(width));
 	maxRows = Math.max(0, Math.floor(maxRows));
 	if (!width || !maxRows) return [];
@@ -47,10 +46,10 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
 	const tasks = s.tasks.map(task => ({ task, status: task.status, suffix: task.note ? clean(task.note) : "" }));
 	const doneCount = tasks.filter(t => t.status === "done").length;
 	const cancelledCount = tasks.filter(t => t.status === "cancelled").length;
-	const outcome = taskOutcome(s);
-	const warnings = s.paused ? ["paused"] : outcome === "blocked" ? ["blocked"] : [];
+	// Item-derived only: the list has no engine state to report.
+	const warnings = tasks.some(t => t.status === "blocked") ? ["blocked"] : [];
 	const counts = ["doing"].map(status => { const n = tasks.filter(t => t.status === status).length; return n ? ` · ${n} ${status}` : ""; }).join("");
-	const end = ` (${doneCount}/${tasks.length} done${cancelledCount ? ` · ${cancelledCount} cancelled` : ""})${outcome === "done" || outcome === "cancelled" ? ` · ${outcome}` : ""}`;
+	const end = ` (${doneCount}/${tasks.length} done${cancelledCount ? ` · ${cancelledCount} cancelled` : ""})`;
 	const foldedFlag = options?.folded;
 	const section = foldedFlag !== undefined;
 	let rows: string[];
@@ -61,9 +60,9 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
 		const prefix = `${folded ? "▸" : "▾"} ${warning ? "! " : ""}${label}`;
 		const detail = visibleWidth(`${prefix}${end}${counts}`) <= width ? counts : "";
 		const tail = `${end}${detail}`;
-		const goalRoom = folded ? 0 : width - visibleWidth(`${prefix} · ${tail}`);
-		const goalPart = goalRoom > 0 ? ` · ${truncateToWidth(clean(s.goal), goalRoom, "…")}` : "";
-		rows = [panelHeading(`${label}${goalPart}${tail}`, width, { folded, warning, theme: headingTheme(theme) })];
+		const titleRoom = folded ? 0 : width - visibleWidth(`${prefix} · ${tail}`);
+		const titlePart = titleRoom > 0 ? ` · ${truncateToWidth(clean(s.title), titleRoom, "…")}` : "";
+		rows = [panelHeading(`${label}${titlePart}${tail}`, width, { folded, warning, theme: headingTheme(theme) })];
 		if (folded) return rows;
 	} else {
 		const bullet = options?.affordance ? "▾" : "●";
@@ -73,11 +72,10 @@ export function goalRows(view: GoalView, width: number, maxRows = 12, theme: Goa
 		const marker = options?.affordance ? "▾" : "";
 		if (marker && warnings.length && visibleWidth(`${prefix} ${marker}${end}`) <= width) prefix = `${prefix} ${marker}`;
 		const detail = visibleWidth(prefix + end + counts) <= width ? counts : "";
-		const goalWidth = width - visibleWidth(`${prefix} · ${end}${detail}`);
-		const goal = goalWidth > 0 ? ` · ${truncateToWidth(clean(s.goal), goalWidth, "…")}` : "";
-		rows = [clip(theme.fg(warnings.length ? "warning" : "accent", `${prefix}${goal}${end}${detail}`))];
+		const titleWidth = width - visibleWidth(`${prefix} · ${end}${detail}`);
+		const titleTail = titleWidth > 0 ? ` · ${truncateToWidth(clean(s.title), titleWidth, "…")}` : "";
+		rows = [clip(theme.fg(warnings.length ? "warning" : "accent", `${prefix}${titleTail}${end}${detail}`))];
 	}
-	if (warnings.length && s.reason && maxRows >= 5) rows.push(clip(theme.fg("warning", `  ${clean(s.reason)}`)));
 	const available = maxRows - rows.length;
 	const overflow = tasks.length > available;
 	// Keep active and blocked tasks visible instead of filling the widget with completed work.

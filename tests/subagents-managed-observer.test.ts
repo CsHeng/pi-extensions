@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ManagedObserver, OBSERVER_HEARTBEAT_MS } from "../extensions/subagents/managed-observer.ts";
-import type { ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
-import { emptyUsage, type EffectiveRoute, type TaskResult } from "../extensions/subagents/contracts.ts";
+import { ManagedObserver, OBSERVER_HEARTBEAT_MS } from "../extensions/agents/managed-observer.ts";
+import type { ObserverSnapshot } from "../extensions/agents/observer-events.ts";
+import { emptyUsage, type EffectiveRoute, type TaskResult } from "../extensions/agents/contracts.ts";
 
 const owner = { repo: "/not-published", parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 const route = { provider: "provider", model: "model", thinking: "high" } as EffectiveRoute;

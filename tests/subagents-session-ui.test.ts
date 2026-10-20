@@ -12,14 +12,14 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { defaultConfig } from "../extensions/subagents/config.ts";
-import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { registerContinuationTool } from "../extensions/subagents/continuation.ts";
-import { SESSION_VIEW_EVENT, type SessionViewReply } from "../extensions/subagents/session-view.ts";
-import { createSubagentsUiExtension } from "../extensions/subagents-ui/index.ts";
-import type { SubagentsOverlay } from "../extensions/subagents-ui/component.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { registerContinuationTool } from "../extensions/agents/continuation.ts";
+import { SESSION_VIEW_EVENT, type SessionViewReply } from "../extensions/agents/session-view.ts";
+import { createSubagentsUiExtension } from "../extensions/agents-ui/index.ts";
+import type { SubagentsOverlay } from "../extensions/agents-ui/component.ts";
 
 const exec = promisify(execFile);
 async function until(predicate: () => boolean): Promise<void> {
@@ -95,12 +95,12 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 		} });
 		createSubagentsUiExtension()(pi);
 		const event = async (name: string) => { for (const fn of handlers.get(name) ?? []) await fn({}, ctx); };
-		return { ctx, service, event, get reply() { return reply; }, get panel() { return panel!; }, open: async () => { void commands.get("subagents-ui")!.handler("list", ctx); await until(() => !!panel && !!reply); } };
+		return { ctx, service, event, get reply() { return reply; }, get panel() { return panel!; }, open: async () => { void commands.get("agents-ui")!.handler("list", ctx); await until(() => !!panel && !!reply); } };
 	};
 	const mounted = mount();
 	t.after(async () => { release(); await mounted.event("session_shutdown"); });
 	await mounted.event("session_start");
-	const created = await mounted.service.execute({ action: "create", requestId: "tenlive", tasks: Array.from({ length: 10 }, (_, index) => ({ id: `live${index}`, role: "explorer", objective: "synthetic live", access: [{ permission: "read", scope: "/tmp/scope" }] })) }, mounted.ctx);
+	const created = await mounted.service.execute({ action: "create", tasks: Array.from({ length: 10 }, (_, index) => ({ id: `live${index}`, role: "explorer", objective: "synthetic live", access: [{ permission: "read", scope: "/tmp/scope" }] })) }, mounted.ctx);
 	assert.equal(created.status, "accepted");
 	await until(() => mounted.service.liveObserverTasks().length === 10);
 	await mounted.open();

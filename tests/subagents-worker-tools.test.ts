@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createWorkerTools } from "../extensions/subagents/worker-tools.ts";
+import { createWorkerTools } from "../extensions/agents/worker-tools.ts";
 
 function quote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 const fixturePath = new URL("fixtures/subagents-worker-command.mjs", import.meta.url).pathname;

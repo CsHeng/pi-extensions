@@ -11,15 +11,15 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
-import { runChild } from "../extensions/subagents/runner.ts";
-import { getManagedRole, getRole } from "../extensions/subagents/roles.ts";
-import type { EffectiveRoute } from "../extensions/subagents/contracts.ts";
+import { runChild } from "../extensions/agents/runner.ts";
+import { getManagedRole, getRole } from "../extensions/agents/roles.ts";
+import type { EffectiveRoute } from "../extensions/agents/contracts.ts";
 import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
 
 const cli = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
 const provider = fileURLToPath(new URL("fixtures/subagents-native-session.ts", import.meta.url));
-const guard = fileURLToPath(new URL("../extensions/subagents/child-capability-guard.ts", import.meta.url));
-const workerGuard = fileURLToPath(new URL("../extensions/subagents/worker-tools.ts", import.meta.url));
+const guard = fileURLToPath(new URL("../extensions/agents/child-capability-guard.ts", import.meta.url));
+const workerGuard = fileURLToPath(new URL("../extensions/agents/worker-tools.ts", import.meta.url));
 const invocation = process.env.CSHENG_GUIDANCE_HOST_PI === "installed" ? { command: "pi", args: ["-e", provider] } : { command: process.execPath, args: [cli, "-e", provider] };
 const route: EffectiveRoute = { provider: "subagent-fixture", model: "fixture", thinking: "off", source: "parent", candidateIndex: 0, executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
@@ -218,7 +218,7 @@ test("configured same-name native write override keeps ownership in a managed wo
 	assert.equal(result.status, "succeeded", `${result.error?.code}: ${result.stderr} ${result.output}`);
 	// The configured implementation ran, not the worker wrapper, and the co-loaded package tool stayed present.
 	assert.match(result.output, /override=configured-write-ok:[^"]*candidate\.txt:then-run/);
-	assert.match(result.output, /tools=[^;]*csheng_subagent_sessions/);
+	assert.match(result.output, /tools=[^;]*agent/);
 	assert.equal(result.workerToolsSettled, true);
 	assert.equal(await readFile(join(child, "candidate.txt"), "utf8"), "configured");
 	// Toolkit lifecycle evidence names only the tools this kit owns; `write` is opaque here.

@@ -28,16 +28,16 @@ test("package exposes the maintained extensions and their Pi peers", async () =>
 	assert.deepEqual(manifest.pi?.extensions, [
 		"./extensions/multi-skill-mentions/index.ts",
 		"./extensions/fast-gpt/index.ts",
-		"./extensions/subagents/index.ts",
+		"./extensions/agents/index.ts",
 		"./extensions/status-footer/index.ts",
 		"./extensions/work-timing/index.ts",
-		"./extensions/subagents-ui/index.ts",
-		"./extensions/workflow/index.ts",
-		"./extensions/loop-notifications/index.ts",
+		"./extensions/agents-ui/index.ts",
+		"./extensions/tasklist/index.ts",
+		"./extensions/job-notifications/index.ts",
 		"./extensions/tasks-ui/index.ts",
-		"./extensions/jobs-ui/index.ts",
+		"./extensions/bash-jobs-ui/index.ts",
 		"./extensions/agent-bark.ts",
-		"./extensions/retained-shell/index.ts",
+		"./extensions/async-bash/index.ts",
 	]);
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": "*",
@@ -50,5 +50,5 @@ test("package exposes the maintained extensions and their Pi peers", async () =>
 	assert.ok(manifest.devDependencies?.["@earendil-works/pi-tui"]);
 	assert.ok(manifest.devDependencies?.typebox);
 	assert.equal(manifest.dependencies, undefined);
-	assert.equal(manifest.scripts?.["e2e:subagents"], "bun scripts/run-live-subagents-e2e.ts");
+	assert.equal(manifest.scripts?.["e2e:agents"], "bun scripts/run-live-agents-e2e.ts");
 });

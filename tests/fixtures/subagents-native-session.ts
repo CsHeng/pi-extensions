@@ -74,7 +74,7 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					};
 					const payload = (await options?.onPayload?.(initial, model) ?? initial) as typeof initial;
 					const serialized = JSON.stringify(payload.messages);
-					text = serialized.includes("<conversation>") ? "SYNTHETIC_SUMMARY" : `index=${serialized.split("Stored local-task index").length - 1};managedTool=${payload.tools.some((tool) => tool.name === "csheng_subagent_sessions") ? 1 : 0};private=${serialized.includes("PRIVATE_INDEX_PROSE") ? 1 : 0}`;
+					text = serialized.includes("<conversation>") ? "SYNTHETIC_SUMMARY" : `index=${serialized.split("Stored local-task index").length - 1};private=${serialized.includes("PRIVATE_INDEX_PROSE") ? 1 : 0}`;
 				}
 				// Pi 0.87 identifies summary requests in the system prompt; older hosts
 				// also expose a <conversation> wrapper in the user message.
@@ -97,6 +97,7 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					}
 				}
 				const input = last?.role === "user" ? JSON.stringify(last.content) : "";
+				await import("node:fs/promises").then(fs => fs.appendFile("/tmp/dbg.txt", JSON.stringify({ text: text.slice(0,160), last: last?.role, mode: process.env.CSHENG_NATIVE_CONTEXT_MODE, cm: process.env.CSHENG_NATIVE_COMPACTION_MODE, err: Boolean(message.errorMessage), stop: message.stopReason, n: context.messages.length }) + "\n"));
 				if (process.env.CSHENG_APPEND_EXPECT_PARTS) {
 					const system = getCurrentSystemPrompt(context.messages);
 					const parts: string[] = JSON.parse(process.env.CSHENG_APPEND_EXPECT_PARTS);
@@ -161,20 +162,24 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					message.content = [{ type: "text", text: `catalog=${guide && system.includes(guide) ? 1 : 0};ancestor=${system.includes("ancestor context") ? 1 : 0};snapshot=${system.includes("snapshot override") ? 1 : 0};managed=${system.includes("unrelated managed context") ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes("reference marker") ? 1 : 0};forbidden=${system.includes(process.env.CSHENG_GUIDANCE_FORBIDDEN_PATH ?? "<no-forbidden-path>") ? 1 : 0}` }];
 				}
 				else if (text !== "SYNTHETIC_SUMMARY" && input.includes("parent-observation-fixture")) {
-					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "csheng_subagent_sessions").at(-1);
+					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1);
 					const priorText = prior?.role === "toolResult" ? prior.content.find((part) => part.type === "text") : undefined;
 					const view = priorText?.type === "text" ? JSON.parse(priorText.text).sessions[0] : undefined;
 					const arguments_ = input.includes("continue-parent-observation-fixture")
-						? { action: "continue", episodes: [{ handle: view.handle, requestId: "continue", expectedEpisode: view.episode, message: "host-worker-fixture" }] }
-						: { action: "create", requestId: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.cwd() }] }] };
-					message.content = [{ type: "toolCall", id: `parent-${context.messages.filter((item) => item.role === "user").length}`, name: "csheng_subagent_sessions", arguments: arguments_ }];
+						? { action: "continue", episodes: [{ handle: view.handle, expectedEpisode: view.episode, message: "host-worker-fixture" }] }
+						: { action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.cwd() }] }] };
+					// A host re-delivery repeats the original tool call id; a new call gets a new one.
+					const priorCallId = input.includes("replay-parent-observation-fixture")
+						? context.messages.filter((item) => item.role === "assistant").flatMap((item) => Array.isArray(item.content) ? item.content : []).filter((part) => part.type === "toolCall" && (part as { name?: string }).name === "agent").map((part) => (part as { id?: string }).id).at(-1)
+						: undefined;
+					message.content = [{ type: "toolCall", id: priorCallId ?? `parent-${context.messages.filter((item) => item.role === "user").length}`, name: "agent", arguments: arguments_ }];
 					message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
 				}
 				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("nested-delegation-fixture")) {
 					// A managed child invokes the co-loaded typed delegation tool for an explicit scope.
-					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "csheng_subagent_sessions").at(-1) as { content?: Array<{ type?: string; text?: string }> } | undefined;
+					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1) as { content?: Array<{ type?: string; text?: string }> } | undefined;
 					if (!prior) {
-						message.content = [{ type: "toolCall", id: "nested-delegation", name: "csheng_subagent_sessions", arguments: { action: "create", requestId: "nested", tasks: [{ id: "nested", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.env.CSHENG_NESTED_SCOPE ?? "." }] }] } }];
+						message.content = [{ type: "toolCall", id: "nested-delegation", name: "agent", arguments: { action: "create", tasks: [{ id: "nested", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.env.CSHENG_NESTED_SCOPE ?? "." }] }] } }];
 						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
 					}
 					const part = prior.content?.find((item) => item.type === "text");

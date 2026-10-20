@@ -5,15 +5,15 @@ import { normalizeContext, validateToolArguments, type JsonObject, type Model } 
 import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses";
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createGoalStore } from "../extensions/workflow/goal-store.ts";
-import { registerGoalTool } from "../extensions/workflow/goal-tool.ts";
+import { createTasklistStore } from "../extensions/tasklist/goal-store.ts";
+import { registerTasklistTool } from "../extensions/tasklist/goal-tool.ts";
 
 function fixture() {
 	let tool: ToolDefinition | undefined;
 	let writes = 0;
 	let calls = 0;
-	const store = createGoalStore(() => { writes += 1; });
-	registerGoalTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store);
+	const store = createTasklistStore(() => { writes += 1; });
+	registerTasklistTool({ registerTool(value: ToolDefinition) { tool = value; }, on() {} } as unknown as ExtensionAPI, store);
 	assert.ok(tool);
 	const ctx = {
 		cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" },
@@ -29,7 +29,7 @@ function fixture() {
 }
 
 for (const api of ["openai-responses", "openai-codex-responses"] as const) {
-	test(`workflow registration survives the real ${api} request serializer before task creation`, async () => {
+	test(`tasklist registration survives the real ${api} request serializer before task creation`, async () => {
 		const { tool, writes } = fixture();
 		const model: Model<typeof api> = {
 			id: "schema-fixture", name: "Schema fixture", api, provider: api === "openai-responses" ? "openai" : "openai-codex",
@@ -42,7 +42,7 @@ for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 			payload = JSON.parse(body);
 			const schema = payload!.tools.find((entry) => entry.name === tool.name)!.parameters;
 			if (schema.type !== "object" || schema.anyOf || schema.oneOf || schema.allOf) {
-				return new Response(JSON.stringify({ error: { message: "Invalid schema for function csheng_workflow: expected an object root without a union" } }), { status: 400, headers: { "content-type": "application/json" } });
+				return new Response(JSON.stringify({ error: { message: "Invalid schema for function tasklist: expected an object root without a union" } }), { status: 400, headers: { "content-type": "application/json" } });
 			}
 			const event = { type: "response.completed", response: { id: "fixture", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } } };
 			return new Response(`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
@@ -64,16 +64,19 @@ for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 	});
 }
 
-test("workflow rejects completion-protocol operations and fields before mutation", async () => {
+test("tasklist rejects completion-protocol operations and fields before mutation", async () => {
  const harness = fixture();
  for (const args of [{ operation: "enroll" }, { operation: "report", facts: [] }, { operation: "inspect", expectedRevision: 1 }]) {
   await assert.rejects(async () => harness.execute(args), /Validation failed/);
   assert.equal(harness.writes(), 0);
  }
- const missing = await harness.execute({ operation: "set", goal: "Incomplete" });
+ const missing = await harness.execute({ operation: "set", title: "Incomplete" });
  assert.equal((missing.details as { ok: boolean }).ok, false);
- await harness.execute({ operation: "set", goal: "Fixture", tasks: [{ id: "t", title: "Task" }] });
+ await harness.execute({ operation: "set", title: "Fixture", tasks: [{ id: "t", title: "Task" }] });
  assert.equal(harness.store.current()?.revision, 1);
- await harness.execute({ operation: "pause", reason: "fixture pause" });
- assert.equal(harness.store.current()?.paused, true);
+ await assert.rejects(async () => harness.execute({ operation: "resume" }), /Validation failed/);
+ assert.equal(harness.writes(), 1, "no removed runtime-control operation can write");
+ const cancelled = await harness.execute({ operation: "cancel" });
+ assert.equal((cancelled.details as { ok: boolean }).ok, true);
+ assert.deepEqual(harness.store.current()?.tasks.map(task => task.status), ["cancelled"]);
 });

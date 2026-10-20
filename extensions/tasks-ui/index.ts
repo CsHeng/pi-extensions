@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { openListOverlay } from "../shared/list-overlay.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sharedAboveEditor, type AboveEditorComposer } from "../shared/above-editor.ts";
-import type { GoalState, GoalView } from "../workflow/goal-contracts.ts";
+import { TASKLIST_STATE_VERSION, type TasklistState, type TasklistView } from "../tasklist/goal-contracts.ts";
 import {
 	parseTasksViewChanged,
 	parseTasksViewReply,
@@ -14,11 +14,11 @@ import {
 	TASKS_VIEW_RESET_EVENT,
 	TASKS_VIEW_VERSION,
 	type TasksViewReply,
-} from "../workflow/tasks-view.ts";
-import { goalRows, tasksRenderBudget, type GoalUiTheme } from "./render.ts";
+} from "../tasklist/tasks-view.ts";
+import { taskRows, tasksRenderBudget, type TasklistUiTheme } from "./render.ts";
 
 export const TASKS_UI_COMMAND = "tasks-ui";
-export const TASKS_UI_ALIAS = "workflow-ui";
+export const TASKS_UI_ALIAS = "tasklist-ui";
 export const TASKS_VIEW_TIMEOUT_MS = 4_000;
 
 export interface TasksUiOptions {
@@ -44,22 +44,21 @@ function defaultSetTimer(callback: () => void, ms: number): unknown {
 function defaultClearTimer(handle: unknown): void {
 	clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
-function themeOf(value: unknown): GoalUiTheme | undefined {
+function themeOf(value: unknown): TasklistUiTheme | undefined {
 	if (!value || typeof value !== "object") return undefined;
-	const theme = value as GoalUiTheme;
+	const theme = value as TasklistUiTheme;
 	return typeof theme.fg === "function" && typeof theme.strikethrough === "function" ? theme : undefined;
 }
 function leafId(ctx: ExtensionContext | undefined): string | null {
 	const leaf = ctx?.sessionManager.getLeafId();
 	return typeof leaf === "string" && leaf.length > 0 ? leaf : null;
 }
-function toView(reply: TasksViewReply): GoalView {
+function toView(reply: TasksViewReply): TasklistView {
 	if (reply.availability === "unavailable") return { unavailable: reply.reason ?? "unavailable" };
 	if (!reply.state) return {};
-	const state: GoalState = {
-		version: 5, revision: reply.state.revision, goal: reply.state.goal, paused: reply.state.paused, cancelled: reply.state.cancelled,
+	const state: TasklistState = {
+		version: TASKLIST_STATE_VERSION, revision: reply.state.revision, title: reply.state.title,
 		tasks: reply.state.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...(task.note ? { note: task.note } : {}) })),
-		...(reply.state.reason ? { reason: reply.state.reason } : {}),
 	};
 	return { state };
 }
@@ -81,7 +80,7 @@ export function createTasksUi(options: TasksUiOptions = {}): (pi: ExtensionAPI) 
 		let stops: Array<() => void> = [];
 		const tui = () => ctx?.mode === "tui" && ctx.hasUI === true;
 		const clearTimer = () => { if (timer !== undefined) { cancelTimer(timer); timer = undefined; } };
-		const currentView = (): GoalView => {
+		const currentView = (): TasklistView => {
 			if (display.kind === "ready") return toView(display.reply);
 			if (display.kind === "unavailable" || display.kind === "waiting") return { unavailable: display.kind === "waiting" ? "unreachable" : display.reason };
 			return {};
@@ -93,7 +92,7 @@ export function createTasksUi(options: TasksUiOptions = {}): (pi: ExtensionAPI) 
 			if (!visible || view.state === undefined) { composer.set("tasks", undefined); return; }
 			const ok = composer.set("tasks", {
 				render(width, terminalRows, theme) {
-					try { return goalRows(currentView(), Math.min(width, 120), folded ? 1 : tasksRenderBudget(terminalRows), themeOf(theme), { folded }); }
+					try { return taskRows(currentView(), Math.min(width, 120), folded ? 1 : tasksRenderBudget(terminalRows), themeOf(theme), { folded }); }
 					catch { failed = true; return []; }
 				},
 				activate() { folded = !folded; publish(); },
@@ -185,7 +184,7 @@ export function createTasksUi(options: TasksUiOptions = {}): (pi: ExtensionAPI) 
 		};
 		const openList = async () => {
 			if (!tui() || !ctx) return;
-			await openListOverlay(ctx, "Tasks · workflow", (width, theme) => goalRows(currentView(), width, 1000, themeOf(theme)));
+			await openListOverlay(ctx, "Tasklist", (width, theme) => taskRows(currentView(), width, 1000, themeOf(theme)));
 		};
 		const handle = async (args: string, commandCtx: ExtensionContext) => {
 			ctx = commandCtx;

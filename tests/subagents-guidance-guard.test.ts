@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { authorizePath, parseCapability } from "../extensions/subagents/path-policy.ts";
-import type { ChildCapabilityManifest } from "../extensions/subagents/contracts.ts";
+import { authorizePath, parseCapability } from "../extensions/agents/path-policy.ts";
+import type { ChildCapabilityManifest } from "../extensions/agents/contracts.ts";
 
 test("internal guidance grant is read-only and narrower than task external roots", async t => {
 	const base = await mkdtemp(join(tmpdir(), "subagent-guidance-guard-"));

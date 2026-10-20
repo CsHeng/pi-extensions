@@ -10,14 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { loadSkills, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
-import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
-import { ContinuationService } from "../extensions/subagents/continuation.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import type { SessionActionResult } from "../extensions/subagents/session-contracts.ts";
-import { defaultConfig } from "../extensions/subagents/config.ts";
-import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
-import type { ChildRunOptions } from "../extensions/subagents/runner.ts";
+import { prepareChildGuidance } from "../extensions/agents/guidance-resources.ts";
+import { ContinuationService } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import type { SessionActionResult } from "../extensions/agents/session-contracts.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
+import type { ChildRunOptions } from "../extensions/agents/runner.ts";
 import type { SubagentExecutionEvent } from "../extensions/shared/subagent-execution.ts";
 const git = promisify(execFile);
 function gate() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
@@ -37,16 +37,16 @@ async function fixture(t: test.TestContext, runner: (options: ChildRunOptions) =
 	return { repo, ctx, store, service, events, wakes, config };
 }
 let writeRoot = "/tmp/scope";
-const task = (id: string): import("../extensions/subagents/contracts.ts").SubagentTask => ({ id, role: "worker", objective: "change source", access: [{ permission: "write", scope: writeRoot }] });
+const task = (id: string): import("../extensions/agents/contracts.ts").SubagentTask => ({ id, role: "worker", objective: "change source", access: [{ permission: "write", scope: writeRoot }] });
 
 test("foreground and join budget expiry release observation, preserve one execution and restore its wake", async t => {
  const slow = gate(), started = gate(); t.after(() => slow.release());
  let signal!: AbortSignal, executions = 0;
  const f = await fixture(t, async options => { executions++; signal = options.signal!; started.release(); await slow.promise; });
- const request = { action: "create", mode: "foreground", waitSeconds: 0, requestId: "budget", tasks: [task("one")] };
- const first = await f.service.execute(request, f.ctx); await started.promise;
+ const request = { action: "create", mode: "foreground", waitSeconds: 0, tasks: [task("one")] };
+ const first = await f.service.execute(request, f.ctx, undefined, undefined, "budget"); await started.promise;
  assert.equal(first.status, "accepted"); assert.deepEqual(first.wait, { status: "expired", waitSeconds: 0 }); assert.equal(first.sessions[0]?.reportComplete, false);
- const second = await f.service.execute({ ...request, waitSeconds: 0.005 }, f.ctx);
+ const second = await f.service.execute({ ...request, waitSeconds: 0.005 }, f.ctx, undefined, undefined, "budget");
  assert.equal(second.runId, first.runId); assert.equal(executions, 1);
  const timed = await f.service.execute({ action: "join", runId: first.runId, waitSeconds: 0.005 }, f.ctx);
  assert.equal(timed.status, "accepted"); assert.equal(timed.wait?.status, "expired"); assert.equal(signal.aborted, false);
@@ -58,13 +58,13 @@ test("foreground and join budget expiry release observation, preserve one execut
 
 test("wake filtering fences observed episodes, late run aggregates, new episodes and owner identity without accepting work", async t => {
  const f = await fixture(t, async () => {});
- const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "wake", tasks: [task("one")] }, f.ctx);
+ const first = await f.service.execute({ action: "create", mode: "foreground", tasks: [task("one")] }, f.ctx);
  assert.equal(first.status, "succeeded"); const event = f.events.findLast(value => value.kind === "run-terminal")!; assert.ok(event);
  assert.equal((await f.service.unobservedWake([event], f.ctx)).length, 1);
  for (const changed of [{ ...event, runId: "wrong" }, { ...event, generation: "wrong" }, { ...event, owner: { ...event.owner, repository: join(f.repo, "wrong") } }, { ...event, owner: { ...event.owner, sessionId: "wrong" } }, { ...event, owner: { ...event.owner, branchAnchor: "other-branch" } }]) assert.deepEqual(await f.service.unobservedWake([changed], f.ctx), []);
  assert.deepEqual(await f.service.unobservedWake([event], { ...f.ctx, isProjectTrusted: () => false }), []);
  f.service.acknowledge(first); assert.deepEqual(await f.service.unobservedWake([event], f.ctx), []);
- const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, requestId: "next", message: "continue" }] }, f.ctx);
+ const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, message: "continue" }] }, f.ctx);
  assert.equal(second.status, "succeeded"); const next = f.events.findLast(value => value.kind === "run-terminal")!;
  assert.equal((await f.service.unobservedWake([next], f.ctx)).length, 1); assert.deepEqual(await f.service.unobservedWake([event], f.ctx), []);
  // A delivered notice is also one-shot, but the result remains unapplied and inspectable.
@@ -83,19 +83,19 @@ test("v3 receipts precede completion, early apply leaves sibling active, fixed i
 		assert.equal(await readFile(join(options.cwd, "base.txt"), "utf8"), options.prompt === "repair" ? "new parent\n" : "dirty parent\n");
 		await writeFile(join(options.cwd, `${options.task.id}.txt`), options.prompt === "repair" ? "repair\n" : "first\n");
 	});
-	const receipt = await f.service.execute({ action: "create", requestId: "batch", tasks: [task("fast"), task("slow")] }, f.ctx, undefined, undefined, "submission-call");
+	const receipt = await f.service.execute({ action: "create", tasks: [task("fast"), task("slow")] }, f.ctx, undefined, undefined, "submission-call");
 	assert.equal(receipt.status, "accepted", JSON.stringify(receipt)); assert.equal(receipt.schemaVersion, 4);
 	await started.promise;
 	await writeFile(join(f.repo, "base.txt"), "new parent\n");
-	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions[0]?.result?.id === "fast"); attempt++) { assert.ok(attempt < 500); await new Promise(resolve => setTimeout(resolve, 5)); }
-	const early = f.events.find(event => event.kind === "task-terminal" && event.sessions[0]?.result?.id === "fast")!;
+	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions[0]?.result?.label === "fast"); attempt++) { assert.ok(attempt < 500); await new Promise(resolve => setTimeout(resolve, 5)); }
+	const early = f.events.find(event => event.kind === "task-terminal" && event.sessions[0]?.result?.label === "fast")!;
 	assert.equal(early.toolCallId, "submission-call"); assert.ok(early.sessions[0]!.candidate);
 	const view = early.sessions[0]!;
 	const apply = await f.service.execute({ action: "apply", handle: view.handle, expectedEpisode: view.episode, candidateId: view.candidate!.id }, f.ctx);
 	assert.equal(apply.status, "succeeded", JSON.stringify(apply)); assert.equal(await readFile(join(f.repo, "base.txt"), "utf8"), "new parent\n");
 	assert.equal((await f.service.execute({ action: "inspect", runId: receipt.runId }, f.ctx)).status, "accepted");
 	assert.equal((await f.service.execute({ action: "refresh", handle: view.handle, expectedEpisode: view.episode }, f.ctx)).status, "succeeded");
-	const repair = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, requestId: "repair", expectedEpisode: view.episode, message: "repair" }] }, f.ctx);
+	const repair = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, expectedEpisode: view.episode, message: "repair" }] }, f.ctx);
 	assert.equal(repair.status, "succeeded", JSON.stringify(repair)); assert.equal(repair.sessions[0]!.episode, 2); assert.equal(paths[0], paths[1]);
 	slow.release();
 	const joined = await f.service.execute({ action: "join", runId: receipt.runId }, f.ctx);
@@ -106,15 +106,15 @@ test("shared capacity fixes queued input before receipt and cancellation of a qu
 	const hold = gate(); const active = gate(); let launched = 0;
 	t.after(() => hold.release());
 	const f = await fixture(t, async options => { launched++; active.release(); if (options.task.id === "one") await hold.promise; else assert.equal(await readFile(join(options.cwd, "base.txt"), "utf8"), "dirty parent\n"); }, 1);
-	const first = await f.service.execute({ action: "create", requestId: "one", tasks: [task("one")] }, f.ctx); await active.promise;
-	const second = await f.service.execute({ action: "create", requestId: "two", tasks: [task("two")] }, f.ctx);
+	const first = await f.service.execute({ action: "create", tasks: [task("one")] }, f.ctx); await active.promise;
+	const second = await f.service.execute({ action: "create", tasks: [task("two")] }, f.ctx);
 	assert.equal(second.status, "accepted", JSON.stringify(second));
 	assert.equal((await f.service.execute({ action: "cancel", runId: second.runId, taskId: "two" }, f.ctx)).cancelOutcome, "accepted");
 	const joined = await f.service.execute({ action: "join", runId: second.runId }, f.ctx);
 	assert.equal(joined.sessions[0]!.result?.status, "aborted"); assert.equal(launched, 1);
 	hold.release(); await f.service.execute({ action: "join", runId: first.runId }, f.ctx);
 	await writeFile(join(f.repo, "base.txt"), "changed after cancelled admission\n");
-	const resumed = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "resume", message: "continue pinned input" }] }, f.ctx);
+	const resumed = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, message: "continue pinned input" }] }, f.ctx);
 	assert.equal(resumed.status, "succeeded", JSON.stringify(resumed)); assert.equal(launched, 2);
 });
 
@@ -125,9 +125,9 @@ test("queued episodes keep the accepted role Skill setting despite a later confi
 		settings.push({ id: options.task.id, inheritSkills: options.inheritSkills });
 		if (options.task.id === "one") { started.release(); await hold.promise; }
 	}, 1);
-	const first = await f.service.execute({ action: "create", requestId: "skillsone", tasks: [task("one")] }, f.ctx);
+	const first = await f.service.execute({ action: "create", tasks: [task("one")] }, f.ctx);
 	await started.promise;
-	const second = await f.service.execute({ action: "create", requestId: "skillstwo", tasks: [task("two")] }, f.ctx);
+	const second = await f.service.execute({ action: "create", tasks: [task("two")] }, f.ctx);
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	assert.equal((await f.store.load(second.sessions[0]!.handle, owner)).inheritSkills, true);
 	f.config.roles.worker.inheritSkills = false;
@@ -137,7 +137,7 @@ test("queued episodes keep the accepted role Skill setting despite a later confi
 	assert.deepEqual(settings, [{ id: "one", inheritSkills: true }, { id: "two", inheritSkills: true }]);
 	assert.equal(joined.sessions[0]?.execution?.inheritSkills, true);
 	await f.service.execute({ action: "join", runId: first.runId }, f.ctx);
-	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, requestId: "skillsnext", message: "next" }] }, f.ctx);
+	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: joined.sessions[0]!.handle, expectedEpisode: 1, message: "next" }] }, f.ctx);
 	assert.equal(continued.status, "succeeded", JSON.stringify(continued));
 	assert.equal(settings.at(-1)?.inheritSkills, false);
 	assert.equal(continued.sessions[0]?.execution?.inheritSkills, false);
@@ -158,7 +158,7 @@ test("parent catalog reload cannot remove a Skill from fixed child input before 
 	await writeFile(join(privateSkill, "SKILL.md"), "---\nname: private-old\ndescription: Ignored private guidance.\n---\n# Private\n");
 	const readParent = () => loadSkills({ cwd: f.repo, agentDir: join(f.repo, "empty-agent"), includeDefaults: false, skillPaths: [join(f.repo, ".agents", "skills")] }).skills.map(value => ({ ...value, sourceInfo: { ...value.sourceInfo, scope: "project" as const } }));
 	parent = readParent();
-	const first = await f.service.execute({ action: "create", mode: "foreground", requestId: "fixedguide", tasks: [task("one")] }, f.ctx);
+	const first = await f.service.execute({ action: "create", mode: "foreground", tasks: [task("one")] }, f.ctx);
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
 	const handle = first.sessions[0]!.handle;
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
@@ -167,28 +167,28 @@ test("parent catalog reload cannot remove a Skill from fixed child input before 
 	assert.deepEqual(selected[0], [captured, privateSkill]);
 	assert.deepEqual((await f.store.load(handle, owner)).projectSkills?.map(value => value.name), ["guide"]);
 	await rm(join(skill, "SKILL.md")); await rm(privateSkill, { recursive: true }); parent = readParent();
-	const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, requestId: "withoutrefresh", message: "same input" }] }, f.ctx);
+	const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, message: "same input" }] }, f.ctx);
 	assert.equal(second.status, "succeeded", JSON.stringify(second));
 	assert.deepEqual(selected[1], [captured], "current parent catalog must not erase the fixed snapshot Skill or retain removed private guidance");
 	const privateNew = join(f.repo, ".agents", "skills", "private-new"); await mkdir(privateNew);
 	await writeFile(join(privateNew, "SKILL.md"), "---\nname: private-new\ndescription: New ignored private guidance.\n---\n# Private\n");
 	parent = readParent();
-	const third = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, requestId: "privateadded", message: "same input" }] }, f.ctx);
+	const third = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, message: "same input" }] }, f.ctx);
 	assert.equal(third.status, "succeeded", JSON.stringify(third));
 	assert.deepEqual(selected[2], [captured, privateNew], "new private guidance follows the current parent catalog without refresh");
 	assert.equal((await f.service.execute({ action: "refresh", handle, expectedEpisode: 3 }, f.ctx)).status, "succeeded");
-	const fourth = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 3, requestId: "afterrefresh", message: "new input" }] }, f.ctx);
+	const fourth = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 3, message: "new input" }] }, f.ctx);
 	assert.equal(fourth.status, "succeeded", JSON.stringify(fourth));
 	assert.deepEqual(selected[3], [privateNew]);
 });
 
 test("continuation reserves the freshly locked record after a concurrent explicit refresh", async t => {
 	const f = await fixture(t, async options => { if (options.prompt === "repair") assert.equal(await readFile(join(options.cwd, "base.txt"), "utf8"), "refreshed\n"); });
-	const created = await f.service.execute({ action: "create", mode: "foreground", requestId: "one", tasks: [task("one")] }, f.ctx);
+	const created = await f.service.execute({ action: "create", mode: "foreground", tasks: [task("one")] }, f.ctx);
 	const view = created.sessions[0]!; const entered = gate(), proceed = gate(); t.after(() => proceed.release());
 	const lock = f.store.withSession.bind(f.store); let pause = true;
 	f.store.withSession = async (handle, owner, action) => { if (pause) { pause = false; entered.release(); await proceed.promise; } return lock(handle, owner, action); };
-	const continuation = f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, expectedEpisode: 1, requestId: "repair", message: "repair" }] }, f.ctx);
+	const continuation = f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, expectedEpisode: 1, message: "repair" }] }, f.ctx);
 	await entered.promise; await writeFile(join(f.repo, "base.txt"), "refreshed\n");
 	const refreshed = await f.service.execute({ action: "refresh", handle: view.handle, expectedEpisode: 1 }, f.ctx); assert.equal(refreshed.status, "succeeded", JSON.stringify(refreshed));
 	proceed.release(); const result = await continuation; assert.equal(result.status, "succeeded", JSON.stringify(result));
@@ -197,11 +197,11 @@ test("continuation reserves the freshly locked record after a concurrent explici
 test("continuation rechecks recovery state after a concurrent uncertain apply and never republishes an older episode", async t => {
 	let launches = 0;
 	const f = await fixture(t, async options => { launches++; await writeFile(join(options.cwd, "new.txt"), "candidate\n"); });
-	const created = await f.service.execute({ action: "create", mode: "foreground", requestId: "one", tasks: [task("one")] }, f.ctx);
+	const created = await f.service.execute({ action: "create", mode: "foreground", tasks: [task("one")] }, f.ctx);
 	const view = created.sessions[0]!; const eventCount = f.events.length;
 	const entered = gate(), proceed = gate(); t.after(() => proceed.release()); const lock = f.store.withSession.bind(f.store); let pause = true;
 	f.store.withSession = async (handle, owner, action) => { if (pause) { pause = false; entered.release(); await proceed.promise; } return lock(handle, owner, action); };
-	const continuation = f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, expectedEpisode: 1, requestId: "repair", message: "repair" }] }, f.ctx);
+	const continuation = f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: view.handle, expectedEpisode: 1, message: "repair" }] }, f.ctx);
 	await entered.promise; const save = f.store.save.bind(f.store); let fail = true;
 	f.store.save = async record => { if (fail && record.candidate?.status === "applied") { fail = false; throw new Error("synthetic persistence failure"); } return save(record); };
 	const applied = await f.service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id }, f.ctx); assert.equal(applied.status, "failed");
@@ -222,17 +222,17 @@ test("a finished sibling is readable while a silent peer runs and an independent
 	}, 3);
 	f.config.maxConcurrency = 3;
 	f.config.routes.worker.maxConcurrency = 3;
-	const receipt = await f.service.execute({ action: "create", requestId: "pair", tasks: [task("silent"), task("done")] }, f.ctx);
+	const receipt = await f.service.execute({ action: "create", tasks: [task("silent"), task("done")] }, f.ctx);
 	assert.equal(receipt.status, "accepted", JSON.stringify(receipt));
 	await started.silent.promise;
 	await started.done.promise;
-	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.id === "done")); attempt++) {
+	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.label === "done")); attempt++) {
 		assert.ok(attempt < 500);
 		await new Promise(resolve => setTimeout(resolve, 5));
 	}
-	const doneEvents = () => f.events.filter(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.id === "done"));
+	const doneEvents = () => f.events.filter(event => event.kind === "task-terminal" && event.sessions.some(session => session.result?.label === "done"));
 	assert.equal(doneEvents().length, 1);
-	const done = doneEvents()[0]!.sessions.find(session => session.result?.id === "done")!;
+	const done = doneEvents()[0]!.sessions.find(session => session.result?.label === "done")!;
 	const inspected = await f.service.execute({ action: "inspect", handle: done.handle }, f.ctx);
 	assert.equal(inspected.sessions[0]?.result?.status, "succeeded");
 	assert.equal(inspected.sessions[0]?.reportComplete, true);
@@ -244,7 +244,7 @@ test("a finished sibling is readable while a silent peer runs and an independent
 	assert.notEqual(run.sessions.find(session => session.handle !== done.handle)?.result?.status, "succeeded");
 	const apply = await f.service.execute({ action: "apply", handle: done.handle, expectedEpisode: done.episode, candidateId: done.candidate!.id }, f.ctx);
 	assert.equal(apply.status, "succeeded", JSON.stringify(apply));
-	const next = await f.service.execute({ action: "create", requestId: "next", tasks: [task("next")] }, f.ctx);
+	const next = await f.service.execute({ action: "create", tasks: [task("next")] }, f.ctx);
 	assert.equal(next.status, "accepted", JSON.stringify(next));
 	await started.next.promise;
 	assert.equal(launches.get("silent"), 1);

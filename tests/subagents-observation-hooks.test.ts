@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RunTelemetry } from "../extensions/subagents/contracts.ts";
-import { registerObservationHooks } from "../extensions/subagents/observation-hooks.ts";
-import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
-import { isLocalTiming } from "../extensions/subagents/telemetry.ts";
+import type { RunTelemetry } from "../extensions/agents/contracts.ts";
+import { registerObservationHooks } from "../extensions/agents/observation-hooks.ts";
+import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+import { isLocalTiming } from "../extensions/agents/telemetry.ts";
 
 function harness(child = false, now: () => number = () => performance.now()) {
 	const handlers = new Map<string, Array<(...args: any[]) => unknown>>();

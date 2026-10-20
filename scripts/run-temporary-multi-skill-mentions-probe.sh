@@ -12,7 +12,8 @@ git -C "${work_root}" init -q
 skill_one_file="${work_root}/probe-alpha.md"
 skill_two_file="${work_root}/probe-beta.md"
 probe_extension="${work_root}/probe.ts"
-prompt_text="\$probe-alpha \$probe-beta verify isolated expansion"
+# Leading mixed selectors: the grouped envelope must name and load both skills once.
+prompt_text="\$probe-alpha /skill:probe-beta verify isolated expansion"
 
 cat >"${skill_one_file}" <<'EOF'
 ---
@@ -30,15 +31,18 @@ description: Isolated beta probe skill.
 Beta probe body.
 EOF
 
+# Counts only; this probe reports the grouped envelope shape, not prompt text.
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function probe(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event) => {
 		const blocks = event.prompt.match(/^<skill name=/gm)?.length ?? 0;
-		const alpha = event.prompt.includes('<skill name="probe-alpha"') ? 1 : 0;
-		const beta = event.prompt.includes('<skill name="probe-beta"') ? 1 : 0;
-		process.stderr.write(`MULTI_SKILL_PROBE blocks=${blocks} alpha=${alpha} beta=${beta}\n`);
+		const names = event.prompt.includes('name="probe-alpha, probe-beta"') ? 1 : 0;
+		const bodies = (event.prompt.match(/Alpha probe body\./g)?.length ?? 0)
+			+ (event.prompt.match(/Beta probe body\./g)?.length ?? 0);
+		const tail = event.prompt.endsWith("\n\nverify isolated expansion") ? 1 : 0;
+		process.stderr.write(`MULTI_SKILL_PROBE blocks=${blocks} names=${names} bodies=${bodies} tail=${tail}\n`);
 	});
 }
 EOF
@@ -58,5 +62,5 @@ probe_output=$(
 		-p "${prompt_text}" 2>&1 || true
 )
 
-grep -Fxq 'MULTI_SKILL_PROBE blocks=2 alpha=1 beta=1' <<<"${probe_output}"
-jq -cn '{result:"pass",source:"temporary",skill_blocks:2,extension_off_checked:false}'
+grep -Fxq 'MULTI_SKILL_PROBE blocks=1 names=1 bodies=2 tail=1' <<<"${probe_output}"
+jq -cn '{result:"pass",source:"temporary",skill_blocks:1,grouped_names:1,extension_off_checked:false}'

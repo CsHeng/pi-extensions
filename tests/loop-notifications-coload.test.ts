@@ -4,17 +4,17 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
-import workflow from "../extensions/workflow/index.ts";
-import { bindRetainedShell, SHELL_EXECUTION_EVENT } from "../extensions/retained-shell/index.ts";
-import { createShellExecutionOwner, type ShellExecutionOwner } from "../extensions/retained-shell/execution.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
+import workflow from "../extensions/tasklist/index.ts";
+import { bindRetainedShell, SHELL_EXECUTION_EVENT } from "../extensions/async-bash/index.ts";
+import { createShellExecutionOwner, type ShellExecutionOwner } from "../extensions/async-bash/execution.ts";
 import { LOOP_NOTICE_TYPE } from "../extensions/shared/loop-facts.ts";
-import { defaultConfig } from "../extensions/subagents/config.ts";
-import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { registerContinuationTool, type ContinuationService } from "../extensions/subagents/continuation.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
+import { registerContinuationTool, type ContinuationService } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 import { createHostHarness, createTrace, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 
 for (const consumerFirst of [false, true]) test(`actual three-producer co-load (consumer first: ${consumerFirst})`, { timeout: 20_000 }, async t => {
@@ -31,7 +31,7 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	const results: unknown[] = [];
 	const trace = createTrace();
 	const producers = (pi: ExtensionAPI) => {
-		shell = createShellExecutionOwner({ spawnSpec: () => ({ shell: "/bin/sh", args: ["-c"] }), onEvent: event => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
+		shell = createShellExecutionOwner({ operations: createLocalBashOperations(), onEvent: event => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
 		bindRetainedShell(pi, shell);
 		children = registerContinuationTool(pi, {
 			store: new ManagedSessionStore(join(base, "children")),
@@ -63,10 +63,10 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	});
 	const tool = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
 	h.faux.setResponses([
-		tool("csheng_workflow", { operation: "set", goal: "Co-load", tasks: [{ id: "task", title: "Work", status: "doing" }] }),
+		tool("tasklist", { operation: "set", title: "Co-load", tasks: [{ id: "task", title: "Work", status: "doing" }] }),
 		tool("bash", { command: "sleep 30", background: true }),
-		tool("csheng_subagent_sessions", { action: "create", requestId: "coload", tasks: [{ id: "child", role: "explorer", objective: "Read", access: [{ permission: "read", scope }] }] }),
-		tool("csheng_workflow", { operation: "update", tasks: [{ id: "task", note: "Waiting for actual results" }] }),
+		tool("agent", { action: "create", tasks: [{ id: "child", role: "explorer", objective: "Read", access: [{ permission: "read", scope }] }] }),
+		tool("tasklist", { operation: "update", tasks: [{ id: "task", note: "Waiting for actual results" }] }),
 		fauxAssistantMessage("yield"),
 		fauxAssistantMessage("shell completion observed while child remains"),
 		fauxAssistantMessage("child completion observed"),
@@ -89,7 +89,7 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	await waitForTrace(trace, () => h.faux.state.callCount >= 7 && trace.entries.filter(entry => entry.event === "native:agent_settled").length >= 3);
 	assert.equal(h.faux.state.callCount, 7, "one child completion with no task-only renewal");
 	assert.equal(projections.length, 2);
-	assert.match(projections[1]!, /Subagent task child/);
+	assert.match(projections[1]!, /Agent task child/);
 	await new Promise(resolve => setTimeout(resolve, 50));
 	assert.equal(h.faux.state.callCount, 7);
 	assert.deepEqual(h.errors, []);

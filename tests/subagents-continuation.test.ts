@@ -2,25 +2,25 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mergeOwnedUsage } from "../extensions/subagents/observability.ts";
-import type { ObservedRun } from "../extensions/subagents/observation-hooks.ts";
-import { ContinuationService, defaultEnclosingCapability } from "../extensions/subagents/continuation.ts";
-import { formatManagedContent } from "../extensions/subagents/render.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { defaultConfig } from "../extensions/subagents/config.ts";
+import { mergeOwnedUsage } from "../extensions/agents/observability.ts";
+import type { ObservedRun } from "../extensions/agents/observation-hooks.ts";
+import { ContinuationService, defaultEnclosingCapability } from "../extensions/agents/continuation.ts";
+import { formatManagedContent } from "../extensions/agents/render.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { runChild } from "../extensions/subagents/runner.ts";
-import { authorizePath } from "../extensions/subagents/path-policy.ts";
+import { runChild } from "../extensions/agents/runner.ts";
+import { authorizePath } from "../extensions/agents/path-policy.ts";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
-import { getRole } from "../extensions/subagents/roles.ts";
-import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import { CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
+import { getRole } from "../extensions/agents/roles.ts";
+import { prepareChildGuidance } from "../extensions/agents/guidance-resources.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import { CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, emptyUsage, emptyTaskTelemetry, type EffectiveRoute } from "../extensions/agents/contracts.ts";
 
-import { ManagedError, MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+import { ManagedError, MANAGED_LIMITS, MANAGED_STORAGE_WARNINGS, type SessionActionResult } from "../extensions/agents/session-contracts.ts";
 
 function assertReplay(actual: SessionActionResult, expected: SessionActionResult) {
 	// Advice describes current storage, not the replayed execution.
@@ -45,7 +45,7 @@ test("real native worker reopens one history and edits the same state with host 
 	for (const count of [1, 2, 3]) {
 		const result = await runChild({
 			task: graph.tasks[0]!, role: { ...getRole("worker"), tools: [...getRole("worker").tools, "bash"] }, route, cwd,
-			guardExtensionPath: new URL("../extensions/subagents/worker-tools.ts", import.meta.url).pathname,
+			guardExtensionPath: new URL("../extensions/agents/worker-tools.ts", import.meta.url).pathname,
 			managedWorkerScratch: scratch,
 			capability: { version: 4, cwd, role: "worker", grants: [{ permission: "write", path: cwd }], roots: [] },
 			prompt: `host-worker-fixture${count === 3 ? " done-only-thinking-fixture" : ""}`, approveProject: false,
@@ -128,10 +128,11 @@ test("one native child writes two repositories and applies one bundle", async (t
 	await writeFile(join(other, "check.cjs"), 'require("node:assert/strict").equal(require("./client.cjs")(), require("node:fs").readFileSync(process.env.SPEC_FILE, "utf8").trim()); console.log("dependency-verified");\n');
 	const checkPrimary = () => promisify(execFile)("node", ["check.cjs"], { cwd: other, env: { ...process.env, API_ROOT: f.repo, SPEC_FILE: evidence } });
 	await assert.rejects(checkPrimary());
-	const created = await f.service.execute({ action: "create", requestId: "tworoot", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture two-root-fixture", access: [{ permission: "write", scope: [f.repo, other] }, { permission: "read", scope: evidence }] }] }, f.ctx);
+	const created = await f.service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture two-root-fixture", access: [{ permission: "write", scope: [f.repo, other] }, { permission: "read", scope: evidence }] }] }, f.ctx);
 	assert.equal(created.status, "succeeded", JSON.stringify(created.error ?? created.sessions[0]?.result?.error ?? created));
 	const view = created.sessions[0]!;
-	assert.equal(view.handle, "worker");
+	assert.equal(view.label, "worker");
+	assert.match(view.handle, /^[a-f0-9]{32}$/);
 	assert.equal(view.candidate?.roots.length, 2, JSON.stringify({ output: view.result?.output, error: view.result?.error, changed: view.result?.changedPaths }));
 	assert.equal(new Set(view.candidate?.changedPaths).size, view.candidate?.changedPaths.length);
 	assert.equal(f.launches(), 1);
@@ -155,30 +156,30 @@ test("typed subdelegation cannot widen enclosing grants while a contained task s
 	const enclosing = { version: 4 as const, role: "worker" as const, cwd: f.repo, grants: [{ permission: "write" as const, path: f.repo }], roots: [] };
 	let launches = 0;
 	const service = new ContinuationService({ ...f.dependencies, enclosingCapability: async () => enclosing, runChild: async options => { launches++; return f.dependencies.runChild(options); } });
-	const outsideTask = { action: "create", requestId: "nestedout", tasks: [{ id: "nested", role: "worker", objective: "x", access: [{ permission: "write", scope: outside }] }] };
+	const outsideTask = { action: "create", tasks: [{ id: "nested", role: "worker", objective: "x", access: [{ permission: "write", scope: outside }] }] };
 	const denied = await service.execute(outsideTask, f.ctx);
 	assert.equal(denied.status, "failed");
 	assert.equal(denied.error?.code, "nested_access_denied");
 	assert.equal(launches, 0, "an unrelated root is rejected before allocation or launch");
-	const escalation = await service.execute({ action: "create", requestId: "nestedesc", tasks: [{ id: "nested2", role: "worker", objective: "x", access: [{ permission: "read", scope: f.repo }, { permission: "write", scope: outside }] }] }, f.ctx);
+	const escalation = await service.execute({ action: "create", tasks: [{ id: "nested2", role: "worker", objective: "x", access: [{ permission: "read", scope: f.repo }, { permission: "write", scope: outside }] }] }, f.ctx);
 	assert.equal(escalation.error?.code, "nested_access_denied");
 	assert.equal(launches, 0);
 	const alias = join(f.repo, "outsidealias"); await symlink(outside, alias, "dir");
 	for (const permission of ["read", "write"]) {
-		const escaped = await service.execute({ action: "create", requestId: "alias" + permission, tasks: [{ id: "alias", role: "worker", objective: "x", access: [{ permission, scope: alias }] }] }, f.ctx);
+		const escaped = await service.execute({ action: "create", tasks: [{ id: "alias", role: "worker", objective: "x", access: [{ permission, scope: alias }] }] }, f.ctx);
 		assert.equal(escaped.error?.code, "nested_access_denied", "a lexical descendant cannot delegate an external physical owner");
 	}
 	await unlink(alias);
 	const readOnly = new ContinuationService({ ...f.dependencies, enclosingCapability: async () => ({ ...enclosing, grants: [{ permission: "read", path: f.repo }] }), runChild: async () => { launches++; throw new Error("stub_child"); } });
-	const upgraded = await readOnly.execute({ action: "create", requestId: "upgrade", tasks: [{ id: "upgrade", role: "worker", objective: "x", access: [{ permission: "write", scope: f.repo }] }] }, f.ctx);
+	const upgraded = await readOnly.execute({ action: "create", tasks: [{ id: "upgrade", role: "worker", objective: "x", access: [{ permission: "write", scope: f.repo }] }] }, f.ctx);
 	assert.equal(upgraded.error?.code, "nested_access_denied");
 	assert.equal(launches, 0);
-	const contained = await service.execute({ action: "create", requestId: "nestedin", tasks: [{ id: "nested3", role: "worker", objective: "x", access: [{ permission: "write", scope: f.repo }] }] }, f.ctx);
+	const contained = await service.execute({ action: "create", tasks: [{ id: "nested3", role: "worker", objective: "x", access: [{ permission: "write", scope: f.repo }] }] }, f.ctx);
 	assert.notEqual(contained.error?.code, "nested_access_denied", JSON.stringify(contained.error));
 	assert.equal(launches, 1, "a grant inside the enclosing range remains eligible");
 	const child = contained.sessions[0]!; enclosing.grants = [];
 	const requests = [
-		{ action: "continue", episodes: [{ handle: child.handle, requestId: "later", expectedEpisode: child.episode, message: "continue" }] },
+		{ action: "continue", episodes: [{ handle: child.handle, expectedEpisode: child.episode, message: "continue" }] },
 		{ action: "refresh", handle: child.handle, expectedEpisode: child.episode },
 		{ action: "apply", handle: child.handle, expectedEpisode: child.episode, candidateId: "Candidate" },
 	];
@@ -215,15 +216,15 @@ test("default launcher admission rejects a missing CLI before allocating or acce
 	const script = process.argv[1];
 	try {
 		process.argv[1] = join(f.base, "removed-cli.js");
-		const denied = await native.execute({ action: "create", requestId: "nolauncher", tasks: [{ id: "read", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+		const denied = await native.execute({ action: "create", tasks: [{ id: "read", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
 		assert.equal(denied.error?.code, "launcher_unavailable");
 		assert.equal(denied.requestTelemetry?.launchedChildren, 0);
 		await assert.rejects(lstat(f.store.root), { code: "ENOENT" });
 		if (script === undefined) delete process.argv[1]; else process.argv[1] = script;
-		const first = await f.service.execute({ action: "create", requestId: "customlauncher", tasks: [{ id: "read", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+		const first = await f.service.execute({ action: "create", tasks: [{ id: "read", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
 		assert.equal(first.status, "succeeded", JSON.stringify(first.error));
 		process.argv[1] = join(f.base, "removed-cli.js");
-		const continued = await native.execute({ action: "continue", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, requestId: "nonextlaunch", message: "continue" }] }, f.ctx);
+		const continued = await native.execute({ action: "continue", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, message: "continue" }] }, f.ctx);
 		assert.equal(continued.error?.code, "launcher_unavailable");
 		assert.equal(continued.sessions[0]!.episode, 1);
 		assert.equal(continued.sessions[0]!.state, "idle");
@@ -240,18 +241,18 @@ test("replaced or removed external roots reject continuation before consuming an
 		const root = join(f.base, "external.txt");
 		await writeFile(root, "original");
 		const task = { id: "readroot", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }, { permission: "read", scope: root }] };
-		const first = await f.service.execute({ action: "create", requestId: `root${change}`, tasks: [task] }, f.ctx);
+		const first = await f.service.execute({ action: "create", tasks: [task] }, f.ctx);
 		assert.equal(first.status, "succeeded");
 		const handle = first.sessions[0]!.handle;
 		await rename(root, `${root}.old`);
 		if (change === "replace") await writeFile(root, "replacement");
-		const failed = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, requestId: "invalidroot", message: "continue" }] }, f.ctx);
+		const failed = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "continue" }] }, f.ctx);
 		assert.equal(failed.error?.code, "capability_invalidated");
 		assert.equal(failed.sessions[0]?.episode, 1);
 		assert.equal(failed.sessions[0]?.state, "idle");
 		assert.equal(f.launches(), 1);
 		if (change === "replace") {
-			const fresh = await f.service.execute({ action: "create", requestId: "verifiednewroot", tasks: [{ ...task, id: "readroot2" }] }, f.ctx);
+			const fresh = await f.service.execute({ action: "create", tasks: [{ ...task, id: "readroot2" }] }, f.ctx);
 			assert.equal(fresh.status, "succeeded");
 			assert.equal(f.launches(), 2);
 		}
@@ -275,24 +276,24 @@ test("explicit close releases a slot and retained-history warnings do not block 
 	await writeFile(native, "retained-required-evidence");
 	assert.equal((await f.service.execute({ ...close, handle: records[1]!.handle, disposition: "discard" }, f.ctx)).status, "succeeded");
 	assert.equal(await readFile(native, "utf8"), "retained-required-evidence");
-	const admitted = await f.service.execute({ action: "create", requestId: "historyfull", tasks: [{ id: "new", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+	const admitted = await f.service.execute({ action: "create", tasks: [{ id: "new", role: "explorer", objective: "scan", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
 	assert.equal(admitted.status, "succeeded", JSON.stringify(admitted.error ?? admitted.sessions[0]?.result?.error));
 	assert.equal(admitted.warnings, undefined);
 	assert.equal(admitted.requestTelemetry?.launchedChildren, 1);
 	assert.equal(f.launches(), 1);
 });
 
-const createWorker = (repo: string) => ({ action: "create", requestId: "createworker", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: repo }] }] });
+const createWorker = (repo: string) => ({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: repo }] }] });
 
 test("normal and replay actions avoid global inventory while close still releases owned work", async (t) => {
 	const f = await serviceFixture(t);
 	Object.defineProperty(f.store, "storageWarning", { get() { throw new Error("global scan forbidden"); } });
-	const first = await f.service.execute(createWorker(f.repo), f.ctx);
+	const first = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "createworker");
 	assert.equal(first.status, "succeeded"); assert.equal(first.warnings, undefined);
 	const handle = first.sessions[0]!.handle;
-	const replay = await new ContinuationService(f.dependencies).execute(createWorker(f.repo), f.ctx);
+	const replay = await new ContinuationService(f.dependencies).execute(createWorker(f.repo), f.ctx, undefined, undefined, "createworker");
 	assertReplay(replay, first); assert.equal(f.launches(), 1);
-	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
+	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
 	assert.equal(continued.status, "succeeded"); assert.equal(continued.warnings, undefined);
 	const applied = await f.service.execute({ action: "apply", handle, expectedEpisode: 2, candidateId: continued.sessions[0]!.candidate!.id }, f.ctx);
 	assert.equal(applied.status, "succeeded");
@@ -317,7 +318,7 @@ test("an untyped failure keeps its managed code and a bounded, path-free cause",
 	assert.equal(episode.sessions[0]!.requestError?.code, "managed_operation_failed");
 	assert.equal(episode.sessions[0]!.requestError?.detail, "ENOENT");
 	assert.equal(episode.sessions[0]!.state, "interrupted", "an untyped child failure still commits the interrupted episode");
-	const request = await new ContinuationService({ ...f.dependencies, loadConfig: async () => { throw errnoError("EACCES", "EACCES: permission denied, open '/tmp/secret/routes.json'"); } }).execute({ ...createWorker(f.repo), requestId: "createworkerconfig" }, f.ctx);
+	const request = await new ContinuationService({ ...f.dependencies, loadConfig: async () => { throw errnoError("EACCES", "EACCES: permission denied, open '/tmp/secret/routes.json'"); } }).execute(createWorker(f.repo), f.ctx);
 	assert.equal(request.status, "failed");
 	assert.equal(request.error?.code, "managed_operation_failed");
 	assert.equal(request.error?.detail, "EACCES");
@@ -328,42 +329,42 @@ test("an untyped failure keeps its managed code and a bounded, path-free cause",
 
 test("managed service keeps fixed inputs, replays inertly, restores history and explicitly refreshes before repair/review", async (t) => {
 	const f = await serviceFixture(t);
-	const first = await f.service.execute(createWorker(f.repo), f.ctx);
+	const first = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "fixedcreate");
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
 	const handle = first.sessions[0]!.handle;
 	assert.ok(first.sessions[0]!.candidate);
-	const stale = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "stale", expectedEpisode: 0, message: "host-worker-fixture" }] }, f.ctx);
+	const stale = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 0, message: "host-worker-fixture" }] }, f.ctx);
 	assert.equal(stale.status, "failed");
 	assert.equal(stale.sessions[0]!.requestError?.code, "stale_episode");
 	assert.equal(f.launches(), 1);
-	const next = { action: "continue", episodes: [{ handle, requestId: "repair", expectedEpisode: 1, message: "host-worker-fixture" }] };
-	const second = await f.service.execute(next, f.ctx);
+	const next = { action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] };
+	const second = await f.service.execute(next, f.ctx, undefined, undefined, "fixednext");
 	assert.equal(second.status, "succeeded", JSON.stringify(second));
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
 	const before = await readFile(join(f.store.path(handle), "native.jsonl"), "utf8");
-	assertReplay(await f.service.execute(next, f.ctx), second);
+	assertReplay(await f.service.execute(next, f.ctx, undefined, undefined, "fixednext"), second);
 	const beforeReplay = f.runs.length;
-	assertReplay(await f.service.execute(createWorker(f.repo), f.ctx), first);
+	assertReplay(await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "fixedcreate"), first);
 	assert.equal(f.runs.length, beforeReplay, "cached create is not a new execution wave");
 	assert.equal(f.runs[0]!.telemetry.timing?.children[0]?.taskId, first.sessions[0]!.result!.observation!.ownerSessionId);
-	assertReplay(await f.service.execute({ ...createWorker(f.repo), tasks: createWorker(f.repo).tasks.map((task) => ({ access: task.access, objective: task.objective, inputs: [], role: task.role, id: task.id })) }, f.ctx), first);
+	assertReplay(await f.service.execute({ ...createWorker(f.repo), tasks: createWorker(f.repo).tasks.map((task) => ({ access: task.access, objective: task.objective, inputs: [], role: task.role, id: task.id })) }, f.ctx, undefined, undefined, "fixedcreate"), first);
 	assert.equal(await readFile(join(f.store.path(handle), "native.jsonl"), "utf8"), before);
 	assert.equal(f.launches(), 2);
 	const apply = { action: "apply", handle, expectedEpisode: 2, candidateId: second.sessions[0]!.candidate!.id };
 	assert.equal((await f.service.execute(apply, f.ctx)).status, "succeeded");
 	assert.equal((await f.service.execute(apply, f.ctx)).status, "succeeded");
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
-	const reviewer = await f.service.execute({ action: "create", requestId: "review", tasks: [{ id: "reviewer", role: "reviewer", objective: "host-reviewer-fixture", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+	const reviewer = await f.service.execute({ action: "create", tasks: [{ id: "reviewer", role: "reviewer", objective: "host-reviewer-fixture", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
 	assert.equal(reviewer.status, "succeeded", JSON.stringify(reviewer));
 	assert.match(reviewer.sessions[0]!.result!.output, /candidate-2/);
 	const restored = new ContinuationService(f.dependencies);
 	assert.equal((await restored.execute({ action: "refresh", handle, expectedEpisode: 2 }, f.ctx)).status, "succeeded");
-	const third = await restored.execute({ action: "continue", episodes: [{ handle, requestId: "again", expectedEpisode: 2, message: "host-worker-fixture" }] }, f.ctx);
+	const third = await restored.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 2, message: "host-worker-fixture" }] }, f.ctx);
 	assert.equal(third.status, "succeeded", JSON.stringify(third));
 	assert.match(third.sessions[0]!.result!.output, /users=3/);
 	assert.equal((await restored.execute({ action: "apply", handle, expectedEpisode: 3, candidateId: third.sessions[0]!.candidate!.id }, f.ctx)).status, "succeeded");
 	assert.equal((await restored.execute({ action: "refresh", handle: reviewer.sessions[0]!.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
-	const reviewAgain = await restored.execute({ action: "continue", episodes: [{ handle: reviewer.sessions[0]!.handle, requestId: "rereview", expectedEpisode: 1, message: "host-reviewer-fixture" }] }, f.ctx);
+	const reviewAgain = await restored.execute({ action: "continue", episodes: [{ handle: reviewer.sessions[0]!.handle, expectedEpisode: 1, message: "host-reviewer-fixture" }] }, f.ctx);
 	assert.equal(reviewAgain.status, "succeeded", JSON.stringify(reviewAgain));
 	assert.match(reviewAgain.sessions[0]!.result!.output, /users=2.*candidate-3/);
 	const source = await preparedSource(f.store, handle, f.repo);
@@ -372,8 +373,8 @@ test("managed service keeps fixed inputs, replays inertly, restores history and 
 	assert.equal((await restored.execute(close, f.ctx)).status, "succeeded");
 	await assert.rejects(readFile(join(source, "candidate.txt")), { code: "ENOENT" });
 	const calls = f.launches();
-	assertReplay(await restored.execute(next, f.ctx), second);
-	assert.equal((await restored.execute({ action: "continue", episodes: [{ handle, requestId: "afterclose", expectedEpisode: 3, message: "host-worker-fixture" }] }, f.ctx)).status, "failed");
+	assertReplay(await restored.execute(next, f.ctx, undefined, undefined, "fixednext"), second);
+	assert.equal((await restored.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 3, message: "host-worker-fixture" }] }, f.ctx)).status, "failed");
 	assert.equal(f.launches(), calls);
 });
 
@@ -406,7 +407,7 @@ test("native workers prepare their own dependencies and preserve Git ownership d
 	assert.equal(await readFile(join(await preparedSource(f.store, first.handle, f.repo), "candidate.txt"), "utf8"), "local-dependency");
 	await writeFile(join(f.repo, "node_modules/pkg/index.js"), 'module.exports = "dependency-2"');
 	assert.equal((await service.execute({ action: "refresh", handle: first.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
-	const next = await service.execute({ action: "continue", episodes: [{ handle: first.handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture host-inputs-fixture" }] }, f.ctx);
+	const next = await service.execute({ action: "continue", episodes: [{ handle: first.handle, expectedEpisode: 1, message: "host-worker-fixture host-inputs-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded"); assert.ok(next.sessions[0]!.candidate);
 	assert.equal(await readFile(join(await preparedSource(f.store, first.handle, f.repo), "candidate.txt"), "utf8"), "local-dependency");
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
@@ -467,14 +468,14 @@ test("forced managed stop terminates an ordinary native search subprocess beyond
 
 test("completed create and continue replay without execution configuration; new episodes still require routes", async (t) => {
 	const f = await serviceFixture(t);
-	const first = await f.service.execute(createWorker(f.repo), f.ctx);
-	const request = { action: "continue", episodes: [{ handle: first.sessions[0]!.handle, requestId: "repair", expectedEpisode: 1, message: "host-worker-fixture" }] };
-	const second = await f.service.execute(request, f.ctx);
+	const first = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "routecreate");
+	const request = { action: "continue", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, message: "host-worker-fixture" }] };
+	const second = await f.service.execute(request, f.ctx, undefined, undefined, "routencontinue");
 	assert.equal(second.status, "succeeded");
 	const unavailable = new ContinuationService({ ...f.dependencies, loadConfig: async () => ({ diagnostic: { code: "invalid_route_config", message: "fixture" } }) });
-	assertReplay(await unavailable.execute(createWorker(f.repo), f.ctx), first);
-	assertReplay(await unavailable.execute(request, f.ctx), second);
-	const fresh = await unavailable.execute({ action: "continue", episodes: [{ ...request.episodes[0], requestId: "new", expectedEpisode: 2 }] }, f.ctx);
+	assertReplay(await unavailable.execute(createWorker(f.repo), f.ctx, undefined, undefined, "routecreate"), first);
+	assertReplay(await unavailable.execute(request, f.ctx, undefined, undefined, "routencontinue"), second);
+	const fresh = await unavailable.execute({ action: "continue", episodes: [{ ...request.episodes[0], expectedEpisode: 2 }] }, f.ctx);
 	assert.equal(fresh.error?.code, "invalid_route_config");
 	assert.equal(f.launches(), 2);
 });
@@ -490,15 +491,15 @@ test("create replay preserves partial and dependency-blocked terminal responses 
 	for (const dependent of [false, true]) {
 		const fail = dependent ? "blockedfail" : "fail";
 		const other = dependent ? "blockedother" : "other";
-		const request = { action: "create", requestId: dependent ? "blocked" : "partial", tasks: [
+		const request = { action: "create", tasks: [
 			{ id: fail, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] },
 			{ id: other, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }], ...(dependent ? { dependsOn: [fail] } : {}) },
 		] };
-		const response = await service.execute(request, f.ctx);
+		const response = await service.execute(request, f.ctx, undefined, undefined, `terminalreplay-${dependent}`);
 		assert.equal(response.status, dependent ? "failed" : "partial", JSON.stringify(response));
 		if (dependent) assert.equal(response.sessions[1]!.requestError?.code, "dependency_failed");
 		const before = calls;
-		assertReplay(await service.execute(request, f.ctx), response);
+		assertReplay(await service.execute(request, f.ctx, undefined, undefined, `terminalreplay-${dependent}`), response);
 		assert.equal(calls, before);
 	}
 });
@@ -506,7 +507,7 @@ test("create replay preserves partial and dependency-blocked terminal responses 
 test("known spawn non-start is not presented as a completed zero-duration execution", async (t) => {
  const f = await serviceFixture(t);
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => ({ id: options.task.id, role: "explorer", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable", telemetry: { ...emptyTaskTelemetry(), childStarted: false }, error: { code: "spawn_failure", message: "not started" } }) });
- const response = await service.execute({ action: "create", requestId: "nostart", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+ const response = await service.execute({ action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
  assert.equal(response.sessions[0]?.result?.executionStatus, "not-started");
  assert.equal(JSON.parse(formatManagedContent(response)).sessions[0].result.durationMs, null);
 });
@@ -519,7 +520,7 @@ test("non-start remains non-start through a result-save failure", async (t) => {
   returned = true; return { id: options.task.id, role: "explorer", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 0,
    changedPaths: [], convergence: "not-applicable", telemetry: { ...emptyTaskTelemetry(), childStarted: false }, error: { code: "spawn_failure", message: "not started" } };
  } });
- const result = await service.execute({ action: "create", requestId: "nostartsave", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+ const result = await service.execute({ action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
  assert.equal(result.sessions[0]?.result?.executionStatus, "not-started");
  assert.equal(result.sessions[0]?.result?.finalization?.stage, "result-save");
  assert.equal(JSON.parse(formatManagedContent(result)).sessions[0].result.durationMs, null);
@@ -533,8 +534,8 @@ test("post-child native validation failure retains execution evidence and cannot
  let calls = 0;
  const child = f.dependencies.runChild;
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return { ...result, output: "executed before validation", usage: { ...result.usage, input: 41 }, durationMs: 19, status: "succeeded" }; } });
- const request = { action: "create", requestId: "nativefault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
- const failed = await service.execute(request, f.ctx);
+ const request = { action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
+ const failed = await service.execute(request, f.ctx, undefined, undefined, "nativefault");
  assert.equal(failed.status, "failed");
  const view = failed.sessions[0]!;
  assert.equal(view.result?.output, "executed before validation");
@@ -542,7 +543,7 @@ test("post-child native validation failure retains execution evidence and cannot
  assert.equal(view.result?.executionStatus, "succeeded");
  assert.deepEqual(view.result?.finalization, { status: "failed", stage: "native-validation", code: "managed_operation_failed", reason: "unclassified" });
  assert.equal(view.candidate, undefined);
- const replay = await service.execute(request, f.ctx); assert.equal(replay.status, "failed"); assert.equal(calls, 1);
+ const replay = await service.execute(request, f.ctx, undefined, undefined, "nativefault"); assert.equal(replay.status, "failed"); assert.equal(calls, 1);
  assert.notEqual((await service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: "missing" }, f.ctx)).status, "succeeded");
 });
 
@@ -554,13 +555,13 @@ test("candidate freeze failure preserves child facts and never exposes an applic
   await rm(join(options.cwd, ".git"), { recursive: true, force: true });
   return { ...result, status: "succeeded", reportComplete: true, workerToolsSettled: true, output: "worker executed", usage: { ...result.usage, input: 37 }, durationMs: 29 };
  } });
- const failed = await service.execute(createWorker(f.repo), f.ctx);
+ const failed = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "renamesave");
  assert.equal(failed.status, "failed");
  const view = failed.sessions[0]!;
  assert.equal(view.result?.output, "worker executed"); assert.equal(view.result?.usage.input, 37);
  assert.equal(view.result?.executionStatus, "succeeded"); assert.equal(view.result?.finalization?.stage, "candidate-freeze");
  assert.equal(view.candidate, undefined);
- assert.equal((await service.execute(createWorker(f.repo), f.ctx)).status, "failed"); assert.equal(calls, 1);
+ assert.equal((await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "renamesave")).status, "failed"); assert.equal(calls, 1);
 });
 
 test("repeated post-freeze save failures cannot expose a worker candidate", async (t) => {
@@ -569,14 +570,14 @@ test("repeated post-freeze save failures cannot expose a worker candidate", asyn
  f.store.save = async record => { if (childDone) { candidateId ??= record.candidate?.id; throw new Error("persistent disk failure"); } return save(record); };
  const child = f.dependencies.runChild;
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return result; } });
- const response = await service.execute(createWorker(f.repo), f.ctx);
+ const response = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "resultsave");
  assert.equal(response.status, "failed"); assert.equal(response.error?.code, "result_persistence_failed");
  const view = response.sessions[0]!;
  assert.ok(candidateId); assert.equal(view.candidate, undefined);
  assert.equal(view.result?.executionStatus, "succeeded"); assert.equal(view.result?.finalization?.stage, "result-save");
  const apply = await service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId }, f.ctx);
  assert.notEqual(apply.status, "succeeded"); assert.equal(calls, 1);
- assert.notEqual((await service.execute(createWorker(f.repo), f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "resultsave")).status, "succeeded"); assert.equal(calls, 1);
 });
 
 test("post-rename save error leaves a durable fence against the actual worker candidate", async (t) => {
@@ -591,7 +592,7 @@ test("post-rename save error leaves a durable fence against the actual worker ca
  };
  const child = f.dependencies.runChild;
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return result; } });
- const result = await service.execute(createWorker(f.repo), f.ctx);
+ const result = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "freezefailure");
  assert.equal(result.status, "failed"); assert.equal(result.error?.code, "result_persistence_failed"); assert.ok(candidateId);
  assert.equal(result.sessions[0]?.result?.executionStatus, "succeeded"); assert.equal(result.sessions[0]?.candidate, undefined);
  f.store.save = save;
@@ -600,7 +601,7 @@ test("post-rename save error leaves a durable fence against the actual worker ca
  assert.equal(inspected.sessions[0]?.candidate, undefined); assert.equal(inspected.sessions[0]?.result?.status, "failed");
  const apply = await service.execute({ action: "apply", handle, expectedEpisode: 1, candidateId }, f.ctx);
  assert.notEqual(apply.status, "succeeded");
- assert.notEqual((await service.execute(createWorker(f.repo), f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "freezefailure")).status, "succeeded"); assert.equal(calls, 1);
  assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "retain" }, f.ctx)).status, "succeeded");
  assert.equal((await service.execute({ action: "inspect", handle }, f.ctx)).sessions[0]?.state, "closed");
  assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "discard" }, f.ctx)).status, "succeeded");
@@ -613,12 +614,12 @@ test("required result-save failure retains child facts and replays failed withou
  f.store.save = async record => { if (!injected && record.result?.status === "succeeded") { injected = true; throw new Error("write failed"); } return save(record); };
  const child = f.dependencies.runChild;
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); return { ...result, status: "succeeded", output: "retained child", usage: { ...result.usage, input: 23 }, durationMs: 17 }; } });
- const request = { action: "create", requestId: "savefault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
- const first = await service.execute(request, f.ctx);
+ const request = { action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
+ const first = await service.execute(request, f.ctx, undefined, undefined, "requiredsave");
  assert.equal(first.status, "failed"); assert.equal(first.sessions[0]?.result?.output, "retained child");
  assert.equal(first.sessions[0]?.result?.usage.input, 23); assert.equal(first.sessions[0]?.result?.durationMs, 17);
  assert.equal(first.sessions[0]?.result?.finalization?.stage, "result-save");
- assert.equal((await service.execute(request, f.ctx)).status, "failed"); assert.equal(calls, 1);
+ assert.equal((await service.execute(request, f.ctx, undefined, undefined, "requiredsave")).status, "failed"); assert.equal(calls, 1);
 });
 
 test("repeated required save failures keep volatile child evidence but fence replay and apply", async (t) => {
@@ -627,12 +628,12 @@ test("repeated required save failures keep volatile child evidence but fence rep
  f.store.save = async record => { if (childDone) throw new Error("persistent disk failure"); return save(record); };
  const child = f.dependencies.runChild;
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { calls++; const result = await child(options); childDone = true; return { ...result, status: "succeeded", output: "retained despite storage", usage: { ...result.usage, input: 83 }, durationMs: 21 }; } });
- const request = { action: "create", requestId: "persistentfault", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
- const first = await service.execute(request, f.ctx);
+ const request = { action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
+ const first = await service.execute(request, f.ctx, undefined, undefined, "repeatsave");
  assert.equal(first.status, "failed"); assert.equal(first.error?.code, "result_persistence_failed");
  assert.equal(first.sessions[0]?.result?.output, "retained despite storage"); assert.equal(first.sessions[0]?.result?.usage.input, 83);
  assert.equal(first.sessions[0]?.result?.finalization?.stage, "result-save");
- assert.notEqual((await service.execute(request, f.ctx)).status, "succeeded"); assert.equal(calls, 1);
+ assert.notEqual((await service.execute(request, f.ctx, undefined, undefined, "repeatsave")).status, "succeeded"); assert.equal(calls, 1);
  assert.notEqual((await service.execute({ action: "apply", handle: first.sessions[0]!.handle, expectedEpisode: 1, candidateId: "missing" }, f.ctx)).status, "succeeded");
 });
 
@@ -643,14 +644,14 @@ test("optional observation persistence failure leaves the required candidate and
 		if (/observation_\d+\.json$/.test(file)) throw new Error("optional storage unavailable");
 		return write(file, value);
 	};
-	const initial = await f.service.execute(createWorker(f.repo), f.ctx);
+	const initial = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "observationsave");
 	assert.equal(initial.status, "succeeded");
 	const view = initial.sessions[0]!;
 	assert.ok(view.candidate);
 	assert.equal(view.result?.observation?.available, false);
 	assert.equal(view.result?.observation?.usage.cost, null);
 	assert.doesNotMatch(await readFile(join(f.store.path(view.handle), "registry.json"), "utf8"), /"observation":/);
-	assertReplay(await new ContinuationService(f.dependencies).execute(createWorker(f.repo), f.ctx), initial);
+	assertReplay(await new ContinuationService(f.dependencies).execute(createWorker(f.repo), f.ctx, undefined, undefined, "observationsave"), initial);
 	assert.equal(f.launches(), 1);
 	const applied = await f.service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id }, f.ctx);
 	assert.equal(applied.status, "succeeded");
@@ -680,7 +681,7 @@ for (const installed of [false, true]) test(`managed ${installed ? "installed" :
 	assert.equal(await readFile(join(await preparedSource(f.store, handle, f.repo), "candidate.txt"), "utf8"), "candidate-1");
 	const source = await preparedSource(f.store, handle, f.repo);
 	const rootIdentity = await lstat(source); const dependencyIdentity = await lstat(join(source, "node_modules/fixture-state"));
-	const next = await service.execute({ action: "continue", episodes: [{ handle, requestId: "aftercompaction", expectedEpisode: 1, message: "host-worker-fixture after-child-compaction-fixture" }] }, f.ctx);
+	const next = await service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture after-child-compaction-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded", JSON.stringify(next));
 	assert.equal(await readFile(join(source, "candidate.txt"), "utf8"), "candidate-1|continued");
 	const later = next.sessions[0]!.result!.observation!;
@@ -701,7 +702,7 @@ test("cold running state, revoked trust and a changed native leaf never replay o
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	const record = await f.store.load(handle, owner);
 	const native = join(f.store.path(handle), "native.jsonl");
-	const request = { action: "continue", episodes: [{ handle, requestId: "next", expectedEpisode: 1, message: "host-worker-fixture" }] };
+	const request = { action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] };
 	const restored = new ContinuationService(f.dependencies);
 	record.state = "running"; await f.store.save(record);
 	const before = await readFile(native, "utf8");
@@ -712,7 +713,7 @@ test("cold running state, revoked trust and a changed native leaf never replay o
 	record.state = "idle"; await f.store.save(record);
 	const changed = `${before}${JSON.stringify({ type: "custom", id: "extra", parentId: record.nativeLeaf, customType: "fixture", data: {} })}\n`;
 	await writeFile(native, changed);
-	const mismatched = await restored.execute({ ...request, episodes: request.episodes.map(episode => ({ ...episode, requestId: "changednative" })) }, f.ctx);
+	const mismatched = await restored.execute(request, f.ctx);
 	assert.equal(mismatched.sessions[0]!.requestError?.code, "native_leaf_mismatch");
 	assert.equal(await readFile(native, "utf8"), changed);
 	assert.equal(f.launches(), 1);
@@ -723,11 +724,11 @@ test("create cancellation with queued tasks has an exact inert terminal replay",
 	const service = new ContinuationService({ ...f.dependencies, loadConfig: async () => ({ config: { ...defaultConfig(), maxConcurrency: 1 } }) });
 	const controller = new AbortController(); f.cancelOnBash(controller);
 	const request = { ...createWorker(f.repo), tasks: [{ ...createWorker(f.repo).tasks[0], objective: "host-worker-fixture cancel-fixture" }, { id: "queued", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: f.repo }] }] };
-	const response = await service.execute(request, f.ctx, controller.signal);
+	const response = await service.execute(request, f.ctx, controller.signal, undefined, "cancelreplay");
 	assert.equal(response.status, "aborted", JSON.stringify(response));
 	assert.equal(response.sessions[1]!.requestError?.code, "aborted");
 	assert.equal(f.launches(), 1);
-	const replay = await service.execute(request, f.ctx);
+	const replay = await service.execute(request, f.ctx, undefined, undefined, "cancelreplay");
 	assertReplay(replay, response);
 	assert.equal(replay.requestTelemetry?.replayedEpisodes, 1, "queued task never had an episode");
 	assert.equal(f.launches(), 1);
@@ -743,7 +744,7 @@ test("episode provenance and actual route survive config changes and fresh repla
 			observeConfiguration: async () => ({ available: true, extensionEpoch: "extension", configurationEpoch: epoch }),
 		},
 	});
-	const first = await service.execute(createWorker(f.repo), f.ctx);
+	const first = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "provenance");
 	assert.equal(first.status, "succeeded");
 	assert.equal(first.requestTelemetry?.configurationEpoch, "config-one");
 	assert.equal(first.requestTelemetry?.launchedChildren, 1);
@@ -751,16 +752,16 @@ test("episode provenance and actual route survive config changes and fresh repla
 	assert.equal(first.sessions[0]?.execution?.inheritSkills, true);
 	assert.ok(first.sessions[0]?.route?.model);
 	epoch = "config-two"; inheritSkills = false;
-	const replay = await service.execute(createWorker(f.repo), f.ctx);
+	const replay = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "provenance");
 	assertReplay(replay, first);
 	assert.equal(reads, 1);
 	const handle = first.sessions[0]!.handle;
-	const next = await service.execute({ action: "continue", episodes: [{ handle, requestId: "newepoch", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
+	const next = await service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded");
 	assert.equal(next.requestTelemetry?.configurationEpoch, "config-two");
 	assert.deepEqual(next.sessions[0]?.execution?.provenance, { available: true, extensionEpoch: "extension", configurationEpoch: "config-two" });
 	assert.equal(next.sessions[0]?.execution?.inheritSkills, false);
-	const historical = await service.execute(createWorker(f.repo), f.ctx);
+	const historical = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "provenance");
 	assertReplay(historical, first);
 	assert.equal(reads, 2);
 });
@@ -770,7 +771,7 @@ test("one origin independently owns sibling worker targets, inputs, apply, refre
  await writeFile(join(f.repo, "origin-only.txt"), "parent");
  for (const target of targets) { await mkdir(target); await promisify(execFile)("git", ["init", "-q", target]); await writeFile(join(target, "dirty.txt"), target); }
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => { roots.push(options.sourceRoot!); return f.dependencies.runChild(options); } });
- const created = await service.execute({ action: "create", requestId: "siblings", tasks: targets.map((repository, i) => ({ id: `worker${i}`, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: repository }] })) }, f.ctx);
+ const created = await service.execute({ action: "create", tasks: targets.map((repository, i) => ({ id: `worker${i}`, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: repository }] })) }, f.ctx);
  assert.equal(created.status, "succeeded", JSON.stringify(created)); assert.deepEqual(new Set(roots), new Set(targets));
  const records = await Promise.all(created.sessions.map(view => f.store.load(view.handle, { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] })));
  assert.notEqual(records[0]!.roots[0]!.input!.commit, records[1]!.roots[0]!.input!.commit);
@@ -793,7 +794,7 @@ test("one origin independently owns sibling worker targets, inputs, apply, refre
  assert.equal(await readFile(join(refreshed.roots[0]!.inputs!.gitWorkspace!.path, "later.txt"), "utf8"), "new target input");
  const other = await f.store.load(second.handle, { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] });
  await assert.rejects(readFile(join(other.roots[0]!.inputs!.gitWorkspace!.path, "later.txt")), { code: "ENOENT" });
- assert.equal((await service.execute({ action: "continue", episodes: [{ handle: first.handle, requestId: "again", expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx)).status, "succeeded");
+ assert.equal((await service.execute({ action: "continue", episodes: [{ handle: first.handle, expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx)).status, "succeeded");
  for (const [i, view] of created.sessions.entries()) {
   assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: i === 0 ? 2 : 1, disposition: "discard" }, f.ctx)).status, "succeeded");
   assert.equal((await promisify(execFile)("git", ["-C", targets[i]!, "for-each-ref", "refs/csheng/subagents/"])).stdout, "");
@@ -815,7 +816,7 @@ test("a target containing the origin repository discovers target skills instead 
   return f.dependencies.runChild(options);
  } });
  const ctx = { ...f.ctx, cwd: origin };
- const result = await service.execute({ action: "create", requestId: "nestedguidance", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: target }] }] }, ctx);
+ const result = await service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: target }] }] }, ctx);
  assert.equal(result.status, "succeeded", JSON.stringify(result)); assert.equal(catalogCalls, 0); assert.equal(checked, true);
  assert.equal((await service.execute({ action: "close", handle: result.sessions[0]!.handle, expectedEpisode: 1, disposition: "discard" }, ctx)).status, "succeeded");
 });
@@ -823,13 +824,13 @@ test("a target containing the origin repository discovers target skills instead 
 test("retargeted repository alias cannot redirect an accepted worker or delete another target", async t => {
  const f = await serviceFixture(t); const other = join(f.base, "other"); await mkdir(other); await promisify(execFile)("git", ["init", "-q", other]);
  const alias = join(f.base, "alias"); await symlink(f.repo, alias);
- const first = await f.service.execute({ action: "create", requestId: "pinned", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: alias }] }] }, f.ctx);
+ const first = await f.service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: alias }] }] }, f.ctx);
  assert.equal(first.status, "succeeded", JSON.stringify(first)); const view = first.sessions[0]!; const launches = f.launches();
  await unlink(alias); await symlink(other, alias);
  for (const request of [
   { action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id },
   { action: "refresh", handle: view.handle, expectedEpisode: 1 },
-  { action: "continue", episodes: [{ handle: view.handle, requestId: "wrongtarget", expectedEpisode: 1, message: "host-worker-fixture" }] },
+  { action: "continue", episodes: [{ handle: view.handle, expectedEpisode: 1, message: "host-worker-fixture" }] },
   { action: "close", handle: view.handle, expectedEpisode: 1, disposition: "discard" },
  ] as const) { const result = await f.service.execute(request, f.ctx); assert.equal(result.status, "failed", JSON.stringify(result)); assert.equal(result.error?.code, "task_repository_changed"); }
  assert.equal(f.launches(), launches); await assert.rejects(readFile(join(other, "candidate.txt")), { code: "ENOENT" });
@@ -844,7 +845,7 @@ test("native explorer create/continue reads an explicit external Git file withou
 	await promisify(execFile)("git", ["init", "-q", sibling]);
 	const external = join(sibling, "external.txt");
 	await writeFile(external, "external-bytes");
-	const first = await f.service.execute({ action: "create", requestId: "explore", tasks: [{ id: "explorer", role: "explorer", objective: "host-explorer-fixture", access: [{ permission: "read", scope: [f.repo, external] }] }] }, f.ctx);
+	const first = await f.service.execute({ action: "create", tasks: [{ id: "explorer", role: "explorer", objective: "host-explorer-fixture", access: [{ permission: "read", scope: [f.repo, external] }] }] }, f.ctx);
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
 	assert.equal(first.sessions[0]!.result!.observation?.available, true);
 	assert.match(first.sessions[0]!.result!.output, /external-bytes/);
@@ -854,7 +855,7 @@ test("native explorer create/continue reads an explicit external Git file withou
 	const handle = first.sessions[0]!.handle;
 	const native = join(f.store.path(handle), "native.jsonl");
 	assert.equal((await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message?.role === "user").length, 1);
-	const next = await f.service.execute({ action: "continue", episodes: [{ handle, requestId: "exploreagain", expectedEpisode: 1, message: "host-explorer-fixture" }] }, f.ctx);
+	const next = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-explorer-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded", JSON.stringify(next));
 	assert.match(next.sessions[0]!.result!.output, /users=2/);
 	assert.match(next.sessions[0]!.result!.output, /external-bytes/);
@@ -864,7 +865,7 @@ test("native explorer create/continue reads an explicit external Git file withou
 
 test("same-create report-only DAG hides unapplied worker candidates from a dependent reviewer", async (t) => {
 	const f = await serviceFixture(t);
-	const created = await f.service.execute({ action: "create", requestId: "reportonly", tasks: [
+	const created = await f.service.execute({ action: "create", tasks: [
 		{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: f.repo }] },
 		{ id: "reviewer", role: "reviewer", objective: "host-reviewer-fixture", access: [{ permission: "read", scope: f.repo }], dependsOn: ["worker"] },
 	] }, f.ctx);
@@ -881,7 +882,7 @@ test("same-create report-only DAG hides unapplied worker candidates from a depen
 	const apply = await f.service.execute({ action: "apply", handle: worker.handle, expectedEpisode: 1, candidateId: worker.candidate!.id }, f.ctx);
 	assert.equal(apply.status, "succeeded");
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-1");
-	const later = await f.service.execute({ action: "create", requestId: "reviewafterapply", tasks: [{ id: "reviewer2", role: "reviewer", objective: "host-reviewer-fixture", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
+	const later = await f.service.execute({ action: "create", tasks: [{ id: "reviewer2", role: "reviewer", objective: "host-reviewer-fixture", access: [{ permission: "read", scope: f.repo }] }] }, f.ctx);
 	assert.equal(later.status, "succeeded", JSON.stringify(later));
 	assert.notEqual(later.sessions[0]!.handle, review.handle);
 	assert.match(later.sessions[0]!.result!.output, /candidate-1/);
@@ -894,7 +895,7 @@ test("same-repository partial write and read grants bind the prepared read and i
 	await promisify(execFile)("git", ["-C", f.repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]);
 	let captured: Parameters<typeof runChild>[0] | undefined;
 	const service = new ContinuationService({ ...f.dependencies, runChild: async options => { captured = options; return f.dependencies.runChild(options); } });
-	const created = await service.execute({ action: "create", requestId: "partialrw", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: join(f.repo, "candidate.txt") }, { permission: "read", scope: join(f.repo, "z.ts") }] }] }, f.ctx);
+	const created = await service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: join(f.repo, "candidate.txt") }, { permission: "read", scope: join(f.repo, "z.ts") }] }] }, f.ctx);
 	assert.equal(created.status, "succeeded", JSON.stringify(created.error ?? created.sessions[0]?.result?.error ?? created));
 	assert.ok(captured);
 	const grants = captured.capability.grants;
@@ -945,7 +946,7 @@ test("a same-repository auxiliary read root reuses the prepared mapping and one 
 		.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo, scope: "project" as const } }));
 	let captured: Parameters<typeof runChild>[0] | undefined;
 	const service = new ContinuationService({ ...f.dependencies, getParentSkills: () => parentSkills, runChild: async options => { captured = options; return f.dependencies.runChild(options); } });
-	const created = await service.execute({ action: "create", requestId: "auxread", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: join(f.repo, "candidate.txt") }, { permission: "read", scope: join(f.repo, "z.ts") }] }] }, f.ctx);
+	const created = await service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: join(f.repo, "candidate.txt") }, { permission: "read", scope: join(f.repo, "z.ts") }] }] }, f.ctx);
 	assert.equal(created.status, "succeeded", JSON.stringify(created.error ?? created.sessions[0]?.result?.error ?? created));
 	assert.ok(captured);
 	const prepared = captured.cwd;
@@ -979,11 +980,262 @@ test("a two-root native worker keeps the captured primary catalog and discovers 
 		.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo, scope: "project" as const } }));
 	let captured: Parameters<typeof runChild>[0] | undefined;
 	const service = new ContinuationService({ ...f.dependencies, getParentSkills: () => parentSkills, runChild: async options => { captured = options; return f.dependencies.runChild(options); } });
-	const result = await service.execute({ action: "create", requestId: "tworootcatalog", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: [f.repo, other] }] }] }, f.ctx);
+	const result = await service.execute({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: [f.repo, other] }] }] }, f.ctx);
 	assert.equal(result.status, "succeeded", JSON.stringify(result.error ?? result.sessions[0]?.result?.error ?? result));
 	assert.ok(captured);
 	const skillPaths = captured.preparedGuidance?.skillPaths ?? [];
 	assert.ok(skillPaths.some(path => path.includes("primary-guide")), `captured primary catalog missing: ${JSON.stringify(skillPaths)}`);
 	assert.ok(skillPaths.some(path => path.includes("secondary-guide")), `secondary catalog missing: ${JSON.stringify(skillPaths)}`);
 	assert.ok(skillPaths.every(path => !path.includes("origin-decoy")), `origin catalog leaked: ${JSON.stringify(skillPaths)}`);
+});
+
+async function ownedRefs(repo: string, prefix: string): Promise<string[]> {
+	const { stdout } = await promisify(execFile)("git", ["-C", repo, "for-each-ref", "--format=%(refname)", prefix]);
+	return stdout.split("\n").filter(Boolean);
+}
+async function attachedWorktrees(repo: string): Promise<string[]> {
+	const { stdout } = await promisify(execFile)("git", ["-C", repo, "worktree", "list", "--porcelain"]);
+	return stdout.split("\n").filter((line) => line.startsWith("worktree "));
+}
+
+test("a rejected admission on the reserve path leaves no handle, and the corrected retry is admitted once", async (t) => {
+	const f = await serviceFixture(t);
+	let sessions = 0;
+	const store = Object.create(f.store) as typeof f.store;
+	const original = f.store.withSession.bind(f.store);
+	// The first record prepares its writable input; rejecting the second record fails the whole admission.
+	(store as any).withSession = async (...args: Parameters<typeof original>) => {
+		sessions += 1;
+		if (sessions === 2) throw new ManagedError("fixture_prepare_failure");
+		return original(...args);
+	};
+	const service = new ContinuationService({ ...f.dependencies, store });
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const request = { action: "create", mode: "foreground" as const, tasks: [
+		{ id: "write-first", role: "worker" as const, objective: "host-worker-fixture", access: [{ permission: "write" as const, scope: f.repo }] },
+		{ id: "scan-second", role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: f.repo }] },
+	] };
+	const rejected = await service.execute(request, f.ctx, undefined, undefined, "call-rejected");
+	assert.equal(rejected.status, "failed");
+	assert.equal(rejected.error?.code, "fixture_prepare_failure");
+	assert.deepEqual(await store.list(owner), [], "a rejected admission reserves no persistent handle");
+	assert.equal(f.launches(), 0);
+	assert.deepEqual(await ownedRefs(f.repo, "refs/csheng/subagents"), [], "an unlaunched first record releases its prepared input ref");
+	assert.equal((await attachedWorktrees(f.repo)).length, 1, "an unlaunched admission creates no worktree");
+
+	// A corrected retry (a new host call) admits normally and launches one child per task.
+	const corrected = await service.execute(request, f.ctx, undefined, undefined, "call-corrected");
+	assert.equal(corrected.status, "succeeded", JSON.stringify(corrected.error ?? corrected.sessions.map(session => session.result?.error)));
+	assert.equal(corrected.sessions.length, 2);
+	assert.equal(f.launches(), 2);
+	// Re-delivering the accepted call replays instead of launching again.
+	const replay = await service.execute(request, f.ctx, undefined, undefined, "call-corrected");
+	assertReplay(replay, corrected);
+	assert.equal(f.launches(), 2);
+});
+
+test("a post-allocation admission failure releases the untouched reservation for the same call identity", async (t) => {
+	const f = await serviceFixture(t);
+	const external = join(f.base, "external.txt");
+	await writeFile(external, "original");
+	const store = Object.create(f.store) as typeof f.store;
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const originalAllocate = f.store.allocate.bind(f.store);
+	let revoked = false;
+	// Revoke a read capability after the batch reservation exists but before preparation starts.
+	(store as any).allocate = async (...args: Parameters<typeof originalAllocate>) => {
+		const allocation = await originalAllocate(...args);
+		if (!revoked) { revoked = true; await rename(external, `${external}.revoked`); }
+		return allocation;
+	};
+	const service = new ContinuationService({ ...f.dependencies, store });
+	const request = { action: "create", mode: "foreground" as const, tasks: [
+		{ id: "write-first", role: "worker" as const, objective: "host-worker-fixture", access: [{ permission: "write" as const, scope: f.repo }] },
+		{ id: "scan-second", role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: f.repo }, { permission: "read" as const, scope: external }] },
+	] };
+	const rejected = await service.execute(request, f.ctx, undefined, undefined, "call-stale-capability");
+	assert.equal(rejected.status, "failed");
+	assert.equal(rejected.error?.code, "capability_invalidated");
+	assert.deepEqual(await store.list(owner), [], "a pre-submit admission failure releases its untouched reservation");
+	assert.equal(f.launches(), 0);
+	assert.deepEqual(await ownedRefs(f.repo, "refs/csheng/subagents"), []);
+
+	// The same host call identity admits the same request once the capability is restored, instead of
+	// reporting an unknown outcome forever.
+	await rename(`${external}.revoked`, external);
+	const corrected = await service.execute(request, f.ctx, undefined, undefined, "call-stale-capability");
+	assert.equal(corrected.status, "succeeded", JSON.stringify(corrected.error ?? corrected.sessions.map(session => session.result?.error)));
+	assert.equal(f.launches(), 2);
+});
+
+test("a rejected continue preparation restores the earlier records instead of consuming their episodes", async (t) => {
+	const f = await serviceFixture(t);
+	let failAt: number | null = null;
+	let sessions = 0;
+	const store = Object.create(f.store) as typeof f.store;
+	const original = f.store.withSession.bind(f.store);
+	(store as any).withSession = async (...args: Parameters<typeof original>) => {
+		sessions += 1;
+		if (failAt !== null && sessions === failAt) throw new ManagedError("fixture_second_prepare_failure");
+		return original(...args);
+	};
+	const service = new ContinuationService({ ...f.dependencies, store });
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const tasks = [
+		{ id: "write-first", role: "worker" as const, objective: "host-worker-fixture", access: [{ permission: "write" as const, scope: f.repo }] },
+		{ id: "scan-second", role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: f.repo }] },
+	];
+	const created = await service.execute({ action: "create", mode: "foreground" as const, tasks }, f.ctx, undefined, undefined, "call-created");
+	assert.equal(created.status, "succeeded", JSON.stringify(created.error ?? created.sessions.map(session => session.result?.error)));
+	const handles = created.sessions.map(session => session.handle);
+	const prior = await Promise.all(handles.map(handle => f.store.load(handle, owner)));
+	assert.equal(f.launches(), 2);
+
+	// The first continuation prepares its next episode; rejecting the second one fails the whole request.
+	sessions = 0; failAt = 2;
+	const episodes = handles.map(handle => ({ handle, expectedEpisode: 1, message: "continue" }));
+	const rejected = await service.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, "call-continued");
+	assert.equal(rejected.status, "failed");
+	assert.equal(rejected.error?.code, "fixture_second_prepare_failure");
+	assert.equal(f.launches(), 2, "a rejected preparation launches nothing");
+	for (const [index, handle] of handles.entries()) {
+		const restored = await f.store.load(handle, owner);
+		assert.equal(restored.state, "idle");
+		assert.equal(restored.episode, prior[index]!.episode, "a rejected admission consumes no episode");
+		assert.equal(restored.requests.length, prior[index]!.requests.length, "no running request stays behind");
+		assert.ok(restored.requests.every(request => request.state !== "running"));
+		assert.equal(restored.dispatch?.runId, prior[index]!.dispatch?.runId);
+		assert.equal(restored.result?.status, prior[index]!.result?.status, "the earlier episode outcome stays inspectable");
+	}
+
+	// The same records remain actionable: a later continuation runs once per record and replays inertly.
+	const accepted = await service.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, "call-retried");
+	assert.equal(accepted.status, "succeeded", JSON.stringify(accepted.error ?? accepted.sessions.map(session => session.result?.error)));
+	assert.equal(f.launches(), 4);
+	const replay = await service.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, "call-retried");
+	assertReplay(replay, accepted);
+	assert.equal(f.launches(), 4);
+});
+
+test("a sibling preparation failure preserves the state a same-episode apply or refresh accepted under the lock", async (t) => {
+	for (const operation of ["apply", "refresh"] as const) {
+		const f = await serviceFixture(t);
+		const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+		const tasks = [
+			{ id: "write-first", role: "worker" as const, objective: "host-worker-fixture", access: [{ permission: "write" as const, scope: f.repo }] },
+			{ id: "scan-second", role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: f.repo }] },
+		];
+		const created = await f.service.execute({ action: "create", mode: "foreground" as const, tasks }, f.ctx, undefined, undefined, `call-created-${operation}`);
+		assert.equal(created.status, "succeeded", JSON.stringify(created.error ?? created.sessions.map(session => session.result?.error)));
+		const worker = created.sessions.find(session => session.label === "write-first")!;
+		assert.ok(worker.candidate);
+		const handles = created.sessions.map(session => session.handle);
+		assert.equal(f.launches(), 2);
+
+		let releaseEntered!: () => void; const entered = new Promise<void>(resolve => { releaseEntered = resolve; });
+		let releaseProceed!: () => void; const proceed = new Promise<void>(resolve => { releaseProceed = resolve; });
+		let resumed = false; t.after(() => { if (!resumed) releaseProceed(); });
+		let sessions = 0;
+		const store = Object.create(f.store) as typeof f.store;
+		const original = f.store.withSession.bind(f.store);
+		// Pause the admission before its first record lock, then reject its second record.
+		(store as any).withSession = async (...args: Parameters<typeof original>) => {
+			sessions += 1;
+			if (sessions === 1) { releaseEntered(); await proceed; }
+			if (sessions === 2) throw new ManagedError("fixture_second_prepare_failure");
+			return original(...args);
+		};
+		const admission = new ContinuationService({ ...f.dependencies, store });
+		const episodes = handles.map(handle => ({ handle, expectedEpisode: 1, message: "continue" }));
+		const continuation = admission.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, `call-continued-${operation}`);
+		await entered;
+		// A foreign same-episode operation completes between the outer load and this admission's lock.
+		if (operation === "apply") {
+			const applied = await f.service.execute({ action: "apply", handle: worker.handle, expectedEpisode: 1, candidateId: worker.candidate.id }, f.ctx);
+			assert.equal(applied.status, "succeeded", JSON.stringify(applied.error ?? applied.sessions[0]?.candidate));
+			assert.equal(applied.sessions[0]!.candidate?.status, "applied");
+		} else {
+			await writeFile(join(f.repo, "foreign.txt"), "refreshed\n");
+			const refreshed = await f.service.execute({ action: "refresh", handle: worker.handle, expectedEpisode: 1 }, f.ctx);
+			assert.equal(refreshed.status, "succeeded", JSON.stringify(refreshed.error));
+			assert.equal(refreshed.sessions[0]!.candidate, undefined);
+		}
+		const accepted = await f.store.load(worker.handle, owner);
+		resumed = true; releaseProceed();
+		const rejected = await continuation;
+		assert.equal(rejected.status, "failed");
+		assert.equal(rejected.error?.code, "fixture_second_prepare_failure");
+		const restored = await f.store.load(worker.handle, owner);
+		assert.equal(restored.state, "idle");
+		assert.equal(restored.episode, 1, "a rejected admission consumes no episode");
+		assert.deepEqual(restored.roots, accepted.roots, `the accepted ${operation} roots must survive the sibling failure`);
+		assert.deepEqual(restored.candidate, accepted.candidate, `the accepted ${operation} candidate state must survive the sibling failure`);
+		assert.ok(restored.requests.every(request => request.state !== "running"));
+		assert.equal(f.launches(), 2);
+	}
+});
+
+test("an input pin that cannot be discarded keeps durable ownership and stays recoverable", async (t) => {
+	const f = await serviceFixture(t);
+	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const commit = async (message: string) => {
+		await promisify(execFile)("git", ["-C", f.repo, "add", "--", "."]);
+		await promisify(execFile)("git", ["-C", f.repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", message]);
+		return (await promisify(execFile)("git", ["-C", f.repo, "rev-parse", "HEAD"])).stdout.trim();
+	};
+	await writeFile(join(f.repo, "seed.txt"), "seed\n");
+	await commit("seed");
+	let pinned: string | undefined;
+	let pinnedRef: string | undefined;
+	let sessions = 0;
+	const store = Object.create(f.store) as typeof f.store;
+	const original = f.store.withSession.bind(f.store);
+	(store as any).withSession = async (...args: Parameters<typeof original>) => {
+		sessions += 1;
+		const result = await original(...args);
+		if (sessions === 1) {
+			// The admission pinned its input; replace that pin and fail the sibling so cleanup must release it.
+			const { stdout } = await promisify(execFile)("git", ["-C", f.repo, "for-each-ref", "--format=%(refname)", "refs/csheng/subagents/inputs"]);
+			pinnedRef = stdout.split("\n").filter(Boolean)[0]!;
+			pinned = (await promisify(execFile)("git", ["-C", f.repo, "rev-parse", pinnedRef])).stdout.trim();
+			await writeFile(join(f.repo, "seed.txt"), "drifted\n");
+			await promisify(execFile)("git", ["-C", f.repo, "update-ref", pinnedRef, await commit("drift")]);
+			throw new ManagedError("fixture_second_prepare_failure");
+		}
+		return result;
+	};
+	const service = new ContinuationService({ ...f.dependencies, store });
+	const request = { action: "create", mode: "foreground" as const, tasks: [
+		{ id: "write-first", role: "worker" as const, objective: "host-worker-fixture", access: [{ permission: "write" as const, scope: f.repo }] },
+		{ id: "scan-second", role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: f.repo }] },
+	] };
+	const rejected = await service.execute(request, f.ctx, undefined, undefined, "call-drifted-pin");
+	assert.equal(rejected.status, "failed");
+	assert.equal(rejected.error?.code, "admission_cleanup_incomplete");
+	assert.equal(rejected.error?.detail, "fixture_second_prepare_failure");
+	assert.equal(f.launches(), 0);
+	assert.ok(pinnedRef !== undefined && pinned !== undefined);
+
+	// The reservation is retained because its owned pin is unresolved, and the record still names that pin.
+	const listed = await f.store.list(owner);
+	assert.equal(listed.length, 2, "a reservation with unresolved resource cleanup is not released");
+	const worker = listed.find(view => view.label === "write-first")!;
+	const record = await f.store.load(worker.handle, owner);
+	assert.equal(record.state, "idle");
+	const owned = record.roots.find(root => root.inputRef === pinnedRef);
+	assert.ok(owned, JSON.stringify(record.roots));
+	assert.equal(owned.input?.commit, pinned, "the record keeps the pin it still owns");
+	assert.equal((await promisify(execFile)("git", ["-C", f.repo, "rev-parse", pinnedRef])).stdout.trim(), (await promisify(execFile)("git", ["-C", f.repo, "rev-parse", "HEAD"])).stdout.trim(), "foreign drift is preserved, not deleted");
+
+	// Resolving the drift lets ordinary managed cleanup finish and frees the records.
+	await promisify(execFile)("git", ["-C", f.repo, "update-ref", pinnedRef, pinned]);
+	for (const view of listed) {
+		const closed = await f.service.execute({ action: "close", handle: view.handle, expectedEpisode: 0, disposition: "discard" }, f.ctx);
+		assert.equal(closed.status, "succeeded", JSON.stringify(closed.error));
+	}
+	assert.deepEqual(await store.list(owner), []);
+	assert.deepEqual(await ownedRefs(f.repo, "refs/csheng/subagents"), []);
+	const corrected = await f.service.execute(request, f.ctx, undefined, undefined, "call-corrected-pin");
+	assert.equal(corrected.status, "succeeded", JSON.stringify(corrected.error ?? corrected.sessions.map(session => session.result?.error)));
+	assert.equal(f.launches(), 2);
 });

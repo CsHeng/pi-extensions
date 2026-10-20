@@ -29,8 +29,8 @@ async function host(t: test.TestContext, history: boolean, panels = false) {
 	const columns = history ? 80 : 120;
 	const rows = panels ? 36 : 24;
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
-		"-e", join(packageRoot, "extensions/subagents-ui/index.ts"),
-		...(panels ? ["-e", join(packageRoot, "extensions/tasks-ui/index.ts"), "-e", join(packageRoot, "extensions/jobs-ui/index.ts"),
+		"-e", join(packageRoot, "extensions/agents-ui/index.ts"),
+		...(panels ? ["-e", join(packageRoot, "extensions/tasks-ui/index.ts"), "-e", join(packageRoot, "extensions/bash-jobs-ui/index.ts"),
 			"-e", join(root, "tests/fixtures/above-editor-panels.ts")]
 			: ["-e", join(root, "tests/fixtures/subagents-observer-tui.ts"), "--model", "observer-fixture/fixture", "--thinking", "off", "--", "observer fixture"])];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `set -eu; stty cols ${columns} rows ${rows}; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
@@ -76,7 +76,7 @@ async function host(t: test.TestContext, history: boolean, panels = false) {
 	await delay(150);
 	if (!panels) {
 		child.stdin.write("\u001b\u0006");
-		await waitFor(() => output.includes("Subagents"), "observer overlay did not open");
+		await waitFor(() => output.includes("Agents"), "observer overlay did not open");
 	}
 	const resize = async (cols: number, rows: number) => {
 		// Resize only the slave belonging to this owned script process, never the caller's TTY.
@@ -96,9 +96,9 @@ async function host(t: test.TestContext, history: boolean, panels = false) {
 test("installed Pi fullscreen: three bottom sections expand independently without opening dialogs", { timeout: 45_000 }, async t => {
 	const f = await host(t, false, true);
 	if (!f) return;
-	const names = ["Tasks", "Jobs", "Subagents"] as const;
+	const names = ["Tasks", "Bash jobs", "Agents"] as const;
 	type Section = typeof names[number];
-	const expanded: Record<Section, boolean> = { Tasks: false, Jobs: false, Subagents: false };
+	const expanded: Record<Section, boolean> = { Tasks: false, "Bash jobs": false, Agents: false };
 	const heading = (lines: string[], name: Section) => lines.findIndex(line => new RegExp(`[▸▾].*${name}`).test(line));
 	const check = async (hidden?: Section) => {
 		await f.waitFor(async () => {
@@ -134,32 +134,32 @@ test("installed Pi fullscreen: three bottom sections expand independently withou
 	f.child.stdin.write("/panels-update\r");
 	await f.waitFor(async () => (await f.frame()).lines.join("\n").includes("Task inline updated"), "header interaction took editor focus or refresh lost inline detail");
 	await check();
-	await click("Jobs");
+	await click("Bash jobs");
 	await click("Tasks");
-	await click("Subagents");
-	f.child.stdin.write("/jobs-ui hide\r");
-	await check("Jobs");
+	await click("Agents");
+	f.child.stdin.write("/bash-jobs-ui hide\r");
+	await check("Bash jobs");
 	f.child.stdin.write("/panels-update\r");
 	await delay(150);
-	await check("Jobs");
-	f.child.stdin.write("/jobs-ui show\r");
+	await check("Bash jobs");
+	f.child.stdin.write("/bash-jobs-ui show\r");
 	await check();
 	await f.resize(50, 36);
 	await check();
 	await click("Tasks");
-	await click("Subagents");
+	await click("Agents");
 	await f.resize(120, 36);
-	for (const [command, title] of [["tasks-ui", "Tasks · workflow"], ["jobs-ui", "Jobs · retained shell"], ["subagents-ui", "Subagents · session"]]) {
+	for (const [command, title] of [["tasks-ui", "Tasklist"], ["bash-jobs-ui", "Bash jobs"], ["agents-ui", "Agents · session"]]) {
 		f.child.stdin.write(`/${command} list\r`);
 		await f.waitFor(async () => {
 			const { lines } = await f.frame();
-			const row = lines.findIndex(line => line.includes(title!));
+			const row = lines.findIndex(line => line.includes(title!) && /[×✕]/u.test(line));
 			return row > 0 && row < 24;
-		}, `${command} list did not open a central overlay`);
-		f.child.stdin.write(command === "subagents-ui" ? "\u001b\u0006" : "\u001b");
-		await f.waitFor(async () => !(await f.frame()).lines.some(line => line.includes(title!)), `${command} list did not close with its keyboard action`);
+		}, `${command} list did not open a central overlay with a close control`);
+		f.child.stdin.write(command === "agents-ui" ? "\u001b\u0006" : "\u001b");
+		await f.waitFor(async () => !(await f.frame()).lines.some(line => line.includes(title!) && /[×✕]/u.test(line)), `${command} list did not close its central overlay with the keyboard action`);
 	}
-	for (const [command, title] of [["tasks-ui", "Tasks"], ["jobs-ui", "Jobs"], ["subagents-ui", "Subagents"]]) {
+	for (const [command, title] of [["tasks-ui", "Tasks"], ["bash-jobs-ui", "Bash jobs"], ["agents-ui", "Agents"]]) {
 		for (const state of ["off", "on"]) {
 			f.child.stdin.write(`/${command}\r`);
 			await f.waitFor(async () => (await f.frame()).lines.join("\n").includes(`${title} UI ${state}.`), `${command} did not acknowledge its visibility toggle`);

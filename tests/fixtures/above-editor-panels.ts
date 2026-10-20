@@ -2,11 +2,11 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { OBSERVER_EVENT, type ObserverSnapshot } from "../../extensions/subagents/observer-events.ts";
-import { SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_EVENT, SESSION_VIEW_CHANGED_EVENT, parseSessionViewRequest, type SessionViewReply } from "../../extensions/subagents/session-view.ts";
-import { projectRecordedUsage } from "../../extensions/subagents/observability.ts";
-import { TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_CHANGED_EVENT, type TasksViewReply } from "../../extensions/workflow/tasks-view.ts";
-import { JOBS_VIEW_EVENT, JOBS_VIEW_REQUEST_EVENT, JOBS_VIEW_CHANGED_EVENT, type JobsViewReply } from "../../extensions/retained-shell/jobs-view.ts";
+import { OBSERVER_EVENT, type ObserverSnapshot } from "../../extensions/agents/observer-events.ts";
+import { SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_EVENT, SESSION_VIEW_CHANGED_EVENT, parseSessionViewRequest, type SessionViewReply } from "../../extensions/agents/session-view.ts";
+import { projectRecordedUsage } from "../../extensions/agents/observability.ts";
+import { TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_CHANGED_EVENT, TASKS_VIEW_VERSION, type TasksViewReply } from "../../extensions/tasklist/tasks-view.ts";
+import { JOBS_VIEW_EVENT, JOBS_VIEW_REQUEST_EVENT, JOBS_VIEW_CHANGED_EVENT, type JobsViewReply } from "../../extensions/async-bash/jobs-view.ts";
 
 export default function panelsFixture(pi: ExtensionAPI): void {
 	let ctx: ExtensionContext | undefined;
@@ -18,8 +18,8 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 	pi.events.on(TASKS_VIEW_REQUEST_EVENT, (data: unknown) => {
 		if (!ctx) return;
 		pi.events.emit(TASKS_VIEW_EVENT, {
-			version: 1, requestId: (data as { requestId: string }).requestId, ...owner(), generation, availability: "ready",
-			state: { revision, goal: "Panel interaction", paused: false, cancelled: false,
+			version: TASKS_VIEW_VERSION, requestId: (data as { requestId: string }).requestId, ...owner(), generation, availability: "ready",
+			state: { revision, title: "Panel interaction",
 				tasks: [{ id: "task", title: revision > 1 ? "Task inline updated" : "Task inline detail", status: "doing" }] },
 		} satisfies TasksViewReply);
 	});
@@ -49,7 +49,7 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 	});
 	const publish = () => {
 		if (!ctx) return;
-		pi.events.emit(TASKS_VIEW_CHANGED_EVENT, { version: 1, generation });
+		pi.events.emit(TASKS_VIEW_CHANGED_EVENT, { version: TASKS_VIEW_VERSION, generation });
 		pi.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation });
 		snapshot = {
 			version: 4, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(),

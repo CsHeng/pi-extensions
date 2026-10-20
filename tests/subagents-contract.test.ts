@@ -21,16 +21,16 @@ import {
 	THINKING_LEVELS,
 	isSafePathGrammar,
 	truncateUtf8,
-} from "../extensions/subagents/contracts.ts";
+} from "../extensions/agents/contracts.ts";
 import type {
 	ChildCapabilityManifest,
 	EffectiveRouteV2,
 	NormalizedChildCapability,
 	RunTelemetryV2,
 	RunTelemetryV3,
-} from "../extensions/subagents/contracts.ts";
-import { ROLES } from "../extensions/subagents/roles.ts";
-import { SubagentSessionToolSchema } from "../extensions/subagents/session-contracts.ts";
+} from "../extensions/agents/contracts.ts";
+import { ROLES } from "../extensions/agents/roles.ts";
+import { SubagentSessionToolSchema } from "../extensions/agents/session-contracts.ts";
 
 test("subagent roles have fixed least-authority tool sets", () => {
 	assert.deepEqual(ROLE_NAMES, ["explorer", "reviewer", "worker"]);
@@ -67,7 +67,7 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		executionProfile: "fast",
 		thinkingProfile: "light",
 	};
-	const createRequest = (tasks: unknown[]) => ({ action: "create", requestId: "request", tasks });
+	const createRequest = (tasks: unknown[]) => ({ action: "create", tasks });
 	assert.equal(Check(SubagentTaskSchema, valid), true);
 	assert.equal(Check(SubagentTaskSchema, {
 		id: "write",

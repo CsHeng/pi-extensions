@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractObservationMetrics, validateParentDisposition } from "../.agents/skills/evaluate-subagent-runs/scripts/observation-metrics.ts";
 import { observationFixture } from "./fixtures/subagents-observation-v1.ts";
-import { unavailableObservation } from "../extensions/subagents/observability.ts";
+import { unavailableObservation } from "../extensions/agents/observability.ts";
 
 function replay(f: ReturnType<typeof observationFixture>, action = "inspect", unavailable = false) {
 	const views = structuredClone(f.sessions);

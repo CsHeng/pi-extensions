@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HARD_LIMITS } from "../extensions/subagents/contracts.ts";
-import { createRunClock, isLocalTiming, LocalTimingRecorder } from "../extensions/subagents/telemetry.ts";
+import { HARD_LIMITS } from "../extensions/agents/contracts.ts";
+import { createRunClock, isLocalTiming, LocalTimingRecorder } from "../extensions/agents/telemetry.ts";
 
 test("clock identity is shared only for one source and preserves real zero", () => {
 	const source = () => 100;

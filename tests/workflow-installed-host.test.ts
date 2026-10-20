@@ -15,7 +15,7 @@ test("installed Pi RPC: active task list awaiting design confirmation does not s
 	const agent = join(base, "agent");
 	await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
-	const extensions = ["workflow", "subagents", "loop-notifications", "subagents-ui", "work-timing", "status-footer"];
+	const extensions = ["tasklist", "agents", "job-notifications", "agents-ui", "work-timing", "status-footer"];
 	const child = spawn("pi", ["--mode", "rpc", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-session", "--approve",
 		...extensions.flatMap((name) => ["-e", join(root, "extensions", name, "index.ts")]),
 		"-e", join(root, "tests/fixtures/workflow/installed-continuation.ts"), "--model", "workflow-installed-fixture/fixture", "--thinking", "off"], {

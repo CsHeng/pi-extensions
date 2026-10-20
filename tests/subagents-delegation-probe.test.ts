@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../scripts/fixtures/delegation-probe-guidance.ts";
-import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../extensions/subagents/tool-surface.ts";
+import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../extensions/agents/tool-surface.ts";
 import {
 	PROBE_GUIDANCE_LEVELS,
 	PROBE_SHAPES,
@@ -37,12 +37,12 @@ import {
 
 test("probe variants reference the production parent-visible surface instead of copied text", () => {
 	const production = probeShapeDefinition("production");
-	assert.equal(production.name, "csheng_subagent_sessions");
+	assert.equal(production.name, "agent");
 	assert.equal(production.description, SUBAGENT_TOOL_DESCRIPTION);
 	assert.equal(production.promptSnippet, SUBAGENT_TOOL_PROMPT_SNIPPET);
 	assert.deepEqual(production.promptGuidelines, [...SUBAGENT_TOOL_PROMPT_GUIDELINES]);
 	const flat = probeShapeDefinition("flat");
-	assert.equal(flat.name, "csheng_subagent_sessions");
+	assert.equal(flat.name, "agent");
 	assert.equal(flat.description, SUBAGENT_TOOL_DESCRIPTION);
 	const keys = Object.keys((flat.parameters as { properties?: Record<string, unknown> }).properties ?? {});
 	assert.deepEqual(keys, ["role", "objective", "access", "inputs", "verification"]);
@@ -85,8 +85,8 @@ test("event parsing counts the call decision in print and rpc streams", () => {
 		'{"type":"session","version":3}',
 		'{"type":"turn_start"}',
 		'{"type":"tool_execution_start","toolCallId":"a","toolName":"bash","args":{}}',
-		'{"type":"tool_execution_start","toolCallId":"b","toolName":"csheng_subagent_sessions","args":{"action":"create"}}',
-		'{"type":"tool_execution_end","toolName":"csheng_subagent_sessions","isError":false}',
+		'{"type":"tool_execution_start","toolCallId":"b","toolName":"agent","args":{"action":"create"}}',
+		'{"type":"tool_execution_end","toolName":"agent","isError":false}',
 		'{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"cost":{"total":0.0125}}}}',
 		'not json',
 	];
@@ -113,13 +113,13 @@ test("event parsing counts the call decision in print and rpc streams", () => {
 
 test("role-aware parsing distinguishes creation tasks, lifecycle calls, unknown Agent types and explicit targets", () => {
  const lines = [
-  { type: "tool_execution_start", toolName: "csheng_subagent_sessions", args: { action: "create", tasks: [{ role: "worker" }, { role: "worker", repository: "/authorized/sibling" }, { role: "worker", repository: "relative" }, { role: "explorer" }, { role: "reviewer" }] } },
-  { type: "tool_execution_start", toolName: "csheng_subagent_sessions", args: { action: "join", runId: "x" } },
-  { type: "tool_execution_start", toolName: "csheng_subagent_sessions", args: { action: "join", runId: "x", tasks: [{ role: "worker" }] } },
-  { type: "tool_execution_start", toolName: "csheng_subagent_sessions", args: { role: "worker", objective: "flat shape" } },
+  { type: "tool_execution_start", toolName: "agent", args: { action: "create", tasks: [{ role: "worker" }, { role: "worker", repository: "/authorized/sibling" }, { role: "worker", repository: "relative" }, { role: "explorer" }, { role: "reviewer" }] } },
+  { type: "tool_execution_start", toolName: "agent", args: { action: "join", runId: "x" } },
+  { type: "tool_execution_start", toolName: "agent", args: { action: "join", runId: "x", tasks: [{ role: "worker" }] } },
+  { type: "tool_execution_start", toolName: "agent", args: { role: "worker", objective: "flat shape" } },
   { type: "tool_execution_start", toolName: "Agent", args: { subagent_type: "general-purpose" } },
   { type: "tool_execution_start", toolName: "Agent", args: { subagent_type: "reviewer" } },
-  { type: "tool_execution_end", toolName: "csheng_subagent_sessions", isError: true },
+  { type: "tool_execution_end", toolName: "agent", isError: true },
  ].map(line => JSON.stringify(line));
  for (const action of ["join", "inspect", "close", "continue", "apply", "refresh", "cancel"]) {
   assert.deepEqual(probeRequestedTasks({ action }), []); assert.deepEqual(probeRequestedTasks({ action, tasks: [{ role: "worker" }] }), []);
@@ -181,7 +181,7 @@ test("probe project fixture is self-contained and read-only toward this reposito
 	const projectFiles = await readdir(join(root, "proj", "src"));
 	assert.deepEqual(projectFiles.sort(), ["__init__.py", "collector.py", "export.py", "parser.py", "report.py", "store.py", "thresholds.py"]);
 	const repoExtensions = (await readdir(join(root, "repo", "extensions"))).sort();
-	assert.ok(repoExtensions.includes("subagents") && repoExtensions.includes("workflow"));
-	assert.ok((await readdir(join(root, "repo", "extensions", "subagents"))).includes("index.ts"));
+	assert.ok(repoExtensions.includes("agents") && repoExtensions.includes("tasklist"));
+	assert.ok((await readdir(join(root, "repo", "extensions", "agents"))).includes("index.ts"));
 	assert.equal((await readdir(join(root, "repo"))).includes("node_modules"), false);
 });

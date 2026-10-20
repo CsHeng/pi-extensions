@@ -3,10 +3,10 @@ import { lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CHILD_CAPABILITY_MANIFEST_VERSION, type ChildCapabilityManifest } from "../extensions/subagents/contracts.ts";
-import { authorizePath, parseCapability } from "../extensions/subagents/path-policy.ts";
-import { getManagedRole, toolsForAccess } from "../extensions/subagents/roles.ts";
-import { isNativePathTool, isNativeShellTool, readOnlyToolArgs } from "../extensions/subagents/native-context.ts";
+import { CHILD_CAPABILITY_MANIFEST_VERSION, type ChildCapabilityManifest } from "../extensions/agents/contracts.ts";
+import { authorizePath, parseCapability } from "../extensions/agents/path-policy.ts";
+import { getManagedRole, toolsForAccess } from "../extensions/agents/roles.ts";
+import { isNativePathTool, isNativeShellTool, readOnlyToolArgs } from "../extensions/agents/native-context.ts";
 
 async function fixture(t: test.TestContext) {
 	const root = await mkdtemp(join(tmpdir(), "subagent-guard-"));

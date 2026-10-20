@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
 import { LOOP_FACTS_EVENT, type LoopFacts } from "../extensions/shared/loop-facts.ts";
 
 function harness() {
@@ -22,7 +22,7 @@ function harness() {
 			emit: (name: string, event: unknown) => { for (const listener of listeners.get(name) ?? []) listener(event); },
 		},
 		registerCommand() {},
-		getActiveTools: () => ["bash", "csheng_workflow"],
+		getActiveTools: () => ["bash", "tasklist"],
 		appendEntry: (_type: string, data: unknown) => { diagnostics.push(data); },
 		sendUserMessage: () => { sends += 1; return sender(); },
 		sendMessage: () => { sends += 1; return sender(); },

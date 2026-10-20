@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createSubagentsExtension } from "../../extensions/subagents/index.ts";
-import { defaultConfig } from "../../extensions/subagents/config.ts";
-import { runChild } from "../../extensions/subagents/runner.ts";
+import { createSubagentsExtension } from "../../extensions/agents/index.ts";
+import { defaultConfig } from "../../extensions/agents/config.ts";
+import { runChild } from "../../extensions/agents/runner.ts";
 
 /** The real parent registration and subprocess bridge, with only synthetic models. */
 export default function nativeParentFixture(pi: ExtensionAPI): void {

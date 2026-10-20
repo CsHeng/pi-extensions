@@ -7,8 +7,8 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
-import { prepareChildGuidance } from "../extensions/subagents/guidance-resources.ts";
-import { authorizePath } from "../extensions/subagents/path-policy.ts";
+import { prepareChildGuidance } from "../extensions/agents/guidance-resources.ts";
+import { authorizePath } from "../extensions/agents/path-policy.ts";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });

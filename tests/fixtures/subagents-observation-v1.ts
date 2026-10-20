@@ -1,6 +1,6 @@
-import { collectNativeObservation } from "../../extensions/subagents/observability.ts";
-import type { ParentObservation } from "../../extensions/subagents/observation-hooks.ts";
-import type { LocalTiming } from "../../extensions/subagents/telemetry.ts";
+import { collectNativeObservation } from "../../extensions/agents/observability.ts";
+import type { ParentObservation } from "../../extensions/agents/observation-hooks.ts";
+import type { LocalTiming } from "../../extensions/agents/telemetry.ts";
 
 /** Frozen synthetic producer-shaped evidence; these durations/costs are not live measurements. */
 export function observationFixture() {

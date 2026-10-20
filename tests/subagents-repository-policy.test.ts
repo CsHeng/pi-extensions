@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { HARD_LIMITS } from "../extensions/subagents/contracts.ts";
-import { validateGraphRelationships, validateGraphStructure } from "../extensions/subagents/graph.ts";
+import { HARD_LIMITS } from "../extensions/agents/contracts.ts";
+import { validateGraphRelationships, validateGraphStructure } from "../extensions/agents/graph.ts";
 import {
 	admitRepositoryTasks,
 	canonicalizeExternalReadRoot,
@@ -15,7 +15,7 @@ import {
 	canonicalizeInternalScope,
 	findCanonicalGitRoot,
 	type RepositoryHost,
-} from "../extensions/subagents/repository-policy.ts";
+} from "../extensions/agents/repository-policy.ts";
 
 const exec = promisify(execFile);
 

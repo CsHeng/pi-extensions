@@ -42,8 +42,8 @@ test("publisher copies only the package snapshot and deletes extra destination f
 	const manifest = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")) as PackageManifest;
 	assert.deepEqual(manifest.files, ["config/", "extensions/"]);
 	assert.equal(JSON.parse(await readFile(join(destination, "package.json"), "utf8")).name, "@csheng/pi-extensions");
-	assert.ok((await readFile(join(destination, "config/csheng-subagents.json"), "utf8")).length > 0);
-	assert.ok((await readFile(join(destination, "extensions/subagents/config.ts"), "utf8")).includes("../../config/csheng-subagents.json"));
+	assert.ok((await readFile(join(destination, "config/csheng-agents.json"), "utf8")).length > 0);
+	assert.ok((await readFile(join(destination, "extensions/agents/config.ts"), "utf8")).includes("../../config/csheng-agents.json"));
 	assert.deepEqual((await readdir(destination)).sort(), ["config", "extensions", "package.json"]);
 });
 

@@ -13,6 +13,10 @@ export type LoopDisposition = "pending" | "returning" | "observed";
 
 export interface LoopExecution {
 	id: string;
+	/** Host call that enrolled this execution; attribution only, never an authority token. */
+	toolCallId?: string;
+	/** Native Agent run grouping, when this producer has one. */
+	runId?: string;
 	phase: LoopPhase;
 	status: string;
 	exitCode: number | null;
@@ -45,6 +49,21 @@ export interface LoopSnapshotRequest {
 	version: 1;
 	accept: (facts: LoopFacts) => void;
 }
+
+/** Read-only result-delivery observation. Absence means no notification consumer is loaded. */
+export const LOOP_DELIVERY_REQUEST = "csheng.job-notifications.delivery-state.request.v1";
+export const LOOP_DELIVERY_CHANGED = "csheng.job-notifications.delivery-state.changed.v1";
+export interface LoopExecutionReference { producer: "retained-shell" | "subagents"; id: string; toolCallId?: string; runId?: string }
+export interface LoopDeliverySnapshot {
+	version: 1;
+	sessionId: string | null;
+	branchAnchor: string | null;
+	pending: LoopExecutionReference[];
+	/** A completion wake reserved/queued but not yet projected into a provider request. */
+	scheduled: LoopExecutionReference[];
+	blocked: boolean;
+}
+export interface LoopDeliveryRequest { version: 1; accept: (state: LoopDeliverySnapshot) => void }
 
 export interface LoopNoticeAck {
 	version: 1;

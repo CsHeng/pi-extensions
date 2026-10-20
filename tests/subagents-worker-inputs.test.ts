@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
-import { captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate } from "../extensions/subagents/git-workspace.ts";
-import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs, workerGitEnvironment, type WorkerInputState } from "../extensions/subagents/worker-inputs.ts";
+import { captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate } from "../extensions/agents/git-workspace.ts";
+import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs, workerGitEnvironment, type WorkerInputState } from "../extensions/agents/worker-inputs.ts";
 const exec = promisify(execFile);
 async function fixture(t: TestContext) {
 	const directory = await realpath(await mkdtemp(join(tmpdir(), "worker-inputs-")));

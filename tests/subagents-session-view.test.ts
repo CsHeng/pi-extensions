@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ContinuationService, registerContinuationTool } from "../extensions/subagents/continuation.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { defaultConfig } from "../extensions/subagents/config.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
-import type { NativeObservation, NativeUsageRow } from "../extensions/subagents/observability.ts";
+import { ContinuationService, registerContinuationTool } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
+import type { NativeObservation, NativeUsageRow } from "../extensions/agents/observability.ts";
 import {
 	SESSION_VIEW_EVENT,
 	SESSION_VIEW_CHANGED_EVENT,
@@ -27,7 +27,7 @@ import {
 	parseSessionViewRequest,
 	type SessionViewReply,
 	type SessionViewScope,
-} from "../extensions/subagents/session-view.ts";
+} from "../extensions/agents/session-view.ts";
 
 const exec = promisify(execFile);
 const usageRow = (ownerSessionId: string, entryId: string, input: number, cost: number): NativeUsageRow =>
@@ -361,7 +361,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	const f = await serviceFixture(t);
 	const ctx = contextFixture(f.repo);
 	const query = (page = 0) => f.service.sessionView({ version: 4, requestId: `ui-${page}-${f.counts.inventory}`, page }, ctx);
-	const created = await f.service.execute({ action: "create", requestId: "run1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
+	const created = await f.service.execute({ action: "create", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run1");
 	assert.equal(created.status, "succeeded");
 	const handle = created.sessions[0]!.handle;
 	let reply = await query();
@@ -377,7 +377,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(row.acceptedEpisodes, 1);
 	assert.equal(row.recordedUsage.assistantTurns, 1);
 	// A stale persisted running state without a fresh core-owned observation is history, never live.
-	const stale = (await f.service.execute({ action: "create", requestId: "run2", mode: "foreground", tasks: [{ id: "taskb", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx)).sessions[0]!.handle;
+	const stale = (await f.service.execute({ action: "create", mode: "foreground", tasks: [{ id: "taskb", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run2")).sessions[0]!.handle;
 	await f.store.withSession(stale, { repo: f.repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async record => { record.state = "running"; await f.store.save(record); });
 	const reloaded = await new SessionViewBuilder({ store: f.store }).build({ version: 4, requestId: "ui-reload", page: 0 }, scope(ownerOf(f.repo)));
 	assert.equal(reloaded.live.length, 0);
@@ -385,7 +385,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(reloaded.summary!.states.running, 1);
 	// Live work moves its handle out of history and settles back without double counting.
 	f.holdChild();
-	const asyncRun = await f.service.execute({ action: "create", requestId: "run3", tasks: [{ id: "taskc", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
+	const asyncRun = await f.service.execute({ action: "create", tasks: [{ id: "taskc", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run3");
 	assert.equal(asyncRun.status, "accepted");
 	const liveHandle = asyncRun.sessions[0]!.handle;
 	await until(() => f.service.liveObserverTasks().length === 1);
@@ -401,7 +401,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.ok(reply.history.rows.some(entry => entry.handle === liveHandle && entry.state === "idle"));
 	assert.equal(reply.summary!.liveAgents, 0);
 	// Continuation keeps one stable identity and accumulates recorded episodes exactly once.
-	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, requestId: "next", expectedEpisode: 1, message: "continue" }] }, ctx);
+	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, message: "continue" }] }, ctx, undefined, undefined, "continue-next");
 	assert.equal(continued.status, "succeeded");
 	assert.equal(continued.sessions[0]!.handle, handle);
 	reply = await query();
@@ -413,7 +413,7 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(reply.usage!.usage.input, 20);
 	// Replay reuses committed evidence without rewriting or rescanning it.
 	const scans = f.counts.inventory;
-	const replay = await f.service.execute({ action: "create", requestId: "run1", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx);
+	const replay = await f.service.execute({ action: "create", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run1");
 	assert.equal(replay.status, "succeeded");
 	reply = await query();
 	assert.equal(f.counts.inventory, scans, "replay is not an invalidation");
@@ -439,7 +439,7 @@ test("session-view event wiring answers only strict validated requests from acti
 	const audits: Array<{ type: string; data: Record<string, unknown> }> = [];
 	const pi = {
 		registerCommand() {}, registerTool() {}, appendEntry(type: string, data: Record<string, unknown>) { audits.push({ type, data }); }, sendMessage() {}, sendUserMessage() {},
-		getActiveTools: () => ["csheng_subagent_sessions"],
+		getActiveTools: () => ["agent"],
 		on(name: string, handler: (event: unknown, ctx?: unknown) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		events: {
 			on(name: string, handler: (data: unknown) => void) { eventHandlers.set(name, [...(eventHandlers.get(name) ?? []), handler]); },

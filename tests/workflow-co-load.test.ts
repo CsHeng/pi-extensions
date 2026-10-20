@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import subagentsExtension from "../extensions/subagents/index.ts";
-import subagentsUiExtension from "../extensions/subagents-ui/index.ts";
+import subagentsExtension from "../extensions/agents/index.ts";
+import subagentsUiExtension from "../extensions/agents-ui/index.ts";
 import statusFooterExtension from "../extensions/status-footer/index.ts";
 import workTimingExtension, { WORK_TIMING_ENTRY_TYPE } from "../extensions/work-timing/index.ts";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
-import workflowExtension from "../extensions/workflow/index.ts";
-import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
+import workflowExtension from "../extensions/tasklist/index.ts";
+import type { TasklistState } from "../extensions/tasklist/goal-contracts.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 
 // Deliberately register workflow before the real timing/observer consumers, not last.
@@ -42,11 +42,11 @@ for (const mode of ["tui", "rpc"] as const) {
 		const harness = await createHostHarness({ mode, trace, extensions: [...packageExtensions, createTraceObserver(trace), lateConsumer] });
 		t.after(async () => { release(); await harness.dispose(); });
 		harness.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("csheng_workflow", {
-				operation: "set", goal: "Co-loaded workflow", tasks: [{ id: "t", title: "Task" }],
+			fauxAssistantMessage(fauxToolCall("tasklist", {
+				operation: "set", title: "Co-loaded tasklist", tasks: [{ id: "t", title: "Task" }],
 			} as never)),
 			fauxAssistantMessage("prematurely stopped"),
-			fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "cancel", reason: "explicit fixture cancellation" } as never)),
+			fauxAssistantMessage(fauxToolCall("tasklist", { operation: "cancel" } as never)),
 			fauxAssistantMessage("truthfully paused"),
 		]);
 		const running = harness.session.prompt("go");
@@ -60,9 +60,8 @@ for (const mode of ["tui", "rpc"] as const) {
 		await harness.session.prompt("cancel the tracked fixture");
 		await waitForTrace(trace, () => trace.entries.filter((entry) => entry.event === "native:agent_settled").length === 2);
 		const branch = harness.session.sessionManager.getBranch();
-		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } };
-		assert.equal(snapshot.data.state.cancelled, true);
-		assert.equal(snapshot.data.state.remindedRevision, undefined);
+		const snapshot = branch.findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: TasklistState } };
+		assert.deepEqual(Object.keys(snapshot.data.state).sort(), ["revision", "tasks", "title", "version"], "no list-level control or reminder bookkeeping is written");
 		assert.equal(snapshot.data.state.tasks[0]!.status, "cancelled");
 		assert.equal(harness.faux.state.callCount, 4);
 		const input = trace.entries.filter((entry) => entry.event === "input");

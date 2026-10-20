@@ -4,8 +4,8 @@ import { ManagedDispatchCollector } from "../.agents/skills/evaluate-subagent-ru
 import { extractSessionMetrics } from "../.agents/skills/evaluate-subagent-runs/scripts/extract-session-metrics.ts";
 
 const telemetry = { version: 1, ownerSessionId: "owner", invocationId: "invocation", startedAtMs: 100, durationMs: 12, extensionEpoch: "ext", configurationEpoch: "config", requestedTasks: 1, admittedTasks: 1, launchedChildren: 1, replayedEpisodes: 0 };
-function session(details: object[], owner = "owner") {
-	return [{ type: "session", version: 3, id: owner }, ...details.map((data, index) => ({ type: "message", id: `entry${index}`, parentId: index ? `entry${index-1}` : null, message: { role: "toolResult", toolName: "csheng_subagent_sessions", details: data } }))].map(row => JSON.stringify(row)).join("\n") + "\n";
+function session(details: object[], owner = "owner", toolName = "agent") {
+	return [{ type: "session", version: 3, id: owner }, ...details.map((data, index) => ({ type: "message", id: `entry${index}`, parentId: index ? `entry${index-1}` : null, message: { role: "toolResult", toolName, details: data } }))].map(row => JSON.stringify(row)).join("\n") + "\n";
 }
 const result = (extra = {}) => ({ schemaVersion: 4, action: "create", status: "succeeded", sessions: [], requestTelemetry: telemetry, ...extra });
 
@@ -20,6 +20,13 @@ test("managed dispatch does not need a settled observation window and stays sepa
 	assert.deepEqual(metrics.managedDispatch.errors, [{ code: "missing_session_version", count: 1 }]);
 	assert.deepEqual(metrics.managedDispatch.actions.find(row => row.action === "close"), { action: "close", status: "failed", count: 1 });
 	assert.doesNotMatch(JSON.stringify(metrics), /invocation|ownerSessionId|"ext"|"config"/);
+});
+
+test("the known historical managed name retains its supported v4 evidence", () => {
+	const collector = new ManagedDispatchCollector();
+	collector.add(session([result()], "owner", "csheng_subagent_sessions"));
+	assert.equal(collector.result().ownedRequests, 1);
+	assert.equal(collector.result().excludedRecords, 0);
 });
 
 test("epoch selection distinguishes request provenance from returned historical episodes", () => {

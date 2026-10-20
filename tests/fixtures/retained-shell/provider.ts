@@ -124,7 +124,7 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 				}
 				if (mode === "coload") {
 					if (call === 0) {
-						emit(stream, message, [{ type: "toolCall", id: "track-call", name: "csheng_workflow", arguments: { operation: "set", goal: trackedGoal, tasks: [{ id: "shell", title: trackedTitle, status: "todo" }] } }], "toolUse");
+						emit(stream, message, [{ type: "toolCall", id: "track-call", name: "tasklist", arguments: { operation: "set", title: trackedGoal, tasks: [{ id: "shell", title: trackedTitle, status: "todo" }] } }], "toolUse");
 						return;
 					}
 					if (call === 1) {
@@ -159,7 +159,7 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 						whileAlive: {
 							calls, executionId, toolCallId: firstToolCallId,
 							toolResultPresent: Boolean(current?.text.includes("status: running") && executionId),
-							marker: marker ? await readFile(marker, "utf8").catch(() => "") : "",
+							marker: marker ? await waitForMarker(marker) : "",
 							releaseExists: release ? await fileExists(release) : true,
 							elapsedMs: Date.now() - startedAt,
 						},
@@ -186,6 +186,16 @@ export default function retainedShellProvider(pi: ExtensionAPI): void {
 			return stream;
 		},
 	});
+}
+
+/** The native operation spawns asynchronously; wait for the command's first effect instead of racing it. */
+async function waitForMarker(path: string): Promise<string> {
+	const started = Date.now();
+	for (;;) {
+		const text = await readFile(path, "utf8").catch(() => "");
+		if (text.length > 0 || Date.now() - started > 2_000) return text;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
 }
 
 async function fileExists(path: string): Promise<boolean> {

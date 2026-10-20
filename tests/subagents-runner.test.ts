@@ -12,10 +12,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/subagents/contracts.ts";
-import type { NormalizedTask } from "../extensions/subagents/graph.ts";
-import { getRole } from "../extensions/subagents/roles.ts";
-import { buildPiArgs, resolvePiInvocation, runChild } from "../extensions/subagents/runner.ts";
+import { HARD_LIMITS, type ChildCapabilityManifest, type EffectiveRoute } from "../extensions/agents/contracts.ts";
+import type { NormalizedTask } from "../extensions/agents/graph.ts";
+import { getRole } from "../extensions/agents/roles.ts";
+import { buildPiArgs, resolvePiInvocation, runChild } from "../extensions/agents/runner.ts";
 import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
 
 const FIXTURE = new URL("fixtures/subagents/fake-pi.mjs", import.meta.url).pathname;

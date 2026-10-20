@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, readFile, rename, rm, chmod, symlink, readlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyGitCandidate, captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate, planGitApply, refreshGitInputs, inspectGitWorkspace, type GitTaskWorkspace } from "../extensions/subagents/git-workspace.ts";
+import { applyGitCandidate, captureGitInput, createGitTaskWorkspace, discardGitWorkspace, freezeGitCandidate, planGitApply, refreshGitInputs, inspectGitWorkspace, type GitTaskWorkspace } from "../extensions/agents/git-workspace.ts";
 const exec = promisify(execFile);
 const env = () => ({ PATH: process.env.PATH, HOME: "/nonexistent", LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@localhost", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@localhost" });
 async function git(repo: string, ...args: string[]): Promise<string> { return (await exec("git", ["-c", "core.hooksPath=/dev/null", "-C", repo, ...args], { env: env(), timeout: 10_000 })).stdout.trim(); }

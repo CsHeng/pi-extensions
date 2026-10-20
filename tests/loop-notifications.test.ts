@@ -3,13 +3,14 @@ import test from "node:test";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
-import { decideDelivery, pendingNotices, type DeliveryView } from "../extensions/loop-notifications/policy.ts";
-import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
-import { validateShellCall } from "../extensions/retained-shell/validate.ts";
-import type { ShellExecutionOwner } from "../extensions/retained-shell/execution.ts";
-import { LOOP_FACTS_EVENT, LOOP_NOTICE_TYPE, type LoopFacts } from "../extensions/shared/loop-facts.ts";
-import workflow from "../extensions/workflow/index.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
+import { decideDelivery, pendingNotices, type DeliveryView } from "../extensions/job-notifications/policy.ts";
+import { bindRetainedShell } from "../extensions/async-bash/index.ts";
+import { validateShellCall } from "../extensions/async-bash/validate.ts";
+import type { ShellExecutionOwner } from "../extensions/async-bash/execution.ts";
+import { LOOP_DELIVERY_REQUEST, LOOP_FACTS_EVENT, LOOP_NOTICE_TYPE, type LoopDeliverySnapshot, type LoopFacts } from "../extensions/shared/loop-facts.ts";
+import { readExecutionQuiescence } from "../extensions/shared/execution-quiescence.ts";
+import workflow from "../extensions/tasklist/index.ts";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/workflow/host-fixture.ts";
 
 function tasks(status: string, extra: Partial<LoopFacts["tasks"]> = {}): LoopFacts {
@@ -104,7 +105,7 @@ function fakePi() {
 	let idle = true;
 	const ctx = { mode: "tui", isIdle: () => idle, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "s", getLeafId: () => "b", getBranch: () => [{ id: "b" }] } } as ExtensionContext;
 	const pi = {
-		getActiveTools: () => ["bash", "csheng_workflow", "csheng_subagent_sessions"],
+		getActiveTools: () => ["bash", "tasklist", "agent"],
 		events: {
 			on: (name: string, handler: (data: unknown) => void) => { listeners.set(name, [...(listeners.get(name) ?? []), handler]); return () => {}; },
 			emit: (name: string, data: unknown) => { for (const handler of listeners.get(name) ?? []) handler(data); },
@@ -116,6 +117,68 @@ function fakePi() {
 	};
 	return { pi: pi as unknown as ExtensionAPI, handlers, commands, sent, ctx, setIdle: (value: boolean) => { idle = value; } };
 }
+
+function deliveryState(host: ReturnType<typeof fakePi>): LoopDeliverySnapshot {
+	let result: LoopDeliverySnapshot | undefined;
+	host.pi.events.emit(LOOP_DELIVERY_REQUEST, { version: 1, accept: (value: LoopDeliverySnapshot) => { result = value; } });
+	assert.ok(result);
+	return result;
+}
+async function hooks(host: ReturnType<typeof fakePi>, name: string, event: unknown = {}): Promise<void> {
+	for (const handler of host.handlers.get(name) ?? []) await handler(event, host.ctx);
+}
+
+test("read-only delivery state covers pending and reserved wake without withholding a sibling result", async () => {
+	const host = fakePi(); loopNotifications(host.pi);
+	const shell = execution("retained-shell", "running"); shell.executions[0]!.toolCallId = "current";
+	const child = execution("subagents", "running"); child.executions[0]!.toolCallId = "current";
+	host.pi.events.on("csheng.loop-notifications.snapshot.v1", (raw: any) => { raw.accept(shell); raw.accept(child); });
+	await hooks(host, "session_start");
+	host.setIdle(false);
+	shell.executions[0]!.phase = "terminal";
+	shell.executions[0]!.summary = "fixture terminal";
+	host.pi.events.emit(LOOP_FACTS_EVENT, shell);
+	assert.equal(deliveryState(host).pending.length, 1);
+	assert.equal(deliveryState(host).scheduled.length, 0);
+	host.setIdle(true);
+	await hooks(host, "agent_settled");
+	assert.equal(host.sent.length, 1, "the running child is not a veto on actual result delivery");
+	assert.equal(deliveryState(host).scheduled.length, 1);
+	assert.equal(readExecutionQuiescence(host.pi, host.ctx, { toolCallIds: new Set(["current"]) }).state, "busy");
+	host.setIdle(false);
+	await hooks(host, "context_with_system", { messages: [] });
+	assert.equal(deliveryState(host).pending.length, 0);
+	assert.equal(deliveryState(host).scheduled.length, 0);
+	host.setIdle(true);
+	await hooks(host, "agent_settled");
+	assert.equal(host.sent.length, 1, "quiescence observation enables no task-only continuation");
+	assert.equal(readExecutionQuiescence(host.pi, host.ctx, { toolCallIds: new Set(["current"]) }).activeExecutions, 1);
+});
+
+test("a reserved carrier becoming unnecessary clears on projection and a send failure is unavailable", async () => {
+	const host = fakePi(); loopNotifications(host.pi);
+	const shell = execution("retained-shell", "terminal"); shell.executions[0]!.toolCallId = "current";
+	host.pi.events.on("csheng.loop-notifications.snapshot.v1", (raw: any) => raw.accept(shell));
+	await hooks(host, "session_start");
+	host.pi.events.emit(LOOP_FACTS_EVENT, shell);
+	assert.equal(deliveryState(host).scheduled.length, 1);
+	shell.executions[0]!.disposition = "observed";
+	host.setIdle(false);
+	await hooks(host, "context_with_system", { messages: [] });
+	assert.equal(deliveryState(host).scheduled.length, 0);
+	host.setIdle(true);
+	assert.equal(readExecutionQuiescence(host.pi, host.ctx, { toolCallIds: new Set(["current"]) }).state, "quiescent");
+
+	const failed = fakePi(); failed.pi.sendMessage = (() => { throw new Error("offline fixture"); }) as ExtensionAPI["sendMessage"];
+	loopNotifications(failed.pi);
+	const pending = execution("retained-shell", "terminal"); pending.executions[0]!.toolCallId = "current";
+	failed.pi.events.on("csheng.loop-notifications.snapshot.v1", (raw: any) => raw.accept(pending));
+	await hooks(failed, "session_start");
+	failed.pi.events.emit(LOOP_FACTS_EVENT, pending);
+	assert.equal(deliveryState(failed).blocked, true);
+	assert.equal(deliveryState(failed).scheduled.length, 0);
+	assert.equal(readExecutionQuiescence(failed.pi, failed.ctx, { toolCallIds: new Set(["current"]) }).state, "unavailable");
+});
 
 test("consumer co-load delivers one combined notice and does not task-renew while work remains", async () => {
 	const host = fakePi();
@@ -171,7 +234,7 @@ for (const consumerFirst of [true, false]) test("host " + (consumerFirst ? "cons
 	const notices: string[] = [];
 	const board: { facts: LoopFacts; emit?: () => void } = { facts: execution("subagents", "running", "pending", "child") };
 	const publisher = (pi: ExtensionAPI) => {
-		pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Fact publisher", parameters: Type.Object({}), async execute() { return { content: [], details: undefined }; } });
+		pi.registerTool({ name: "agent", label: "Fixture", description: "Fact publisher", parameters: Type.Object({}), async execute() { return { content: [], details: undefined }; } });
 		const publish = () => pi.events.emit(LOOP_FACTS_EVENT, board.facts);
 		board.emit = publish;
 		pi.events.on("csheng.loop-notifications.snapshot.v1", (raw: unknown) => (raw as { accept?: (facts: LoopFacts) => void }).accept?.(board.facts));
@@ -188,7 +251,7 @@ for (const consumerFirst of [true, false]) test("host " + (consumerFirst ? "cons
 	const h = await createHostHarness({ trace, extensions });
 	t.after(() => h.dispose());
 	h.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
+		fauxAssistantMessage(fauxToolCall("tasklist", { operation: "set", title: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
 		fauxAssistantMessage("yield"),
 		fauxAssistantMessage("saw terminal"),
 		fauxAssistantMessage("must-not-run"),
@@ -213,7 +276,7 @@ test("a completion arriving inside a later settlement consumer waits for that co
 	const gate = new Promise<void>(resolve => { release = resolve; });
 	let first = true;
 	const producer = (pi: ExtensionAPI) => {
-		pi.registerTool({ name: "csheng_subagent_sessions", label: "Fixture", description: "Enroll completion", parameters: Type.Object({}), async execute() {
+		pi.registerTool({ name: "agent", label: "Fixture", description: "Enroll completion", parameters: Type.Object({}), async execute() {
 			pi.events.emit(LOOP_FACTS_EVENT, execution("subagents", "running", "pending", "child"));
 			return { content: [], details: undefined };
 		} });
@@ -229,8 +292,8 @@ test("a completion arriving inside a later settlement consumer waits for that co
 	const h = await createHostHarness({ trace, extensions: [workflow, loopNotifications, producer, createTraceObserver(trace)] });
 	t.after(async () => { release(); await h.dispose(); });
 	h.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("csheng_workflow", { operation: "set", goal: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
-		fauxAssistantMessage(fauxToolCall("csheng_subagent_sessions", {})),
+		fauxAssistantMessage(fauxToolCall("tasklist", { operation: "set", title: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
+		fauxAssistantMessage(fauxToolCall("agent", {})),
 		fauxAssistantMessage("yield"), fauxAssistantMessage("saw terminal"), fauxAssistantMessage("must-not-run"),
 	]);
 	const running = h.session.prompt("start the fixture");

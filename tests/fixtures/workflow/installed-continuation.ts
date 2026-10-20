@@ -17,8 +17,8 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 		// This consumer is loaded AFTER workflow. An early timer/idle re-entry would record 0 twice.
 		await new Promise((resolve) => setTimeout(resolve, 40));
 		settled += 1;
-		const last = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: { cancelled: boolean } } };
-		await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "continuation-proof.json"), JSON.stringify({ calls, settled, starts, sources, disposition: last.data.state.cancelled ? "cancelled" : "active", facts }));
+		const last = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: unknown } } | undefined;
+		await writeFile(join(process.env.PI_CODING_AGENT_DIR!, "continuation-proof.json"), JSON.stringify({ calls, settled, starts, sources, disposition: last ? "active" : "none", facts }));
 	});
 	pi.registerProvider("workflow-installed-fixture", {
 		baseUrl: "http://invalid.invalid", apiKey: "synthetic-not-a-credential", api: "openai-completions",
@@ -30,8 +30,8 @@ export default function installedContinuation(pi: ExtensionAPI): void {
 				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 			stream.push({ type: "start", partial: message });
 			if (call === 0) {
-				const args = { operation: "set", goal: "Design awaiting user confirmation", tasks: [{ id: "t", title: "Review design", status: "doing" }] };
-				const toolCall = { type: "toolCall" as const, id: `fixture-${call}`, name: "csheng_workflow", arguments: args };
+				const args = { operation: "set", title: "Design awaiting user confirmation", tasks: [{ id: "t", title: "Review design", status: "doing" }] };
+				const toolCall = { type: "toolCall" as const, id: `fixture-${call}`, name: "tasklist", arguments: args };
 				message.content = [toolCall]; message.stopReason = "toolUse";
 				stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
 				stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(args), partial: message });

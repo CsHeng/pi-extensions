@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV } from "../extensions/subagents/contracts.ts";
+import { CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV } from "../extensions/agents/contracts.ts";
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
 
@@ -28,7 +28,7 @@ test("installed native readonly child discovers git_read, reads history and refu
  await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
  const implementation = process.env.CSHENG_GIT_READ_PROBE_ROOT ?? root;
  const execution = exec("pi", ["--mode", "json", "--no-session", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-approve",
-  "--tools", "read,grep,find,ls,git_read", "-e", join(implementation, "extensions/subagents/child-capability-guard.ts"),
+  "--tools", "read,grep,find,ls,git_read", "-e", join(implementation, "extensions/agents/child-capability-guard.ts"),
   "-e", join(root, "tests/fixtures/subagents-git-read-host.ts"), "--model", "git-read-fixture/fixture", "--thinking", "off", "--", "read fixture history"],
   { cwd: repo, env: { ...env, [CHILD_MARKER_ENV]: "1", [CHILD_CAPABILITY_ENV]: manifest, GIT_READ_FIXTURE_INPUTS: inputs }, timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024 });
  execution.child.stdin?.end();

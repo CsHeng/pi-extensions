@@ -9,12 +9,12 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test, { after } from "node:test";
-import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/subagents/config.ts";
-import { emptyUsage, HARD_LIMITS, type TaskResult } from "../extensions/subagents/contracts.ts";
-import { registerContinuationTool } from "../extensions/subagents/continuation.ts";
-import { createSubagentsExtension, type SubagentDependencies } from "../extensions/subagents/index.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+import { defaultConfig, loadConfig, parseConfig, ROUTE_CONFIG_FILE } from "../extensions/agents/config.ts";
+import { emptyUsage, HARD_LIMITS, type TaskResult } from "../extensions/agents/contracts.ts";
+import { registerContinuationTool } from "../extensions/agents/continuation.ts";
+import { createSubagentsExtension, type SubagentDependencies } from "../extensions/agents/index.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/agents/session-contracts.ts";
 
 const exec = promisify(execFile);
 const fixtureRepo = await mkdtemp(join(tmpdir(), "subagent-adapter-repo-"));
@@ -155,8 +155,8 @@ async function registered(t: test.TestContext, overrides: Partial<SubagentDepend
 	return { base, store, state };
 }
 
-function createInput(requestId: string, tasks: object[]) {
-	return { action: "create", requestId, tasks };
+function createInput(_requestId: string, tasks: object[]) {
+	return { action: "create", tasks };
 }
 
 async function emitBeforeAgentStart(state: Harness, event = { systemPrompt: "base" }, ctx = context()) {
@@ -199,7 +199,7 @@ test("joined results and later terminals do not use a producer-owned model wake"
 	const fast = new Promise<void>(resolve => { releaseFast = resolve; }), slow = new Promise<void>(resolve => { releaseSlow = resolve; });
 	const terminal = new Promise<void>(resolve => { fastTerminal = resolve; }), nextDone = new Promise<void>(resolve => { nextTerminal = resolve; });
 	t.after(() => { releaseFast(); releaseSlow(); });
-	const { state } = await registered(t, { onExecution: event => { if (event.kind === "task-terminal") { if (event.sessions[0]?.result?.id === "fast") fastTerminal(); if (event.sessions[0]?.result?.id === "next") nextTerminal(); } }, runChild: async options => { options.onChildStarted?.(); await (options.task.id === "fast" ? fast : slow); options.onChildSettled?.(); return successful(options.task); } });
+	const { state } = await registered(t, { onExecution: event => { if (event.kind === "task-terminal") { if (event.sessions[0]?.result?.label === "fast") fastTerminal(); if (event.sessions[0]?.result?.label === "next") nextTerminal(); } }, runChild: async options => { options.onChildStarted?.(); await (options.task.id === "fast" ? fast : slow); options.onChildSettled?.(); return successful(options.task); } });
 	const ctx = { ...context(), mode: "rpc", signal: new AbortController().signal, isIdle: () => true, hasPendingMessages: () => false, waitForIdle: async () => {} };
 	const sent: unknown[] = []; state.pi.sendMessage = (message: unknown) => { sent.push(message); };
 	state.pi.sendUserMessage = () => { sent.push("user"); };
@@ -227,11 +227,11 @@ test("extension registers only the managed tool and a redacted status command", 
 	assert.equal(state.tool.name, SUBAGENT_SESSION_TOOL_NAME);
 	assert.deepEqual([...state.tools.keys()], [SUBAGENT_SESSION_TOOL_NAME]);
 	assert.equal(state.tools.has("csheng_subagents"), false);
-	assert.deepEqual([...state.commands.keys()], ["subagents"]);
+	assert.deepEqual([...state.commands.keys()], ["agents"]);
 	assert.equal(state.commands.has("subagents-debug"), false);
 	const ctx = context();
-	await state.commands.get("subagents").handler("", ctx);
-	assert.match(ctx.notifications[0]?.message ?? "", /tool=csheng_subagent_sessions/);
+	await state.commands.get("agents").handler("", ctx);
+	assert.match(ctx.notifications[0]?.message ?? "", /tool=agent/);
 	assert.doesNotMatch(ctx.notifications[0]?.message ?? "", /\/tmp\/agent/);
 });
 
@@ -252,7 +252,7 @@ test("status and managed create route across all accessible models without readi
 	});
 	const ctx = context(true, [parentModel, selected]);
 	Object.defineProperty(ctx, "scopedModels", { get() { throw new Error("Cycling models are not a routing boundary"); } });
-	await state.commands.get("subagents").handler("", ctx);
+	await state.commands.get("agents").handler("", ctx);
 	assert.match(ctx.notifications[0]?.message ?? "", /explorer=synthetic\/outside-cycle:low/);
 	const result = await state.tool.execute("all-models", {
 		...createInput("allmodels", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]),
@@ -268,7 +268,7 @@ test("invalid route configuration is reported by status without launching work",
 		loadConfig: async () => ({ diagnostic: { code: "invalid_route_config", message: "invalid overlay" } }),
 	})(state.pi);
 	const ctx = context();
-	await state.commands.get("subagents").handler("", ctx);
+	await state.commands.get("agents").handler("", ctx);
 	assert.equal(ctx.notifications[0]?.level, "error");
 	assert.match(ctx.notifications[0]?.message ?? "", /invalid overlay/);
 });
@@ -509,7 +509,8 @@ test("a concurrent duplicate submission returns its receipt without launching an
 	const input = createInput("busy", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]);
 	const first = state.tool.execute("first", input, undefined, undefined, context());
 	await childStarted;
-	const second = detailsOf(await state.tool.execute("second", input, undefined, undefined, context()));
+	// The same host tool call re-delivered must not launch a second child.
+	const second = detailsOf(await state.tool.execute("first", input, undefined, undefined, context()));
 	assert.equal(second.status, "accepted");
 	assert.equal(second.kind, "submission");
 	releaseChild?.();
@@ -734,7 +735,7 @@ test("explorer and reviewer external roots reach only task and capability fields
 });
 
 test("managed TUI progress publishes route and actual launches; replay publishes no new run", async (t) => {
-	const snapshots: import("../extensions/subagents/observer-events.ts").ObserverSnapshot[] = [];
+	const snapshots: import("../extensions/agents/observer-events.ts").ObserverSnapshot[] = [];
 	const { state } = await registered(t, { onObserver: value => snapshots.push(value), runChild: async options => {
 		options.onChildStarted?.(); options.onChildSettled?.();
 		return { ...successful(options.task), route: options.route };
@@ -750,7 +751,8 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	assert.equal(snapshots.at(-1)?.tasks[0]?.assistantTurns, 1);
 	assert.equal(snapshots.at(-1)?.tasks[0]?.headline, "scan");
 	const length = snapshots.length;
-	const replay = await state.tool.execute("replay", input, undefined, undefined, ctx);
+	// Re-delivery of the same host tool call replays the accepted result instead of launching again.
+	const replay = await state.tool.execute("call", input, undefined, undefined, ctx);
 	assert.equal(replay.details.requestTelemetry.launchedChildren, 0);
 	assert.equal(snapshots.length, length);
 	const second = await state.tool.execute("second", { ...createInput("second", [{ id: "other", role: "reviewer", objective: "other", access: [{ permission: "read", scope: "/tmp/scope" }] }]), mode: "foreground" }, undefined, undefined, ctx);
@@ -758,20 +760,28 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	assert.ok(snapshots[length]!.revision > snapshots[length - 1]!.revision, "revisions must increase across runs in one generation");
 	assert.equal(snapshots[length]!.generation, snapshots[0]!.generation);
 	const handle = first.details.sessions[0]!.handle;
-	const episode = { handle, requestId: "episodetwo", expectedEpisode: 1, message: "second scan" };
+	const episode = { handle, expectedEpisode: 1, message: "second scan" };
 	const two = await state.tool.execute("two", { action: "continue", mode: "foreground", episodes: [episode] }, undefined, undefined, ctx);
 	assert.equal(two.details.status, "succeeded");
-	const three = await state.tool.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, requestId: "episodethree", expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
+	const three = await state.tool.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
 	assert.equal(three.details.status, "succeeded");
 	const mixedStart = snapshots.length;
-	const mixed = await state.tool.execute("mixed", { action: "continue", mode: "foreground", episodes: [episode, { handle: second.details.sessions[0]!.handle, requestId: "othertwo", expectedEpisode: 1, message: "fresh review" }] }, undefined, undefined, ctx);
+	// A new call is new work even when prose repeats; a re-delivered call is the replay.
+	const mixedInput = { action: "continue", mode: "foreground", episodes: [
+		{ handle, expectedEpisode: 3, message: "third scan" },
+		{ handle: second.details.sessions[0]!.handle, expectedEpisode: 1, message: "fresh review" },
+	] };
+	const mixed = await state.tool.execute("mixed", mixedInput, undefined, undefined, ctx);
 	assert.equal(mixed.details.status, "succeeded");
-	assert.equal(mixed.details.requestTelemetry.launchedChildren, 1);
+	assert.equal(mixed.details.requestTelemetry.launchedChildren, 2);
 	for (const snapshot of snapshots.slice(mixedStart)) {
-		const cached = snapshot.tasks.find(row => row.id === handle)!;
-		assert.equal(cached.episode, 2, "cached evidence retains its historical episode, not current ep3");
-		assert.equal(cached.replayed, true);
+		assert.equal(snapshot.tasks.find(row => row.id === handle)!.episode, 4, "each observer row reports its own episode");
+		assert.equal(snapshot.tasks.find(row => row.id === second.details.sessions[0]!.handle)!.episode, 2);
 	}
+	const mixedLength = snapshots.length;
+	const replayedMixed = await state.tool.execute("mixed", mixedInput, undefined, undefined, ctx);
+	assert.equal(replayedMixed.details.requestTelemetry.launchedChildren, 0, "same-call replay launches nothing");
+	assert.equal(snapshots.length, mixedLength);
 });
 
 test("worker explicit external read roots reach the child without an external write grant", async (t) => {

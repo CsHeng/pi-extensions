@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const REPO_ROOT = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
-const SCRIPT = fileURLToPath(new URL("../scripts/run-installed-subagents-probe.sh", import.meta.url));
+const SCRIPT = fileURLToPath(new URL("../scripts/run-installed-agents-probe.sh", import.meta.url));
 
 const PASS = {
 	result: "pass",
@@ -46,7 +46,7 @@ done
 [[ \${extension_count} -eq 1 ]]
 if [[ \$instance == 1 ]]; then
 	printf '%s\\n' \\
-		'{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"subagents"},{"name":"subagents-ui"}]}}' \\
+		'{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"agents"},{"name":"agents-ui"}]}}' \\
 		'{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-subagent-probe","data":{"present":false,"managed":true,"managedSource":true,"ui":true,"debug":false}}]}}'
 else
 	printf '%s\\n' \\

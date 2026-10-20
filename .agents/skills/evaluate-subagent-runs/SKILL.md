@@ -1,6 +1,6 @@
 ---
 name: evaluate-subagent-runs
-description: "Use for read-only evaluation of explicit Pi session JSONL files containing current-version managed csheng_subagent_sessions results and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition. Retired one-shot csheng_subagents and non-current managed envelopes are excluded, not interpreted."
+description: "Use for read-only evaluation of explicit Pi session JSONL files containing current-version managed agent results and native observations: routing, launch, replay, owned usage, command/timing evidence, apply, and explicit parent disposition. Retired one-shot csheng_subagents and non-current managed envelopes are excluded, not interpreted."
 ---
 
 # Evaluate Subagent Runs
@@ -12,7 +12,7 @@ Evaluate one explicitly named Pi session (or one explicit current-epoch scan) wi
 - Accept one exact session JSONL path or session ID, or an explicit current-epoch scan that names both a sessions root and the provenance manifest.
 - Read only the selected Pi JSONL and, when explicitly supplied, one bounded parent-disposition JSON. Never read Pi SQLite, settings, credentials, logs, or unrelated sessions.
 - Emit only metric artifact schema version five as defined in `references/metric-schema.md`. That artifact version is independent of the collaboration/managed envelope version (currently four) and of the session-view version (currently four).
-- Interpret a managed `csheng_subagent_sessions` envelope only when `schemaVersion` is four. The retired one-shot `csheng_subagents` tool name and any non-four managed envelope are classified shallowly and excluded before any nested field is read; they are reported as exclusions (`source.excludedRuns`, `observations.excludedRecords`, `managedDispatch.excludedRecords`), never as invalid current work. Do not add legacy inference or a compatibility adapter.
+- Interpret canonical `agent` or known historical `csheng_subagent_sessions` managed envelopes only when `schemaVersion` is four. The retired one-shot `csheng_subagents` tool name and any non-four managed envelope are classified shallowly and excluded before any nested field is read; they are reported as exclusions (`source.excludedRuns`, `observations.excludedRecords`, `managedDispatch.excludedRecords`), never as invalid current work. Do not add legacy inference or a compatibility adapter.
 - Never copy prompts, objectives, raw model selectors, task IDs, child output, stderr, environment values, route-file content, or external file content. The bounded per-root `destination` projection described in the schema is the only path-like field retained.
 - Report exclusions, invalid current records, and unavailable provenance as separate categories. Do not merge excluded or unavailable evidence into a known total.
 - Report logical counts once: `outcomes.candidatesApplied` counts a candidate only when it is actually `applied`; owned usage is deduplicated by owner/entry/episode; `managedDispatch` deduplicates owner/invocation. Do not multiply a count because a bundle has several repository roots.

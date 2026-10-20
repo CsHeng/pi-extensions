@@ -8,7 +8,7 @@ import {
 	observerTools,
 	parseObserverSnapshot,
 	type ObserverSnapshot,
-} from "../extensions/subagents/observer-events.ts";
+} from "../extensions/agents/observer-events.ts";
 
 function task(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {

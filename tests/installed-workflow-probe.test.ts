@@ -25,7 +25,7 @@ done
 if [[ -n $session_dir ]]; then
 	mkdir -p "$session_dir"
 	cat >"$session_dir/session.jsonl" <<'JSONL'
-{"type":"custom","customType":"csheng-workflow-state","data":{"schemaVersion":2,"state":{"goal":"Synthetic workflow probe"}}}
+{"type":"custom","customType":"csheng-workflow-state","data":{"schemaVersion":2,"state":{"title":"Synthetic tasklist probe"}}}
 JSONL
 	printf 'PROBE_DONE\\n'
 	exit 0
@@ -38,9 +38,9 @@ if [[ -f "\${PI_CODING_AGENT_DIR:-}/settings.json" ]]; then
 	jq -e --arg path "${REPO_ROOT}" '.packages[0] == $path' "\${PI_CODING_AGENT_DIR}/settings.json" >/dev/null
 fi
 if [[ $no_extensions == 1 && $extension_count -le 1 ]]; then
-	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"workflow-probe"}]}}' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-workflow-probe","data":{"tool":false,"source":false,"todo":false}}]}}'
+	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"workflow-probe"}]}}' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-workflow-probe","data":{"tool":false,"source":false,"catalog":false,"todo":false}}]}}'
 else
-	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"workflow-probe"}]}}' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-workflow-probe","data":{"tool":true,"source":true,"todo":false}}]}}'
+	printf '%s\\n' '{"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"workflow-probe"}]}}' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","customType":"csheng-workflow-probe","data":{"tool":true,"source":true,"catalog":true,"todo":false}}]}}'
 fi
 `;
 
@@ -63,7 +63,7 @@ async function runProbe(t: test.TestContext, script: string, source: string): Pr
 	assert.deepEqual(JSON.parse(result.stdout), {
 		result: "pass",
 		source,
-		...(source === "installed" ? { fixture: "synthetic-workflow" } : {}),
+		...(source === "installed" ? { fixture: "synthetic-tasklist" } : {}),
 		tool: 1,
 		source_identity: 1,
 		extension_off_tool: 0,
@@ -73,9 +73,9 @@ async function runProbe(t: test.TestContext, script: string, source: string): Pr
 }
 
 test("temporary workflow runner accepts shim registration and synthetic snapshot responses", async (t) => {
-	await runProbe(t, "run-temporary-workflow-probe.sh", "temporary");
+	await runProbe(t, "run-temporary-tasklist-probe.sh", "temporary");
 });
 
 test("installed workflow runner accepts shim package and synthetic snapshot responses", async (t) => {
-	await runProbe(t, "run-installed-workflow-probe.sh", "installed");
+	await runProbe(t, "run-installed-tasklist-probe.sh", "installed");
 });

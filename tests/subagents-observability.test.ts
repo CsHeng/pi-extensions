@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeCapabilityInvalidated, nativeLeaf, projectRecordedUsage, unavailableObservation, type NativeObservation, type NativeUsageRow, type ObservedUsage } from "../extensions/subagents/observability.ts";
-import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
-import { emptyUsage, HARD_LIMITS } from "../extensions/subagents/contracts.ts";
+import { boundNativeObservation, collectNativeObservation, isNativeObservation, mergeOwnedUsage, nativeCapabilityInvalidated, nativeLeaf, projectRecordedUsage, unavailableObservation, type NativeObservation, type NativeUsageRow, type ObservedUsage } from "../extensions/agents/observability.ts";
+import { MANAGED_LIMITS } from "../extensions/agents/session-contracts.ts";
+import { emptyUsage, HARD_LIMITS } from "../extensions/agents/contracts.ts";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const jsonl = (...entries: unknown[]) => `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;

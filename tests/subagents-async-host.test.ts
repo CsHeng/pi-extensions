@@ -12,17 +12,17 @@ import test from "node:test";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerContinuationTool, type ContinuationService } from "../extensions/subagents/continuation.ts";
-import { ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { defaultConfig } from "../extensions/subagents/config.ts";
-import { runChild } from "../extensions/subagents/runner.ts";
+import { registerContinuationTool, type ContinuationService } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { runChild } from "../extensions/agents/runner.ts";
 import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../extensions/shared/subagent-execution.ts";
-import type { SessionActionResult, SessionView } from "../extensions/subagents/session-contracts.ts";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
+import type { SessionActionResult, SessionView } from "../extensions/agents/session-contracts.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
 import { LOOP_NOTICE_TYPE } from "../extensions/shared/loop-facts.ts";
-import workflow from "../extensions/workflow/index.ts";
-import type { GoalState } from "../extensions/workflow/goal-contracts.ts";
+import workflow from "../extensions/tasklist/index.ts";
+import type { TasklistState } from "../extensions/tasklist/goal-contracts.ts";
 import nativeFixture from "./fixtures/subagents-native-session.ts";
 import { createHostHarness, createTrace, createTraceObserver } from "./fixtures/workflow/host-fixture.ts";
 const exec = promisify(execFile);
@@ -40,14 +40,14 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
    return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "done", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
   pi.on("agent_start", (_event, ctx) => { context = ctx; });
-  pi.on("tool_result", event => { const result = event.details as SessionActionResult; if (event.toolName === "csheng_subagent_sessions" && result.action === "create") receipt = result; });
+  pi.on("tool_result", event => { const result = event.details as SessionActionResult; if (event.toolName === "agent" && result.action === "create") receipt = result; });
   pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { if ((event as SubagentExecutionEvent).kind === "run-terminal") terminal(); });
   pi.registerTool({ name: "drain_children", label: "Drain fixture", description: "Release owned fixture children while parent tool holds the turn", parameters: Type.Object({}), async execute() { release(); await completed; return { content: [{ type: "text", text: "terminal" }], details: {} }; } });
  }] });
  t.after(async () => { release(); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context)).status, "succeeded"); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
  h.faux.setResponses([
-  managed({ action: "create", requestId: "consume", tasks: (consume === "mixed" ? ["one", "two"] : ["one"]).map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] })) }), tool("drain_children", {}),
+  managed({ action: "create", tasks: (consume === "mixed" ? ["one", "two"] : ["one"]).map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] })) }), tool("drain_children", {}),
   providerContext => { providerEvidence = JSON.stringify(providerContext.messages); return managed(consume === "join" ? { action: "join", runId: receipt.runId } : consume === "close" ? { action: "close", handle: receipt.sessions[0]!.handle, expectedEpisode: 1, disposition: "discard" } : { action: "inspect", handle: receipt.sessions[0]!.handle }); },
   fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved evidence received"),
  ]);
@@ -75,22 +75,22 @@ test("blocked work can resume, yield fully idle, and receive one child terminal 
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
  h.faux.setResponses([
-  tool("csheng_workflow", { operation: "set", goal: "Verify resumed execution", tasks: [{ id: "verify", title: "Verify", status: "blocked", note: "Await user prerequisite" }] }),
+  tool("tasklist", { operation: "set", title: "Verify resumed execution", tasks: [{ id: "verify", title: "Verify", status: "blocked", note: "Await user prerequisite" }] }),
   fauxAssistantMessage("Waiting for the user prerequisite"),
  ]);
  await h.session.prompt("Start verification"); assert.equal(h.faux.state.callCount, 2);
  h.faux.setResponses([
-  tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "doing", note: null }] }),
-  managed({ action: "create", requestId: "yield", tasks: [{ id: "verify", role: "explorer", objective: "inspect fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }),
+  tool("tasklist", { operation: "update", tasks: [{ id: "verify", status: "doing", note: null }] }),
+  managed({ action: "create", tasks: [{ id: "verify", role: "explorer", objective: "inspect fixture", access: [{ permission: "read", scope: "/tmp/scope" }] }] }),
   fauxAssistantMessage("Execution is pending; this turn can end without completing the task"),
   context => { terminalWire = JSON.stringify(context.messages); return managed({ action: "inspect", handle }); },
-  context => { evidenceWire = JSON.stringify(context.messages); return tool("csheng_workflow", { operation: "update", tasks: [{ id: "verify", status: "done" }] }); },
+  context => { evidenceWire = JSON.stringify(context.messages); return tool("tasklist", { operation: "update", tasks: [{ id: "verify", status: "done" }] }); },
   fauxAssistantMessage("Execution evidence collected"),
  ]);
  await h.session.prompt("Prerequisite resolved; continue");
  await until(() => started && h.faux.state.callCount === 5 && !h.session.isStreaming);
- const state = () => h.session.sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state").at(-1) as { data: { state: GoalState } };
- assert.equal(state().data.state.tasks[0]?.status, "doing"); assert.equal(state().data.state.paused, false); assert.equal(wakes, 0);
+ const state = () => h.session.sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state").at(-1) as { data: { state: TasklistState } };
+ assert.equal(state().data.state.tasks[0]?.status, "doing"); assert.equal("paused" in state().data.state, false); assert.equal(wakes, 0);
  await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 5, "pending work alone must not keep requesting the provider");
  handle = (await service.contextIndex(ctx))[0]!.handle;
  release(); await until(() => h.faux.state.callCount === 8 && !h.session.isStreaming);
@@ -116,7 +116,7 @@ for (const boundary of ["settlement", "compaction", "compaction-abort", "compact
  }] });
  t.after(async () => { releaseChild(); releaseBoundary(); releaseFailure(); await work?.catch(() => {}); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "boundary", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved result received")]);
+ h.faux.setResponses([managed({ action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("parent work finished"), fauxAssistantMessage("unobserved result received")]);
  work = h.session.prompt("bounded fixture");
  if (boundary !== "settlement") { await work; work = h.session.compact("owned fixture only"); }
  await until(() => entered);
@@ -144,7 +144,7 @@ test("a completion queued behind a parent tool cannot restart an aborted real ho
  }, createTraceObserver(trace)] });
  t.after(async () => { release(); await h.session.abort(); await service.shutdown(); if (context) for (const view of await service.contextIndex(context)) assert.equal((await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, context)).status, "succeeded"); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "abort", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), tool("bash", { command: "sleep 30" }), fauxAssistantMessage("must not resume after abort")]);
+ h.faux.setResponses([managed({ action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), tool("bash", { command: "sleep 30" }), fauxAssistantMessage("must not resume after abort")]);
  const running = h.session.prompt("bounded fixture"); await until(() => trace.entries.some(entry => entry.event === "tool_start" && entry.detail?.toolName === "bash"));
  release(); await until(() => terminal); await new Promise(resolve => setImmediate(resolve)); await h.session.abort(); await running;
  await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 2); assert.equal(h.session.isStreaming, false); assert.deepEqual(h.errors, []);
@@ -160,13 +160,13 @@ for (const aggregate of ["failed", "partial"] as const) test(`returned ${aggrega
    return { id: options.task.id, role: options.task.role, status: options.task.id === "failed" ? "failed" : "succeeded", reportComplete: true, output: "returned failure is evidence", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
   pi.on("agent_start", (_event, context) => { ctx = context; });
-  pi.on("tool_execution_end", event => { if (event.toolName !== "csheng_subagent_sessions") return; const details = event.result.details as SessionActionResult; if (details.action === "create") receipt = details; if (details.action === "join") { returned = details; isError = event.isError; } });
+  pi.on("tool_execution_end", event => { if (event.toolName !== "agent") return; const details = event.result.details as SessionActionResult; if (details.action === "create") receipt = details; if (details.action === "join") { returned = details; isError = event.isError; } });
   pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { if ((event as SubagentExecutionEvent).kind === "run-terminal") terminal(); });
   pi.registerTool({ name: "drain_failure", label: "Drain failure fixture", description: "Release fixture child", parameters: Type.Object({}), async execute() { release(); await completion; return { content: [{ type: "text", text: "terminal" }], details: {} }; } });
  }] });
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "failure", tasks: (aggregate === "partial" ? ["failed", "succeeded"] : ["failed"]).map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] })) }), tool("drain_failure", {}), () => managed({ action: "join", runId: receipt.runId }), fauxAssistantMessage("failure evidence collected, not accepted")]);
+ h.faux.setResponses([managed({ action: "create", tasks: (aggregate === "partial" ? ["failed", "succeeded"] : ["failed"]).map(id => ({ id, role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] })) }), tool("drain_failure", {}), () => managed({ action: "join", runId: receipt.runId }), fauxAssistantMessage("failure evidence collected, not accepted")]);
  await h.session.prompt("fixture");
  assert.equal(returned.status, aggregate); assert.equal(isError, true); assert.ok(delayed.length > 0);
  assert.deepEqual(await service.unobservedWake(delayed, ctx), [], "the delivered failure result must fence a later notification");
@@ -184,12 +184,12 @@ test("queued but dropped completion is not acknowledged, and a new input can exp
    return { id: options.task.id, role: options.task.role, status: "succeeded", reportComplete: true, output: "one execution", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable" };
   } });
   pi.on("agent_start", (_event, context) => { ctx = context; });
-  pi.on("tool_execution_end", event => { if (event.toolName === "csheng_subagent_sessions" && (event.result.details as SessionActionResult).action === "create") receipt = event.result.details as SessionActionResult; });
+  pi.on("tool_execution_end", event => { if (event.toolName === "agent" && (event.result.details as SessionActionResult).action === "create") receipt = event.result.details as SessionActionResult; });
   pi.events.on(SUBAGENT_EXECUTION_EVENT, raw => { const event = raw as SubagentExecutionEvent; if (event.kind === "task-terminal") terminalEvent = event; });
  }] });
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([managed({ action: "create", requestId: "dropped", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("waiting for a real event")]);
+ h.faux.setResponses([managed({ action: "create", tasks: [{ id: "scan", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("waiting for a real event")]);
  await h.session.prompt("start fixture"); release(); await until(() => !!terminalEvent);
  assert.equal((await service.unobservedWake([terminalEvent], ctx)).length, 1, "publication alone must not consume terminal evidence");
  assert.equal(h.faux.state.callCount, 2);
@@ -230,7 +230,7 @@ for (const order of ["workflow-first", "executor-first"] as const) test(`complet
  const h = await createHostHarness({ mode: "rpc", extensions: order === "workflow-first" ? [notifications, workflow, executor] : [executor, workflow, notifications] });
  t.after(async () => { release(); await service.shutdown(); if (ctx) for (const view of await service.contextIndex(ctx)) await service.execute({ action: "close", handle: view.handle, expectedEpisode: view.episode, disposition: "discard" }, ctx); await h.dispose(); await rm(base, { recursive: true, force: true }); });
  await exec("git", ["init", "-q", h.workDir]);
- h.faux.setResponses([contract({ operation: "set", goal: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", requestId: "merge", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("terminal evidence received"); }, fauxAssistantMessage("must-not-run")]);
+ h.faux.setResponses([contract({ operation: "set", title: "independent work", tasks: [{ id: "running", title: "Child", status: "doing" }, { id: "ready", title: "Independent task" }] }), managed({ action: "create", tasks: [{ id: "child", role: "explorer", objective: "inspect", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), fauxAssistantMessage("settle with ready work"), providerContext => { providerWire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("terminal evidence received"); }, fauxAssistantMessage("must-not-run")]);
  await h.session.prompt("fixture"); await until(() => h.faux.state.callCount === 4 && !h.session.isStreaming);
  await new Promise(resolve => setTimeout(resolve, 100));
  assert.equal(h.faux.state.callCount, 4, "the terminal notice starts one turn, not a later task-only renewal");
@@ -241,8 +241,8 @@ for (const order of ["workflow-first", "executor-first"] as const) test(`complet
 });
 
 const tool = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
-const managed = (args: unknown) => tool("csheng_subagent_sessions", args);
-const contract = (args: unknown) => tool("csheng_workflow", args);
+const managed = (args: unknown) => tool("agent", args);
+const contract = (args: unknown) => tool("tasklist", args);
 async function until(check: () => boolean | Promise<boolean>) {
  const deadline = Date.now() + 15000;
  while (Date.now() < deadline) { try { if (await check()) return; } catch { /* owned fixture marker not written yet */ } await new Promise(resolve => setTimeout(resolve, 10)); }
@@ -264,7 +264,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
   }) });
   pi.on("agent_start", (_event, context) => { ctx = context; });
   pi.events.on(SUBAGENT_EXECUTION_EVENT, event => { events.push(event as SubagentExecutionEvent); });
-  pi.on("tool_execution_end", event => { if (event.toolName === "csheng_subagent_sessions") results.push(event.result.details as SessionActionResult); });
+  pi.on("tool_execution_end", event => { if (event.toolName === "agent") results.push(event.result.details as SessionActionResult); });
  };
  const trace = createTrace();
  const h = await createHostHarness({ mode: "rpc", realSessionFile: true, trace, extensions: [loopNotifications, nativeFixture, workflow, extension, createTraceObserver(trace)] });
@@ -279,13 +279,13 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
   await h.dispose(); await rm(base, { recursive: true, force: true });
  });
  await exec("git", ["init", "-q", h.workDir]); await writeFile(join(h.workDir, "dirty.txt"), "dirty input\n");
- const state = () => (h.session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: GoalState } }).data.state;
- const latest = (id: string): SessionView => events.flatMap(event => event.sessions).filter(view => view.result?.id === id).sort((a, b) => b.episode - a.episode)[0]!;
+ const state = () => (h.session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "csheng-workflow-state") as { data: { state: TasklistState } }).data.state;
+ const latest = (id: string): SessionView => events.flatMap(event => event.sessions).filter(view => view.result?.label === id).sort((a, b) => b.episode - a.episode)[0]!;
  const apply = (view: SessionView) => managed({ action: "apply", handle: view.handle, expectedEpisode: view.episode, candidateId: view.candidate!.id });
  h.faux.setResponses([
-  contract({ operation: "set", goal: "fixture implementation", tasks: [{ id: "t", title: "Source work" }] }),
+  contract({ operation: "set", title: "fixture implementation", tasks: [{ id: "t", title: "Source work" }] }),
   contract({ operation: "update", tasks: [{ id: "t", status: "doing" }] }),
-  managed({ action: "create", requestId: "pair", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: h.workDir }], model: "subagent-fixture/fixture", thinking: "off" })) }),
+  managed({ action: "create", tasks: ["fast", "slow"].map(id => ({ id, role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: h.workDir }], model: "subagent-fixture/fixture", thinking: "off" })) }),
   tool("bash", { command: "printf independent > parent-progress" }),
   contract({ operation: "update", tasks: [{ id: "t", note: "Submitted; parent made independent progress" }] }), fauxAssistantMessage("waiting"),
  ]);
@@ -318,7 +318,7 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  h.faux.setResponses([
   contract({ operation: "update", tasks: [{ id: "t", note: "Repair requested" }] }),
   managed({ action: "refresh", handle: fast.handle, expectedEpisode: 1 }),
-  managed({ action: "continue", mode: "foreground", episodes: [{ handle: fast.handle, expectedEpisode: 1, requestId: "repair", message: "host-worker-fixture" }] }),
+  managed({ action: "continue", mode: "foreground", episodes: [{ handle: fast.handle, expectedEpisode: 1, message: "host-worker-fixture" }] }),
   () => apply(latest("fast")), fauxAssistantMessage("repair applied; still waiting for sibling"),
  ]);
  await h.session.prompt("repair fast task explicitly");
@@ -326,8 +326,8 @@ test("real RPC-mode Pi parent and native children overlap, wake, apply early and
  assert.equal(await readFile(join(h.workDir, "fast.txt"), "utf8"), "candidate-2");
  const after = await store.load(fast.handle, { repo: h.workDir, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) });
  assert.equal(after.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path, before.roots.find(root => root.permission === "write")?.inputs?.gitWorkspace?.path); assert.notEqual(after.nativeLeaf, before.nativeLeaf);
- h.faux.setResponses([managed({ action: "join", runId }), () => apply(latest("slow")), contract({ operation: "cancel", reason: "fixture transport proof is not semantic acceptance" }), fauxAssistantMessage("done")]);
- await writeFile(join(base, "release-slow"), "go"); await until(() => state().cancelled === true && h.session.isStreaming === false);
+ h.faux.setResponses([managed({ action: "join", runId }), () => apply(latest("slow")), contract({ operation: "cancel" }), fauxAssistantMessage("done")]);
+ await writeFile(join(base, "release-slow"), "go"); await until(() => state().tasks.every(task => task.status === "cancelled") && h.session.isStreaming === false);
  assert.equal(results.findLast(result => result.action === "join")!.sessions.find(view => view.handle === fast.handle)!.episode, 1);
  assert.equal(await readFile(join(h.workDir, "slow.txt"), "utf8"), "candidate-1"); assert.notEqual(state().tasks[0]!.status, "done"); assert.deepEqual(h.errors, []);
  assert.ok(results.every(result => ["accepted", "succeeded"].includes(result.status)), JSON.stringify(results.map(result => ({ action: result.action, status: result.status, error: result.error }))));

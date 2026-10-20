@@ -4,10 +4,10 @@ import { mkdir as ensureScopeMkdir } from "node:fs/promises";
 ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyUsage, type TaskResult } from "../extensions/subagents/contracts.ts";
-import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "../extensions/subagents/graph.ts";
-import { runScheduledTasks } from "../extensions/subagents/scheduler.ts";
-import { createRunClock, workerIntervalTotals } from "../extensions/subagents/telemetry.ts";
+import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
+import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "../extensions/agents/graph.ts";
+import { runScheduledTasks } from "../extensions/agents/scheduler.ts";
+import { createRunClock, workerIntervalTotals } from "../extensions/agents/telemetry.ts";
 
 function success(task: NormalizedTask, output = task.id): TaskResult {
 	return {
@@ -115,7 +115,7 @@ test("graph admission rejects cycles, unknown dependencies and read-only writes;
 	] }).ok, false);
 	assert.deepEqual(validateGraphStructure({ tasks: [
 		{ id: "a", role: "explorer", objective: "a", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["missing"] },
-	] }), { ok: false, error: { code: "unknown_dependency", message: "Task a depends on unknown task missing." } });
+	] }), { ok: false, error: { code: "unknown_dependency", message: "Task a depends on unknown label missing." } });
 	assert.equal(validateGraphStructure({ tasks: [
 		{ id: "a", role: "reviewer", objective: "a", access: [{ permission: "write", scope: "/tmp/write" }] },
 	] }).ok, true);
@@ -342,7 +342,7 @@ test("task cancellation aborts pending work, blocks dependents, and leaves unrel
 		{ id: "pending", role: "explorer", objective: "pending", access: [{ permission: "read", scope: "/tmp/scope" }] },
 		{ id: "blocked", role: "reviewer", objective: "blocked", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["pending"] },
 	]);
-	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let control: import("../extensions/agents/scheduler.ts").SchedulerControl | undefined;
 	let release: (() => void) | undefined;
 	const gate = new Promise<void>((resolve) => { release = resolve; });
 	const run = runScheduledTasks(tasks, {
@@ -377,7 +377,7 @@ test("enterConvergence linearizes task and run cancellation", async () => {
 		{ id: "worker", role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] },
 		{ id: "other", role: "explorer", objective: "o", access: [{ permission: "read", scope: "/tmp/scope" }] },
 	]);
-	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let control: import("../extensions/agents/scheduler.ts").SchedulerControl | undefined;
 	let otherSignal: AbortSignal | undefined;
 	let releaseOther: (() => void) | undefined;
 	const otherGate = new Promise<void>((resolve) => { releaseOther = resolve; });
@@ -412,7 +412,7 @@ test("enterConvergence linearizes task and run cancellation", async () => {
 
 test("task cancellation before enterConvergence wins and prevents the critical section", async () => {
 	const tasks = graph([{ id: "worker", role: "worker", objective: "w", access: [{ permission: "write", scope: "/tmp/src" }] }]);
-	let control: import("../extensions/subagents/scheduler.ts").SchedulerControl | undefined;
+	let control: import("../extensions/agents/scheduler.ts").SchedulerControl | undefined;
 	let ready: (() => void) | undefined;
 	const started = new Promise<void>((resolve) => { ready = resolve; });
 	const run = runScheduledTasks(tasks, {

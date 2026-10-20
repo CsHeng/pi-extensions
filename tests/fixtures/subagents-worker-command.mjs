@@ -15,7 +15,7 @@ if (mode === "check") {
 	await writeFile("started", String(child.pid));
 	setInterval(() => {}, 1000);
 } else if (mode === "search-check") {
-	const { createWorkerTools } = await import("../../extensions/subagents/worker-tools.ts");
+	const { createWorkerTools } = await import("../../extensions/agents/worker-tools.ts");
 	const worker = await createWorkerTools({ cwd: process.cwd(), scratch: process.argv[3] });
 	const find = worker.tools.find((tool) => tool.name === "find");
 	const signal = new AbortController();

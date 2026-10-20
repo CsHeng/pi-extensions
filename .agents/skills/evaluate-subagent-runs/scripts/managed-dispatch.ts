@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { AsyncDispatchCollector, type AsyncDispatchMetrics } from "./async-dispatch.ts";
-import { nativeLeaf } from "../../../../extensions/subagents/observability.ts";
-import type { ManagedRequestTelemetry } from "../../../../extensions/subagents/session-contracts.ts";
+import { nativeLeaf } from "../../../../extensions/agents/observability.ts";
+import type { ManagedRequestTelemetry } from "../../../../extensions/agents/session-contracts.ts";
 
 export interface DispatchEpoch { extensionEpoch: string; configurationEpoch: string; extensionActivatedAtMs: number; configurationActivatedAtMs: number }
 type Group = { action: string; status: string; count: number };
@@ -70,7 +70,7 @@ export class ManagedDispatchCollector {
 				continue;
 			}
 			const message = object(row?.message), details = object(message?.details);
-			if (row?.type !== "message" || message?.role !== "toolResult" || message.toolName !== "csheng_subagent_sessions") continue;
+			if (row?.type !== "message" || message?.role !== "toolResult" || !["agent", "csheng_subagent_sessions"].includes(String(message.toolName))) continue;
 			if (++this.records > 100000) throw new Error("too_many_runs");
 			// Shallow version cut before payload interpretation: explicitly versioned non-current envelopes are
 			// excluded, never interpreted as current; malformed versionless current records still fail validation.

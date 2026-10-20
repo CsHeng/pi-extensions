@@ -4,7 +4,7 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-
 import {
 	emptyUsage,
 	type TaskResult,
-} from "../extensions/subagents/contracts.ts";
+} from "../extensions/agents/contracts.ts";
 import {
 	boundToolContent,
 	formatClock,
@@ -12,9 +12,9 @@ import {
 	formatManagedContent,
 	formatManagedResult,
 	formatProgress,
-} from "../extensions/subagents/render.ts";
-import { MANAGED_STORAGE_WARNINGS, parseSessionRequest, type SessionActionResult, type SessionView } from "../extensions/subagents/session-contracts.ts";
-import type { NativeObservation } from "../extensions/subagents/observability.ts";
+} from "../extensions/agents/render.ts";
+import { MANAGED_STORAGE_WARNINGS, parseSessionRequest, type SessionActionResult, type SessionView } from "../extensions/agents/session-contracts.ts";
+import type { NativeObservation } from "../extensions/agents/observability.ts";
 
 function task(index: number, output: string): TaskResult {
 	return {
@@ -112,7 +112,7 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 		},
 	}];
 	const progress = formatProgress(results, 12_000);
-	assert.match(progress, /Subagents 1\/2 running, 1 finished · 3 turns · 12s/);
+	assert.match(progress, /Agents 1\/2 running, 1 finished · 3 turns · 12s/);
 	assert.match(formatProgress(results), /3 turns · unknown/);
 	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
 	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);

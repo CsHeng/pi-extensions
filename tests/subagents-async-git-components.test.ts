@@ -5,8 +5,8 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SessionExecutionSupervisor, type ExecutionEvent } from "../extensions/subagents/session-supervisor.ts";
-import { captureGitInput, createGitTaskWorkspace, freezeGitCandidate, applyGitCandidate, refreshGitInputs, discardGitWorkspace, type GitTaskWorkspace, type GitCandidate } from "../extensions/subagents/git-workspace.ts";
+import { SessionExecutionSupervisor, type ExecutionEvent } from "../extensions/agents/session-supervisor.ts";
+import { captureGitInput, createGitTaskWorkspace, freezeGitCandidate, applyGitCandidate, refreshGitInputs, discardGitWorkspace, type GitTaskWorkspace, type GitCandidate } from "../extensions/agents/git-workspace.ts";
 const exec = promisify(execFile);
 function deferred<T = void>() { let resolve!: (value: T | PromiseLike<T>) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
 async function git(repo: string, ...args: string[]) { return (await exec("git", ["-c", "core.hooksPath=/dev/null", "-C", repo, ...args], { timeout: 10_000, env: { PATH: process.env.PATH, HOME: "/nonexistent", LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@localhost", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@localhost" } })).stdout.trim(); }

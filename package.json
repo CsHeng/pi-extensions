@@ -20,11 +20,11 @@
   ],
   "scripts": {
     "check": "bun run typecheck && bun run test:fast && bun run test:isolated && bun run test:host-optional && bash -n scripts/*.sh",
-    "e2e:installed-offline": "bash scripts/run-installed-workflow-probe.sh",
+    "e2e:installed-offline": "bash scripts/run-installed-tasklist-probe.sh",
     "e2e:host-offline": "bun scripts/run-test-lane.ts host-required",
     "e2e:ui-offline": "bun scripts/run-test-lane.ts ui-required",
-    "e2e:subagents": "bun scripts/run-live-subagents-e2e.ts",
-    "e2e:subagents-ui": "bun test ./tests/subagents-ui-tui.e2e.ts",
+    "e2e:agents": "bun scripts/run-live-agents-e2e.ts",
+    "e2e:agents-ui": "bun test ./tests/subagents-ui-tui.e2e.ts",
     "test": "bun test --timeout 120000 ./tests/*.test.ts",
     "test:fast": "bun scripts/run-test-lane.ts fast",
     "test:isolated": "bun scripts/run-test-lane.ts isolated",
@@ -50,16 +50,16 @@
     "extensions": [
       "./extensions/multi-skill-mentions/index.ts",
       "./extensions/fast-gpt/index.ts",
-      "./extensions/subagents/index.ts",
+      "./extensions/agents/index.ts",
       "./extensions/status-footer/index.ts",
       "./extensions/work-timing/index.ts",
-      "./extensions/subagents-ui/index.ts",
-      "./extensions/workflow/index.ts",
-      "./extensions/loop-notifications/index.ts",
+      "./extensions/agents-ui/index.ts",
+      "./extensions/tasklist/index.ts",
+      "./extensions/job-notifications/index.ts",
       "./extensions/tasks-ui/index.ts",
-      "./extensions/jobs-ui/index.ts",
+      "./extensions/bash-jobs-ui/index.ts",
       "./extensions/agent-bark.ts",
-      "./extensions/retained-shell/index.ts"
+      "./extensions/async-bash/index.ts"
     ]
   }
 }

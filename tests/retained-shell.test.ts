@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, type BashOperations, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
-import { EventEmitter } from "node:events";
 import { NATIVE_TIMER_MAX_MS } from "../extensions/shared/duration-timer.ts";
-import { createShellDelivery } from "../extensions/retained-shell/delivery.ts";
-import { createShellExecutionOwner, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/retained-shell/execution.ts";
-import { bindRetainedShell } from "../extensions/retained-shell/index.ts";
-import loopNotifications from "../extensions/loop-notifications/index.ts";
-import { shellClaim, SHELL_EXECUTION_EVENT } from "../extensions/retained-shell/policy.ts";
-import { validateShellCall } from "../extensions/retained-shell/validate.ts";
+import { createShellDelivery } from "../extensions/async-bash/delivery.ts";
+import { createShellExecutionOwner, type ShellExecutionEvent, type ShellExecutionOwner, type ShellExecutionView, type ShellScope, type StartShellInput } from "../extensions/async-bash/execution.ts";
+import { bindRetainedShell } from "../extensions/async-bash/index.ts";
+import loopNotifications from "../extensions/job-notifications/index.ts";
+import { shellClaim, SHELL_EXECUTION_EVENT } from "../extensions/async-bash/policy.ts";
+import { validateShellCall } from "../extensions/async-bash/validate.ts";
 import { LOOP_FACTS_EVENT, LOOP_NOTICE_TYPE, LOOP_SNAPSHOT_REQUEST, type LoopFacts } from "../extensions/shared/loop-facts.ts";
+import { fakeBashOperations } from "./helpers/fake-bash-operations.ts";
 
-const shell = { shell: "/bin/sh", args: ["-c"] };
 const scope: ShellScope = { sessionId: "session", branchAnchor: "leaf" };
 const unscoped: ShellScope = { sessionId: null, branchAnchor: null };
 
@@ -76,7 +76,7 @@ test("registration claims builtin bash only in tui or rpc", () => {
 				return () => {};
 			},
 		};
-		bindRetainedShell(pi as unknown as ExtensionAPI, createShellExecutionOwner({ spawnSpec: () => shell }));
+		bindRetainedShell(pi as unknown as ExtensionAPI, createShellExecutionOwner({ operations: createLocalBashOperations() }));
 		const ctx = { mode: item.mode, sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
 		for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
 		assert.equal(tools.some((tool) => tool.name === "bash"), item.claimed, item.mode);
@@ -89,7 +89,7 @@ test("retained execution keeps one process across inspect, renew, released wait,
 	const marker = join(dir, "marker");
 	const pidfile = join(dir, "pid");
 	const events: ShellExecutionEvent[] = [];
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => { events.push(event); } });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations(), onEvent: (event) => { events.push(event); } });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -134,7 +134,7 @@ test("retained execution keeps one process across inspect, renew, released wait,
 
 test("foreground window releases the wait and a short command returns its own terminal", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -170,7 +170,7 @@ test("foreground window releases the wait and a short command returns its own te
 
 test("deadline and shutdown do not report a successful exit", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -205,7 +205,7 @@ test("deadline and shutdown do not report a successful exit", async (t) => {
 
 test("an already aborted start does not spawn", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -228,7 +228,7 @@ test("an already aborted start does not spawn", async (t) => {
 
 test("output stays bounded and a missing command does not spawn", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, maxOutputBytes: 32 });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations(), maxOutputBytes: 32 });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -259,20 +259,16 @@ test("output stays bounded and a missing command does not spawn", async (t) => {
 	assert.ok(Buffer.byteLength(view.output) <= 32);
 });
 
-test("observer failure and late output do not settle before the process closes", async (t) => {
+test("observer failure and late output do not settle before the native operation settles", async (t) => {
 	const dir = await scratch();
-	const child = new EventEmitter() as EventEmitter & { pid: number; stdout: EventEmitter; stderr: EventEmitter; stdin: null };
-	child.pid = 4242;
-	child.stdout = new EventEmitter();
-	child.stderr = new EventEmitter();
-	child.stdin = null;
-	const owner = createShellExecutionOwner({
-		spawnSpec: () => shell,
-		launch: () => child as never,
-		stop: () => {
-			child.stdout.emit("data", Buffer.from("late\n"));
-			child.emit("close", null);
+	const { operations, executions } = fakeBashOperations({
+		onAbort: (execution) => {
+			execution.emit("late\n");
+			execution.close(null);
 		},
+	});
+	const owner = createShellExecutionOwner({
+		operations,
 		onEvent: () => { throw new Error("observer failed"); },
 	});
 	t.after(async () => {
@@ -294,11 +290,12 @@ test("observer failure and late output do not settle before the process closes",
 	assert.equal(cancelled.status, "cancelled");
 	assert.equal(cancelled.output, "late\n");
 	assert.equal(cancelled.exitCode, null);
+	assert.equal(executions.get("sleep 30")?.aborted, true);
 });
 
 test("controls stay in one session branch and a switch interrupts only the old owner", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -348,7 +345,7 @@ test("branch switch keeps ancestor work and a late old terminal does not enter t
 		},
 	};
 	pi.events.on(LOOP_FACTS_EVENT, (data) => { const facts = data as LoopFacts; if (facts.producer === "retained-shell") published.push(facts); });
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations(), onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
 	const startsBefore = owner.startCount;
 	t.after(async () => { await owner.shutdown(); await rm(dir, { recursive: true, force: true }); });
 	bindRetainedShell(pi as unknown as ExtensionAPI, owner);
@@ -378,7 +375,7 @@ test("an empty execution id does not start a process", async () => {
 	assert.equal(validateShellCall({ action: "inspect", executionId: "" }).ok, false);
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => void>>();
 	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext) => Promise<{ isError?: boolean }> }>();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	const before = owner.startCount;
 	const pi = {
 		getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin" } }],
@@ -422,7 +419,7 @@ test("nine background terminals remain listed and project once", async (t) => {
 			return () => {};
 		},
 	};
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations(), onEvent: (event) => pi.events.emit(SHELL_EXECUTION_EVENT, event) });
 	t.after(async () => { await owner.shutdown(); await rm(dir, { recursive: true, force: true }); });
 	bindRetainedShell(pi as unknown as ExtensionAPI, owner);
 	loopNotifications(pi as unknown as ExtensionAPI);
@@ -493,7 +490,7 @@ test("terminal retention is bounded and a dropped wake stays inspectable", () =>
 
 test("terminal records stay inspectable after later terminals finish", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -519,7 +516,7 @@ test("terminal records stay inspectable after later terminals finish", async (t)
 
 test("display notification sees every finished record", async (t) => {
 	const dir = await scratch();
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -596,7 +593,7 @@ test("omitted wait is 180 seconds and an explicit duration above the old caps is
 test("inspect is immediate, wait expiry only releases the observer, and a terminal keeps its exit code", async (t) => {
 	const dir = await scratch();
 	const events: ShellExecutionEvent[] = [];
-	const owner = createShellExecutionOwner({ spawnSpec: () => shell, onEvent: (event) => { events.push(event); } });
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations(), onEvent: (event) => { events.push(event); } });
 	t.after(async () => {
 		await owner.shutdown();
 		await rm(dir, { recursive: true, force: true });
@@ -657,7 +654,7 @@ test("a duration above the native timer ceiling does not expire immediately and 
 	const dir = await scratch();
 	let startedId = "";
 	const owner = createShellExecutionOwner({
-		spawnSpec: () => shell,
+		operations: createLocalBashOperations(),
 		onEvent: (event) => { if (event.phase === "started") startedId = event.executionId; },
 	});
 	t.after(async () => {
@@ -713,6 +710,168 @@ test("a duration above the native timer ceiling does not expire immediately and 
 	]);
 	assert.equal(cancelled.status, "cancelled");
 });
+
+test("one native operation keeps a silent retained command alive until it writes its output", async (t) => {
+	const dir = await scratch();
+	const release = join(dir, "release");
+	const native = createLocalBashOperations();
+	let calls = 0;
+	const counted: BashOperations = {
+		exec: (command, cwd, options) => { calls += 1; return native.exec(command, cwd, options); },
+	};
+	const owner = createShellExecutionOwner({ operations: counted });
+	t.after(async () => {
+		await owner.shutdown();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const started = await owner.start({
+		command: `while [ ! -f ${quote(release)} ]; do sleep 0.05; done; printf 'done\\n'`,
+		cwd: dir,
+		env: process.env,
+		sessionId: scope.sessionId,
+		branchAnchor: scope.branchAnchor,
+		toolCallId: "call-native",
+		deadlineMs: 20_000,
+		foregroundWindowMs: 150,
+	});
+	assert.equal(started.status, "running");
+	assert.equal(started.output, "");
+	assert.equal(calls, 1);
+	assert.equal(owner.startCount, 1);
+	assert.equal(owner.inspect(started.executionId, scope)?.status, "running");
+	await writeFile(release, "go\n");
+	const finished = await owner.wait(started.executionId, scope, { waitMs: 10_000 });
+	assert.equal(finished.status, "exited");
+	assert.equal(finished.exitCode, 0);
+	assert.equal(finished.output, "done\n");
+	assert.equal(calls, 1);
+	const writer = await owner.start({
+		command: "printf 'early\\n'; sleep 0.3; printf 'late\\n'",
+		cwd: dir,
+		env: process.env,
+		sessionId: scope.sessionId,
+		branchAnchor: scope.branchAnchor,
+		toolCallId: "call-output",
+		deadlineMs: 20_000,
+		foregroundWindowMs: 100,
+	});
+	assert.equal(writer.status, "running");
+	assert.equal(writer.output, "early\n");
+	assert.equal(owner.inspect(writer.executionId, scope)?.output, "early\n");
+	const collected = await owner.wait(writer.executionId, scope, { waitMs: 10_000 });
+	assert.equal(collected.status, "exited");
+	assert.equal(collected.output, "early\nlate\n");
+	assert.equal(calls, 2);
+});
+
+test("native operations apply cwd and environment once and the configured prefix once", async (t) => {
+	const dir = await scratch();
+	const resolved = await realpath(dir);
+	const marker = join(dir, "prefix");
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
+	t.after(async () => {
+		await owner.shutdown();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const scopeInput = { cwd: dir, sessionId: scope.sessionId, branchAnchor: scope.branchAnchor, toolCallId: null, deadlineMs: 10_000, foregroundWindowMs: 5_000 } as const;
+	const observed = await owner.start({
+		command: "printf '%s|%s' \"$PWD\" \"$NATIVE_WRAPPER_ENV\"",
+		...scopeInput,
+		env: { ...process.env, NATIVE_WRAPPER_ENV: "wrapper-value" },
+	});
+	assert.equal(observed.status, "exited");
+	assert.equal(observed.exitCode, 0);
+	assert.equal(observed.output, `${resolved}|wrapper-value`);
+	const prefixed = await owner.start({
+		command: "true",
+		commandPrefix: `printf 'prefix\\n' >> ${quote(marker)}`,
+		...scopeInput,
+		env: process.env,
+	});
+	assert.equal(prefixed.status, "exited");
+	assert.equal(prefixed.exitCode, 0);
+	assert.equal(prefixed.label, "true", "the label uses the command, not the prefix");
+	assert.equal(prefixed.commandPreview, "true");
+	assert.equal(await readFile(marker, "utf8"), "prefix\n", "the prefix runs once for one start");
+});
+
+test("a retained command has no terminal stdin and does not wait for input", async (t) => {
+	const dir = await scratch();
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
+	t.after(async () => {
+		await owner.shutdown();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const view = await owner.start({
+		command: "if [ -t 0 ]; then printf 'tty\\n'; else printf 'no-tty\\n'; fi; cat; printf 'after-stdin\\n'",
+		cwd: dir,
+		env: process.env,
+		sessionId: null,
+		branchAnchor: null,
+		toolCallId: null,
+		deadlineMs: 10_000,
+		foregroundWindowMs: 5_000,
+	});
+	assert.equal(view.status, "exited");
+	assert.equal(view.exitCode, 0);
+	assert.equal(view.output, "no-tty\nafter-stdin\n");
+});
+
+test("cancel stops the shell and its children", async (t) => {
+	const dir = await scratch();
+	const shellPidFile = join(dir, "shell.pid");
+	const childPidFile = join(dir, "child.pid");
+	const owner = createShellExecutionOwner({ operations: createLocalBashOperations() });
+	t.after(async () => {
+		await owner.shutdown();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const started = await owner.start({
+		command: `echo $$ > ${quote(shellPidFile)}; sleep 300 & echo $! > ${quote(childPidFile)}; wait`,
+		cwd: dir,
+		env: process.env,
+		sessionId: scope.sessionId,
+		branchAnchor: scope.branchAnchor,
+		toolCallId: null,
+		deadlineMs: 60_000,
+		foregroundWindowMs: 0,
+	});
+	await waitForFile(shellPidFile);
+	await waitForFile(childPidFile);
+	const shellPid = Number(await readFile(shellPidFile, "utf8"));
+	const childPid = Number(await readFile(childPidFile, "utf8"));
+	assert.equal(shellPid > 1 && childPid > 1, true);
+	assert.equal(processAlive(shellPid), true);
+	assert.equal(processAlive(childPid), true);
+	const cancelled = await owner.cancel(started.executionId, scope);
+	assert.equal(cancelled.status, "cancelled");
+	assert.equal(cancelled.exitCode, null);
+	await waitForGone(shellPid);
+	await waitForGone(childPid);
+});
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false;
+	}
+	try {
+		// A killed orphan can stay a zombie until its new parent reaps it.
+		return readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[2] !== "Z";
+	} catch {
+		return true;
+	}
+}
+
+async function waitForGone(pid: number): Promise<void> {
+	const started = Date.now();
+	while (Date.now() - started < 5_000) {
+		if (!processAlive(pid)) return;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	throw new Error(`process ${pid} survived execution teardown`);
+}
 
 function runningView(): ShellExecutionView {
 	return {

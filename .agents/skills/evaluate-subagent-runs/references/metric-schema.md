@@ -2,7 +2,7 @@
 
 `schemaVersion = 5` is a redacted evaluation document, not runtime state and not a workflow ledger. It is independent of the collaboration/managed envelope version (currently `4`) and of the session-view version (currently `4`): those describe runtime payloads, while `schemaVersion` versions only this report.
 
-The evaluator reads the retired one-shot `csheng_subagents` tool name and the registered managed `csheng_subagent_sessions` tool name only to **classify** envelopes. It never interprets one-shot task payloads, and it interprets a managed envelope only when its `schemaVersion === 4`. Every other version is excluded before any nested field is read and is reported as an exclusion, not as invalid current evidence. There is no legacy inference and no compatibility adapter.
+The evaluator reads the retired one-shot `csheng_subagents` tool name and the canonical managed `agent` and known historical `csheng_subagent_sessions` tool names only to **classify** envelopes. It never interprets one-shot task payloads, and it interprets a managed envelope only when its `schemaVersion === 4`. Every other version is excluded before any nested field is read and is reported as an exclusion, not as invalid current evidence. There is no legacy inference and no compatibility adapter.
 
 ## Top level
 

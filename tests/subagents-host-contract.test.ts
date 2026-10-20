@@ -13,9 +13,9 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/subagents/session-contracts.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/agents/session-contracts.ts";
 
-import { JsonlProtocolParser } from "../extensions/subagents/protocol.ts";
+import { JsonlProtocolParser } from "../extensions/agents/protocol.ts";
 
 function managedResult(status: SessionActionResult["status"], schemaVersion: 4 = 4): SessionActionResult {
 	return { schemaVersion, action: "create", status, sessions: [] };
@@ -25,7 +25,7 @@ async function extensionRunner(t: test.TestContext): Promise<ExtensionRunner> {
 	const agentDir = await mkdtemp(join(tmpdir(), "subagent-host-contract-"));
 	t.after(async () => rm(agentDir, { recursive: true, force: true }));
 	const loaded = await discoverAndLoadExtensions(
-		["./extensions/subagents/index.ts"],
+		["./extensions/agents/index.ts"],
 		process.cwd(),
 		agentDir,
 	);

@@ -4,13 +4,13 @@ These documents own self-contained extension behavior, maintenance and removal c
 
 - [Multi-skill mentions](architecture/multi-skill-mentions.md)
 - [Fast GPT](architecture/fast-gpt.md)
-- [Managed subagents](architecture/subagents.md) and [execution](architecture/subagent-execution.md)
-- [Execution primitives](architecture/subagent-execution-primitives.md)
-- [Subagents UI](architecture/subagents-ui.md)
-- [Workflow](architecture/workflow.md)
-- [Loop notifications](architecture/loop-notifications.md)
+- [Managed subagents](architecture/agents.md) and [execution](architecture/agent-execution.md)
+- [Execution primitives](architecture/agent-execution-primitives.md)
+- [Agents UI](architecture/agents-ui.md)
+- [Tasklist](architecture/tasklist.md)
+- [Job Notifications](architecture/job-notifications.md)
 - [Work-timing metrics](architecture/work-timing.md)
-- [Retained shell](architecture/retained-shell.md)
+- [Async Bash](architecture/async-bash.md)
 
 Shared integration and responsibility explanations live at `$AGENT_ARCHITECTURE_DIR/docs/architecture/`, including `pi-extension-integration.md`. New designs/plans (even changes limited to this product), deferred questions and retained evaluation results belong to that owner's `docs/plans/pi-integration/` and `docs/evaluations/pi-integration/`. Use this repository's mise root variables; do not infer checkout layout.
 

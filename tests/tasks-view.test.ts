@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import workflow from "../extensions/workflow/index.ts";
-import { createGoalStore } from "../extensions/workflow/goal-store.ts";
-import { registerTasksView, TASKS_VIEW_CHANGED_EVENT, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT, parseTasksViewReply } from "../extensions/workflow/tasks-view.ts";
+import workflow from "../extensions/tasklist/index.ts";
+import { createTasklistStore } from "../extensions/tasklist/goal-store.ts";
+import { registerTasksView, TASKS_VIEW_CHANGED_EVENT, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT, TASKS_VIEW_VERSION, parseTasksViewReply } from "../extensions/tasklist/tasks-view.ts";
 
 function harness() {
  const listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -23,26 +23,28 @@ function request(events: { emit: (name: string, data: unknown) => void }, listen
  let reply: unknown;
  const stop = events.emit;
  listeners.set(TASKS_VIEW_EVENT, [...(listeners.get(TASKS_VIEW_EVENT) ?? []), data => { reply = data; }]);
- stop(TASKS_VIEW_REQUEST_EVENT, { version: 1, requestId });
+ stop(TASKS_VIEW_REQUEST_EVENT, { version: TASKS_VIEW_VERSION, requestId });
  return reply;
 }
 
 test("query reads the committed snapshot and does not mutate, append, wake, or enter context", () => {
  const h = harness();
- const store = createGoalStore(type => h.appended.push(type));
+ const store = createTasklistStore(type => h.appended.push(type));
  const view = registerTasksView(h.pi, store);
  view.bind(h.ctx);
  const changed: unknown[] = [];
  h.listeners.set(TASKS_VIEW_CHANGED_EVENT, [data => changed.push(data)]);
- store.mutate({ operation: "set", goal: "Fixture", tasks: [{ id: "a", title: "Task" }] });
+ store.mutate({ operation: "set", title: "Fixture", tasks: [{ id: "a", title: "Task" }] });
  const seen = request(h.events, h.listeners);
  const parsed = parseTasksViewReply(seen);
  assert.equal(parsed.ok, true);
  if (!parsed.ok) return;
  assert.equal(parsed.value.state?.revision, store.current()!.revision);
+ assert.equal(parsed.value.state?.title, "Fixture");
  assert.equal(parsed.value.state?.tasks[0]?.title, "Task");
  assert.equal(JSON.stringify(changed).includes("Task"), false);
  assert.equal(JSON.stringify(seen).includes("observation"), false);
+ assert.equal(JSON.stringify(seen).includes("paused"), false);
  const before = store.current()!.revision;
  const appends = h.appended.length;
  request(h.events, h.listeners, "query-2");
@@ -55,12 +57,12 @@ test("query reads the committed snapshot and does not mutate, append, wake, or e
 });
 test("invalidation is emitted only after the owner commit and late queries see it", () => {
  const h = harness();
- const store = createGoalStore(() => {});
+ const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
  const duringHold: unknown[] = [];
  h.events.on(TASKS_VIEW_CHANGED_EVENT, data => duringHold.push(data));
  view.hold();
- store.mutate({ operation: "set", goal: "Hidden", tasks: [{ id: "a", title: "Early" }] });
+ store.mutate({ operation: "set", title: "Hidden", tasks: [{ id: "a", title: "Early" }] });
  assert.deepEqual(duringHold, []);
  view.bind(h.ctx);
  assert.equal(duringHold.length > 0, true);
@@ -76,9 +78,9 @@ test("invalidation is emitted only after the owner commit and late queries see i
 });
 test("untrusted and unsupported owners publish unavailable without task payloads", () => {
  const h = harness();
- const store = createGoalStore(() => {});
+ const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
- store.mutate({ operation: "set", goal: "Secret", tasks: [{ id: "a", title: "Hidden" }] });
+ store.mutate({ operation: "set", title: "Secret", tasks: [{ id: "a", title: "Hidden" }] });
  const untrusted = { ...h.ctx, isProjectTrusted: () => false } as ExtensionContext;
  view.bind(untrusted);
  const denied = parseTasksViewReply(request(h.events, h.listeners, "deny"));
@@ -107,9 +109,10 @@ test("malformed requests are ignored and headless workflow keeps its tool", () =
  for (const fn of handlers.get("session_start") ?? []) fn({}, ctx);
  let replies = 0;
  h.events.on(TASKS_VIEW_EVENT, () => { replies += 1; });
- h.events.emit(TASKS_VIEW_REQUEST_EVENT, { version: 1, requestId: "ok" });
+ h.events.emit(TASKS_VIEW_REQUEST_EVENT, { version: TASKS_VIEW_VERSION, requestId: "ok" });
  h.events.emit(TASKS_VIEW_REQUEST_EVENT, { version: 9, requestId: "bad" });
  assert.equal(replies, 1);
- assert.equal(tools.includes("csheng_workflow"), true);
+ assert.equal(tools.includes("tasklist"), true);
+ assert.equal(tools.includes("csheng_workflow"), false);
  assert.deepEqual(widgets, []);
 });

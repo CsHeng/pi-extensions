@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { isNativeObservation, mergeOwnedUsage, nativeLeaf, normalizeCommandCorrelation, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/subagents/observability.ts";
-import { isLocalTiming, spanDuration } from "../../../../extensions/subagents/telemetry.ts";
-import type { TimeSpan } from "../../../../extensions/subagents/contracts.ts";
-import { isProductId } from "../../../../extensions/subagents/identity.ts";
+import { isNativeObservation, mergeOwnedUsage, nativeLeaf, normalizeCommandCorrelation, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/agents/observability.ts";
+import { isLocalTiming, spanDuration } from "../../../../extensions/agents/telemetry.ts";
+import type { TimeSpan } from "../../../../extensions/agents/contracts.ts";
+import { isProductId } from "../../../../extensions/agents/identity.ts";
+
+/** Current public managed tool name, plus the retained historical name that carries the same schema. */
+const MANAGED_TOOL_NAMES = new Set(["agent", "csheng_subagent_sessions"]);
 
 /** Read-only, cumulative owned evidence. These are not bills per tool invocation. */
 export interface ObservationMetrics {
@@ -229,8 +232,9 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
 			// Shallow version/type cut before payload interpretation: explicitly versioned non-current and legacy
 			// tool envelopes are excluded from current evidence and reported separately, never treated as invalid.
-			if (message.toolName === "csheng_subagents" || (message.toolName === "csheng_subagent_sessions" && typeof details.schemaVersion === "number" && details.schemaVersion !== 4)) { result.excludedRecords++; continue; }
-			if (message.toolName === "csheng_subagent_sessions" && details.schemaVersion === 4 && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
+			const managedToolName = typeof message.toolName === "string" && MANAGED_TOOL_NAMES.has(message.toolName);
+			if (message.toolName === "csheng_subagents" || (managedToolName && typeof details.schemaVersion === "number" && details.schemaVersion !== 4)) { result.excludedRecords++; continue; }
+			if (managedToolName && details.schemaVersion === 4 && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
 				if (details.kind === "submission") continue;
 				for (const raw of details.sessions) {

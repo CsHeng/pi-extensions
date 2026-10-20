@@ -5,11 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fingerprint, ManagedSessionStore } from "../extensions/subagents/managed-sessions.ts";
-import { validateGraphStructure } from "../extensions/subagents/graph.ts";
-import { emptyUsage } from "../extensions/subagents/contracts.ts";
-import { collectNativeObservation } from "../extensions/subagents/observability.ts";
-import { MANAGED_LIMITS } from "../extensions/subagents/session-contracts.ts";
+import { fingerprint, ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
+import { collectNativeObservation } from "../extensions/agents/observability.ts";
+import { MANAGED_LIMITS } from "../extensions/agents/session-contracts.ts";
 
 async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
@@ -21,15 +21,19 @@ async function setup(t: test.TestContext) {
 	return { base, owner, tasks: graph.tasks, store };
 }
 
-test("public IDs preserve mixed case through admission, storage and lookup without aliases", async t => {
+test("task labels survive admission and storage while the persistent handle stays separate", async t => {
  const { store, owner } = await setup(t);
- const graph = validateGraphStructure({ tasks: [{ id: "TaskR2a", role: "reviewer", objective: "Inspect evidence", access: [{ permission: "read", scope: owner.repo }] }] });
+ const graph = validateGraphStructure({ tasks: [{ id: "Read /src: α", role: "reviewer", objective: "Inspect evidence", access: [{ permission: "read", scope: owner.repo }] }] });
  assert.equal(graph.ok, true); if (!graph.ok) throw new Error("fixture");
  const record = (await store.allocate(owner, "RequestA1", graph.tasks)).records[0]!;
- assert.equal(record.handle, "TaskR2a");
- assert.equal(store.view(record).handle, "TaskR2a");
- assert.equal((await store.load("TaskR2a", owner)).task.id, "TaskR2a");
- await assert.rejects(store.load("taskr2a", owner));
+ assert.match(record.handle, /^[a-f0-9]{32}$/);
+ assert.equal(record.task.id, "Read /src: α", "the readable label is retained as task data");
+ assert.equal(store.view(record).label, "Read /src: α");
+ assert.equal((await store.load(record.handle, owner)).task.id, "Read /src: α");
+ await assert.rejects(store.load("Read /src: α", owner));
+ const repeated = (await store.allocate(owner, "RequestA2", graph.tasks)).records[0]!;
+ assert.equal(repeated.task.id, "Read /src: α", "a later call may reuse the same label");
+ assert.notEqual(repeated.handle, record.handle, "repeated labels keep distinct persistent handles");
 });
 
 test("hard workspace and parsing bounds remain independent of global estimates", () => {
@@ -132,7 +136,7 @@ test("registry lock spans the mutation and unknown stale writers are not reclaim
 	const peer = new ManagedSessionStore(base);
 	await store.withSession(handle, owner, async (record) => {
 		await assert.rejects(peer.withSession(handle, owner, async () => {}), /writer_busy_or_unknown/);
-		const module = new URL("../extensions/subagents/managed-sessions.ts", import.meta.url).href;
+		const module = new URL("../extensions/agents/managed-sessions.ts", import.meta.url).href;
 		const script = `import { ManagedSessionStore } from ${JSON.stringify(module)}; const store = new ManagedSessionStore(process.argv[1]); try { await store.withSession(process.argv[2], JSON.parse(process.argv[3]), async () => {}); process.exitCode = 1; } catch (error) { console.log(error.code); }`;
 		const result = await promisify(execFile)(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script, base, handle, JSON.stringify(owner)], { timeout: 10_000, env: { PATH: process.env.PATH, HOME: base, PI_OFFLINE: "1" } });
 		assert.match(result.stdout, /managed_writer_busy_or_unknown/);
@@ -354,4 +358,27 @@ test("legacy profile fields are excluded without rewrite or profile-less success
 	assert.equal(listed.includes(routeRecord.handle), false);
 	assert.equal(await readFile(taskFile.path, "utf8"), taskFile.original);
 	assert.equal(await readFile(routeFile.path, "utf8"), routeFile.original);
+});
+
+test("a released admission reservation leaves no handle behind and can be retried with the same identity", async t => {
+	const { store, owner, tasks } = await setup(t);
+	const first = await store.allocate(owner, "call-identity", tasks);
+	assert.equal(first.fresh, true);
+	assert.equal((await store.list(owner)).length, 1);
+	assert.equal(await store.releaseReservation(owner, "call-identity"), true, "an untouched reservation is released");
+	assert.deepEqual(await store.list(owner), [], "no unusable handle stays reserved");
+	await assert.rejects(store.load(first.records[0]!.handle, owner));
+	// The same call identity now admits fresh work instead of reporting an unknown outcome.
+	const retried = await store.allocate(owner, "call-identity", tasks);
+	assert.equal(retried.fresh, true);
+	assert.equal(retried.records[0]!.task.id, tasks[0]!.id);
+
+	// A reservation that already accepted an episode is evidence, not a releasable placeholder.
+	const accepted = await store.allocate(owner, "accepted", tasks);
+	await store.withSession(accepted.records[0]!.handle, owner, async record => {
+		record.episode = 1; record.state = "idle"; record.requests.push({ id: fingerprint(["accepted", record.handle]), fingerprint: fingerprint(["episode"]), episode: 1, state: "complete" });
+		await store.save(record);
+	});
+	assert.equal(await store.releaseReservation(owner, "accepted"), false);
+	assert.equal((await store.load(accepted.records[0]!.handle, owner)).episode, 1);
 });

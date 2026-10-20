@@ -3,14 +3,14 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor } from "../extensions/shared/above-editor.ts";
-import { ManagedObserver } from "../extensions/subagents/managed-observer.ts";
+import { ManagedObserver } from "../extensions/agents/managed-observer.ts";
 import {
 	createSubagentsUiExtension,
 	SUBAGENTS_UI_COMMAND,
 	SUBAGENTS_UI_PANEL_KEY,
 	SUBAGENTS_UI_STATUS_KEY,
-} from "../extensions/subagents-ui/index.ts";
-import { SubagentsOverlay, type OverlaySnapshot, type SessionViewState } from "../extensions/subagents-ui/component.ts";
+} from "../extensions/agents-ui/index.ts";
+import { SubagentsOverlay, type OverlaySnapshot, type SessionViewState } from "../extensions/agents-ui/component.ts";
 import {
 	OBSERVER_STALE_MS,
 	compactCount,
@@ -26,8 +26,8 @@ import {
 	shortLabel,
 	subagentsInlineBudget,
 	taskColumns,
-} from "../extensions/subagents-ui/render.ts";
-import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/subagents/observer-events.ts";
+} from "../extensions/agents-ui/render.ts";
+import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/agents/observer-events.ts";
 import {
 	SESSION_VIEW_CHANGED_EVENT,
 	SESSION_VIEW_EVENT,
@@ -36,8 +36,8 @@ import {
 	parseSessionViewReply,
 	type SessionViewHistoryRow,
 	type SessionViewReply,
-} from "../extensions/subagents/session-view.ts";
-import type { RecordedUsageProjection } from "../extensions/subagents/observability.ts";
+} from "../extensions/agents/session-view.ts";
+import type { RecordedUsageProjection } from "../extensions/agents/observability.ts";
 
 type Handler = (event?: unknown, ctx?: ExtensionContext) => unknown;
 type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<unknown>;
@@ -331,8 +331,8 @@ test("physical layout stays bounded with wrapped counts, long history and all te
 });
 
 test("session-scoped title, counts and recorded usage stay distinct from live turns", () => {
-	assert.equal(formatSessionTitle(undefined), "Subagents · session");
-	assert.equal(formatSessionTitle("parent_session-1"), "Subagents · session parent…");
+	assert.equal(formatSessionTitle(undefined), "Agents · session");
+	assert.equal(formatSessionTitle("parent_session-1"), "Agents · session parent…");
 	const counts = sessionCounts(snapshot(), sessionReply(), "ready", undefined, false);
 	const countRows = formatSessionCountRows(counts);
 	assert.equal(countRows[0]?.text, "1 live (t2)");
@@ -371,7 +371,7 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
 	const lines = overlay.render(80, 40);
 	assert.ok(lines.length <= 40, `panel fits 80x40, got ${lines.length}`);
-	assert.match(lines[0] ?? "", /Subagents · session parent…/);
+	assert.match(lines[0] ?? "", /Agents · session parent…/);
 	const text = lines.join("\n");
 	assert.equal((text.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "all ten identified live rows stay visible");
 	assert.match(text, /running · 10 agents/);
@@ -562,7 +562,7 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
 	answer(pi, sessionReply({ requestId: retry.requestId, history: paged, summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 } }));
 	const text = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(text, /Subagents · session parent…/);
+	assert.match(text, /Agents · session parent…/);
 	assert.match(text, /history 1–20 of 37 · page 1\/2/);
 	assert.match(text, /✓ [0-9a-f]{8} worker ep1 idle succeeded/);
 	held.overlay?.handleInput("enter");
@@ -763,7 +763,7 @@ test("owner lifecycle resets dismiss an open overlay and reject its retired gene
 		if (event === "session_shutdown") await pi.handlers.get("session_start")?.({}, newCtx);
 		pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 100 }));
 		await openWith(pi, newCtx);
-		assert.match(rendered, /No observed subagent work/);
+		assert.match(rendered, /No observed Agent work/);
 	}
 });
 
@@ -903,7 +903,7 @@ test("themable rows keep hierarchy colors across the session layout", () => {
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
 	const lines = overlay.render(80, 24);
 	assert.ok(lines.length > 0);
-	assert.match(lines[0] ?? "", /<accent>Subagents/);
+	assert.match(lines[0] ?? "", /<accent>Agents/);
 	assert.ok(lines.every(line => line.startsWith("{selectedBg}")), "panel rows keep the selected background");
 });
 
@@ -1025,10 +1025,10 @@ test("title click toggles inline expansion and never opens the overlay", async (
 		requestId: lastRequest(host.pi).requestId,
 		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 1, queued: 1, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 },
 	}));
-	const subagentLines = () => host.content(80).filter(line => /Subagents|explorer |worker /.test(line));
+	const subagentLines = () => host.content(80).filter(line => /Agents|explorer |worker /.test(line));
 	const folded = subagentLines();
 	assert.equal(folded.length, 1);
-	assert.match(folded[0] ?? "", /▸ Subagents/);
+	assert.match(folded[0] ?? "", /▸ Agents/);
 	const clicked = clickHeader(host, 2);
 	assert.equal(clicked?.focus, undefined);
 	await new Promise(resolve => setImmediate(resolve));
@@ -1036,7 +1036,7 @@ test("title click toggles inline expansion and never opens the overlay", async (
 	assert.equal(selects.length, 0, "title click does not open a select");
 	assert.equal(tasksClicks, 0, "subagents title click does not activate Tasks");
 	const expanded = subagentLines();
-	assert.match(expanded[0] ?? "", /▾ Subagents/);
+	assert.match(expanded[0] ?? "", /▾ Agents/);
 	assert.match(expanded.join("\n"), /explorer scan ep0 running/);
 	assert.match(expanded.join("\n"), /explorer wait ep0 queued/);
 	assert.match(expanded.join("\n"), /worker 11111111 ep1 idle/);
@@ -1047,7 +1047,7 @@ test("title click toggles inline expansion and never opens the overlay", async (
 	clickHeader(host, 2);
 	const collapsed = subagentLines();
 	assert.equal(collapsed.length, 1);
-	assert.match(collapsed[0] ?? "", /▸ Subagents/);
+	assert.match(collapsed[0] ?? "", /▸ Agents/);
 	assert.equal(host.panel, undefined);
 	clickHeader(host, 0);
 	assert.equal(tasksClicks, 1);
@@ -1059,14 +1059,14 @@ test("bare subagents-ui toggles summary visibility and does not rotate into deta
 	await host.pi.handlers.get("session_start")?.({}, host.ctx);
 	assert.equal(host.mounts.length, 0);
 	host.pi.events.emit(OBSERVER_EVENT, snapshot());
-	assert.match(host.content().join("\n"), /Subagents/);
+	assert.match(host.content().join("\n"), /Agents/);
 	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("", host.ctx);
 	assert.equal(host.content().length, 0);
 	assert.equal(host.panel, undefined);
 	const hidden = requestCount(host.pi);
 	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("show", host.ctx);
 	assert.ok(requestCount(host.pi) >= hidden);
-	assert.match(host.content().join("\n"), /Subagents/);
+	assert.match(host.content().join("\n"), /Agents/);
 	const shown = requestCount(host.pi);
 	await host.pi.commands.get(SUBAGENTS_UI_COMMAND)!.handler("show", host.ctx);
 	assert.equal(requestCount(host.pi), shown, "show is idempotent");
@@ -1216,10 +1216,10 @@ test("session shutdown releases only the subagents summary slot", async () => {
 	host.composer.set("tasks", { render: () => ["Tasks"] });
 	await host.pi.handlers.get("session_start")?.({}, host.ctx);
 	assert.match(host.content(80).join("\n"), /Tasks/);
-	assert.match(host.content(80).join("\n"), /Subagents/);
+	assert.match(host.content(80).join("\n"), /Agents/);
 	await host.pi.handlers.get("session_shutdown")?.({});
 	assert.match(host.content(80).join("\n"), /Tasks/);
-	assert.doesNotMatch(host.content(80).join("\n"), /Subagents/);
+	assert.doesNotMatch(host.content(80).join("\n"), /Agents/);
 	assert.deepEqual(host.composer.slots(), ["tasks"]);
 	host.pi.events.emit(OBSERVER_EVENT, snapshot());
 	assert.doesNotMatch(host.content(80).join("\n"), /running/);
@@ -1233,7 +1233,7 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	const command = host.pi.commands.get(SUBAGENTS_UI_COMMAND)!;
 	await command.handler("expand", host.ctx);
 	assert.equal(host.panel, undefined, "expand does not open the overlay");
-	assert.match(host.content(80)[0] ?? "", /▾ Subagents/);
+	assert.match(host.content(80)[0] ?? "", /▾ Agents/);
 	assert.match(host.content(80).join("\n"), /explorer scan ep0 running/);
 	const narrowWidget = host.mounts.at(-1)?.value;
 	const narrow = (narrowWidget as (tui: unknown, theme: unknown) => { render(width: number): string[] })({ terminal: { rows: 8 } }, undefined).render(12)
@@ -1254,7 +1254,7 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	assert.match(host.content(80).join("\n"), /hidden/);
 	await command.handler("collapse", host.ctx);
 	assert.equal(host.content(80).filter(line => line.trim().length > 0).length, 1);
-	assert.match(host.content(80)[0] ?? "", /▸ Subagents/);
+	assert.match(host.content(80)[0] ?? "", /▸ Agents/);
 	assert.equal(host.panel, undefined);
 	await command.handler("", host.ctx);
 	assert.equal(host.content().length, 0);
@@ -1294,10 +1294,10 @@ test("expanded inline rows keep the title first and stay inside width and row bo
 	};
 	const lines = formatSubagentsInline(model, 80, 4, { folded: false });
 	assert.equal(lines.length, 4);
-	assert.match(lines[0] ?? "", /^▾ Subagents \(1 running · 7 queued \/ 40 agents\)/);
+	assert.match(lines[0] ?? "", /^▾ Agents \(1 running · 7 queued \/ 40 agents\)/);
 	assert.match(lines[1] ?? "", /explorer agent0 ep0 running/);
 	assert.match(lines[2] ?? "", /explorer agent1 ep0 queued/);
-	assert.match(lines[3] ?? "", /more · \/subagents-ui list/);
+	assert.match(lines[3] ?? "", /more · \/agents-ui list/);
 	assert.match(lines.join("\n"), /openai gpt-4.1 off/);
 	assert.doesNotMatch(lines.join("\n"), /scan the bounded/);
 	const narrow = formatSubagentsInline(model, 28, 4, { folded: false });
@@ -1306,11 +1306,11 @@ test("expanded inline rows keep the title first and stay inside width and row bo
 	assert.ok(narrow.every(line => visibleWidth(line) <= 28));
 	const folded = formatSubagentsInline(model, 80, 6, { folded: true });
 	assert.equal(folded.length, 1);
-	assert.match(folded[0] ?? "", /^▸ Subagents/);
+	assert.match(folded[0] ?? "", /^▸ Agents/);
 	assert.doesNotMatch(folded[0] ?? "", /agent0/);
 	const theme = { fg: (color: "accent" | "warning", text: string) => `<${color}>${text}</${color}>` };
 	const warned = formatSubagentsInline({ counts: { running: "unknown", queued: 0, agents: "unknown" } }, 80, 4, { folded: true, theme });
-	assert.match(warned[0] ?? "", /<warning>▸ ! Subagents \(running unknown \/ agents unknown\)/);
+	assert.match(warned[0] ?? "", /<warning>▸ ! Agents \(running unknown \/ agents unknown\)/);
 	assert.doesNotMatch(warned[0] ?? "", /! !|▸ ▸/);
 	const unconfirmed = formatSubagentsInline({
 		counts: { running: 0, queued: 0, agents: 1 },

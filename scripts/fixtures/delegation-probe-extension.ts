@@ -5,9 +5,9 @@
 import { Type, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "./delegation-probe-guidance.ts";
-import { SubagentTaskSchema } from "../../extensions/subagents/contracts.ts";
-import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest } from "../../extensions/subagents/session-contracts.ts";
-import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/subagents/tool-surface.ts";
+import { SubagentTaskSchema } from "../../extensions/agents/contracts.ts";
+import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest } from "../../extensions/agents/session-contracts.ts";
+import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/agents/tool-surface.ts";
 
 export const PROBE_SHAPE_ENV = "CSHENG_PROBE_SHAPE";
 export const PROBE_GUIDANCE_ENV = "CSHENG_PROBE_GUIDANCE";

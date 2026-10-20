@@ -1,180 +1,132 @@
+import { before as ensureScopeBefore } from "node:test";
+import { mkdir as ensureScopeMkdir } from "node:fs/promises";
+ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); });
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import { MANAGED_CONTEXT_TYPE, registerManagedContext } from "../extensions/subagents/context.ts";
-import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/subagents/session-contracts.ts";
-import type { SessionView } from "../extensions/subagents/session-contracts.ts";
-import {
-	createHostHarness,
-	createTrace,
-	createTraceObserver,
-	waitForTrace,
-	type Trace,
-} from "./fixtures/workflow/host-fixture.ts";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { ContinuationService, registerContinuationTool } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
+import { SUBAGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
 
-const view: SessionView = { handle: "session_example", role: "worker", episode: 2, state: "idle", reportComplete: true };
+const git = promisify(execFile);
 
-const injections = (trace: Trace): number =>
-	trace.entries.filter((entry) => entry.event === "context" && String(entry.detail?.roles ?? "").includes("custom")).length;
-const requests = (trace: Trace): number => trace.entries.filter((entry) => entry.event === "context").length;
+/** Captures the handlers the real extension registers, without a host loop or a child process. */
+function captureRegistration() {
+	const handlers = new Map<string, Array<(event: any, ctx?: any) => any>>();
+	const entries: Array<{ customType?: string }> = [];
+	const tool = { value: undefined as any };
+	const pi = {
+		on(name: string, handler: (event: any, ctx?: any) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+		registerTool(value: any) { tool.value = value; },
+		registerCommand() {},
+		appendEntry(customType: string) { entries.push({ customType }); },
+		getActiveTools: () => [SUBAGENT_SESSION_TOOL_NAME],
+		events: { on() {}, emit() {} },
+	} as unknown as ExtensionAPI;
+	return { pi, handlers, entries, tool };
+}
 
-test("managed index reaches one delivered input once across a multi-request tool turn", async (t) => {
-	const trace = createTrace();
-	let reads = 0;
-	const scenario: (pi: ExtensionAPI) => void = (pi) => {
-		pi.registerTool({
-			name: SUBAGENT_SESSION_TOOL_NAME,
-			label: "Managed sessions",
-			description: "Fixture stub so the managed context guard stays exercised.",
-			parameters: Type.Object({}),
-			async execute() {
-				return { content: [{ type: "text" as const, text: "stub" }], details: {} };
-			},
-		});
-		registerManagedContext(pi, async () => {
-			reads += 1;
-			return [view];
-		});
+async function fixture(t: test.TestContext) {
+	const base = await mkdtemp(join(tmpdir(), "subagent-discovery-")); const repo = join(base, "repo");
+	await ensureScopeMkdir(repo); await git("git", ["init", "-q", repo]);
+	const model = { provider: "fixture", id: "fixture", reasoning: false };
+	const ctx = { mode: "tui", cwd: repo, isProjectTrusted: () => true, model, thinkingLevel: "off", scopedModels: [], modelRegistry: { getAll: () => [model], getAvailable: () => [model] }, sessionManager: { getSessionId: () => "parent", getLeafId: () => "anchor", getBranch: () => [{ id: "anchor" }] } } as unknown as ExtensionContext;
+	const store = new ManagedSessionStore(base);
+	const config = defaultConfig();
+	let launches = 0;
+	const dependencies = {
+		store, loadConfig: async () => ({ config }),
+		runChild: async (options: { task: { id: string; role: TaskResult["role"] } }) => {
+			launches += 1;
+			return { id: options.task.id, role: options.task.role, status: "succeeded", output: "report", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applied", reportComplete: true, workerToolsSettled: true } satisfies TaskResult;
+		},
 	};
-	const harness = await createHostHarness({ trace, extensions: [scenario, createTraceObserver(trace)] });
-	t.after(() => harness.dispose());
-	harness.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 0.2; echo TOOL_OK" })),
-		fauxAssistantMessage("after tool"),
-	]);
+	t.after(async () => rm(base, { recursive: true, force: true }));
+	return { base, repo, ctx, store, dependencies, launches: () => launches };
+}
 
-	await harness.session.prompt("first");
-	assert.equal(requests(trace), 2, "one tool turn makes two provider requests");
-	assert.equal(injections(trace), 1, "the index is injected for the delivered input, not per provider request");
-	assert.equal(reads, 1);
-	assert.ok(trace.entries.some((entry) => entry.event === "tool_end" && entry.detail?.isError === false));
+const task = (label: string) => ({ id: label, role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: "/tmp/scope" }] });
 
-	await harness.session.prompt("second");
-	assert.equal(injections(trace), 2, "a new delivered input opens a new window");
-	assert.equal(reads, 2);
+test("the registered agent tool injects no managed session index and keeps guidance natively assembled", async (t) => {
+	const f = await fixture(t);
+	const captured = captureRegistration();
+	registerContinuationTool(captured.pi, f.dependencies);
+	// No context hook exists any more: nothing can append a per-turn session index or refresh bookkeeping.
+	assert.equal(captured.handlers.has("context"), false);
+	assert.equal(captured.handlers.has("context_with_system"), true, "live-activity cleanup stays registered");
+
+	const tool = captured.tool.value;
+	assert.equal(tool.name, "agent");
+	assert.ok(tool.description.length > 0);
+	assert.ok(tool.promptSnippet && tool.promptSnippet.length > 0, "capability guidance uses native prompt assembly");
+	assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0);
+	assert.match(tool.promptGuidelines.join("\n"), /bare inspect/, "discovery is stated in the static guidance");
+	assert.doesNotMatch(JSON.stringify([tool.description, tool.promptSnippet, tool.promptGuidelines]), /requestId|replay token|managed session index/i);
+
+	// Normal input, extension-origin input, settlement and compaction never produce index entries.
+	const settle = async (name: string, event: unknown = {}) => {
+		for (const handler of captured.handlers.get(name) ?? []) await handler(event, f.ctx);
+	};
+	await settle("session_start", {});
+	await settle("input", { source: "interactive", text: "work" });
+	await settle("input", { source: "extension", text: "EXTENSION-ORIGIN" });
+	await settle("agent_settled", {});
+	await settle("session_compact", { reason: "manual" });
+	await settle("session_tree", {});
+	assert.deepEqual(captured.entries, [], "no custom managed-index entry is appended");
+	await new ContinuationService(f.dependencies).shutdown();
 });
 
-test("extension-origin messages do not open a managed index window", async (t) => {
-	const trace = createTrace();
-	let reads = 0;
-	const scenario: (pi: ExtensionAPI) => void = (pi) => {
-		pi.registerTool({
-			name: SUBAGENT_SESSION_TOOL_NAME,
-			label: "Managed sessions",
-			description: "Fixture stub so the managed context guard stays exercised.",
-			parameters: Type.Object({}),
-			async execute() {
-				return { content: [{ type: "text" as const, text: "stub" }], details: {} };
-			},
-		});
-		registerManagedContext(pi, async () => {
-			reads += 1;
-			return [view];
-		});
-	};
-	const harness = await createHostHarness({ trace, extensions: [scenario, createTraceObserver(trace)] });
-	t.after(() => harness.dispose());
-	harness.faux.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("extension-origin")]);
+test("a bare inspect recovers this session's Agents after resume and compaction without an index", async (t) => {
+	const f = await fixture(t);
+	const service = new ContinuationService(f.dependencies);
+	t.after(async () => { await service.shutdown(); });
 
-	await harness.session.prompt("first");
-	await harness.session.sendUserMessage("EXTENSION-ORIGIN");
+	const created = await service.execute({ action: "create", mode: "foreground", tasks: [task("fix-parser-tests"), task("review-evidence")] }, f.ctx, undefined, undefined, "call-one");
+	assert.equal(created.status, "succeeded");
+	const [first, second] = created.sessions;
+	assert.equal(f.launches(), 2);
+	assert.deepEqual([first!.label, second!.label].sort(), ["fix-parser-tests", "review-evidence"]);
+	assert.match(first!.handle, /^[a-f0-9]{32}$/, "the persistent handle is generated, not the label");
 
-	assert.equal(injections(trace), 1, "only the delivered human input carries the index");
-	assert.equal(reads, 1);
-	assert.ok(trace.entries.some((entry) => entry.event === "input" && entry.detail?.text === "EXTENSION-ORIGIN" && entry.detail?.source === "extension"));
+	// A fresh service over the same store stands in for resume/compaction/reload.
+	const resumed = new ContinuationService(f.dependencies);
+	t.after(async () => { await resumed.shutdown(); });
+	const discovered = await resumed.execute({ action: "inspect" }, f.ctx);
+	assert.equal(discovered.status, "succeeded");
+	assert.deepEqual(discovered.sessions.map(view => view.label).sort(), ["fix-parser-tests", "review-evidence"]);
+	for (const view of discovered.sessions) {
+		assert.equal(typeof view.handle, "string");
+		assert.equal(view.episode, 1);
+		assert.equal(view.result?.status, "succeeded");
+		assert.equal(view.reportComplete, true);
+	}
+	// The discovered handle and episode are sufficient for the next real action.
+	const single = await resumed.execute({ action: "inspect", handle: first!.handle }, f.ctx);
+	assert.equal(single.sessions.length, 1);
+	assert.equal(single.sessions[0]!.label, first!.label);
+	assert.equal((await resumed.execute({ action: "close", handle: first!.handle, expectedEpisode: single.sessions[0]!.episode, disposition: "discard" }, f.ctx)).status, "succeeded");
+	// Closed records leave discovery but current work stays listed.
+	const after = await resumed.execute({ action: "inspect" }, f.ctx);
+	assert.deepEqual(after.sessions.map(view => view.label), [second!.label]);
 });
 
-test("a failed provider request keeps the index for its retry instead of multiplying it", async (t) => {
-	const trace = createTrace();
-	let reads = 0;
-	const scenario: (pi: ExtensionAPI) => void = (pi) => {
-		pi.registerTool({
-			name: SUBAGENT_SESSION_TOOL_NAME,
-			label: "Managed sessions",
-			description: "Fixture stub so the managed context guard stays exercised.",
-			parameters: Type.Object({}),
-			async execute() {
-				return { content: [{ type: "text" as const, text: "stub" }], details: {} };
-			},
-		});
-		registerManagedContext(pi, async () => {
-			reads += 1;
-			return [view];
-		});
-	};
-	const harness = await createHostHarness({ trace, extensions: [scenario, createTraceObserver(trace)] });
-	t.after(() => harness.dispose());
-	harness.faux.setResponses([
-		fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: synthetic transient" }),
-		fauxAssistantMessage("recovered"),
-	]);
-
-	await harness.session.prompt("retry");
-	assert.equal(injections(trace), 2, "the failed attempt and its retry each carry the index");
-	assert.equal(reads, 2);
-	assert.equal(trace.entries.filter((entry) => entry.event === "agent_end" && entry.detail?.stopReason === "stop").length, 1);
-});
-
-test("transformed queued model inputs receive non-authorizing reference without claiming human provenance", async (t) => {
-	const trace = createTrace();
-	let reads = 0;
-	const scenario: (pi: ExtensionAPI) => void = (pi) => {
-		pi.registerTool({
-			name: SUBAGENT_SESSION_TOOL_NAME,
-			label: "Managed sessions",
-			description: "Fixture stub so the managed context guard stays exercised.",
-			parameters: Type.Object({}),
-			async execute() {
-				return { content: [{ type: "text" as const, text: "stub" }], details: {} };
-			},
-		});
-		registerManagedContext(pi, async () => {
-			reads += 1;
-			return [view];
-		});
-		// Registered after the injection, so this sees the provider's final message list.
-		pi.on("context", (event) => {
-			const users = event.messages
-				.filter((message) => message.role === "user")
-				.map((message) => {
-					const content = message.content;
-					if (typeof content === "string") return content;
-					return Array.isArray(content)
-						? content.filter((part) => (part as { type?: string }).type === "text").map((part) => (part as { text?: string }).text ?? "").join("")
-						: "";
-				})
-				.join("|");
-			trace.record("context-final", {
-				users,
-				hasIndex: event.messages.some((message) => message.role === "custom" && message.customType === MANAGED_CONTEXT_TYPE && String(message.content).includes(view.handle)),
-				deliveryUnavailable: event.messages.some((message) => message.role === "custom" && String(message.content).startsWith("Native input delivery identity is unavailable")),
-			});
-		});
-	};
-	const harness = await createHostHarness({ trace, extensions: [scenario, createTraceObserver(trace)], templates: { "wf-template": "control" } });
-	t.after(() => harness.dispose());
-	harness.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 0.3; echo TOOL_OK" })),
-		fauxAssistantMessage("after tool"),
-		fauxAssistantMessage("extra"),
-	]);
-
-	const running = harness.session.prompt("start");
-	await waitForTrace(trace, (entry) => entry.event === "tool_start");
-	await harness.session.prompt("human follow-up", { streamingBehavior: "followUp" });
-	await harness.session.sendUserMessage("/wf-template", { deliverAs: "steer", expandPromptTemplates: true });
-	await running;
-
-	const finals = trace.entries.filter((entry) => entry.event === "context-final");
-	const steerRequest = finals.findIndex((entry) => String(entry.detail?.users ?? "").includes("control"));
-	const humanRequest = finals.findIndex((entry) => String(entry.detail?.users ?? "").includes("human follow-up"));
-	assert.ok(steerRequest >= 0, "the extension steer reached the provider");
-	assert.ok(humanRequest > steerRequest, "the queued human follow-up reached the provider after the steer");
-	assert.equal(finals[steerRequest]?.detail?.hasIndex, true, "unknown native context can receive non-authorizing metadata");
-	assert.equal(finals[humanRequest]?.detail?.hasIndex, true, "actual follow-up preparation receives reference too");
-	assert.equal(finals[steerRequest]?.detail?.deliveryUnavailable, false);
-	assert.equal(finals[humanRequest]?.detail?.deliveryUnavailable, false);
-	assert.equal(reads, 3, "initial input plus the two actual model-bound native inputs, not queue receipts");
+test("discovery stays inert for untrusted projects and never returns another session's Agents", async (t) => {
+	const f = await fixture(t);
+	const service = new ContinuationService(f.dependencies);
+	t.after(async () => { await service.shutdown(); });
+	await service.execute({ action: "create", tasks: [task("owned")] }, f.ctx, undefined, undefined, "call-owned");
+	const untrusted = await service.execute({ action: "inspect" }, { ...f.ctx, isProjectTrusted: () => false });
+	assert.equal(untrusted.status, "failed");
+	assert.equal(untrusted.error?.code, "project_trust_required");
+	const foreign = await service.execute({ action: "inspect" }, { ...f.ctx, sessionManager: { ...f.ctx.sessionManager, getSessionId: () => "another-session" } });
+	assert.equal(foreign.status, "succeeded");
+	assert.deepEqual(foreign.sessions, []);
 });

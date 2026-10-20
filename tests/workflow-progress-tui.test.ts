@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflow progress, grey strike, list and replay`, { timeout: 45_000 }, async t => {
+for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real tasklist progress, grey strike, list and replay`, { timeout: 45_000 }, async t => {
  try { await access("/usr/bin/script"); } catch { t.skip("util-linux script unavailable; no install performed"); return; }
  const version = spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 5_000 });
  if (version.status !== 0) { t.skip("installed Pi unavailable"); return; }
@@ -22,7 +22,7 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  const implementation = process.env.CSHENG_WORKFLOW_PROBE_ROOT ?? root;
  // Tasks observation refuses an untrusted project. --approve trusts this disposable fixture so the renderer oracle still runs.
  const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
-  "-e", join(implementation, "extensions/workflow/index.ts"), "-e", join(implementation, "extensions/tasks-ui/index.ts"), "-e", join(root, "tests/fixtures/workflow/progress-tui.ts"),
+  "-e", join(implementation, "extensions/tasklist/index.ts"), "-e", join(implementation, "extensions/tasks-ui/index.ts"), "-e", join(root, "tests/fixtures/workflow/progress-tui.ts"),
   "--model", "progress-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "progress fixture"];
  const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 42; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
   cwd: base, detached: true, env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color", COLORTERM: "truecolor", FORCE_COLOR: "0" },
@@ -47,7 +47,7 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  };
  await waitFor(async () => { try { return await readFile(join(agent, "ready"), "utf8") === "ready"; } catch { return false; } }, "fixture did not settle");
  assert.match(output, /1\/2 done/);
- assert.match(output, /TRACKING_PAUSED_FIXTURE/); assert.match(output, /2\/2 done/);
+ assert.match(output, /TRACKING_BLOCKED_FIXTURE/); assert.match(output, /2\/2 done/);
  const greyStrike = /\x1b\[38;2;(\d+);(\d+);(\d+)m\x1b\[9mSTRIKE_DONE_A\x1b\[29m/;
  // Sections intentionally start folded. Exercise the public inline command before inspecting body styles.
  const beforeExpand = output.length; child.stdin.write("/tasks-ui expand\r");
@@ -56,8 +56,8 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real workflo
  const red = Number(widgetStyle[1]), green = Number(widgetStyle[2]), blue = Number(widgetStyle[3]);
  const tint = Math.max(red, green, blue) - Math.min(red, green, blue);
  assert.ok(tint <= 20, `host dim stays a near-neutral grey, got rgb(${red},${green},${blue})`);
- const beforeList = output.length; child.stdin.write("/workflow-ui list\r");
- await waitFor(() => output.slice(beforeList).includes("Tasks · workflow"), "list did not mount");
+ const beforeList = output.length; child.stdin.write("/tasklist-ui list\r");
+ await waitFor(() => output.slice(beforeList).includes("Tasklist"), "list did not mount");
  await delay(150);
  const renderedLines = (chunk: string) => chunk.split(/\r|\n|\x1b\[[0-9;?]*[ABCDEFGHJK]/);
  const beforeSelected = output.length; child.stdin.write("\x1b[B");

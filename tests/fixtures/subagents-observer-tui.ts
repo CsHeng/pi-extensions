@@ -3,11 +3,11 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ManagedObserver } from "../../extensions/subagents/managed-observer.ts";
-import { OBSERVER_EVENT, type ObserverSnapshot } from "../../extensions/subagents/observer-events.ts";
-import { emptyUsage, type EffectiveRoute } from "../../extensions/subagents/contracts.ts";
-import { SESSION_VIEW_CHANGED_EVENT, SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, parseSessionViewRequest, type SessionViewReply } from "../../extensions/subagents/session-view.ts";
-import { projectRecordedUsage, type RecordedUsageHandleInput } from "../../extensions/subagents/observability.ts";
+import { ManagedObserver } from "../../extensions/agents/managed-observer.ts";
+import { OBSERVER_EVENT, type ObserverSnapshot } from "../../extensions/agents/observer-events.ts";
+import { emptyUsage, type EffectiveRoute } from "../../extensions/agents/contracts.ts";
+import { SESSION_VIEW_CHANGED_EVENT, SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, parseSessionViewRequest, type SessionViewReply } from "../../extensions/agents/session-view.ts";
+import { projectRecordedUsage, type RecordedUsageHandleInput } from "../../extensions/agents/observability.ts";
 
 /** Synthetic stimulus only: real host/keyboard/rendering, no native child or provider I/O. */
 export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void> {

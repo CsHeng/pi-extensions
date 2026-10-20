@@ -3,15 +3,15 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Synthetic provider drives the real workflow tool and real installed TUI; no provider I/O. */
+/** Synthetic provider drives the real tasklist tool and real installed TUI; no provider I/O. */
 export default function progressFixture(pi: ExtensionAPI): void {
  const dir = process.env.PI_CODING_AGENT_DIR!;
  const actions = [
-  { operation: "set", goal: "PROGRESS_FIXTURE", tasks: [{ id: "a", title: "STRIKE_DONE_A" }, { id: "b", title: "STRIKE_DONE_B" }] },
+  { operation: "set", title: "PROGRESS_FIXTURE", tasks: [{ id: "a", title: "STRIKE_DONE_A" }, { id: "b", title: "STRIKE_DONE_B" }] },
   { operation: "update", tasks: [{ id: "a", status: "doing" }] },
   { operation: "update", tasks: [{ id: "a", status: "done" }] },
-  { operation: "pause", reason: "TRACKING_PAUSED_FIXTURE" },
-  { operation: "resume" },
+  { operation: "update", tasks: [{ id: "b", status: "blocked", note: "TRACKING_BLOCKED_FIXTURE" }] },
+  { operation: "update", tasks: [{ id: "b", status: "doing", note: null }] },
   { operation: "update", tasks: [{ id: "b", status: "done" }] },
  ];
  let turn = 0;
@@ -28,7 +28,7 @@ export default function progressFixture(pi: ExtensionAPI): void {
     stream.push({ type: "start", partial: message });
     await new Promise(resolve => setTimeout(resolve, 200));
     if (action) {
-     const toolCall = { type: "toolCall" as const, id: `progress-${turn}`, name: "csheng_workflow", arguments: action as never };
+     const toolCall = { type: "toolCall" as const, id: `progress-${turn}`, name: "tasklist", arguments: action as never };
      message.content = [toolCall];
      stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
      stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(action), partial: message });
