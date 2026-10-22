@@ -17,7 +17,7 @@ import { resolvePiInvocation, runChild, type ChildRunOptions } from "./runner.ts
 import { mergeChildGuidance, prepareChildGuidance, selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, managedWriteRoots, type ManagedRecord } from "./managed-sessions.ts";
-import { applyCandidate, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
+import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitInput, retainGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
 import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
@@ -236,7 +236,7 @@ export class ContinuationService {
 	private failed(action: SessionActionResult["action"], error: unknown, aborted = false): SessionActionResult {
 		const known = error instanceof ManagedError || error instanceof RepositoryPolicyError || error instanceof GitWorkspaceError || error instanceof SupervisorError;
 		const cause = (error as { code?: unknown })?.code ?? (error instanceof Error && error.name !== "Error" ? error.name : "unclassified");
-		return { schemaVersion: MANAGED_SESSION_VERSION, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}) } };
+		return { schemaVersion: MANAGED_SESSION_VERSION, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}), ...(error instanceof ManagedError && error.unexpectedFields ? { unexpectedFields: error.unexpectedFields } : {}), ...(error instanceof ManagedError && error.invalidFields ? { invalidFields: error.invalidFields } : {}), ...(error instanceof ManagedError && error.conflicts ? { conflicts: error.conflicts } : {}) } };
 	}
 	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void, toolCallId?: string): Promise<SessionActionResult> {
 		// Replay identity comes from the host tool-call boundary; a direct service call gets its own fresh identity.
@@ -260,6 +260,8 @@ export class ContinuationService {
 			const result = this.failed(action, error, signal?.aborted);
 			if (request?.action === "continue" && ctx.isProjectTrusted()) {
 				try { const owner = await this.owner(ctx); result.sessions = await Promise.all(request.episodes!.map(async episode => ({ ...this.dependencies.store.view(await this.dependencies.store.load(episode.handle, owner)), requestError: result.error! }))); } catch { /* Preserve the original typed failure. */ }
+			} else if (request?.action === "refresh" && error instanceof ManagedError && error.conflicts) {
+				try { result.sessions = [this.dependencies.store.view(await this.dependencies.store.load(request.handle!, await this.owner(ctx)))]; } catch { /* Preserve the conflict even if its view cannot be recovered. */ }
 			}
 			telemetry.durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
 			return { ...result, requestTelemetry: telemetry };
@@ -303,7 +305,9 @@ export class ContinuationService {
 					}
 					return store.view(record);
 				});
-				return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view] };
+				const conflicts = request.action === "apply" ? view.candidate?.roots.filter(root => root.status === "conflict").map(root => conflictScope(root.rootId, root.changedPaths)) ?? [] : [];
+				return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: request.action === "apply" && view.candidate?.status !== "applied" ? "failed" : "succeeded", sessions: [view],
+					...(conflicts.length ? { error: { code: "convergence_conflict", conflicts, detail: "Conflicting roots were not applied; other roots may already be applied. The Agent's input remains pinned. Reconcile against the current parent in an authorized task or create a fresh Agent; do not force the old candidate." } } : {}) };
 			} finally { this.invalidateSessionView(); }
 		}
 		if (this.stopped) throw new ManagedError("supervisor_closed");

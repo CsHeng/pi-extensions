@@ -210,7 +210,7 @@ test("managed model content is parseable JSON with headers for ten huge reports"
 		sessions: Array<{
 			handle: string;
 			result?: { report?: string; reportTruncated?: boolean; id: string; status: string; stopReason?: string; error?: { code: string } };
-			candidate?: { id: string; status: string; changedCount: number; appliedCount: number };
+			candidate?: { id: string; status: string; changedCount: number; appliedCount: number; roots: Array<{ id: string; status: string; recovery: string }> };
 			nativeUsage: { recorded: boolean; input: number | null };
 		}>;
 	};
@@ -353,4 +353,79 @@ test("managed TUI does not leak command rows and keeps candidate ids under bound
 	const parsed = JSON.parse(content) as { sessions: Array<{ handle: string; candidate: { id: string } }> };
 	assert.ok(parsed.sessions[0]!.handle.startsWith("h-x"));
 	assert.ok(parsed.sessions[0]!.candidate.id.startsWith("c-y"));
+});
+
+interface ControlReceiptRow {
+	handle: string;
+	episode: number;
+	state: string;
+	reportComplete: boolean;
+	requestError?: { code: string };
+	candidate?: { id: string; status: string; changedCount: number; appliedCount: number; roots: Array<{ id: string; status: string; recovery: string }> };
+	release?: { status: string; remaining: string[] };
+	result?: { id: string; status: string; stopReason?: string; error?: { code: string }; report?: string; reportTruncated?: boolean; reportOmitted?: { reason: string; bytes: number; recover: string } };
+}
+
+function receipt(content: string): { action: string; status: string; error?: { code: string }; sessions: ControlReceiptRow[] } {
+	return JSON.parse(content) as { action: string; status: string; error?: { code: string }; sessions: ControlReceiptRow[] };
+}
+
+test("control action acknowledgements omit the prior report and name its inspect recovery", () => {
+	const report = `report-${"r".repeat(200_000)}`;
+	const view = sessionView(0, {
+		result: { ...task(0, report), stopReason: "stop", error: { code: "incomplete_report", message: "x" }, observation: emptyObservation() },
+		candidate: { id: "cand0", episode: 0, status: "partial", changedPaths: ["a.ts", "b.ts"], appliedPaths: ["a.ts"], roots: [
+			{ rootId: "rootone", destination: "/work/alpha", status: "applied", changedPaths: ["a.ts"], appliedPaths: ["a.ts"] },
+			{ rootId: "roottwo", destination: "/work/beta", status: "unknown", changedPaths: ["b.ts"], appliedPaths: [] },
+		] },
+		release: { status: "partial", remaining: ["roottwo"] },
+	});
+	for (const action of ["apply", "refresh", "close"] as const) {
+		const details = managed([view], { action, status: action === "apply" ? "failed" : "succeeded", ...(action === "apply" ? { error: { code: "apply_partial" } } : {}) });
+		const content = formatManagedContent(details);
+		assert.equal(content, formatManagedContent(details), "compact acknowledgements stay deterministic");
+		assert.ok(Buffer.byteLength(content, "utf8") < 4_000);
+		assert.equal(content.includes(report.slice(0, 64)), false);
+		const parsed = receipt(content);
+		assert.equal(parsed.action, action);
+		assert.equal(parsed.status, action === "apply" ? "failed" : "succeeded");
+		assert.equal(parsed.error?.code, action === "apply" ? "apply_partial" : undefined);
+		const row = parsed.sessions[0]!;
+		assert.equal(row.handle, "handle-0");
+		assert.equal(row.episode, 0);
+		assert.equal(row.state, "idle");
+		assert.equal(row.reportComplete, true);
+		assert.equal(row.result?.id, "task-0");
+		assert.equal(row.result?.status, "succeeded");
+		assert.equal(row.result?.stopReason, "stop");
+		assert.equal(row.result?.error?.code, "incomplete_report");
+		assert.equal(row.result?.report, undefined);
+		assert.equal(row.result?.reportTruncated, undefined);
+		assert.deepEqual(row.result?.reportOmitted, { reason: "control_action", bytes: Buffer.byteLength(report, "utf8"), recover: "inspect handle=handle-0" });
+		assert.equal(row.candidate?.id, "cand0");
+		assert.equal(row.candidate?.status, "partial");
+		assert.equal(row.candidate?.changedCount, 2);
+		assert.equal(row.candidate?.appliedCount, 1);
+		assert.deepEqual(row.candidate?.roots.map((root) => [root.id, root.status, root.recovery]), [["rootone", "applied", "none"], ["roottwo", "unknown", "required"]]);
+		assert.deepEqual(row.release, { status: "partial", remaining: ["roottwo"] });
+	}
+	const inspected = receipt(formatManagedContent(managed([view])));
+	assert.ok(inspected.sessions[0]!.result?.report?.startsWith("report-"));
+	assert.equal(inspected.sessions[0]!.result?.reportOmitted, undefined);
+	const joined = receipt(formatManagedContent(managed([view], { action: "join", status: "accepted", kind: "execution", runId: "run" })));
+	assert.ok(joined.sessions[0]!.result?.report?.startsWith("report-"));
+});
+
+test("control receipts keep failed and empty outcomes without resurrecting report text", () => {
+	const empty = sessionView(0, { result: { ...task(0, ""), observation: emptyObservation() }, requestError: { code: "stale_episode" } });
+	delete empty.candidate;
+	const refresh = receipt(formatManagedContent(managed([empty], { action: "refresh", status: "failed", error: { code: "stale_episode" } })));
+	assert.equal(refresh.sessions[0]!.requestError?.code, "stale_episode");
+	assert.deepEqual(refresh.sessions[0]!.result?.reportOmitted, { reason: "control_action", bytes: 0, recover: "inspect handle=handle-0" });
+	const live = sessionView(1);
+	delete live.result;
+	const close = receipt(formatManagedContent(managed([live], { action: "close", status: "succeeded" })));
+	assert.equal(close.sessions[0]!.result, undefined);
+	const text = formatManagedResult(managed([sessionView(2, { result: { ...task(2, "committed-output"), observation: emptyObservation() } })], { action: "apply" }), true);
+	assert.match(text, /committed-output/, "the TUI keeps its own expanded evidence");
 });

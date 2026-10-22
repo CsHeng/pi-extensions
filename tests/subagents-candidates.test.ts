@@ -10,7 +10,10 @@ import { validateGraphStructure } from "../extensions/agents/graph.ts";
 import { admitRepositoryTasks } from "../extensions/agents/repository-policy.ts";
 import { ManagedSessionStore, type ManagedRecord } from "../extensions/agents/managed-sessions.ts";
 import { MANAGED_LIMITS } from "../extensions/agents/session-contracts.ts";
-import { applyCandidate, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "../extensions/agents/candidates.ts";
+import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "../extensions/agents/candidates.ts";
+import { ContinuationService } from "../extensions/agents/continuation.ts";
+import { formatManagedContent } from "../extensions/agents/render.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discardGitWorkspace, discardGitInput, planGitApply } from "../extensions/agents/git-workspace.ts";
 const exec = promisify(execFile);
 /** A real store whose persistence can be interrupted deterministically at a chosen save. */
@@ -121,6 +124,102 @@ test("same-line conflicts retain both source versions and report conflict withou
  const f = await setup(t, repo => writeFile(join(repo, "file"), "base\n")); await writeFile(join(f.source, "file"), "worker\n"); const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
  await writeFile(join(f.repo, "file"), "parent\n"); assert.equal((await applyCandidate(f.store, f.record, candidate.id)).status, "conflict");
  await assert.rejects(syncManagedInputs(f.store, f.record), /convergence_conflict/); assert.equal(await readFile(join(f.source, "file"), "utf8"), "worker\n"); assert.equal(await readFile(join(f.repo, "file"), "utf8"), "parent\n");
+});
+
+test("conflict scope is bounded candidate-path metadata, not raw Git diagnostics", () => {
+ const summary = conflictScope("root", ["x".repeat(300), ...Array.from({ length: 12 }, (_, index) => `path-${index}`)]);
+ assert.equal(summary.changedCount, 13); assert.equal(summary.changedPaths.length, 8);
+ assert.equal(summary.changedPaths[0]!.length, 256); assert.equal(summary.pathsTruncated, true);
+ assert.deepEqual(conflictScope("root", ["file"]), { rootId: "root", changedPaths: ["file"], changedCount: 1, pathsTruncated: false });
+});
+
+test("apply conflict receipts preserve partial outcomes and expose bounded scope without file contents", async t => {
+ const f = await multiSetup(t, async (a, b) => {
+  await writeFile(join(a, "clean.txt"), "private-base-content\n");
+  await writeFile(join(b, "conflict.txt"), "private-base-content\n");
+ });
+ await writeFile(join(f.workspaceA.path, "clean.txt"), "private-worker-content\n");
+ await writeFile(join(f.workspaceB.path, "conflict.txt"), "private-worker-content\n");
+ for (let index = 0; index < 9; index++) await writeFile(join(f.workspaceB.path, `extra-${index}.txt`), "private-worker-content\n");
+ const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ await f.store.save(f.record);
+ await writeFile(join(f.repoB, "conflict.txt"), "private-parent-content\n");
+ const service = new ContinuationService({ store: f.store, loadConfig: async () => { throw new Error("control actions must not read routes"); } });
+ t.after(() => service.shutdown());
+ const ctx = { cwd: f.repoA, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "parent", getLeafId: () => "entry", getBranch: () => [{ id: "entry" }] } } as unknown as ExtensionContext;
+ const applied = await service.execute({ action: "apply", handle: f.record.handle, expectedEpisode: 1, candidateId: candidate.id }, ctx);
+ assert.equal(applied.status, "failed"); assert.equal(applied.sessions[0]!.candidate!.status, "partial");
+ assert.equal(applied.error!.code, "convergence_conflict"); assert.equal(applied.error!.conflicts!.length, 1);
+ const scope = applied.error!.conflicts![0]!;
+ assert.equal(scope.rootId, f.record.roots.find(root => root.inputs?.gitWorkspace?.path === f.workspaceB.path)!.id);
+ assert.equal(scope.changedCount, 10); assert.equal(scope.changedPaths.length, 8); assert.equal(scope.pathsTruncated, true);
+ const receipt = JSON.parse(formatManagedContent(applied));
+ assert.deepEqual(receipt.error.conflicts, applied.error!.conflicts);
+ assert.ok(receipt.sessions[0].candidate.roots.some((root: { status: string; applied: number }) => root.status === "applied" && root.applied === 1));
+ const refreshed = await service.execute({ action: "refresh", handle: f.record.handle, expectedEpisode: 1 }, ctx);
+ assert.equal(refreshed.error!.code, "candidate_recovery_required", "partial apply still requires adjudication before refresh");
+ assert.doesNotMatch(formatManagedContent(applied) + formatManagedContent(refreshed), /private-(?:base|parent|worker)-content|<<<<<<<|>>>>>>>/);
+ const record = await f.store.load(f.record.handle, f.owner);
+ assert.equal(record.roots.find(root => root.inputs?.gitWorkspace?.path === f.workspaceB.path)!.inputs!.gitWorkspace!.inputBase, f.workspaceB.inputBase);
+ assert.equal(await readFile(join(f.workspaceB.path, "conflict.txt"), "utf8"), "private-worker-content\n");
+ assert.equal(await readFile(join(f.repoB, "conflict.txt"), "utf8"), "private-parent-content\n");
+ assert.equal(await readFile(join(f.repoA, "clean.txt"), "utf8"), "private-worker-content\n");
+ const inspected = await service.execute({ action: "inspect", handle: f.record.handle }, ctx);
+ assert.equal(inspected.sessions[0]!.candidate!.status, "partial");
+ assert.equal(JSON.parse(formatManagedContent(inspected)).sessions[0].result.report, "done");
+});
+
+test("refresh conflict retains its input, candidate and inspectable result with a scoped diagnostic", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "file"), "private-base-content\n"));
+ await writeFile(join(f.source, "file"), "private-worker-content\n");
+ const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ const root = f.record.roots.find(item => item.permission === "write")!;
+ const inputBase = root.inputs!.gitWorkspace!.inputBase;
+ await f.store.save(f.record);
+ await writeFile(join(f.repo, "file"), "private-parent-content\n");
+ const service = new ContinuationService({ store: f.store, loadConfig: async () => { throw new Error("control actions must not read routes"); } });
+ t.after(() => service.shutdown());
+ const ctx = { cwd: f.repo, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "parent", getLeafId: () => "entry", getBranch: () => [{ id: "entry" }] } } as unknown as ExtensionContext;
+ const refreshed = await service.execute({ action: "refresh", handle: f.record.handle, expectedEpisode: 1 }, ctx);
+ assert.equal(refreshed.error!.code, "convergence_conflict");
+ assert.deepEqual(refreshed.error!.conflicts, [{ rootId: root.id, changedPaths: ["file"], changedCount: 1, pathsTruncated: false }]);
+ assert.equal(refreshed.sessions[0]!.handle, f.record.handle); assert.equal(refreshed.sessions[0]!.episode, 1);
+ assert.equal(refreshed.sessions[0]!.candidate!.id, candidate.id);
+ assert.deepEqual(JSON.parse(formatManagedContent(refreshed)).error.conflicts, refreshed.error!.conflicts);
+ assert.doesNotMatch(formatManagedContent(refreshed), /private-(?:base|parent|worker)-content|<<<<<<<|>>>>>>>/);
+ const record = await f.store.load(f.record.handle, f.owner);
+ assert.equal(record.roots.find(item => item.id === root.id)!.inputs!.gitWorkspace!.inputBase, inputBase);
+ assert.equal(await readFile(join(f.source, "file"), "utf8"), "private-worker-content\n");
+ assert.equal(await readFile(join(f.repo, "file"), "utf8"), "private-parent-content\n");
+ const inspected = await service.execute({ action: "inspect", handle: f.record.handle }, ctx);
+ assert.equal(inspected.sessions[0]!.candidate!.id, candidate.id);
+ assert.equal(JSON.parse(formatManagedContent(inspected)).sessions[0].result.report, "done");
+});
+
+test("compact control receipts leave the retained report recoverable after apply, refresh and discard", async t => {
+ const f = await setup(t, repo => writeFile(join(repo, "file"), "base\n"));
+ await writeFile(join(f.source, "file"), "worker\n");
+ const candidate = await freezeCandidate(f.store, f.record); assert.ok(candidate);
+ await f.store.save(f.record);
+ const service = new ContinuationService({ store: f.store, loadConfig: async () => { throw new Error("control actions must not read routes"); } });
+ t.after(() => service.shutdown());
+ const ctx = { cwd: f.repo, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "parent", getLeafId: () => "entry", getBranch: () => [{ id: "entry" }] } } as unknown as ExtensionContext;
+ for (const request of [
+  { action: "apply", handle: f.record.handle, expectedEpisode: 1, candidateId: candidate.id },
+  { action: "refresh", handle: f.record.handle, expectedEpisode: 1 },
+  { action: "close", handle: f.record.handle, expectedEpisode: 1, disposition: "discard" },
+ ]) {
+  const result = await service.execute(request, ctx);
+  assert.equal(result.status, "succeeded", JSON.stringify(result.error));
+  const receipt = JSON.parse(formatManagedContent(result));
+  assert.equal(receipt.sessions[0].result.report, undefined);
+  assert.equal(receipt.sessions[0].result.reportOmitted.bytes, 4);
+  const inspected = await service.execute({ action: "inspect", handle: f.record.handle }, ctx);
+  assert.equal(inspected.status, "succeeded");
+  assert.equal(JSON.parse(formatManagedContent(inspected)).sessions[0].result.report, "done");
+  if (request.action === "refresh") assert.equal(inspected.sessions[0]!.candidate, undefined);
+  if (request.action === "close") assert.equal(inspected.sessions[0]!.release!.status, "complete");
+ }
 });
 
 test("ignored environments remain project-owned through candidate apply and source refresh", async t => {

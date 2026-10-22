@@ -74,6 +74,14 @@ export async function prepareManagedWorkspace(store: ManagedSessionStore, record
 	}
 }
 
+// Report only the candidate's bounded relative-path scope, never raw Git conflict output.
+// This is not a list of exact conflicting files: Git may report directory/rename conflicts.
+export function conflictScope(rootId: string, changedPaths: readonly string[]) {
+	const paths = changedPaths.slice(0, 8).map(path => path.slice(0, 256));
+	return { rootId, changedPaths: paths, changedCount: changedPaths.length,
+		pathsTruncated: changedPaths.length > paths.length || paths.some((path, index) => path !== changedPaths[index]) };
+}
+
 export async function syncManagedInputs(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
 	writable(record);
 	if (record.state !== "idle") throw new ManagedError("session_not_idle");
@@ -84,7 +92,7 @@ export async function syncManagedInputs(store: ManagedSessionStore, record: Mana
 		if (!workspace) throw new ManagedError("managed_workspace_missing");
 		const result = await refreshGitInputs(workspace);
 		await store.save(record);
-		if (result.status === "conflict") throw new ManagedError("convergence_conflict");
+		if (result.status === "conflict") throw new ManagedError("convergence_conflict", { conflicts: [conflictScope(root.id, result.candidate.changedPaths)] }, "The conflicting root's input and worker files are unchanged; earlier roots may have refreshed. Reconcile against the current parent in an authorized task, then refresh or create a fresh Agent. Do not force the old candidate.");
 		root.inputs = await refreshWorkerInputs(root.source, workspace.path, root.inputs!);
 	}
 	delete record.candidate;

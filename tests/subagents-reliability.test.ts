@@ -14,20 +14,26 @@ import type { SessionActionResult, SessionView } from "../extensions/agents/sess
 
 const route: EffectiveRoute = { provider: "fixture", model: "actual-model", thinking: "high", source: "user-config", candidateIndex: 0, selectionSource: "role-default", executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] };
 
-test("managed refusals keep action and missing fields without launching or reading config", async () => {
+test("managed refusals preserve field diagnostics without launching or reading config", async () => {
 	let configReads = 0;
 	const service = new ContinuationService({ loadConfig: async () => { configReads++; throw new Error("must not read"); } });
 	const ctx = { isProjectTrusted: () => false, sessionManager: { getSessionId: () => "owner" } } as unknown as ExtensionContext;
-	for (const [request, action, fields] of [
-		[{ action: "create" }, "create", ["tasks"]],
-		[{ action: "close", handle: "h" }, "close", ["expectedEpisode"]],
-		[{ action: "untrusted arbitrary action" }, null, ["action"]],
+	for (const [request, action, kind, fields] of [
+		[{ action: "create" }, "create", "missingFields", ["tasks"]],
+		[{ action: "close", handle: "h" }, "close", "missingFields", ["expectedEpisode"]],
+		[{ action: "untrusted arbitrary action" }, null, "invalidFields", ["action"]],
+		[{ action: "join", runId: "run", taskId: "worker" }, "join", "unexpectedFields", ["taskId"]],
 	] as const) {
 		const result = await service.execute(request, ctx);
 		assert.equal(result.schemaVersion, 4);
 		assert.equal(result.action, action);
 		assert.equal(result.status, "failed");
-		assert.deepEqual(result.error?.missingFields, fields);
+		const rendered = JSON.parse(formatManagedContent(result));
+		for (const field of ["missingFields", "unexpectedFields", "invalidFields"] as const) {
+			assert.deepEqual(result.error?.[field], field === kind ? fields : undefined);
+			assert.deepEqual(rendered.error?.[field], result.error?.[field]);
+		}
+		assert.ok(formatManagedResult(result).includes(`${kind.replace("Fields", "")}=${fields.join(",")}`));
 		assert.equal(result.requestTelemetry?.launchedChildren, 0);
 		assert.equal(result.requestTelemetry?.configurationEpoch, null);
 		assert.equal(result.requestTelemetry?.ownerSessionId, "owner");

@@ -27,7 +27,7 @@ const episode = Type.Object({ handle: opaque, expectedEpisode: version,
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
 export const SubagentSessionToolSchema = Type.Object({
-	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create starts a batch of bounded tasks; continue sends a message to an existing Agent; inspect alone lists this session's Agents, or one handle/runId; join waits for a run within a bounded observation budget; cancel stops a run or one task; apply merges one accepted candidate; close retains or discards an owned session; refresh re-syncs an idle Agent's fixed input." }),
+	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create starts a batch of bounded tasks; continue sends a message using an existing Agent's pinned input and worktree, not the latest parent files; inspect alone lists this session's Agents, or one handle/runId; join waits for a run within a bounded observation budget; cancel stops a run or one task; apply merges one accepted candidate; close retains or discards an owned session; refresh explicitly merges current parent files into an idle Agent's input; it may conflict, and success invalidates the old candidate." }),
 	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares a role, objective, readable label and explicit access grants. A write grant may name several repository roots. Role selects purpose and routing, not permission. Independent tasks may run in parallel." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Continue episodes: each names an idle Agent handle, the exact expectedEpisode, and the next message." })),
 	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply, refresh and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
@@ -35,25 +35,50 @@ export const SubagentSessionToolSchema = Type.Object({
 	runId: Type.Optional(opaque),
 	mode: Type.Optional(StringEnum(["async", "foreground"] as const, { description: "create/continue: foreground waits within this call for one run; async returns a submission receipt." })),
 	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for create/continue/join; default 180 seconds, with explicit finite durations honored without a product cap. Expiry returns this call while execution continues. inspect returns immediately." })),
-	taskId: Type.Optional(Type.String({ minLength: 1, maxLength: 64, pattern: "\\S", description: "Optional task handle within the run, or its readable label, which is unambiguous inside one call." })),
+	taskId: Type.Optional(Type.String({ minLength: 1, maxLength: 64, pattern: "\\S", description: "cancel only: optional task handle within the run, or its readable label. Omit for join, which waits for the whole run." })),
 }, { additionalProperties: false });
 export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
 
-export class ManagedError extends Error {
+export interface ConflictScope {
+	rootId: string;
+	/** Candidate change scope, not a claim that every listed path conflicts. */
+	changedPaths: string[];
+	changedCount: number;
+	pathsTruncated: boolean;
+}
+export interface ManagedErrorDiagnostics {
+	missingFields?: string[];
+	unexpectedFields?: string[];
+	invalidFields?: string[];
+	conflicts?: ConflictScope[];
+}
+export class ManagedError extends Error implements ManagedErrorDiagnostics {
 	readonly code: string;
 	readonly missingFields?: string[];
+	readonly unexpectedFields?: string[];
+	readonly invalidFields?: string[];
+	readonly conflicts?: ConflictScope[];
 	readonly detail?: string;
-	constructor(code: string, missingFields?: string[], detail?: string) { super(code); this.name = "ManagedError"; this.code = code; if (missingFields) this.missingFields = missingFields; if (detail) this.detail = detail; }
+	constructor(code: string, diagnostics: ManagedErrorDiagnostics = {}, detail?: string) {
+		super(code); this.name = "ManagedError"; this.code = code;
+		if (diagnostics.missingFields) this.missingFields = diagnostics.missingFields;
+		if (diagnostics.unexpectedFields) this.unexpectedFields = diagnostics.unexpectedFields;
+		if (diagnostics.invalidFields) this.invalidFields = diagnostics.invalidFields;
+		if (diagnostics.conflicts) this.conflicts = diagnostics.conflicts;
+		if (detail) this.detail = detail;
+	}
 }
 export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(SubagentSessionToolSchema, raw)) {
 		// Keep the rejection addressable: name the failing field, never echo the value.
 		const failing = Errors(SubagentSessionToolSchema, raw)[0];
-		const params = failing?.params as { additionalProperties?: unknown; required?: unknown } | undefined;
+		const params = failing?.params as { additionalProperties?: unknown; requiredProperties?: unknown } | undefined;
 		const named = failing?.keyword === "additionalProperties" && Array.isArray(params?.additionalProperties) ? params.additionalProperties[0]
-			: failing?.keyword === "required" && Array.isArray(params?.required) ? params.required[0]
+			: failing?.keyword === "required" && Array.isArray(params?.requiredProperties) ? params.requiredProperties[0]
 			: (failing?.instancePath ?? "").split("/").filter(Boolean).at(-1);
-		throw new ManagedError("invalid_session_request", typeof named === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(named) ? [named] : undefined);
+		const field = typeof named === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(named) ? [named] : undefined;
+		const kind = failing?.keyword === "required" ? "missingFields" : failing?.keyword === "additionalProperties" ? "unexpectedFields" : "invalidFields";
+		throw new ManagedError("invalid_session_request", field ? { [kind]: field } : undefined);
 	}
 	const input = raw as SessionRequest;
 	const fields: Record<SessionRequest["action"], readonly string[]> = {
@@ -63,11 +88,11 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 		join: ["action", "runId", "mode", "waitSeconds"], cancel: ["action", "runId", "taskId"],
 	};
 	const unexpected = Object.keys(input).filter((key) => !fields[input.action].includes(key));
-	if (unexpected.length > 0) throw new ManagedError("invalid_action_fields", unexpected);
+	if (unexpected.length > 0) throw new ManagedError("invalid_action_fields", { unexpectedFields: unexpected });
 	if (input.waitSeconds !== undefined) { try { observationWaitMilliseconds(input.waitSeconds); } catch { throw new ManagedError("invalid_wait_seconds"); } }
 	if (input.waitSeconds !== undefined && input.mode === "async") throw new ManagedError("wait_requires_foreground");
 	if (input.action === "create") {
-		if (!input.tasks) throw new ManagedError("missing_create_fields", ["tasks"]);
+		if (!input.tasks) throw new ManagedError("missing_create_fields", { missingFields: ["tasks"] });
 		const graph = validateGraphStructure({ tasks: input.tasks });
 		if (!graph.ok) throw new ManagedError(graph.error.code, undefined, graph.error.message);
 	}
@@ -75,9 +100,9 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 		if (!input.episodes || new Set(input.episodes.map((item) => item.handle)).size !== input.episodes.length) throw new ManagedError("invalid_episodes");
 		if (input.episodes.some((item) => Buffer.byteLength(item.message) > HARD_LIMITS.maxInputBytes)) throw new ManagedError("message_too_large");
 	}
-	if ((input.action === "apply" || input.action === "close" || input.action === "refresh") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value));
-	if (input.action === "apply" && !input.candidateId) throw new ManagedError("missing_candidate");
-	if ((input.action === "join" || input.action === "cancel") && !input.runId) throw new ManagedError("missing_run_id");
+	if ((input.action === "apply" || input.action === "close" || input.action === "refresh") && (!input.handle || input.expectedEpisode === undefined)) throw new ManagedError("missing_session_version", { missingFields: [!input.handle && "handle", input.expectedEpisode === undefined && "expectedEpisode"].filter((value): value is string => !!value) });
+	if (input.action === "apply" && !input.candidateId) throw new ManagedError("missing_candidate", { missingFields: ["candidateId"] });
+	if ((input.action === "join" || input.action === "cancel") && !input.runId) throw new ManagedError("missing_run_id", { missingFields: ["runId"] });
 	if (input.action === "join" && input.mode !== undefined) {
 		if (input.mode !== "foreground") throw new ManagedError("invalid_join_mode");
 		const { mode: _mode, ...canonical } = input;
@@ -174,5 +199,5 @@ export interface SessionActionResult {
 	/** Observation budget expired; this does not cancel or settle the execution. */
 	wait?: { status: "expired"; waitSeconds: number };
 	sessions: SessionView[];
-	error?: { code: string; missingFields?: string[]; detail?: string };
+	error?: ManagedErrorDiagnostics & { code: string; detail?: string };
 }

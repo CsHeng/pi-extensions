@@ -12,7 +12,31 @@ import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses"
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { registerContinuationTool } from "../extensions/agents/continuation.ts";
 import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
-import { parseSessionRequest, SUBAGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+import { ManagedError, parseSessionRequest, SUBAGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+
+test("field diagnostics distinguish missing, unexpected and invalid fields without echoing values", () => {
+	const refusal = (request: unknown) => {
+		try { parseSessionRequest(request); } catch (error) { assert.ok(error instanceof ManagedError); return error; }
+		throw new Error("expected rejection");
+	};
+	for (const [request, kind, fields] of [
+		[{}, "missingFields", ["action"]],
+		[{ action: "join" }, "missingFields", ["runId"]],
+		[{ action: "apply", handle: "h", expectedEpisode: 1 }, "missingFields", ["candidateId"]],
+		[{ action: "join", runId: "run", taskId: "worker" }, "unexpectedFields", ["taskId"]],
+		[{ action: "inspect", runId: "run", waitSeconds: 1 }, "unexpectedFields", ["waitSeconds"]],
+		[{ action: "inspect", arbitraryPermission: "private-field-value" }, "unexpectedFields", ["arbitraryPermission"]],
+		[{ action: "private-action-value" }, "invalidFields", ["action"]],
+		[{ action: "inspect", handle: "../private-path-value" }, "invalidFields", ["handle"]],
+	] as const) {
+		const error = refusal(request);
+		for (const field of ["missingFields", "unexpectedFields", "invalidFields"] as const) assert.deepEqual(error[field], field === kind ? fields : undefined);
+		assert.doesNotMatch(JSON.stringify(error), /private-.*-value/);
+	}
+	// The failed join is repaired by removing taskId, not by replacing its value.
+	assert.deepEqual(parseSessionRequest({ action: "join", runId: "run" }), { action: "join", runId: "run" });
+	assert.equal(parseSessionRequest({ action: "cancel", runId: "run", taskId: "worker" }).taskId, "worker");
+});
 
 test("waiting budgets are observation-only, finite and not capped to short host windows", () => {
  for (const waitSeconds of [0, 0.01, 1800, 3_000_000]) assert.equal(parseSessionRequest({ action: "join", runId: "run", waitSeconds }).waitSeconds, waitSeconds);
@@ -33,9 +57,10 @@ test("one canonical agent tool exposes strict disjoint action fields without cal
 	assert.throws(() => parseSessionRequest({ action: "inspect", tasks: [] }), /invalid_session_request/);
 	assert.throws(() => parseSessionRequest({ action: "inspect", handle: "../native.jsonl" }));
 	assert.throws(() => parseSessionRequest({ action: "apply", handle: "h", expectedEpisode: 1 }), /missing_candidate/);
-	const extra = (() => { try { parseSessionRequest({ action: "close", handle: "h", expectedEpisode: 1, arbitraryPermission: true }); } catch (error) { return error as { code: string; missingFields?: string[] }; } throw new Error("expected rejection"); })();
+	const extra = (() => { try { parseSessionRequest({ action: "close", handle: "h", expectedEpisode: 1, arbitraryPermission: true }); } catch (error) { return error as ManagedError; } throw new Error("expected rejection"); })();
 	assert.equal(extra.code, "invalid_session_request");
-	assert.deepEqual(extra.missingFields, ["arbitraryPermission"]);
+	assert.deepEqual(extra.unexpectedFields, ["arbitraryPermission"]);
+	assert.equal(extra.missingFields, undefined);
 	assert.throws(() => parseSessionRequest({ action: "create", tasks: [{ id: "a", role: "explorer", objective: "work", access: [{ permission: "read", scope: "/tmp/scope" }], repository: "/tmp/scope" }] }), /invalid_session_request/);
 	const episode = { handle: "h", expectedEpisode: 1, message: "continue" };
 	assert.throws(() => parseSessionRequest({ action: "continue", episodes: [episode, episode] }), /invalid_episodes/);

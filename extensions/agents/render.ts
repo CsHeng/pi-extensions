@@ -9,6 +9,8 @@ import { isNativeObservation, type ObservedUsage } from "./observability.ts";
 import type { SessionActionResult, SessionView } from "./session-contracts.ts";
 
 const SUMMARY_SCALAR_CHARS = 300;
+/** Control acknowledgements name the durable outcome; the prior report stays recoverable through explicit inspect(handle). */
+const COMPACT_ACTIONS: ReadonlySet<NonNullable<SessionActionResult["action"]>> = new Set(["apply", "refresh", "close"]);
 
 function singleLine(value: string): string {
 	return truncateLine(value.replace(/\s+/g, " ").trim(), SUMMARY_SCALAR_CHARS).text;
@@ -129,7 +131,7 @@ function managedRoute(route: EffectiveRoute): Record<string, unknown> {
 	};
 }
 
-function sessionPayload(session: SessionView, reportBudget: number | null): Record<string, unknown> {
+function sessionPayload(session: SessionView, reportBudget: number | null, omitReport = false): Record<string, unknown> {
 	const payload: Record<string, unknown> = {
 		handle: boundScalar(session.handle),
 		...(session.label ? { label: boundScalar(session.label) } : {}),
@@ -156,7 +158,9 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 		result.durationMs = session.result.executionStatus === "not-started" || session.result.executionStatus === "unavailable" || (!session.result.executionStatus && session.result.durationMs === 0) ? null : session.result.durationMs;
 		if (session.result.error) result.error = { code: boundScalar(session.result.error.code) };
 		const output = session.result.output ?? "";
-		if (reportBudget === null) {
+		if (omitReport) {
+			result.reportOmitted = { reason: "control_action", bytes: utf8Bytes(output), recover: `inspect handle=${boundScalar(session.handle)}` };
+		} else if (reportBudget === null) {
 			result.reportTruncated = true;
 		} else {
 			const clipped = truncateReport(output, reportBudget);
@@ -184,7 +188,7 @@ function sessionPayload(session: SessionView, reportBudget: number | null): Reco
 	return payload;
 }
 
-function managedEnvelope(details: SessionActionResult, reportBudget: number | null): Record<string, unknown> {
+function managedEnvelope(details: SessionActionResult, reportBudget: number | null, omitReport = false): Record<string, unknown> {
 	const payload: Record<string, unknown> = {
 		schemaVersion: details.schemaVersion,
 		action: details.action,
@@ -192,21 +196,32 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		...(details.kind ? { kind: details.kind } : {}),
 		...(details.runId ? { runId: boundScalar(details.runId) } : {}),
 		...(details.generation ? { generation: boundScalar(details.generation) } : {}),
-		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget)),
+		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget, omitReport)),
 	};
 	if (details.wait) payload.wait = details.wait;
 	if (details.warnings?.length) payload.warnings = details.warnings;
-	if (details.error) payload.error = { code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}), ...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}) };
+	if (details.error) payload.error = {
+		code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}),
+		...(details.error.missingFields ? { missingFields: details.error.missingFields } : {}),
+		...(details.error.unexpectedFields ? { unexpectedFields: details.error.unexpectedFields } : {}),
+		...(details.error.invalidFields ? { invalidFields: details.error.invalidFields } : {}),
+		...(details.error.conflicts ? { conflicts: details.error.conflicts.slice(0, 32).map(scope => ({
+			rootId: boundScalar(scope.rootId), changedCount: scope.changedCount, changedPaths: scope.changedPaths.slice(0, 8).map(boundScalar),
+			pathsTruncated: scope.pathsTruncated || scope.changedPaths.length > 8,
+		})) } : {}),
+	};
 	return payload;
 }
 
-function stringifyManaged(details: SessionActionResult, reportBudget: number | null): string {
-	return JSON.stringify(managedEnvelope(details, reportBudget));
+function stringifyManaged(details: SessionActionResult, reportBudget: number | null, omitReport = false): string {
+	return JSON.stringify(managedEnvelope(details, reportBudget, omitReport));
 }
 
 export function formatManagedContent(details: SessionActionResult): string {
-	const skeleton = stringifyManaged(details, null);
-	if (utf8Bytes(skeleton) > DEFAULT_MAX_BYTES) return skeleton;
+	// A control action returns one compact, deterministic acknowledgement; join, inspect and completion still carry the report.
+	const omitReport = details.action !== null && COMPACT_ACTIONS.has(details.action);
+	const skeleton = stringifyManaged(details, null, omitReport);
+	if (omitReport || utf8Bytes(skeleton) > DEFAULT_MAX_BYTES) return skeleton;
 	const reportCount = Math.max(1, details.sessions.filter((session) => session.result).length);
 	let high = Math.max(0, Math.floor((DEFAULT_MAX_BYTES - utf8Bytes(skeleton)) / reportCount));
 	let low = 0;
@@ -240,7 +255,7 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 	];
 	if (details.wait) lines.push(`Observation budget expired after ${details.wait.waitSeconds}s; execution continues. In TUI/RPC, leave work unfinished and resume on completion notification rather than polling.`);
 	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
-	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}`);
+	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}${details.error.unexpectedFields?.length ? ` unexpected=${details.error.unexpectedFields.join(",")}` : ""}${details.error.invalidFields?.length ? ` invalid=${details.error.invalidFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {
 		const identity = session.label && session.label !== session.handle
 			? `[${boundScalar(session.label)}] handle=${boundScalar(session.handle)}`
