@@ -68,7 +68,9 @@ test("the registered agent tool injects no managed session index and keeps guida
 	assert.ok(tool.promptSnippet && tool.promptSnippet.length > 0, "capability guidance uses native prompt assembly");
 	assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0);
 	assert.match(tool.promptGuidelines.join("\n"), /bare inspect/, "discovery is stated in the static guidance");
-	assert.doesNotMatch(JSON.stringify([tool.description, tool.promptSnippet, tool.promptGuidelines]), /requestId|replay token|managed session index/i);
+	assert.match(tool.promptSnippet, /bare inspect/, "snippet retains handle recovery via bare inspect");
+	assert.doesNotMatch(tool.promptSnippet, /find Agents with a bare inspect,\s*wait with join/i, "snippet omits routine inspect-then-join polling cue");
+	assert.doesNotMatch(JSON.stringify([tool.description, tool.promptSnippet, tool.promptGuidelines]), /requestId|replay token|managed session index|job-notifications/i);
 
 	// Normal input, extension-origin input, settlement and compaction never produce index entries.
 	const settle = async (name: string, event: unknown = {}) => {

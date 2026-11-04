@@ -58,6 +58,9 @@ test("probe keeps historical treatments separate from the unaugmented production
 	assert.deepEqual(probeGuidanceLines("off"), []);
 	assert.deepEqual(probeGuidanceLines("balanced"), [BASE_DELEGATION_GUIDANCE]);
 	assert.deepEqual(probeGuidanceLines("aggressive"), [BASE_DELEGATION_GUIDANCE, AGGRESSIVE_DELEGATION_GUIDANCE]);
+	assert.equal(SUBAGENT_TOOL_PROMPT_SNIPPET.includes(BASE_DELEGATION_GUIDANCE), false);
+	assert.equal(SUBAGENT_TOOL_PROMPT_SNIPPET.includes(AGGRESSIVE_DELEGATION_GUIDANCE), false);
+	assert.doesNotMatch(SUBAGENT_TOOL_PROMPT_SNIPPET, /job-notifications|find Agents with a bare inspect,\s*wait with join/i);
 	assert.deepEqual(PROBE_SHAPES, ["production", "flat", "agent-shape"]);
 });
 
