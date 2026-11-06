@@ -88,9 +88,12 @@ for (const mode of ["timing-first", "notifications-first", "no-notifications"] a
 	const timing = join(root, "extensions/work-timing/index.ts");
 	const notifications = join(root, "extensions/job-notifications/index.ts");
 	const observers = mode === "notifications-first" ? [notifications, timing] : mode === "timing-first" ? [timing, notifications] : [timing];
+	// Bark evaluates the same interaction boundary independently; a stub hook records its events.
+	await mkdir(join(base, ".local", "bin"), { recursive: true });
+	await writeFile(join(base, ".local", "bin", "agent-bark-hook"), "#!/bin/sh\nset -eu\ncat >> \"$HOME/bark-events.jsonl\"\nprintf '\\n' >> \"$HOME/bark-events.jsonl\"\n", { mode: 0o700 });
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
 		"-e", join(root, "extensions/async-bash/index.ts"), "-e", join(root, "extensions/tasklist/index.ts"),
-		...observers.flatMap(path => ["-e", path]), "-e", join(root, "tests/fixtures/work-timing-async.ts"),
+		...observers.flatMap(path => ["-e", path]), "-e", join(root, "extensions/agent-bark.ts"), "-e", join(root, "tests/fixtures/work-timing-async.ts"),
 		"--model", "timing-async-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "timing fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
 		cwd: base, detached: true, env: { PATH: installedPath, HOME: base, TMPDIR: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color", TIMING_NOTIFICATIONS: mode === "no-notifications" ? "0" : "1" },
@@ -135,6 +138,9 @@ for (const mode of ["timing-first", "notifications-first", "no-notifications"] a
 	assert.ok(proof.entries[0].totalMs >= 500, "autonomous idle gaps belong to elapsed work");
 	assert.ok(proof.entries[0].totalMs >= proof.elapsed - 100, "the timer spans actual native runs rather than adding their active durations");
 	assert.equal(proof.timingLeaked, false, "timing observations never enter provider messages");
+	const bark = (await readFile(join(base, "bark-events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+	assert.deepEqual(bark.map(event => event.hook_event_name), ["UserPromptSubmit", "Stop"], "Bark notifies once, at the interaction end timing also uses");
+	assert.ok(bark[1].duration_ms >= 500 && bark[1].duration_ms >= proof.elapsed - 100, "Bark reports the same main-agent wall span");
 	if (mode === "no-notifications") {
 		assert.deepEqual(proof.kinds, ["user"]);
 		assert.equal(proof.providerCalls, 4, "measurement starts no result run when the notification consumer is absent");

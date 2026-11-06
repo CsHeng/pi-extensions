@@ -1,11 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
-	executionKey,
-	observeExecutionQuiescence,
-	readExecutionQuiescence,
-	type ExecutionScope,
-} from "../shared/execution-quiescence.ts";
+	createInteractionBoundary,
+	type InteractionClose,
+	type InteractionKind,
+	type InteractionSpan,
+	type InteractionStatus,
+} from "../shared/interaction-boundary.ts";
 
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
 const WORK_TIMING_VERSION = 4;
@@ -109,9 +110,9 @@ export function compactStatusLabel(status: string, width: number): string {
 }
 
 /** What an entry measures: one external interaction, or the restored single-run meaning of v1-v3. */
-export type WorkTimingScope = "interaction" | "run";
-/** A settled interaction reached quiescence; interrupted and unavailable did not. */
-export type WorkTimingStatus = "settled" | "interrupted" | "unavailable";
+export type WorkTimingScope = InteractionKind;
+/** A settled interaction reached quiescence; failed, interrupted and unavailable did not. */
+export type WorkTimingStatus = InteractionStatus;
 
 export interface WorkTimingEntryData {
 	version: 1 | 2 | 3 | 4;
@@ -128,7 +129,7 @@ export interface WorkTimingEntryData {
 	streamedOutputTokens: number;
 	/** Version 4: interaction span, or the historical single-run scope of v1-v3. */
 	scope: WorkTimingScope;
-	/** Version 4: whether the span reached quiescence, was cut short, or could not be verified. */
+	/** Version 4: whether the span reached quiescence, failed, was cut short, or could not be verified. */
 	status: WorkTimingStatus;
 	/** Version 4: pure human wait already excluded from `totalMs`. */
 	humanWaitMs: number;
@@ -179,15 +180,11 @@ interface ClockSample {
 }
 
 /**
- * One measured span. An interaction span starts at real external input and ends only
- * when the main loop is settled and every execution it owns has finished without a
- * pending or reserved result delivery; a run span measures a model run that no human
- * input started and produces no summary entry.
+ * Measurements of one span. The shared interaction boundary owns when a span starts and ends
+ * (external input through final quiescence, failure or interruption); this extension owns only
+ * what it measures inside that span.
  */
-interface TimingSpan {
-	kind: WorkTimingScope;
-	startedAt: number;
-	ctx: ExtensionContext;
+interface TimingData {
 	/** Completed-run totals; the in-flight turn is added by each snapshot. */
 	reasoningMs: number;
 	lastTurnReasoningMs: number;
@@ -195,34 +192,15 @@ interface TimingSpan {
 	inputTokens: number;
 	generationMs: number;
 	streamedOutputTokens: number;
-	/** Pure human wait excluded from `totalMs`; interactions only. */
-	humanWaitMs: number;
-	/** Executions already present when the interaction started; never inferred as its work. */
-	excludedExecutions: Set<string>;
-	/** Native tool calls started in this span, kept as the raw opaque ids the host gave. */
-	toolCallIds: Set<string>;
-	/** Producer executions explicitly adopted by a control or query receipt. */
-	executionKeys: Set<string>;
-	/** Native Agent runs explicitly adopted by a control or query receipt. */
-	runIds: Set<string>;
 	turn: TurnTiming | undefined;
 	/** Tools executing right now, in start order. */
 	tools: ActiveTool[];
-	/** Start of the open extension UI prompt span, when the user is being asked. */
-	promptStartedAt: number | undefined;
-	/** When the open prompt's human wait was last attributed. */
-	promptSampledAt: number | undefined;
-	/** Whether related executions were progressing at the last prompt sample. */
-	promptBusy: boolean;
 	/** The slow-lane duration sample shared by both paint lanes. */
 	clock: ClockSample | undefined;
-	/** The host accepted a run and has not settled it yet. */
-	runActive: boolean;
-	/** A native run settled inside this interaction; owned work may still be running. */
-	awaiting: boolean;
 	lastStatus: string | undefined;
-	stopObserving: (() => void) | undefined;
 }
+
+type TimingSpan = InteractionSpan<TimingData>;
 
 interface TimingSnapshot {
 	totalMs: number;
@@ -328,7 +306,7 @@ function normalizeEntryData(data: unknown): WorkTimingEntryData {
 		streamedOutputTokens: validDuration(candidate.streamedOutputTokens),
 		// Older entries recorded one settled native run and claim no human-wait exclusion.
 		scope: current && candidate.scope === "interaction" ? "interaction" : "run",
-		status: current && (candidate.status === "interrupted" || candidate.status === "unavailable")
+		status: current && (candidate.status === "interrupted" || candidate.status === "failed" || candidate.status === "unavailable")
 			? candidate.status
 			: "settled",
 		humanWaitMs: current ? validDuration(candidate.humanWaitMs) : 0,
@@ -444,23 +422,6 @@ function recordTurnOutput(turn: TurnTiming, event: { type?: unknown; delta?: unk
 	);
 }
 
-/**
- * Producer receipts from a control or query call adopt work that started earlier.
- * Creation receipts already carry the originating tool call, so this only needs the
- * public execution/run identities a late inspect, wait, join or cancel returns.
- */
-function adoptionFromToolResult(result: unknown): { executionKeys: string[]; runIds: string[] } {
-	const details = (result as { details?: unknown } | undefined)?.details;
-	if (!details || typeof details !== "object") return { executionKeys: [], runIds: [] };
-	const record = details as { executionId?: unknown; runId?: unknown };
-	return {
-		executionKeys: typeof record.executionId === "string" && record.executionId
-			? [executionKey("retained-shell", record.executionId)]
-			: [],
-		runIds: typeof record.runId === "string" && record.runId ? [record.runId] : [],
-	};
-}
-
 export function createWorkTimingExtension(
 	dependencies: WorkTimingDependencies = {},
 ): (pi: ExtensionAPI) => void {
@@ -471,15 +432,64 @@ export function createWorkTimingExtension(
 	const onResize = dependencies.onResize ?? defaultOnResize;
 
 	return (pi: ExtensionAPI): void => {
-		let span: TimingSpan | undefined;
-		/**
-		 * A real external input has arrived, but its native run has not started yet. Every input
-		 * event replaces or clears it, and only the user run that follows that input can consume
-		 * it, so a handled input cannot be inherited by a later automatic run.
-		 */
-		let pendingInteractionStart: number | undefined;
 		let intervalHandle: unknown;
 		let unsubscribeResize: (() => void) | undefined;
+
+		const emptyData = (): TimingData => ({
+			reasoningMs: 0,
+			lastTurnReasoningMs: 0,
+			outputTokens: 0,
+			inputTokens: 0,
+			generationMs: 0,
+			streamedOutputTokens: 0,
+			turn: undefined,
+			tools: [],
+			clock: undefined,
+			lastStatus: undefined,
+		});
+
+		const stopInterval = (): void => {
+			if (intervalHandle === undefined) return;
+			cancel(intervalHandle);
+			intervalHandle = undefined;
+		};
+
+		/** The interaction ended; the boundary already released its span and observer. */
+		const finalize = ({ span: current, status, totalMs, humanWaitMs }: InteractionClose<TimingData>): void => {
+			stopInterval();
+			current.ctx.ui.setWorkingMessage();
+			const data = current.data;
+			pi.appendEntry<WorkTimingEntryData>(WORK_TIMING_ENTRY_TYPE, {
+				version: WORK_TIMING_VERSION,
+				totalMs,
+				reasoningMs: data.reasoningMs,
+				lastTurnReasoningMs: data.lastTurnReasoningMs,
+				outputTokens: data.outputTokens,
+				inputTokens: data.inputTokens,
+				generationMs: data.generationMs,
+				streamedOutputTokens: data.streamedOutputTokens,
+				scope: "interaction",
+				status,
+				humanWaitMs,
+			});
+		};
+
+		const boundary = createInteractionBoundary<TimingData>({
+			pi,
+			now,
+			createData: emptyData,
+			/**
+			 * The earlier run's completed metrics are not historical interaction work, and a
+			 * mid-turn cut keeps only its post-cut part. The live tool clocks measure the tools
+			 * themselves, not the interaction, so they continue.
+			 */
+			promoteData: (previous, at) => ({
+				...emptyData(),
+				tools: previous.tools,
+				turn: previous.turn ? cutTurnAt(previous.turn, at) : undefined,
+			}),
+			onClose: finalize,
+		});
 
 		const turnReasoningAt = (turn: TurnTiming, at: number): number => {
 			let total = turn.completedReasoningMs;
@@ -490,52 +500,41 @@ export function createWorkTimingExtension(
 			return total;
 		};
 
-		const scopeOf = (current: TimingSpan): ExecutionScope => ({
-			toolCallIds: current.toolCallIds,
-			...(current.executionKeys.size > 0 ? { executionKeys: current.executionKeys } : {}),
-			...(current.runIds.size > 0 ? { runIds: current.runIds } : {}),
-			...(current.excludedExecutions.size > 0 ? { excludedExecutions: current.excludedExecutions } : {}),
-		});
-
-		/** Whether related async work is progressing; unavailable state counts as work, not human wait. */
-		const relatedExecutionsActive = (current: TimingSpan): boolean => {
-			const quiescence = readExecutionQuiescence(pi, current.ctx, scopeOf(current));
-			return quiescence.state === "unavailable" || quiescence.activeExecutions > 0;
-		};
-
 		const toolSnapshotAt = (current: TimingSpan, at: number): Pick<TimingSnapshot, "toolMs" | "toolCount"> => {
-			if (current.tools.length === 0) return { toolMs: 0, toolCount: 0 };
+			const tools = current.data.tools;
+			if (tools.length === 0) return { toolMs: 0, toolCount: 0 };
 			const openPromptMs = current.promptStartedAt === undefined ? 0 : Math.max(0, at - current.promptStartedAt);
 			let toolMs = 0;
-			for (const tool of current.tools) {
+			for (const tool of tools) {
 				// A prompt that opened after this tool started pauses only its own span.
 				const promptMs = Math.min(openPromptMs, Math.max(0, at - tool.startedAt));
 				const elapsed = Math.max(0, at - tool.startedAt - tool.promptMs - promptMs);
 				// The longest-running tool leads; ties keep the oldest (start order).
 				if (elapsed > toolMs) toolMs = elapsed;
 			}
-			return { toolMs, toolCount: current.tools.length };
+			return { toolMs, toolCount: tools.length };
 		};
 
 		const snapshotAt = (current: TimingSpan, at: number): TimingSnapshot => {
-			const turn = current.turn;
-			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : current.lastTurnReasoningMs;
+			const data = current.data;
+			const turn = data.turn;
+			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : data.lastTurnReasoningMs;
 			const currentOutputTokens = turn ? turnOutputTokens(turn) : 0;
 			const currentInputTokens = turn ? turnInputTokens(turn) : 0;
 			const currentGenerationMs = turn ? turnDecodeMs(turn, at) : 0;
 			const currentStreamedTokens = turn && turn.decodeStartedAt !== undefined && currentGenerationMs > 0
 				? currentOutputTokens
 				: 0;
-			const outputTokens = current.outputTokens + currentOutputTokens;
+			const outputTokens = data.outputTokens + currentOutputTokens;
 			return {
 				// Human wait is excluded: the span reports autonomous wall time.
 				totalMs: Math.max(0, at - current.startedAt - current.humanWaitMs),
-				reasoningMs: current.reasoningMs + (turn ? turnReasoningMs : 0),
+				reasoningMs: data.reasoningMs + (turn ? turnReasoningMs : 0),
 				turnReasoningMs,
 				outputTokens,
-				inputTokens: current.inputTokens + currentInputTokens,
-				generationMs: current.generationMs + currentGenerationMs,
-				streamedOutputTokens: current.streamedOutputTokens + currentStreamedTokens,
+				inputTokens: data.inputTokens + currentInputTokens,
+				generationMs: data.generationMs + currentGenerationMs,
+				streamedOutputTokens: data.streamedOutputTokens + currentStreamedTokens,
 				...toolSnapshotAt(current, at),
 			};
 		};
@@ -544,7 +543,7 @@ export function createWorkTimingExtension(
 		// Both publish through the same formatter and working-message writer.
 		const sampleClock = (current: TimingSpan, at: number): void => {
 			const snapshot = snapshotAt(current, at);
-			current.clock = {
+			current.data.clock = {
 				totalMs: snapshot.totalMs,
 				reasoningMs: snapshot.reasoningMs,
 				turnReasoningMs: snapshot.turnReasoningMs,
@@ -553,11 +552,11 @@ export function createWorkTimingExtension(
 		};
 
 		const paint = (at: number, resampleClock: boolean): void => {
-			const current = span;
+			const current = boundary.current;
 			if (!current) return;
 			if (resampleClock) sampleClock(current, at);
 			const snapshot = snapshotAt(current, at);
-			const durations = current.clock ?? snapshot;
+			const durations = current.data.clock ?? snapshot;
 			// Live tool timing: only a long-running tool is worth surfacing, and it
 			// vanishes the moment the tool ends.
 			const toolField = durations.toolMs >= TOOL_ELAPSED_MIN_MS
@@ -572,195 +571,46 @@ export function createWorkTimingExtension(
 				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
 			// Compact to the host's single-line working row; fields that cannot fit are omitted.
 			const label = compactStatusLabel(status, Math.max(1, columns() - WORKING_ROW_CHROME));
-			if (label === current.lastStatus) return;
-			current.lastStatus = label;
+			if (label === current.data.lastStatus) return;
+			current.data.lastStatus = label;
 			current.ctx.ui.setWorkingMessage(label);
-		};
-
-		const stopInterval = (): void => {
-			if (intervalHandle === undefined) return;
-			cancel(intervalHandle);
-			intervalHandle = undefined;
 		};
 
 		const startInterval = (): void => {
 			if (intervalHandle !== undefined) return;
 			intervalHandle = schedule(() => {
-				const current = span;
-				if (!current) return;
+				if (!boundary.current) return;
 				const at = now();
-				sampleHumanWait(current, at);
+				boundary.samplePrompt(at);
 				paint(at, true);
 			}, STATUS_UPDATE_INTERVAL_MS);
-		};
-
-		/**
-		 * Attribute the open prompt's elapsed time. A blocking UI prompt is human wait even when a
-		 * native tool is the one awaiting it: the prompt lifecycle is authoritative for who is
-		 * blocking, and only related async work makes that interval autonomous. The interval that
-		 * just ended is classified with the state that held during it, then that state refreshes.
-		 */
-		function sampleHumanWait(current: TimingSpan, at: number): void {
-			if (current.kind !== "interaction" || current.promptStartedAt === undefined || current.promptSampledAt === undefined) return;
-			if (!current.promptBusy) {
-				current.humanWaitMs += Math.max(0, at - current.promptSampledAt);
-			}
-			current.promptSampledAt = at;
-			current.promptBusy = relatedExecutionsActive(current);
-		}
-
-		const closePrompt = (current: TimingSpan, at: number): void => {
-			if (current.promptStartedAt === undefined) return;
-			sampleHumanWait(current, at);
-			current.promptStartedAt = undefined;
-			current.promptSampledAt = undefined;
 		};
 
 		const finishTurn = (current: TimingSpan, at: number): void => {
 			// Tool and prompt events always precede the turn boundary; close any leftover
 			// state so a stale timer can never outlive its turn.
-			closePrompt(current, at);
-			current.tools.length = 0;
-			if (!current.turn) return;
-			const reasoningMs = turnReasoningAt(current.turn, at);
-			pauseTurnDecode(current.turn, at);
-			const outputTokens = turnOutputTokens(current.turn);
-			const generationMs = turnDecodeMs(current.turn, at);
-			current.reasoningMs += reasoningMs;
-			current.lastTurnReasoningMs = reasoningMs;
-			current.outputTokens += outputTokens;
-			current.inputTokens += turnInputTokens(current.turn);
-			current.generationMs += generationMs;
-			if (generationMs > 0) current.streamedOutputTokens += outputTokens;
-			current.turn = undefined;
-		};
-
-		const releaseSpan = (): void => {
-			const current = span;
-			if (!current) return;
-			stopInterval();
-			current.stopObserving?.();
-			span = undefined;
-			current.ctx.ui.setWorkingMessage();
-		};
-
-		const finalize = (current: TimingSpan, at: number, status: WorkTimingStatus): void => {
-			if (span !== current) return;
-			const humanWaitMs = current.humanWaitMs;
-			const data: WorkTimingEntryData = {
-				version: WORK_TIMING_VERSION,
-				totalMs: Math.max(0, at - current.startedAt - humanWaitMs),
-				reasoningMs: current.reasoningMs,
-				lastTurnReasoningMs: current.lastTurnReasoningMs,
-				outputTokens: current.outputTokens,
-				inputTokens: current.inputTokens,
-				generationMs: current.generationMs,
-				streamedOutputTokens: current.streamedOutputTokens,
-				scope: "interaction",
-				status,
-				humanWaitMs,
-			};
-			releaseSpan();
-			pi.appendEntry<WorkTimingEntryData>(WORK_TIMING_ENTRY_TYPE, data);
-		};
-
-		/** Close the interaction only on authoritative quiescence; the helper stays passive. */
-		const concludeIfQuiet = (current: TimingSpan, at: number): boolean => {
-			if (span !== current || current.kind !== "interaction" || current.runActive) return false;
-			const quiescence = readExecutionQuiescence(pi, current.ctx, scopeOf(current));
-			if (quiescence.state === "busy") return false;
-			finalize(current, at, quiescence.state === "quiescent" ? "settled" : "unavailable");
-			return true;
-		};
-
-		const watchQuiescence = (current: TimingSpan): void => {
-			if (current.kind !== "interaction" || current.stopObserving) return;
-			current.stopObserving = observeExecutionQuiescence(pi, () => {
-				if (span !== current || current.kind !== "interaction") return;
-				const at = now();
-				sampleHumanWait(current, at);
-				concludeIfQuiet(current, at);
-			});
-		};
-
-		const createSpan = (kind: WorkTimingScope, startedAt: number, ctx: ExtensionContext): TimingSpan => ({
-			kind,
-			startedAt,
-			ctx,
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: 0,
-			inputTokens: 0,
-			generationMs: 0,
-			streamedOutputTokens: 0,
-			humanWaitMs: 0,
-			excludedExecutions: new Set(),
-			toolCallIds: new Set(),
-			executionKeys: new Set(),
-			runIds: new Set(),
-			turn: undefined,
-			tools: [],
-			promptStartedAt: undefined,
-			promptSampledAt: undefined,
-			promptBusy: false,
-			clock: undefined,
-			runActive: false,
-			awaiting: false,
-			lastStatus: undefined,
-			stopObserving: undefined,
-		});
-
-		/**
-		 * Pin the work that already exists so an unrelated older job can never be mistaken
-		 * for this interaction's work; adopting it later still needs an explicit receipt.
-		 */
-		const startInteraction = (startedAt: number, ctx: ExtensionContext): TimingSpan => {
-			const current = createSpan("interaction", startedAt, ctx);
-			const quiescence = readExecutionQuiescence(pi, ctx);
-			for (const execution of quiescence.executions) {
-				if (execution.phase !== "terminal") current.excludedExecutions.add(execution.key);
-			}
-			watchQuiescence(current);
-			return current;
-		};
-
-		/**
-		 * An external input during an extension-started run starts a fresh interaction at that
-		 * moment. The earlier run's completed metrics are not historical interaction work, and a
-		 * mid-turn cut keeps only its post-cut part; ongoing execution attribution and live tool
-		 * clocks stay so work the person is now waiting on remains owned by the interaction.
-		 */
-		const promoteToInteraction = (current: TimingSpan, at: number, ctx: ExtensionContext): TimingSpan => {
-			const next = createSpan("interaction", at, ctx);
-			for (const toolCallId of current.toolCallIds) next.toolCallIds.add(toolCallId);
-			for (const key of current.executionKeys) next.executionKeys.add(key);
-			for (const runId of current.runIds) next.runIds.add(runId);
-			// The live tool clocks measure the tool itself, not the interaction, so they continue.
-			next.tools = current.tools;
-			if (current.turn) next.turn = cutTurnAt(current.turn, at);
-			// Executions this run already owns stay in scope; unrelated ones are excluded rather than
-			// mistaken for the interaction's own work.
-			const attributed = (execution: { toolCallId?: string; runId?: string; key: string }): boolean =>
-				(execution.toolCallId !== undefined && next.toolCallIds.has(execution.toolCallId))
-				|| next.executionKeys.has(execution.key)
-				|| (execution.runId !== undefined && next.runIds.has(execution.runId));
-			const quiescence = readExecutionQuiescence(pi, ctx);
-			for (const execution of quiescence.executions) {
-				if (execution.phase !== "terminal" && !attributed(execution)) next.excludedExecutions.add(execution.key);
-			}
-			next.runActive = true;
-			next.awaiting = false;
-			watchQuiescence(next);
-			return next;
+			boundary.closePrompt(at);
+			const data = current.data;
+			data.tools.length = 0;
+			if (!data.turn) return;
+			const reasoningMs = turnReasoningAt(data.turn, at);
+			pauseTurnDecode(data.turn, at);
+			const outputTokens = turnOutputTokens(data.turn);
+			const generationMs = turnDecodeMs(data.turn, at);
+			data.reasoningMs += reasoningMs;
+			data.lastTurnReasoningMs = reasoningMs;
+			data.outputTokens += outputTokens;
+			data.inputTokens += turnInputTokens(data.turn);
+			data.generationMs += generationMs;
+			if (generationMs > 0) data.streamedOutputTokens += outputTokens;
+			data.turn = undefined;
 		};
 
 		const teardown = (): void => {
 			stopInterval();
 			unsubscribeResize?.();
 			unsubscribeResize = undefined;
-			span?.stopObserving?.();
-			span = undefined;
-			pendingInteractionStart = undefined;
+			boundary.reset();
 		};
 
 		pi.registerEntryRenderer<WorkTimingEntryData>(
@@ -773,9 +623,11 @@ export function createWorkTimingExtension(
 				const elapsed = formatDuration(data.totalMs);
 				const head = data.status === "interrupted"
 					? `Interrupted after ${elapsed}`
-					: data.status === "unavailable"
-						? `Timed ${elapsed} (state unavailable)`
-						: `Worked for ${elapsed}`;
+					: data.status === "failed"
+						? `Failed after ${elapsed}`
+						: data.status === "unavailable"
+							? `Timed ${elapsed} (state unavailable)`
+							: `Worked for ${elapsed}`;
 				const waited = data.humanWaitMs >= 1_000 ? formatDuration(data.humanWaitMs) : "";
 				const fields = [
 					head,
@@ -804,31 +656,7 @@ export function createWorkTimingExtension(
 
 		pi.on("input", (event, ctx) => {
 			if (ctx.mode !== "tui") return;
-			const at = now();
-			if (event.source === "extension") {
-				// Every user-message run comes from prompt(), which emits input first, while custom
-				// runs never emit input. The most recent input is therefore that run's input: clearing
-				// here means an input another handler consumed cannot let a much later automatic run
-				// inherit stale human intent. No correlation id exists to bind more tightly.
-				pendingInteractionStart = undefined;
-				return;
-			}
-			const current = span;
-			if (!current) {
-				// The run it starts decides whether an interaction exists; a handled input does not fabricate one.
-				pendingInteractionStart = at;
-				return;
-			}
-			if (current.runActive) {
-				// Steering or follow-up during the run belongs to the same interaction. An automatic
-				// run only becomes an interaction from the moment a person joins it.
-				if (current.kind === "run") span = promoteToInteraction(current, at, ctx);
-				else current.ctx = ctx;
-				return;
-			}
-			// A human typed while this interaction awaited quiescence: it was cut, not completed.
-			finalize(current, at, "interrupted");
-			pendingInteractionStart = at;
+			boundary.input(event.source, ctx, now());
 		});
 
 		pi.on("before_agent_start", (event, ctx) => {
@@ -838,36 +666,16 @@ export function createWorkTimingExtension(
 				unsubscribeResize = onResize(() => paint(now(), false));
 			}
 			const at = now();
-			let current = span;
-			if (!current) {
-				// Only a run started by real external input opens an interaction.
-				if (event.messageType === "user" && pendingInteractionStart !== undefined) {
-					current = startInteraction(pendingInteractionStart, ctx);
-					pendingInteractionStart = undefined;
-					span = current;
-				} else {
-					// Automatic continuation without a human boundary: live timing only, no summary.
-					current = createSpan("run", at, ctx);
-					span = current;
-				}
-			} else {
-				current.ctx = ctx;
-			}
-			// A prompt cannot span native runs; normal settlement closes it explicitly.
-			if (current.promptStartedAt !== undefined) {
-				current.promptStartedAt = undefined;
-				current.promptSampledAt = undefined;
-			}
-			current.runActive = true;
-			current.awaiting = false;
+			boundary.beforeAgentStart(event.messageType, ctx, at);
 			paint(at, true);
 			startInterval();
 		});
 
 		pi.on("turn_start", (_event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			finishTurn(span, now());
-			span.turn = {
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
+			finishTurn(current, now());
+			current.data.turn = {
 				completedReasoningMs: 0,
 				activeReasoning: new Map(),
 				deltaChars: 0,
@@ -883,8 +691,8 @@ export function createWorkTimingExtension(
 		});
 
 		pi.on("message_update", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span?.turn) return;
-			const turn = span.turn;
+			const turn = boundary.current?.data.turn;
+			if (ctx.mode !== "tui" || !turn) return;
 			const assistantEvent = event.assistantMessageEvent;
 			if (assistantEvent.type === "thinking_start") {
 				if (!turn.activeReasoning.has(assistantEvent.contentIndex)) {
@@ -903,34 +711,33 @@ export function createWorkTimingExtension(
 		});
 
 		pi.on("message_end", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span?.turn) return;
+			const turn = boundary.current?.data.turn;
+			if (ctx.mode !== "tui" || !turn) return;
 			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
-			pauseTurnDecode(span.turn, now());
+			pauseTurnDecode(turn, now());
 			paint(now(), true);
 		});
 
 		const toolNameOf = (event: { toolName?: unknown }): string =>
 			typeof event.toolName === "string" && event.toolName ? event.toolName : "tool";
 
-		const removeActiveTool = (event: { toolCallId?: unknown; toolName?: unknown }): void => {
-			if (!span) return;
+		const removeActiveTool = (current: TimingSpan, event: { toolCallId?: unknown; toolName?: unknown }): void => {
+			const tools = current.data.tools;
 			const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
 			const toolName = typeof event.toolName === "string" && event.toolName ? event.toolName : undefined;
-			let index = toolCallId === undefined ? -1 : span.tools.findIndex((tool) => tool.toolCallId === toolCallId);
-			if (index < 0 && toolName !== undefined) index = span.tools.findIndex((tool) => tool.toolName === toolName);
-			if (index >= 0) span.tools.splice(index, 1);
+			let index = toolCallId === undefined ? -1 : tools.findIndex((tool) => tool.toolCallId === toolCallId);
+			if (index < 0 && toolName !== undefined) index = tools.findIndex((tool) => tool.toolName === toolName);
+			if (index >= 0) tools.splice(index, 1);
 		};
 
 		pi.on("tool_execution_start", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			const current = span;
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
 			const at = now();
-			if (current.promptStartedAt !== undefined) sampleHumanWait(current, at);
-			if (current.turn) pauseTurnDecode(current.turn, at);
+			boundary.toolStart(event.toolCallId, at);
+			if (current.data.turn) pauseTurnDecode(current.data.turn, at);
 			const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
-			// Raw host ids stay opaque; they only name work that began in this span.
-			if (toolCallId) current.toolCallIds.add(toolCallId);
-			current.tools.push({
+			current.data.tools.push({
 				toolCallId,
 				toolName: toolNameOf(event),
 				startedAt: at,
@@ -940,75 +747,51 @@ export function createWorkTimingExtension(
 		});
 
 		pi.on("tool_execution_end", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			const current = span;
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
 			const at = now();
-			if (current.promptStartedAt !== undefined) sampleHumanWait(current, at);
-			// Keep explicit control/query ownership even in an automatic run: a person may
-			// join it later, and promotion must retain work it already adopted.
-			const adopted = adoptionFromToolResult((event as { result?: unknown }).result);
-			for (const key of adopted.executionKeys) current.executionKeys.add(key);
-			for (const runId of adopted.runIds) current.runIds.add(runId);
-			removeActiveTool(event);
+			boundary.toolEnd((event as { result?: unknown }).result, at);
+			removeActiveTool(current, event);
 			paint(at, true);
 		});
 
 		pi.on("ui_prompt_start", (_event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			const current = span;
-			const at = now();
-			// Coalesced by the host into one outer span; waiting on the user is not tool time.
-			current.promptStartedAt ??= at;
-			// Only interactions attribute human wait; a run span just freezes its tool clock.
-			if (current.kind !== "interaction") return;
-			if (current.promptSampledAt === undefined) {
-				current.promptSampledAt = at;
-				current.promptBusy = relatedExecutionsActive(current);
-			}
+			if (ctx.mode !== "tui" || !boundary.current) return;
+			// Waiting on the user is not tool time; only interactions attribute human wait.
+			boundary.promptStart(now());
 		});
 
 		pi.on("ui_prompt_end", (_event, ctx) => {
-			if (ctx.mode !== "tui" || !span || span.promptStartedAt === undefined) return;
-			const current = span;
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
 			const at = now();
-			const promptStartedAt = current.promptStartedAt;
-			if (promptStartedAt === undefined) return;
-			sampleHumanWait(current, at);
-			current.promptStartedAt = undefined;
-			current.promptSampledAt = undefined;
-			const waitedMs = Math.max(0, at - promptStartedAt);
-			for (const tool of current.tools) tool.promptMs += waitedMs;
+			const waitedMs = boundary.promptEnd(at);
+			if (waitedMs === undefined) return;
+			for (const tool of current.data.tools) tool.promptMs += waitedMs;
 			paint(at, true);
 		});
 
 		pi.on("turn_end", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			if (span.turn) recordTurnOutput(span.turn, {}, event.message);
-			finishTurn(span, now());
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
+			if (current.data.turn) recordTurnOutput(current.data.turn, {}, event.message);
+			finishTurn(current, now());
 			paint(now(), true);
 		});
 
 		pi.on("agent_settled", (event, ctx) => {
-			if (ctx.mode !== "tui" || !span) return;
-			const current = span;
-			current.ctx = ctx;
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current) return;
 			const settledAt = now();
 			finishTurn(current, settledAt);
-			current.runActive = false;
-			current.clock = undefined;
-			current.lastStatus = undefined;
-			if (current.kind === "run") {
-				// No human interaction opened this run, so there is nothing to summarize.
-				releaseSpan();
-				return;
-			}
-			if (event.aborted) {
-				finalize(current, settledAt, "interrupted");
-				return;
-			}
-			current.awaiting = true;
-			// One summary only after the main loop and all work this interaction owns are quiet.
-			if (concludeIfQuiet(current, settledAt)) return;
+			current.data.clock = undefined;
+			current.data.lastStatus = undefined;
+			// One summary only after the main loop and all work this interaction owns are quiet,
+			// or when the interaction was cut or failed.
+			const outcome = boundary.settled(event.aborted === true, ctx, settledAt);
+			if (outcome === "closed") return;
+			// A run no human started has nothing to summarize; an awaiting interaction keeps its
+			// span while the native working row stops between runs.
 			stopInterval();
 			ctx.ui.setWorkingMessage();
 		});

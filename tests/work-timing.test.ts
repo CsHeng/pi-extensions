@@ -1318,6 +1318,45 @@ test("reports an aborted run as interrupted without waiting for quiescence", asy
 	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Interrupted after 7s • ΣR 0s (0%)");
 });
 
+test("ends a failed main run at the failure even while owned work still runs", async () => {
+	let now = 0;
+	const pi = new FakePi();
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+	(ctx.sessionManager as unknown as { getBranch: () => unknown[] }).getBranch = () => [
+		{ id: LEAF_ID, type: "message", message: { role: "assistant", stopReason: "error", content: [] } },
+	];
+	const producer = installProducer(pi, {
+		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		delivery: deliveryFacts(),
+	});
+	const scheduler = new FakeScheduler();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+
+	producer.facts = [];
+	await beginInteraction(pi, ctx);
+	now = 1_000;
+	await invoke(pi, "tool_execution_start", { toolCallId: "call-bash", toolName: "bash" }, ctx);
+	producer.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])];
+	await invoke(pi, "tool_execution_end", { toolCallId: "call-bash", toolName: "bash", result: { details: {} } }, ctx);
+	now = 5_000;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+	assert.equal(pi.entries.length, 1, "no automatic continuation can resume a failed main run");
+	assert.equal(entryData(pi).status, "failed");
+	assert.equal(entryData(pi).totalMs, 5_000);
+	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Failed after 5s • ΣR 0s (0%)");
+
+	now = 9_000;
+	producer.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
+	publish(pi);
+	await settle();
+	assert.equal(pi.entries.length, 1, "a late terminal cannot reopen or extend the failed interaction");
+});
+
 test("does not fabricate a summary for extension-origin runs", async () => {
 	let now = 0;
 	const pi = new FakePi();
