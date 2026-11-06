@@ -55,7 +55,7 @@ test("missing, duplicate, invalid-clock and oversized identities remain incomple
 	}
 });
 
-test("shutdown never invents a completed interaction, including closed local spans", () => {
+test("shutdown never invents a completed main run, including closed local spans", () => {
 	const f = harness(true); f.emit("before_agent_start"); f.emit("message_start", assistant); f.emit("message_end", assistant); f.emit("session_shutdown");
 	assert.equal(f.customs.at(-1)!.data.complete, false);
 });

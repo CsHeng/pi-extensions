@@ -20,12 +20,12 @@ export interface ParentObservation {
 	timing: LocalTiming;
 	runs: ObservedRun[];
 }
-interface Interaction { recorder: LocalTimingRecorder; startLeaf: string | null | undefined; relevant: boolean; assistant: number | undefined; sequence: number; runs: ObservedRun[]; endedThinking: Set<number>; delegationCalls: Set<string>; usedTools: Set<string>; failures: Array<{ reason: "manual" | "threshold" | "overflow"; aborted: boolean }>; usageComplete: boolean }
+interface MainRun { recorder: LocalTimingRecorder; startLeaf: string | null | undefined; relevant: boolean; assistant: number | undefined; sequence: number; runs: ObservedRun[]; endedThinking: Set<number>; delegationCalls: Set<string>; usedTools: Set<string>; failures: Array<{ reason: "manual" | "threshold" | "overflow"; aborted: boolean }>; usageComplete: boolean }
 
 /** Diagnostic event consumer only: no loop, task decisions, tool/profile changes or UI. */
 export function registerObservationHooks(pi: ExtensionAPI, options: { child?: boolean; capabilityKey?: string | null; now?: () => number } = {}): { recordRun(run: ObservedRun): void } {
-	let interaction: Interaction | undefined;
-	const observe = (action: () => void) => { try { action(); } catch { interaction?.recorder.invalidate(); } };
+	let mainRun: MainRun | undefined;
+	const observe = (action: () => void) => { try { action(); } catch { mainRun?.recorder.invalidate(); } };
 	const append = (type: string, data: unknown) => {
 		try {
 			if (Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_CUSTOM_BYTES) return false;
@@ -33,11 +33,11 @@ export function registerObservationHooks(pi: ExtensionAPI, options: { child?: bo
 		} catch { return false; /* Optional evidence must not break execution. */ }
 	};
 	const begin = (ctx: ExtensionContext) => {
-		interaction ??= { recorder: new LocalTimingRecorder(options.now ?? monotonicNow), startLeaf: physicalLast(ctx), relevant: false, assistant: undefined, sequence: 0, runs: [], endedThinking: new Set(), delegationCalls: new Set(), usedTools: new Set(), failures: [], usageComplete: true };
-		return interaction;
+		mainRun ??= { recorder: new LocalTimingRecorder(options.now ?? monotonicNow), startLeaf: physicalLast(ctx), relevant: false, assistant: undefined, sequence: 0, runs: [], endedThinking: new Set(), delegationCalls: new Set(), usedTools: new Set(), failures: [], usageComplete: true };
+		return mainRun;
 	};
 	const settle = (ctx: ExtensionContext, shutdown = false) => {
-		const current = interaction; interaction = undefined;
+		const current = mainRun; mainRun = undefined;
 		if (!current) return;
 		if (shutdown) current.recorder.invalidate();
 		const timing = current.recorder.finish();
@@ -57,69 +57,69 @@ export function registerObservationHooks(pi: ExtensionAPI, options: { child?: bo
 		});
 	}));
 	pi.on("message_start", (event) => observe(() => {
-		if (!interaction || event.message.role !== "assistant") return;
-		if (interaction.assistant !== undefined) { interaction.recorder.invalidate(); return; }
-		interaction.assistant = ++interaction.sequence; interaction.endedThinking.clear();
-		interaction.recorder.start("assistant", String(interaction.assistant));
+		if (!mainRun || event.message.role !== "assistant") return;
+		if (mainRun.assistant !== undefined) { mainRun.recorder.invalidate(); return; }
+		mainRun.assistant = ++mainRun.sequence; mainRun.endedThinking.clear();
+		mainRun.recorder.start("assistant", String(mainRun.assistant));
 	}));
 	pi.on("message_update", (event) => observe(() => {
-		if (!interaction) return;
+		if (!mainRun) return;
 		const update = event.assistantMessageEvent;
 		if (update.type !== "thinking_start" && update.type !== "thinking_end" && update.type !== "thinking_delta") return;
-		if (interaction.assistant === undefined || !Number.isSafeInteger(update.contentIndex) || update.contentIndex < 0) { interaction.recorder.invalidate(); return; }
-		const key = `${interaction.assistant}:${update.contentIndex}`;
-		if (update.type === "thinking_start") interaction.recorder.start("reasoning", key);
+		if (mainRun.assistant === undefined || !Number.isSafeInteger(update.contentIndex) || update.contentIndex < 0) { mainRun.recorder.invalidate(); return; }
+		const key = `${mainRun.assistant}:${update.contentIndex}`;
+		if (update.type === "thinking_start") mainRun.recorder.start("reasoning", key);
 		else if (update.type === "thinking_end") {
-			interaction.recorder.end("reasoning", key);
-			if (interaction.endedThinking.size < HARD_LIMITS.maxWaitSpans) interaction.endedThinking.add(update.contentIndex);
-			else interaction.recorder.invalidate();
+			mainRun.recorder.end("reasoning", key);
+			if (mainRun.endedThinking.size < HARD_LIMITS.maxWaitSpans) mainRun.endedThinking.add(update.contentIndex);
+			else mainRun.recorder.invalidate();
 		}
-		else if (!interaction.recorder.hasOpen("reasoning", key)) interaction.recorder.invalidate();
+		else if (!mainRun.recorder.hasOpen("reasoning", key)) mainRun.recorder.invalidate();
 	}));
 	pi.on("message_end", (event) => observe(() => {
-		if (!interaction || event.message.role !== "assistant") return;
-		if (interaction.assistant === undefined) { interaction.recorder.invalidate(); return; }
-		if (!Array.isArray(event.message.content) || event.message.content.length > HARD_LIMITS.maxWaitSpans) interaction.recorder.invalidate();
+		if (!mainRun || event.message.role !== "assistant") return;
+		if (mainRun.assistant === undefined) { mainRun.recorder.invalidate(); return; }
+		if (!Array.isArray(event.message.content) || event.message.content.length > HARD_LIMITS.maxWaitSpans) mainRun.recorder.invalidate();
 		else for (const [index, part] of event.message.content.entries()) {
-			if (part.type === "thinking" && !interaction.endedThinking.has(index)) interaction.recorder.invalidate();
+			if (part.type === "thinking" && !mainRun.endedThinking.has(index)) mainRun.recorder.invalidate();
 		}
-		interaction.recorder.end("assistant", String(interaction.assistant)); interaction.assistant = undefined;
+		mainRun.recorder.end("assistant", String(mainRun.assistant)); mainRun.assistant = undefined;
 	}));
 	pi.on("tool_execution_start", (event) => observe(() => {
-		if (!interaction) return;
+		if (!mainRun) return;
 		const delegation = DELEGATION_TOOLS.has(event.toolName) && pi.getActiveTools().includes(event.toolName);
 		if (delegation) {
-			interaction.relevant = true; interaction.usedTools.add(event.toolName);
-			if (interaction.delegationCalls.size >= HARD_LIMITS.maxWaitSpans) { interaction.recorder.invalidate(); return; }
-			interaction.delegationCalls.add(`${event.toolName}:${event.toolCallId}`);
+			mainRun.relevant = true; mainRun.usedTools.add(event.toolName);
+			if (mainRun.delegationCalls.size >= HARD_LIMITS.maxWaitSpans) { mainRun.recorder.invalidate(); return; }
+			mainRun.delegationCalls.add(`${event.toolName}:${event.toolCallId}`);
 		}
-		interaction.recorder.start(delegation ? "delegationWait" : "localTool", event.toolCallId);
+		mainRun.recorder.start(delegation ? "delegationWait" : "localTool", event.toolCallId);
 	}));
 	pi.on("tool_execution_end", (event) => observe(() => {
-		if (!interaction) return;
-		const delegation = interaction.delegationCalls.delete(`${event.toolName}:${event.toolCallId}`);
-		interaction.recorder.end(delegation ? "delegationWait" : "localTool", event.toolCallId);
+		if (!mainRun) return;
+		const delegation = mainRun.delegationCalls.delete(`${event.toolName}:${event.toolCallId}`);
+		mainRun.recorder.end(delegation ? "delegationWait" : "localTool", event.toolCallId);
 	}));
 	pi.on("session_before_compact", (_event, ctx) => observe(() => { begin(ctx).recorder.start("compaction", "compact"); }));
-	pi.on("session_compact", () => observe(() => { interaction?.recorder.end("compaction", "compact"); }));
+	pi.on("session_compact", () => observe(() => { mainRun?.recorder.end("compaction", "compact"); }));
 	pi.on("session_compact_failed", (event) => observe(() => {
-		interaction?.recorder.end("compaction", "compact");
+		mainRun?.recorder.end("compaction", "compact");
 		const failure = { reason: event.reason, aborted: event.aborted };
 		if (options.child) {
-			if (!append("csheng-compaction-unavailable", failure) && interaction) interaction.usageComplete = false;
-		} else if (interaction) {
-			if (interaction.failures.length >= HARD_LIMITS.maxWaitSpans) { interaction.usageComplete = false; interaction.recorder.invalidate(); }
-			else interaction.failures.push(failure);
+			if (!append("csheng-compaction-unavailable", failure) && mainRun) mainRun.usageComplete = false;
+		} else if (mainRun) {
+			if (mainRun.failures.length >= HARD_LIMITS.maxWaitSpans) { mainRun.usageComplete = false; mainRun.recorder.invalidate(); }
+			else mainRun.failures.push(failure);
 		}
 	}));
 	pi.on("agent_settled", (_event, ctx) => observe(() => { settle(ctx); }));
 	pi.on("session_shutdown", (_event, ctx) => observe(() => { settle(ctx, true); }));
 	return { recordRun(run) {
-		if (!interaction) return;
+		if (!mainRun) return;
 		try {
-			if (interaction.runs.length >= 32 || Buffer.byteLength(JSON.stringify(run)) > MAX_CUSTOM_BYTES) { interaction.recorder.invalidate(); return; }
-			interaction.runs.push(structuredClone(run));
-		} catch { interaction.recorder.invalidate(); }
+			if (mainRun.runs.length >= 32 || Buffer.byteLength(JSON.stringify(run)) > MAX_CUSTOM_BYTES) { mainRun.recorder.invalidate(); return; }
+			mainRun.runs.push(structuredClone(run));
+		} catch { mainRun.recorder.invalidate(); }
 	} };
 }
 function physicalLast(ctx: ExtensionContext): string | null | undefined {
