@@ -3,7 +3,7 @@
 export const LOOP_FACTS_EVENT = "csheng.loop-notifications.facts.v1";
 export const LOOP_SNAPSHOT_REQUEST = "csheng.loop-notifications.snapshot.v1";
 export const LOOP_NOTICE_TYPE = "csheng.loop-notifications.notice";
-/** Sent only after a notice is projected into a model request, never when a send is queued. */
+/** Sent only after an identified native notice participates in request preparation, never on enqueue or persistence alone. */
 export const LOOP_NOTICE_ACK = "csheng.loop-notifications.ack.v1";
 
 export type LoopProducer = "workflow" | "retained-shell" | "subagents";
@@ -59,7 +59,7 @@ export interface LoopDeliverySnapshot {
 	sessionId: string | null;
 	branchAnchor: string | null;
 	pending: LoopExecutionReference[];
-	/** A completion wake reserved/queued but not yet projected into a provider request. */
+	/** A native completion handoff reserved/proposed but not yet resolved by request preparation or a lifecycle boundary. */
 	scheduled: LoopExecutionReference[];
 	blocked: boolean;
 }

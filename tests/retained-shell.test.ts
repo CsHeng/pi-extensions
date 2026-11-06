@@ -397,8 +397,9 @@ test("an empty execution id does not start a process", async () => {
 	await owner.shutdown();
 });
 
-test("nine background terminals remain listed and project once", async (t) => {
+test("nine background terminals remain listed and are handed to Pi once", async (t) => {
 	const dir = await scratch();
+	const sent: Array<{ customType?: string; content?: string; details?: unknown }> = [];
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
 	const listeners = new Map<string, Array<(data: unknown) => void>>();
 	const pi = {
@@ -413,7 +414,7 @@ test("nine background terminals remain listed and project once", async (t) => {
 		registerTool: () => {},
 		registerCommand: () => {},
 		sendUserMessage: () => {},
-		sendMessage: async () => {},
+		sendMessage: async (message: { customType?: string; content?: string; details?: unknown }) => { sent.push(message); },
 		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 			return () => {};
@@ -428,7 +429,8 @@ test("nine background terminals remain listed and project once", async (t) => {
 		const event = data as ShellExecutionEvent;
 		if (event.phase === "exited") exited.add(event.executionId);
 	});
-	const ctx = { mode: "tui", isIdle: () => false, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
+	let idle = false;
+	const ctx = { mode: "tui", isIdle: () => idle, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getBranch: () => [{ id: "leaf" }] } } as ExtensionContext;
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 	const ids: string[] = [];
 	for (let index = 0; index < 9; index++) {
@@ -440,18 +442,21 @@ test("nine background terminals remain listed and project once", async (t) => {
 	assert.equal(exited.size, ids.length);
 	assert.equal(owner.list(scope).filter((view) => view.status !== "running").length, ids.length);
 	for (const id of ids) assert.equal(owner.inspect(id, scope)?.status, "exited");
-	const project = async () => {
-		let text = "";
-		for (const handler of handlers.get("context_with_system") ?? []) {
-			const result = await handler({ messages: [] }, ctx) as { messages?: Array<{ customType?: string; content?: string }> } | undefined;
-			text += (result?.messages ?? []).filter((message) => message.customType === LOOP_NOTICE_TYPE).map((message) => message.content ?? "").join("\n");
-		}
-		return text;
-	};
-	const first = await project();
-	for (const id of ids) assert.equal(first.split(id).length - 1, 1, id);
-	const second = await project();
-	for (const id of ids) assert.equal(second.includes(id), false, id);
+	// Busy while the terminals arrive; the settled idle boundary hands one combined native notice to Pi.
+	assert.equal(sent.length, 0);
+	idle = true;
+	const settled = async () => { for (const handler of handlers.get("agent_settled") ?? []) await handler({ aborted: false }, ctx); };
+	await settled();
+	assert.equal(sent.length, 1);
+	const notice = sent[0]!;
+	assert.equal(notice.customType, LOOP_NOTICE_TYPE);
+	for (const id of ids) assert.equal((notice.content ?? "").split(id).length - 1, 1, id);
+	// Request preparation of that immutable message consumes and acknowledges every result.
+	idle = false;
+	for (const handler of handlers.get("context_with_system") ?? []) await handler({ messages: [{ role: "custom", ...notice }] }, ctx);
+	idle = true;
+	await settled();
+	assert.equal(sent.length, 1, "a prepared notice is never delivered again");
 	const replies: LoopFacts[] = [];
 	pi.events.emit(LOOP_SNAPSHOT_REQUEST, { version: 1, accept: (facts: LoopFacts) => replies.push(facts) });
 	assert.equal(replies.some((facts) => facts.producer === "retained-shell" && facts.executions.some((execution) => ids.includes(execution.id) && execution.disposition === "pending")), false);

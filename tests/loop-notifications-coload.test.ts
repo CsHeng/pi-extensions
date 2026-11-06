@@ -88,8 +88,9 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	releaseChild();
 	await waitForTrace(trace, () => h.faux.state.callCount >= 7 && trace.entries.filter(entry => entry.event === "native:agent_settled").length >= 3);
 	assert.equal(h.faux.state.callCount, 7, "one child completion with no task-only renewal");
-	assert.equal(projections.length, 2);
-	assert.match(projections[1]!, /Agent task child/);
+	assert.equal(projections.length, 3);
+	assert.equal(projections[1], projections[0], "the earlier shell completion remains in the next request");
+	assert.match(projections[2]!, /Agent task child/);
 	await new Promise(resolve => setTimeout(resolve, 50));
 	assert.equal(h.faux.state.callCount, 7);
 	assert.deepEqual(h.errors, []);

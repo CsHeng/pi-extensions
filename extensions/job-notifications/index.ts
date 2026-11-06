@@ -6,10 +6,21 @@ import { decideDelivery, noticeKey, type DeliveryDecision, type DeliveryView } f
 
 const WAIT_COMMAND = "csheng-loop-notifications-wait";
 
+interface NoticeDetails { version: 2; sessionId: string; notices: LoopExecutionReference[] }
+function noticeReferences(message: { customType?: string; details?: unknown }, sessionId: string): LoopExecutionReference[] {
+	if (message.customType !== LOOP_NOTICE_TYPE || !message.details || typeof message.details !== "object") return [];
+	const details = message.details as Partial<NoticeDetails>;
+	if (details.version !== 2 || details.sessionId !== sessionId || !Array.isArray(details.notices)) return [];
+	return details.notices.filter((notice): notice is LoopExecutionReference => !!notice &&
+		(notice.producer === "retained-shell" || notice.producer === "subagents") && typeof notice.id === "string");
+}
+
 export default function loopNotifications(pi: ExtensionAPI): void {
 	const facts = new Map<string, LoopFacts>();
 	const seen = new Set<string>();
 	const consumed = new Set<string>();
+	// Native history prevents duplicate sends; only request preparation acknowledges delivery.
+	const admitted = new Set<string>();
 	const suppressed = new Set<string>();
 	let wakeStopped = false;
 	let sendBlocked = false;
@@ -32,7 +43,8 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 	const allowed = (next: DeliveryDecision): DeliveryDecision => {
 		if (next.kind !== "notices") return next;
 		const tools = pi.getActiveTools();
-		const notices = next.notices.filter(notice => tools.includes(notice.producer === "retained-shell" ? "bash" : "agent"));
+		const reserved = new Set(scheduled.map(notice => noticeKey(notice.producer, notice.id)));
+		const notices = next.notices.filter(notice => !admitted.has(noticeKey(notice.producer, notice.id)) && !reserved.has(noticeKey(notice.producer, notice.id)) && tools.includes(notice.producer === "retained-shell" ? "bash" : "agent"));
 		if (notices.length === next.notices.length) return next;
 		if (notices.length === 0) return { kind: "none", text: "", notices: [] };
 		return { kind: "notices", text: notices.map(notice => notice.summary.trim()).join("\n"), notices };
@@ -54,10 +66,10 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 			scheduled: scheduled.map(reference), blocked: !context || wakeStopped || sendBlocked,
 		} satisfies LoopDeliverySnapshot);
 	});
-	const consume = (next: DeliveryDecision): void => {
-		for (const notice of next.notices) consumed.add(noticeKey(notice.producer, notice.id));
+	const consume = (notices: LoopExecutionReference[]): void => {
+		for (const notice of notices) consumed.add(noticeKey(notice.producer, notice.id));
 		sendBlocked = false;
-		scheduled = [];
+		scheduled = scheduled.filter(notice => !consumed.has(noticeKey(notice.producer, notice.id)));
 		publishDelivery();
 	};
 	const eligibleHost = (ctx: ExtensionContext): boolean => ctx.mode === "tui" || ctx.mode === "rpc";
@@ -69,25 +81,38 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 			return allowed(decision()).kind !== "none";
 		},
 	});
+	const noticeMessage = (next: DeliveryDecision, ctx: ExtensionContext) => ({
+		customType: LOOP_NOTICE_TYPE, content: next.text, display: false,
+		details: { version: 2, sessionId: ctx.sessionManager.getSessionId(), notices: next.notices.map(reference) } satisfies NoticeDetails,
+	});
+	const restoreAdmissions = (ctx: ExtensionContext): void => {
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom_message") continue;
+			for (const notice of noticeReferences(entry, ctx.sessionManager.getSessionId())) admitted.add(noticeKey(notice.producer, notice.id));
+		}
+	};
 	const send = (ctx: ExtensionContext): void => {
 		if (wakeStopped || sendBlocked || ctx.signal?.aborted || barrier.aborted || !ctx.isIdle() || ctx.hasPendingMessages() || !ctx.isProjectTrusted() || !eligibleHost(ctx)) return;
 		const next = allowed(decision());
 		if (next.kind === "none") return;
 		if (!reserveModelWake(pi, ctx)) return;
-		scheduled = next.notices.map(reference);
+		const references = next.notices.map(reference);
+		scheduled.push(...references);
 		publishDelivery();
 		const attemptEpoch = deliveryEpoch;
 		const fail = (): void => {
-			if (attemptEpoch !== deliveryEpoch) return;
+			if (attemptEpoch !== deliveryEpoch || references.every(notice => consumed.has(noticeKey(notice.producer, notice.id)))) return;
 			releaseModelWake(pi);
 			sendBlocked = true;
-			scheduled = [];
+			scheduled = scheduled.filter(notice => !references.some(sent => noticeKey(sent.producer, sent.id) === noticeKey(notice.producer, notice.id)));
 			publishDelivery();
 			// A bounded diagnostic, not a retry or a result acknowledgment.
 			try { pi.appendEntry("csheng.loop-notifications.delivery-error", { reason: "send-failed" }); } catch { /* notification failure must not stop execution */ }
 		};
 		try {
-			void Promise.resolve(pi.sendMessage({ customType: LOOP_NOTICE_TYPE, content: next.text, display: false, details: { version: 1 } }, { triggerTurn: true })).catch(fail);
+			// Idle handoff only. Busy results use a native boundary draft, never a steering queue
+			// whose admission could be delayed behind other custom messages.
+			void Promise.resolve(pi.sendMessage(noticeMessage(next, ctx), { triggerTurn: true })).catch(fail);
 		} catch { fail(); }
 	};
 	const schedule = (ctx: ExtensionContext): void => {
@@ -110,6 +135,7 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 		facts.clear();
 		seen.clear();
 		consumed.clear();
+		admitted.clear();
 		suppressed.clear();
 		wakeStopped = false;
 		sendBlocked = false;
@@ -118,6 +144,8 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 	const bind = (ctx: ExtensionContext): void => {
 		reset();
 		context = ctx;
+		// Resume/tree restore only deduplication, never a new wake or a delivery acknowledgment.
+		restoreAdmissions(ctx);
 		requestSnapshots();
 		publishDelivery();
 	};
@@ -150,29 +178,49 @@ export default function loopNotifications(pi: ExtensionAPI): void {
 			publishDelivery();
 		}
 	});
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("session_compact", (_event, ctx) => {
+		// A legitimate compaction can summarize a just-appended notice before its first request.
+		restoreAdmissions(ctx);
+		scheduled = [];
+		publishDelivery();
+	});
+	pi.on("agent_settled", (event, ctx) => {
 		context = ctx;
+		if (scheduled.length > 0) restoreAdmissions(ctx);
+		if (event.aborted) {
+			wakeStopped = true;
+			for (const notice of pendingKeys()) suppressed.add(notice);
+			scheduled = [];
+		}
 		if (!wakeStopped && !ctx.signal?.aborted && !barrier.aborted) schedule(ctx);
 		publishDelivery();
 	});
-	pi.on("context_with_system", (event, ctx) => {
-		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === LOOP_NOTICE_TYPE));
-		if (ctx.signal?.aborted || !ctx.isProjectTrusted() || wakeStopped || !eligibleHost(ctx)) return { messages };
+	pi.on("turn_end", (event, ctx) => {
+		// Revalidate after all foreground tools. The public boundary includes custom queues,
+		// unlike hasPendingMessages(); let earlier queued work observe results before deciding.
+		if (event.outcome !== "completed" || ctx.signal?.aborted || wakeStopped || sendBlocked || !ctx.isProjectTrusted() || !eligibleHost(ctx)
+			|| ctx.hasPendingMessages() || event.context.pendingMessages.length > 0) return;
 		const next = allowed(decision());
-		if (next.kind === "notices") {
-			messages.push({ role: "custom", customType: LOOP_NOTICE_TYPE, content: next.text, display: false, timestamp: Date.now() });
-			consume(next);
-			const ids = next.notices.filter((notice) => notice.producer === "retained-shell").map((notice) => notice.id);
-			if (ids.length > 0) {
-				try { pi.events.emit(LOOP_NOTICE_ACK, { version: 1, producer: "retained-shell", ids } satisfies LoopNoticeAck); } catch { /* Ack failure leaves the notice pending for a later projection. */ }
-			}
-		} else if (scheduled.length > 0) {
-			// A source can become observed/suppressed after reserving the carrier wake.
-			// Its projection still resolves that handoff even when no notice remains.
-			scheduled = [];
-			publishDelivery();
+		if (next.kind === "none") return;
+		scheduled.push(...next.notices.map(reference));
+		publishDelivery();
+		// Pi commits the draft after tool results and owns continuation/abort. Once committed,
+		// this historical fact stays in place even if that request is aborted or retried.
+		return { entries: [...event.entries, { type: "custom_message", ...noticeMessage(next, ctx) }], continue: true };
+	});
+	pi.on("context_with_system", (event, ctx) => {
+		if (ctx.signal?.aborted || !ctx.isProjectTrusted() || wakeStopped || !eligibleHost(ctx)) return;
+		const notices = event.messages.flatMap(message => message.role === "custom"
+			? noticeReferences(message, ctx.sessionManager.getSessionId()) : [])
+			.filter(notice => !consumed.has(noticeKey(notice.producer, notice.id)));
+		if (notices.length === 0) return;
+		for (const notice of notices) admitted.add(noticeKey(notice.producer, notice.id));
+		consume(notices);
+		const ids = notices.filter(notice => notice.producer === "retained-shell").map(notice => notice.id);
+		if (ids.length > 0) {
+			try { pi.events.emit(LOOP_NOTICE_ACK, { version: 1, producer: "retained-shell", ids } satisfies LoopNoticeAck); } catch { /* Source evidence remains inspectable if acknowledgment fails. */ }
 		}
-		return { messages };
+		// Observation only: queued != prepared, and prepared != successful provider processing.
 	});
 	pi.on("session_shutdown", () => { reset(); context = undefined; publishDelivery(); });
 
