@@ -30,7 +30,7 @@ const parameters = Type.Object({
 		Type.Literal("wait"),
 		Type.Literal("renew"),
 		Type.Literal("cancel"),
-	], { description: "run starts a command. inspect returns a snapshot for a specific diagnostic question. wait holds this call for a terminal result within waitSeconds. renew extends the execution deadline; cancel stops the execution. For completion alone after a running result, yield to the session notification instead of polling." })),
+	], { description: "run starts a command. inspect returns a snapshot for a specific diagnostic question. wait holds this call for a terminal result within waitSeconds. renew extends the execution deadline; cancel stops the execution. For completion alone after a running result, end the turn; the session notification resumes you." })),
 	executionId: Type.Optional(Type.String({ description: "Copy the execution_id returned by run and pair it with an explicit control action. This identifies the retained execution, not an OS process." })),
 	background: Type.Optional(Type.Boolean({ description: "Return as soon as the execution is running. The process keeps going." })),
 	deadlineSeconds: Type.Optional(Type.Number({ description: "Finite execution deadline in seconds for a new run, or the new deadline for renew. Omitted start uses 600. An explicit positive finite value is honored with no product cap and kills the process at that deadline." })),

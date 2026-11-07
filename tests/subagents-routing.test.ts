@@ -426,7 +426,7 @@ test("explicit routing takes one getAll and getAvailable snapshot and never muta
 test("user overlay owns concurrency without replacing unmentioned packaged routes", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-user-overlay-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
-	await writeFile(join(root, "csheng-subagents.json"), JSON.stringify({
+	await writeFile(join(root, "csheng-agents.json"), JSON.stringify({
 		maxConcurrency: 12,
 		routes: {
 			explorer: { maxConcurrency: 5 },
@@ -528,15 +528,15 @@ test("configuration accepts user concurrency and rejects invalid values or unkno
 test("loader isolates malformed and symlinked user configuration", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-routing-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
-	await writeFile(join(root, "csheng-subagents.json"), "{");
+	await writeFile(join(root, "csheng-agents.json"), "{");
 	const malformed = await loadConfig(root);
 	assert.equal(malformed.diagnostic?.code, "invalid_route_config");
 	assert.equal(malformed.diagnostic?.message, "route configuration is not valid JSON");
 
-	await rm(join(root, "csheng-subagents.json"));
+	await rm(join(root, "csheng-agents.json"));
 	await mkdir(join(root, "actual"));
 	await writeFile(join(root, "actual", "config.json"), "{}");
-	await symlink(join(root, "actual", "config.json"), join(root, "csheng-subagents.json"));
+	await symlink(join(root, "actual", "config.json"), join(root, "csheng-agents.json"));
 	const linked = await loadConfig(root);
 	assert.match(linked.diagnostic?.message ?? "", /non-symlink/);
 });
@@ -544,7 +544,7 @@ test("loader isolates malformed and symlinked user configuration", async (t) => 
 test("retired profile and policy config fields fail without rewriting user files", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "subagent-retired-config-"));
 	t.after(async () => rm(root, { recursive: true, force: true }));
-	const path = join(root, "csheng-subagents.json");
+	const path = join(root, "csheng-agents.json");
 	for (const [field, value] of [["reasoningProfiles", { deep: "max" }], ["guidance", "aggressive"]] as const) {
 		const original = JSON.stringify({ [field]: value, maxConcurrency: 3 });
 		await writeFile(path, original);

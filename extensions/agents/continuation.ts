@@ -73,6 +73,23 @@ export async function defaultEnclosingCapability(): Promise<ChildCapabilityManif
 }
 const activeState = (record: ManagedRecord) => record.state === "queued" || record.state === "running";
 
+/** Bound the carried closing excerpt independently for every task in a combined notice. */
+export const NOTICE_EXCERPT_LIMIT = 1200;
+function closingExcerpt(output: string): string {
+	// The excerpt is the child's own report tail; the full report stays inspectable.
+	const text = output.trim();
+	if (text.length <= NOTICE_EXCERPT_LIMIT) return text;
+	const marker = "[earlier output truncated] ";
+	const tail = text.slice(-(NOTICE_EXCERPT_LIMIT - marker.length));
+	const boundary = /(?:\n\s*\n|[.!?]\s+)/.exec(tail);
+	return marker + (boundary ? tail.slice(boundary.index + boundary[0].length) : tail);
+}
+function taskNotice(label: string, handle: string, runId: string, phase: string, view?: SessionView): string {
+	const result = view?.result;
+	const excerpt = result?.output ? closingExcerpt(result.output) : "";
+	return `Agent task ${label} (handle ${handle}) in run ${runId}: phase ${phase}${result ? `; status ${result.status}` : ""}${view ? `; expectedEpisode ${view.episode}` : ""}${view?.candidate ? `; candidateId ${view.candidate.id}` : ""}${result ? `; changed paths ${result.changedPaths.length}` : ""}.${excerpt ? ` Closing summary: ${excerpt}` : ""} Full report available through inspect; execution is not acceptance.`;
+}
+
 interface AdmissionProgress {
 	handle: string;
 	runId: string;
@@ -200,7 +217,7 @@ export class ContinuationService {
 			const live = view.phase === "preparing" || view.phase === "queued" || view.phase === "running";
 			if (live || view.tasks.length === 0) executions.push({
 				id: view.runId, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: live ? view.phase === "running" ? "running" : view.phase === "queued" ? "queued" : "preparing" : "terminal",
-				status: view.phase, exitCode: null, summary: live ? "" : `Agent run ${view.runId} is ${view.phase}. Inspect terminal evidence and decide whether to review, apply, continue, or close; execution is not acceptance.`,
+				status: view.phase, exitCode: null, summary: live ? "" : `Agent run ${view.runId}: phase ${view.phase}. Full report available through inspect; execution is not acceptance.`,
 				disposition: live ? "pending" : binding?.foreground ? "returning" : "pending",
 			});
 			for (const task of view.tasks) {
@@ -210,7 +227,7 @@ export class ContinuationService {
 				const label = record?.task.id ?? task.taskId;
 				executions.push({
 					id: view.runId + ":" + task.taskId, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: "terminal", status: task.phase, exitCode: null,
-					summary: observed ? "" : `Agent task ${label} (handle ${task.taskId}) in run ${view.runId} is ${task.phase}. Inspect terminal evidence or join the run, then decide whether to review, apply, continue, or close; execution is not acceptance.`,
+					summary: observed ? "" : taskNotice(label, task.taskId, view.runId, task.phase, binding?.views.get(task.taskId)),
 					disposition: observed ? "observed" : binding?.foreground ? "returning" : "pending",
 				});
 			}

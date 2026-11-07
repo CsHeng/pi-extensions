@@ -16,7 +16,6 @@ import {
 
 export { THINKING_LEVELS } from "./contracts.ts";
 export const ROUTE_CONFIG_FILE = "csheng-agents.json";
-export const LEGACY_ROUTE_CONFIG_FILE = "csheng-subagents.json";
 export type ConfiguredThinking = "$parent" | ThinkingLevel;
 
 const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/csheng-agents.json", import.meta.url));
@@ -62,7 +61,7 @@ export interface ConfigSourceSnapshot {
 	packageBytes: Buffer;
 	userBytes?: Buffer;
 	/** Selected filename only, never raw routes or an agent-directory path. */
-	userFile?: typeof ROUTE_CONFIG_FILE | typeof LEGACY_ROUTE_CONFIG_FILE;
+	userFile?: typeof ROUTE_CONFIG_FILE;
 }
 
 interface ParseOptions {
@@ -255,17 +254,14 @@ function parseJsonBytes(bytes: Buffer, owner: string): unknown {
 
 export async function readConfigSources(agentDir = getAgentDir()): Promise<ConfigSourceSnapshot> {
 	const packageBytes = await readRegularFile(PACKAGE_CONFIG_PATH, "packaged route configuration");
-	// Canonical presence wins. Invalid/unsafe canonical input is an error, not permission
-	// to fall back or merge another explicit route choice. Both files remain untouched.
-	for (const userFile of [ROUTE_CONFIG_FILE, LEGACY_ROUTE_CONFIG_FILE] as const) {
-		try {
-			return { packageBytes, userBytes: await readRegularFile(join(agentDir, userFile), "route configuration"), userFile };
-		} catch (error) {
-			if (isNodeError(error) && error.code === "ENOENT") continue;
-			throw error;
-		}
+	// The canonical file is the only user source. Invalid/unsafe input is an error, not permission
+	// to fall back to another file; the user file is never rewritten.
+	try {
+		return { packageBytes, userBytes: await readRegularFile(join(agentDir, ROUTE_CONFIG_FILE), "route configuration"), userFile: ROUTE_CONFIG_FILE };
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { packageBytes };
+		throw error;
 	}
-	return { packageBytes };
 }
 
 export function parseConfigSources(snapshot: ConfigSourceSnapshot): ConfigLoadResult {

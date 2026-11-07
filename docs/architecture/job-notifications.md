@@ -79,4 +79,4 @@ sequenceDiagram
     Note over N,M: No task-only continuation; wait for real input or a new result
 ```
 
-Print and JSON do not receive these wakes. Only the bounded completion notice and its references become native conversational history; Async Bash and Agent records remain the source execution evidence. There is no separate persisted notification queue. Private event/storage names are retained rather than migrating live histories. The inline Mermaid diagrams above are the product-owned diagram sources.
+Print and JSON do not receive these wakes. Agent task notices carry phase and result status, available candidate ID and expected episode, changed-path count and a bounded closing report excerpt; paths are not enumerated. The full report remains available through inspect, and execution is not acceptance. Only the bounded completion notice and its references become native conversational history; Async Bash and Agent records remain the source execution evidence. There is no separate persisted notification queue. Private event/storage names are retained rather than migrating live histories. The inline Mermaid diagrams above are the product-owned diagram sources.

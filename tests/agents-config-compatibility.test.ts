@@ -6,7 +6,7 @@ import test from "node:test";
 import { loadConfig, readConfigSources } from "../extensions/agents/config.ts";
 
 const canonical = "csheng-agents.json";
-const legacy = "csheng-subagents.json";
+const retired = "csheng-subagents.json";
 const config = (model: string) => JSON.stringify({ routes: { explorer: { candidates: [{ model, thinking: "off" }] } } });
 
 async function fixture(t: test.TestContext): Promise<string> {
@@ -15,20 +15,20 @@ async function fixture(t: test.TestContext): Promise<string> {
 	return root;
 }
 
-test("Agents uses the known legacy route file without rewriting explicit choices", async t => {
+test("Agents reads only the canonical route file and leaves a retired file name alone", async t => {
 	const root = await fixture(t);
-	const bytes = config("fixture/legacy");
-	await writeFile(join(root, legacy), bytes);
+	const bytes = config("fixture/retired");
+	await writeFile(join(root, retired), bytes);
 	const result = await loadConfig(root);
-	assert.equal(result.config?.routes.explorer.candidates[0]?.model, "fixture/legacy");
-	assert.equal(result.source?.userFile, legacy);
-	assert.equal(await readFile(join(root, legacy), "utf8"), bytes);
+	assert.equal(result.source?.userFile, undefined, "a retired file name is not a user source");
+	assert.notEqual(result.config?.routes.explorer.candidates[0]?.model, "fixture/retired");
+	assert.equal(await readFile(join(root, retired), "utf8"), bytes);
 	await assert.rejects(readFile(join(root, canonical)), { code: "ENOENT" });
 });
 
-test("canonical Agents route file takes precedence rather than merging legacy choices", async t => {
+test("canonical Agents route file is used without merging other files", async t => {
 	const root = await fixture(t);
-	await writeFile(join(root, legacy), config("fixture/legacy"));
+	await writeFile(join(root, retired), config("fixture/retired"));
 	await writeFile(join(root, canonical), config("fixture/canonical"));
 	const result = await loadConfig(root);
 	assert.equal(result.config?.routes.explorer.candidates[0]?.model, "fixture/canonical");
@@ -38,7 +38,7 @@ test("canonical Agents route file takes precedence rather than merging legacy ch
 
 test("an invalid canonical route file is visible and never silently falls back", async t => {
 	const root = await fixture(t);
-	await writeFile(join(root, legacy), config("fixture/legacy"));
+	await writeFile(join(root, retired), config("fixture/retired"));
 	await writeFile(join(root, canonical), "{invalid");
 	const result = await loadConfig(root);
 	assert.equal(result.config === undefined, true, "invalid configuration must not yield effective routes");
@@ -46,10 +46,10 @@ test("an invalid canonical route file is visible and never silently falls back",
 	assert.equal(result.source?.userFile, canonical);
 });
 
-test("canonical route file safety failures do not fall back to legacy state", async t => {
+test("canonical route file safety failures do not fall back to any other state", async t => {
 	const root = await fixture(t);
-	await writeFile(join(root, legacy), config("fixture/legacy"));
-	await symlink(join(root, legacy), join(root, canonical));
+	await writeFile(join(root, retired), config("fixture/retired"));
+	await symlink(join(root, retired), join(root, canonical));
 	const result = await loadConfig(root);
 	assert.equal(result.config === undefined, true, "invalid configuration must not yield effective routes");
 	assert.equal(result.diagnostic?.code, "invalid_route_config");

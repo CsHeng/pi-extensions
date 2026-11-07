@@ -12,7 +12,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerContinuationTool, type ContinuationService } from "../extensions/agents/continuation.ts";
+import { registerContinuationTool, ContinuationService, NOTICE_EXCERPT_LIMIT } from "../extensions/agents/continuation.ts";
 import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 import { emptyUsage } from "../extensions/agents/contracts.ts";
 import { defaultConfig } from "../extensions/agents/config.ts";
@@ -26,6 +26,24 @@ import type { TasklistState } from "../extensions/tasklist/goal-contracts.ts";
 import nativeFixture from "./fixtures/subagents-native-session.ts";
 import { createHostHarness, createTrace, createTraceObserver } from "./fixtures/workflow/host-fixture.ts";
 const exec = promisify(execFile);
+
+test("terminal facts carry a bounded result and omit observed summaries", () => {
+ const service = new ContinuationService();
+ const view = { handle: "handle1", episode: 2, result: { status: "succeeded", changedPaths: ["private/a", "private/b"], output: `${"Earlier sentence. ".repeat(150)}Closing sentence about src/example.ts.` }, candidate: { id: "candidate1" } };
+ const record = { handle: "handle1", episode: 2, state: "idle", task: { id: "task1" } };
+ const internals = service as unknown as { supervisor: unknown; bindings: Map<string, unknown>; observedEpisodes: Map<string, number> };
+ internals.supervisor = { inspect: () => [{ runId: "run1", phase: "running", tasks: [{ taskId: "handle1", phase: "succeeded" }] }] };
+ internals.bindings.set("run1", { records: [record], views: new Map([["handle1", view]]) });
+ const fact = () => service.notificationFacts("session", null).executions.find(item => item.id === "run1:handle1")!;
+ const summary = fact().summary;
+ assert.match(summary, /phase succeeded; status succeeded; expectedEpisode 2; candidateId candidate1; changed paths 2/);
+ assert.ok(summary.includes("[earlier output truncated] ")); assert.ok(summary.includes("Closing sentence about src/example.ts."), "the child's own report tail is carried verbatim");
+ assert.ok(!summary.includes("private/a"), "changed paths are counted, not enumerated");
+ const excerpt = summary.split("Closing summary: ")[1]!.split(" Full report available")[0]!;
+ assert.ok(excerpt.length <= NOTICE_EXCERPT_LIMIT);
+ internals.observedEpisodes.set("handle1", 2);
+ assert.equal(fact().summary, ""); assert.equal(fact().disposition, "observed");
+});
 
 for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real host ${consume} consumes terminal notifications without a stale provider turn`, { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-wake-consumed-")); const store = new ManagedSessionStore(base);
@@ -53,7 +71,7 @@ for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real
  ]);
  await h.session.prompt("bounded notification fixture"); await new Promise(resolve => setImmediate(resolve));
  assert.equal(h.faux.state.callCount, 4); assert.deepEqual(wakes, []);
- assert.ok(providerEvidence.includes("Inspect terminal evidence"));
+ assert.ok(providerEvidence.includes("Full report available through inspect"));
  for (const view of receipt.sessions) assert.ok(providerEvidence.includes(view.handle), "ready sibling facts must reach the ongoing provider request without an extra wake");
  assert.deepEqual(h.errors, []);
 });
@@ -94,7 +112,7 @@ test("blocked work can resume, yield fully idle, and receive one child terminal 
  await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 5, "pending work alone must not keep requesting the provider");
  handle = (await service.contextIndex(ctx))[0]!.handle;
  release(); await until(() => h.faux.state.callCount === 8 && !h.session.isStreaming);
- assert.equal(wakes, 0, "the executor does not wake; the consumer delivers the terminal"); assert.ok(terminalWire.includes("Inspect terminal evidence")); assert.ok(evidenceWire.includes("released child evidence"));
+ assert.equal(wakes, 0, "the executor does not wake; the consumer delivers the terminal"); assert.ok(terminalWire.includes("Full report available through inspect")); assert.ok(evidenceWire.includes("released child evidence"));
  assert.equal(state().data.state.tasks[0]?.status, "done");
  await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(h.faux.state.callCount, 8); assert.deepEqual(h.errors, []);
 });
@@ -196,7 +214,7 @@ test("queued but dropped completion is not acknowledged, and a new input can exp
  let wire = "";
  h.faux.setResponses([managed({ action: "inspect", handle: receipt.sessions[0]!.handle }), providerContext => { wire = JSON.stringify(providerContext.messages); return fauxAssistantMessage("explicit result collected"); }]);
  await h.session.prompt("collect explicitly; supersede the dropped queue");
- assert.ok(wire.includes("one execution")); assert.ok(!wire.includes("Inspect terminal evidence"), "a superseded queued notice must not reappear from history");
+ assert.ok(wire.includes("one execution")); assert.ok(!wire.includes("Full report available through inspect"), "a superseded queued notice must not reappear from history");
  assert.deepEqual(await service.unobservedWake([terminalEvent], ctx), []);
  assert.equal(h.faux.state.callCount, 4); assert.deepEqual(h.errors, []);
 });
