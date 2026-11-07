@@ -87,7 +87,7 @@ function closingExcerpt(output: string): string {
 function taskNotice(label: string, handle: string, runId: string, phase: string, view?: SessionView): string {
 	const result = view?.result;
 	const excerpt = result?.output ? closingExcerpt(result.output) : "";
-	return `Agent task ${label} (handle ${handle}) in run ${runId}: phase ${phase}${result ? `; status ${result.status}` : ""}${view ? `; expectedEpisode ${view.episode}` : ""}${view?.candidate ? `; candidateId ${view.candidate.id}` : ""}${result ? `; changed paths ${result.changedPaths.length}` : ""}.${excerpt ? ` Closing summary: ${excerpt}` : ""} Full report available through inspect; execution is not acceptance.`;
+	return `Agent task ${label} (handle ${handle}) in run ${runId}: phase ${phase}${result ? `; status ${result.status}` : ""}${view ? `; expectedEpisode ${view.episode}` : ""}${view?.candidate ? `; candidateId ${view.candidate.id}` : ""}${result ? `; changed paths ${result.changedPaths.length}` : "; result unavailable"}.${excerpt ? ` Closing summary: ${excerpt}` : ""} Full report available through inspect; execution is not acceptance.`;
 }
 
 interface AdmissionProgress {
@@ -225,9 +225,14 @@ export class ContinuationService {
 				const record = binding?.records.find(item => item.handle === task.taskId);
 				const observed = this.closedHandles.has(task.taskId) || record?.state === "closed" || (!!record && (this.observedEpisodes.get(record.handle) ?? 0) >= record.episode);
 				const label = record?.task.id ?? task.taskId;
+				const cached = binding?.views.get(task.taskId);
+				const terminalView = cached?.episode === record?.episode ? cached : undefined;
+				// The supervisor marks terminal before its asynchronous publication fills the view.
+				// Keep the fact live so another sibling's snapshot cannot consume a partial notice.
+				const publishing = !observed && live && !terminalView?.result;
 				executions.push({
-					id: view.runId + ":" + task.taskId, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: "terminal", status: task.phase, exitCode: null,
-					summary: observed ? "" : taskNotice(label, task.taskId, view.runId, task.phase, binding?.views.get(task.taskId)),
+					id: view.runId + ":" + task.taskId, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: publishing ? "running" : "terminal", status: publishing ? "publishing" : task.phase, exitCode: null,
+					summary: observed || publishing ? "" : taskNotice(label, task.taskId, view.runId, task.phase, terminalView),
 					disposition: observed ? "observed" : binding?.foreground ? "returning" : "pending",
 				});
 			}

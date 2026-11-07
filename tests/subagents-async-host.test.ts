@@ -45,6 +45,30 @@ test("terminal facts carry a bounded result and omit observed summaries", () => 
  assert.equal(fact().summary, ""); assert.equal(fact().disposition, "observed");
 });
 
+test("terminal notices wait for the current result while a sibling can publish", () => {
+ const service = new ContinuationService();
+ const internals = service as unknown as { supervisor: unknown; bindings: Map<string, unknown> };
+ const run = { runId: "run1", phase: "running", tasks: [{ taskId: "handle1", phase: "completed" }, { taskId: "handle2", phase: "completed" }] };
+ const views = new Map<string, unknown>([
+  ["handle1", { handle: "handle1", episode: 1, result: { status: "succeeded", output: "previous episode", changedPaths: [] } }],
+  ["handle2", { handle: "handle2", episode: 1, result: { status: "succeeded", output: "sibling closing report", changedPaths: [] } }],
+ ]);
+ internals.supervisor = { inspect: () => [run] };
+ internals.bindings.set("run1", { records: [{ handle: "handle1", episode: 2, task: { id: "task1" } }, { handle: "handle2", episode: 1, task: { id: "task2" } }], views });
+ const facts = () => service.notificationFacts("session", null).executions;
+ const pending = facts().find(item => item.id === "run1:handle1")!;
+ assert.equal(pending.phase, "running"); assert.equal(pending.status, "publishing"); assert.equal(pending.summary, "");
+ assert.match(facts().find(item => item.id === "run1:handle2")!.summary, /sibling closing report/);
+ // A delayed publication now supplies the current episode's terminal evidence.
+ views.set("handle1", { handle: "handle1", episode: 2, result: { status: "succeeded", output: "current closing report", changedPaths: ["src/a.ts"] }, candidate: { id: "candidate2" } });
+ const ready = facts().find(item => item.id === "run1:handle1")!;
+ assert.equal(ready.phase, "terminal"); assert.match(ready.summary, /expectedEpisode 2; candidateId candidate2; changed paths 1/); assert.match(ready.summary, /current closing report/); assert.ok(!ready.summary.includes("previous episode"));
+ // A settled run with unavailable evidence must not remain permanently live.
+ run.phase = "failed"; views.delete("handle1");
+ const unavailable = facts().find(item => item.id === "run1:handle1")!;
+ assert.equal(unavailable.phase, "terminal"); assert.match(unavailable.summary, /result unavailable/);
+});
+
 for (const consume of ["join", "inspect", "close", "mixed"] as const) test(`real host ${consume} consumes terminal notifications without a stale provider turn`, { timeout: 20000 }, async t => {
  const base = await mkdtemp(join(tmpdir(), "async-wake-consumed-")); const store = new ManagedSessionStore(base);
  let release!: () => void, terminal!: () => void, context!: ExtensionContext, service!: ContinuationService, receipt!: SessionActionResult;
