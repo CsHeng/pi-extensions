@@ -11,6 +11,7 @@ These documents own self-contained extension behavior, maintenance and removal c
 - [Job Notifications](architecture/job-notifications.md)
 - [Work-timing metrics](architecture/work-timing.md)
 - [Async Bash](architecture/async-bash.md)
+- [Cache Keepalive](architecture/cache-keepalive.md)
 
 Shared integration and responsibility explanations live at `$AGENT_ARCHITECTURE_DIR/docs/architecture/`, including `pi-extension-integration.md`. New designs/plans (even changes limited to this product), deferred questions and retained evaluation results belong to that owner's `docs/plans/pi-integration/` and `docs/evaluations/pi-integration/`. Use this repository's mise root variables; do not infer checkout layout.
 

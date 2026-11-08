@@ -59,7 +59,8 @@
       "./extensions/tasks-ui/index.ts",
       "./extensions/bash-jobs-ui/index.ts",
       "./extensions/agent-bark.ts",
-      "./extensions/async-bash/index.ts"
+      "./extensions/async-bash/index.ts",
+      "./extensions/cache-keepalive/index.ts"
     ]
   }
 }

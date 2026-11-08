@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains small, independently removable Pi extensions. It exports twelve maintained extensions: `multi-skill-mentions`, `fast-gpt`, `agents`, `agents-ui`, `status-footer`, `work-timing`, `tasklist`, `job-notifications`, `tasks-ui`, `bash-jobs-ui`, `agent-bark`, and `async-bash`, while preserving Pi's authoritative host agent loop. `agents-ui` is default-loaded as a TUI-only read-only observer.
+This repository contains small, independently removable Pi extensions. It exports thirteen maintained extensions: `multi-skill-mentions`, `fast-gpt`, `agents`, `agents-ui`, `status-footer`, `work-timing`, `tasklist`, `job-notifications`, `tasks-ui`, `bash-jobs-ui`, `agent-bark`, `async-bash`, and `cache-keepalive`, while preserving Pi's authoritative host agent loop. `agents-ui` is default-loaded as a TUI-only read-only observer.
 
 ## Multi-skill Mentions
 
@@ -60,6 +60,10 @@ When adopting this packaged adapter, disable or remove the old loose `~/.pi/agen
 
 In TUI and RPC, the enhanced `bash` can return while the same native Pi Bash operation keeps running. Pi owns shell selection, launch and process-tree teardown; the wrapper retains output, an execution-scoped abort signal and renewable deadline. Configured cwd, environment and shell command prefix apply once. `inspect` reads the retained result, `wait` can be released without stopping work, `renew` extends the same execution, and `cancel` aborts it through Pi. A running result is not exit 0 and does not get a second result on the original call. Print and JSON keep the native draining shell. Job Notifications delivers a terminal not already returned by the tool. Start with `{"command":"bun test"}` and control it with `{"action":"inspect","executionId":"exec_example"}`; an execution id without an explicit action is rejected and starts nothing. See [Async Bash](docs/architecture/async-bash.md).
 
+## Cache Keepalive
+
+`cache-keepalive` keeps an idle TUI/RPC session's Anthropic prompt cache warm while Pi 1.5.0's own idle warming stops after a custom message enters the context. It acts only while Pi's `cacheWarming` setting is `"streaming"` (Pi's default), replays the last real provider payload with a one-token response on Pi's own schedule and economics, and records each refresh as a context-free `csheng-cache-keepalive` entry. Setting `cacheWarming` to `"idle"` returns to the official warmer and makes this extension stand down. See [Cache Keepalive](docs/architecture/cache-keepalive.md).
+
 ## Tasklist And Job Notifications
 
 `tasklist` keeps a passive branch-local list with an ordinary title, stable item IDs, text, `todo`, `doing`, `blocked`, `done` or `cancelled` status and optional notes. Use `set`, `update` and `inspect`; `cancel` is a bulk edit of unfinished items, not execution cancellation. There is no list pause/resume, automatic interruption mutation or inferred task completion. The main agent judges completion and necessary checks; this independent capability requires no particular Skill, update schedule or empty-list condition for ending a turn.
@@ -89,6 +93,7 @@ extensions/tasks-ui/index.ts
 extensions/bash-jobs-ui/index.ts
 extensions/agent-bark.ts
 extensions/async-bash/index.ts
+extensions/cache-keepalive/index.ts
 ```
 
 Each extension keeps independent behavior, state, tests, and removal semantics while sharing one Pi package.
