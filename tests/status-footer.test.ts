@@ -17,6 +17,7 @@ import statusFooter, {
 	parseMcpCounts,
 	renderFooterLines,
 } from "../extensions/status-footer/index.ts";
+import { computeCacheWaste } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/cache-stats.js";
 
 type Handler = (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown;
 type FooterFactory = (
@@ -205,7 +206,100 @@ test("sums session usage and takes cache hit from the latest assistant prompt", 
 	assert.equal(usage.cacheRead, 1_350);
 	assert.equal(usage.cost, 0.13);
 	assert.equal(usage.cacheHitPercent?.toFixed(1), "95.0");
+	// Session mean is weighted by prompt tokens over assistant prompts only: 1350 / 1500.
+	assert.equal(usage.sessionCacheHitPercent?.toFixed(1), "90.0");
 });
+
+function rebillAssistant(input: number, cacheRead: number, cacheWrite = 0, model = "m1") {
+	// $3/M input, $0.30/M cache read, $3.75/M cache write.
+	const cost = { input: input * 3e-6, output: 0, cacheRead: cacheRead * 3e-7, cacheWrite: cacheWrite * 3.75e-6 };
+	return {
+		type: "message",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		message: {
+			role: "assistant", provider: "p", model, timestamp: 0,
+			usage: { input, output: 0, cacheRead, cacheWrite, cost: { ...cost, total: cost.input + cost.cacheRead + cost.cacheWrite } },
+		},
+	};
+}
+
+test("counts cache re-bills exactly as Pi's /session Cache re-billed metric", () => {
+	const entries = [
+		// No cache activity yet: a cacheless provider never counts.
+		rebillAssistant(5_000, 0),
+		rebillAssistant(9_000, 0),
+		// Cache appears; growth only.
+		rebillAssistant(12_000, 0, 0),
+		rebillAssistant(200, 11_904),
+		// Below the 1024-token noise floor, then real misses.
+		rebillAssistant(1_500, 11_000),
+		rebillAssistant(9_000, 11_000),
+		// Model switch re-bills and counts, as in Pi.
+		rebillAssistant(20_000, 0, 0, "m2"),
+		// Zero-usage message leaves the previous request in place.
+		rebillAssistant(0, 0),
+		rebillAssistant(500, 1_000),
+		// Compaction resets: the next prompt is new content.
+		{ type: "compaction", usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
+		rebillAssistant(30_000, 0, 6_000),
+		// Cache warming refreshes the previous request.
+		{ type: "usage", kind: "cache_warm", provider: "p", model: "m1", timestamp: "2026-01-01T00:00:00.000Z", usage: { input: 0, output: 0, cacheRead: 40_000, cacheWrite: 0, cost: { total: 0 } } },
+		rebillAssistant(40_000, 2_000, 0),
+	];
+	const catalog = { cost: { cacheRead: 0.3 } };
+	const pi = computeCacheWaste(entries as never, { getModel: () => catalog });
+	const usage = collectUsageTotals(entries, { find: () => catalog });
+	assert.equal(usage.rebillCount, pi.missCount);
+	assert.equal(usage.rebillTokens, pi.missedTokens);
+	assert.ok(Math.abs((usage.rebillCost ?? 0) - pi.missedCost) < 1e-12);
+	assert.ok(pi.missCount >= 3);
+	assert.ok(pi.missedCost > 0);
+});
+
+test("renders the session mean after CH and cumulative re-bills after cost", () => {
+	const lines = renderFooterLines(
+		{
+			...baseRebillInput(),
+			usage: {
+				input: 103_000,
+				output: 8_800,
+				cacheRead: 1_200_000,
+				cacheWrite: 0,
+				cost: 2.715,
+				cacheHitPercent: 99.2,
+				sessionCacheHitPercent: 92.1,
+				rebillCount: 2,
+				rebillTokens: 31_000,
+				rebillCost: 0.084,
+			},
+		},
+		200,
+		identityTheme,
+	);
+	assert.ok(
+		stripAnsi(lines[0] ?? "").endsWith(" | ↑103k ↓8.8k R1.2M CH99.2% x\u030492.1% $2.715 RB2 $0.084 | 108k/272k (39.8%)"),
+	);
+
+	// Zero recorded rebill dollars (subscription or unknown price) fall back to tokens, as Pi's /session does.
+	const subscription = renderFooterLines(
+		{
+			...baseRebillInput(),
+			usage: { input: 103_000, output: 8_800, cacheRead: 1_200_000, cacheWrite: 0, cost: 0, cacheHitPercent: 99.2, rebillCount: 2, rebillTokens: 31_000, rebillCost: 0 },
+		},
+		200,
+		identityTheme,
+	);
+	assert.ok(stripAnsi(subscription[0] ?? "").includes(" CH99.2% RB2 31k | "));
+});
+
+function baseRebillInput() {
+	return {
+		modelName: "Grok 4.6", thinkingLevel: "high", reasoning: true, provider: "xai", usingSubscription: true,
+		workdir: "/workspace/project", gitBranch: null, mcp: undefined,
+		contextTokens: 108_000, contextWindow: 272_000, contextPercent: 39.8,
+		sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
+	};
+}
 
 test("counts enabled MCP servers from an adapter snapshot", () => {
 	assert.deepEqual(
@@ -484,7 +578,7 @@ test("installs the compact footer in TUI mode and refreshes MCP counts", async (
 	assert.equal(beforeMcp.length, 1);
 	assert.equal(
 		stripAnsi(beforeMcp[0] ?? ""),
-		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% $5.378 | 229k/500k (45.9%)",
+		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% x\u030495.3% $5.378 RB0 | 229k/500k (45.9%)",
 	);
 
 	pi.events.emit("pi-mcp-adapter/status/v1", {
@@ -492,7 +586,7 @@ test("installs the compact footer in TUI mode and refreshes MCP counts", async (
 	});
 	assert.equal(
 		stripAnsi(footer.render(220)[0] ?? ""),
-		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% $5.378 | 229k/500k (45.9%) | MCP 2/2",
+		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% x\u030495.3% $5.378 RB0 | 229k/500k (45.9%) | MCP 2/2",
 	);
 
 	await invoke(pi, "thinking_level_select", { level: "medium" }, ctx);

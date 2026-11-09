@@ -29,6 +29,12 @@ export interface UsageSnapshot {
 	cacheWrite: number;
 	cost: number;
 	cacheHitPercent: number | undefined;
+	/** Prompt-token-weighted cache-hit rate over every assistant prompt in the session. */
+	sessionCacheHitPercent?: number | undefined;
+	/** Pi's /session "Cache Re-billed": counted misses, re-billed prompt tokens, and extra dollars. */
+	rebillCount?: number;
+	rebillTokens?: number;
+	rebillCost?: number;
 }
 
 export interface McpCounts {
@@ -102,7 +108,12 @@ interface UsageFields {
 	output?: unknown;
 	cacheRead?: unknown;
 	cacheWrite?: unknown;
-	cost?: { total?: unknown };
+	cost?: { input?: unknown; cacheRead?: unknown; cacheWrite?: unknown; total?: unknown };
+}
+
+/** Cache-read price lookup ($/M tokens), satisfied by Pi's model registry. */
+export interface CacheReadPriceSource {
+	find(provider: string, modelId: string): { cost: { cacheRead: number } } | undefined;
 }
 
 function numberOrZero(value: unknown): number {
@@ -124,7 +135,7 @@ export function formatWorkdir(cwd: string, home: string | undefined = homedir())
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
-export function collectUsageTotals(entries: readonly unknown[]): UsageSnapshot {
+export function collectUsageTotals(entries: readonly unknown[], models?: CacheReadPriceSource): UsageSnapshot {
 	const usage: UsageSnapshot = {
 		input: 0,
 		output: 0,
@@ -132,26 +143,51 @@ export function collectUsageTotals(entries: readonly unknown[]): UsageSnapshot {
 		cacheWrite: 0,
 		cost: 0,
 		cacheHitPercent: undefined,
+		sessionCacheHitPercent: undefined,
 	};
+	let promptInput = 0;
+	let promptCacheRead = 0;
+	let promptCacheWrite = 0;
+	const rebill: RebillTotals = { count: 0, tokens: 0, cost: 0 };
+	// Previous effective request, mirroring Pi's cache-stats scan behind /session "Cache re-billed".
+	let previous: { promptTokens: number; reportedCache: boolean } | undefined;
 
 	for (const entry of entries) {
 		if (!entry || typeof entry !== "object") continue;
 		const record = entry as {
 			type?: unknown;
+			kind?: unknown;
 			usage?: UsageFields;
-			message?: { role?: unknown; usage?: UsageFields };
+			message?: { role?: unknown; provider?: unknown; model?: unknown; usage?: UsageFields };
 		};
 
 		let fields: UsageFields | undefined;
 		if (record.type === "message" && record.message?.role === "assistant") {
 			fields = record.message.usage;
 			if (fields) {
-				usage.cacheHitPercent = promptCacheHit(numberOrZero(fields.input), numberOrZero(fields.cacheRead), numberOrZero(fields.cacheWrite));
+				const input = numberOrZero(fields.input);
+				const cacheRead = numberOrZero(fields.cacheRead);
+				const cacheWrite = numberOrZero(fields.cacheWrite);
+				usage.cacheHitPercent = promptCacheHit(input, cacheRead, cacheWrite);
+				promptInput += input;
+				promptCacheRead += cacheRead;
+				promptCacheWrite += cacheWrite;
+				previous = trackRebill(rebill, previous, fields, () => {
+					const { provider, model } = record.message ?? {};
+					if (!models || typeof provider !== "string" || typeof model !== "string") return 0;
+					return numberOrZero(models.find(provider, model)?.cost.cacheRead) / 1_000_000;
+				});
 			}
 		} else if (record.type === "message" && record.message?.role === "toolResult") {
 			fields = record.message.usage;
 		} else if (record.type === "branch_summary" || record.type === "compaction") {
 			fields = record.usage;
+			// The context legitimately changed; the next prompt is new content, not re-billed.
+			previous = undefined;
+		} else if (record.type === "usage" && record.kind === "cache_warm" && record.usage) {
+			const promptTokens =
+				numberOrZero(record.usage.input) + numberOrZero(record.usage.cacheRead) + numberOrZero(record.usage.cacheWrite);
+			if (promptTokens > 0) previous = { promptTokens, reportedCache: true };
 		}
 
 		if (!fields) continue;
@@ -162,7 +198,53 @@ export function collectUsageTotals(entries: readonly unknown[]): UsageSnapshot {
 		usage.cost += numberOrZero(fields.cost?.total);
 	}
 
+	usage.sessionCacheHitPercent = promptCacheHit(promptInput, promptCacheRead, promptCacheWrite);
+	usage.rebillCount = rebill.count;
+	usage.rebillTokens = rebill.tokens;
+	usage.rebillCost = rebill.cost;
 	return usage;
+}
+
+/** Pi treats per-request misses at or below this as cache breakpoint granularity noise. */
+const REBILL_NOISE_FLOOR_TOKENS = 1024;
+
+interface RebillTotals {
+	count: number;
+	tokens: number;
+	cost: number;
+}
+
+/**
+ * One step of Pi's cache-miss detection (core/cache-stats, not a public export):
+ * prompt tokens that were in the previous request's prompt but not read from cache,
+ * priced at this request's paid rate minus its cache-read rate. Model switches count,
+ * as in Pi. Returns the next previous-request state.
+ */
+function trackRebill(
+	totals: RebillTotals,
+	previous: { promptTokens: number; reportedCache: boolean } | undefined,
+	fields: UsageFields,
+	catalogReadPerToken: () => number,
+): { promptTokens: number; reportedCache: boolean } | undefined {
+	const input = numberOrZero(fields.input);
+	const cacheRead = numberOrZero(fields.cacheRead);
+	const cacheWrite = numberOrZero(fields.cacheWrite);
+	const promptTokens = input + cacheRead + cacheWrite;
+	if (promptTokens <= 0) return previous;
+	const cacheActivity = cacheRead + cacheWrite > 0;
+	if (previous && (cacheActivity || previous.reportedCache)) {
+		const missed = Math.min(previous.promptTokens, promptTokens) - cacheRead;
+		if (missed > REBILL_NOISE_FLOOR_TOKENS) {
+			const paidTokens = input + cacheWrite;
+			const paidPerToken =
+				paidTokens > 0 ? (numberOrZero(fields.cost?.input) + numberOrZero(fields.cost?.cacheWrite)) / paidTokens : 0;
+			const readPerToken = cacheRead > 0 ? numberOrZero(fields.cost?.cacheRead) / cacheRead : catalogReadPerToken();
+			totals.count += 1;
+			totals.tokens += missed;
+			totals.cost += missed * Math.max(0, paidPerToken - readPerToken);
+		}
+	}
+	return { promptTokens, reportedCache: (previous?.reportedCache ?? false) || cacheActivity };
 }
 
 export function parseMcpCounts(data: unknown): McpCounts | undefined {
@@ -222,19 +304,37 @@ function cacheHitColor(percent: number): string {
 	return "#ff5f5f";
 }
 
+/**
+ * Cumulative re-bills after cost, matching Pi's /session "Cache Re-billed": count plus
+ * extra dollars, or re-billed tokens when the dollar amount is below Pi's display floor.
+ */
+function formatRebill(usage: UsageSnapshot): string {
+	const count = usage.rebillCount;
+	if (count === undefined || (usage.cacheRead === 0 && usage.cacheWrite === 0)) return "";
+	if (count === 0) return hexFg(POWERLINE.cacheHit, "RB0");
+	const cost = usage.rebillCost ?? 0;
+	const amount = cost >= 0.0001 ? `$${cost.toFixed(3)}` : formatTokens(usage.rebillTokens ?? 0);
+	return hexFg(POWERLINE.subscription, `RB${count} ${amount}`);
+}
+
 function formatTrafficParts(input: FooterRenderInput): string {
 	const parts: string[] = [];
 	if (input.usage.input) parts.push(hexFg(POWERLINE.input, `↑${formatTokens(input.usage.input)}`));
 	if (input.usage.output) parts.push(hexFg(POWERLINE.output, `↓${formatTokens(input.usage.output)}`));
 	if (input.usage.cacheRead) parts.push(hexFg(POWERLINE.cacheRead, `R${formatTokens(input.usage.cacheRead)}`));
 	if (input.usage.cacheWrite) parts.push(hexFg(POWERLINE.cacheWrite, `W${formatTokens(input.usage.cacheWrite)}`));
-	if (
-		(input.usage.cacheRead > 0 || input.usage.cacheWrite > 0) &&
-		input.usage.cacheHitPercent !== undefined
-	) {
+	const cacheActive = input.usage.cacheRead > 0 || input.usage.cacheWrite > 0;
+	if (cacheActive && input.usage.cacheHitPercent !== undefined) {
 		parts.push(hexFg(cacheHitColor(input.usage.cacheHitPercent), `CH${input.usage.cacheHitPercent.toFixed(1)}%`));
 	}
+	const sessionHit = input.usage.sessionCacheHitPercent;
+	if (cacheActive && sessionHit !== undefined) {
+		// x̄ = session mean, weighted by prompt tokens across all assistant prompts.
+		parts.push(hexFg(cacheHitColor(sessionHit), `x\u0304${sessionHit.toFixed(1)}%`));
+	}
 	if (input.usage.cost) parts.push(hexFg(POWERLINE.cost, `$${input.usage.cost.toFixed(3)}`));
+	const rebill = formatRebill(input.usage);
+	if (rebill) parts.push(rebill);
 	return parts.join(" ");
 }
 
@@ -367,7 +467,7 @@ function footerInput(
 	gitBranch: string | null,
 	fastGpt: boolean,
 ): FooterRenderInput {
-	const usage = collectUsageTotals(ctx.sessionManager.getEntries());
+	const usage = collectUsageTotals(ctx.sessionManager.getEntries(), ctx.modelRegistry);
 	const contextUsage = ctx.getContextUsage();
 	return {
 		modelName: modelName(state.model),
