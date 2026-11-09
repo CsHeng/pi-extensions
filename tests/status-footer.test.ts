@@ -10,14 +10,24 @@ import type {
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import statusFooter, {
-	collectUsageTotals,
 	formatTokens,
 	formatWorkdir,
 	isUsingSubscription,
 	parseMcpCounts,
 	renderFooterLines,
 } from "../extensions/status-footer/index.ts";
+import {
+	collectLaneTotals,
+	emptyLaneTotals,
+	REQUEST_TIMING_ENTRY_TYPE,
+	type CacheReadPriceSource,
+	type LaneTotals,
+} from "../extensions/shared/usage-metrics.ts";
 import { computeCacheWaste } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/cache-stats.js";
+
+function lane(values: Partial<LaneTotals>): LaneTotals {
+	return { ...emptyLaneTotals(), ...values };
+}
 
 type Handler = (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown;
 type FooterFactory = (
@@ -44,7 +54,7 @@ class FakePi {
 	}
 }
 
-function context(mode: ExtensionContext["mode"]): {
+function context(mode: ExtensionContext["mode"], session?: { entries: readonly unknown[]; models?: CacheReadPriceSource | undefined }): {
 	ctx: ExtensionContext;
 	getFooterFactory: () => FooterFactory | undefined;
 } {
@@ -65,11 +75,12 @@ function context(mode: ExtensionContext["mode"]): {
 		modelRegistry: {
 			getProvider: () => ({ auth: { oauth: { isSubscription: true } } }),
 			isUsingOAuth: () => true,
+			find: (provider: string, modelId: string) => session?.models?.find(provider, modelId),
 		},
 		sessionManager: {
 			getCwd: () => "/tmp/later",
 			getHeader: () => ({ cwd: "/workspace/project" }),
-			getEntries: () => [
+			getEntries: () => session?.entries ?? [
 				{
 					type: "message",
 					message: {
@@ -145,6 +156,17 @@ const tui = {
 	requestRender: () => {},
 } as unknown as TUI;
 
+/** The real footer component over a live session entry list, rendered as Pi would. */
+async function installedFooter(entries: readonly unknown[], models?: CacheReadPriceSource): Promise<Component> {
+	const pi = new FakePi();
+	statusFooter(pi as unknown as ExtensionAPI);
+	const { ctx, getFooterFactory } = context("tui", { entries, models });
+	await invoke(pi, "session_start", { reason: "startup" }, ctx);
+	const factory = getFooterFactory();
+	assert.ok(factory);
+	return factory(tui, identityTheme, footerData);
+}
+
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
@@ -161,54 +183,27 @@ test("abbreviates a home-relative original workdir", () => {
 	assert.equal(formatWorkdir("/workspace/project", "/home/csheng"), "/workspace/project");
 });
 
-test("sums session usage and takes cache hit from the latest assistant prompt", () => {
-	const usage = collectUsageTotals([
-		{
-			type: "message",
-			message: {
-				role: "assistant",
-				usage: {
-					input: 100,
-					output: 20,
-					cacheRead: 400,
-					cacheWrite: 0,
-					cost: { total: 0.1 },
-				},
-			},
-		},
-		{
-			type: "compaction",
-			usage: {
-				input: 10,
-				output: 4,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: { total: 0.01 },
-			},
-		},
-		{
-			type: "message",
-			message: {
-				role: "assistant",
-				usage: {
-					input: 50,
-					output: 5,
-					cacheRead: 950,
-					cacheWrite: 0,
-					cost: { total: 0.02 },
-				},
-			},
-		},
-	]);
-
-	assert.equal(usage.input, 160);
-	assert.equal(usage.output, 29);
-	assert.equal(usage.cacheRead, 1_350);
-	assert.equal(usage.cost, 0.13);
-	assert.equal(usage.cacheHitPercent?.toFixed(1), "95.0");
-	// Session mean is weighted by prompt tokens over assistant prompts only: 1350 / 1500.
-	assert.equal(usage.sessionCacheHitPercent?.toFixed(1), "90.0");
+test("the session lane shows the prompt-weighted mean CH and no separate latest-prompt rate", () => {
+	const entries = [
+		footerAssistant({ input: 100, output: 20, cacheRead: 400, total: 0.1 }),
+		{ type: "compaction", usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } },
+		footerAssistant({ input: 50, output: 5, cacheRead: 950, total: 0.02 }),
+	];
+	const line = stripAnsi(renderFooterLines({ ...baseRebillInput(), usage: collectLaneTotals(entries) }, 200, identityTheme)[0] ?? "");
+	// 1350 / 1500 over assistant prompts; the latest prompt's 95.0% belongs to the working row.
+	assert.ok(line.includes(" | ↑160 ↓29 R1.4k CH90.0% $0.130 | "), line);
+	assert.equal(line.includes("x\u0304"), false);
 });
+
+function footerAssistant(usage: { input: number; output: number; cacheRead: number; total: number }, extra: Record<string, unknown> = {}) {
+	return {
+		type: "message",
+		message: {
+			role: "assistant", provider: "p", model: "m1", stopReason: "stop", timestamp: 0, ...extra,
+			usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: 0, cost: { total: usage.total } },
+		},
+	};
+}
 
 function rebillAssistant(input: number, cacheRead: number, cacheWrite = 0, model = "m1") {
 	// $3/M input, $0.30/M cache read, $3.75/M cache write.
@@ -223,73 +218,95 @@ function rebillAssistant(input: number, cacheRead: number, cacheWrite = 0, model
 	};
 }
 
-test("counts cache re-bills exactly as Pi's /session Cache re-billed metric", () => {
+test("the installed footer's RB equals Pi's /session Cache Re-billed for the same session", async () => {
 	const entries = [
-		// No cache activity yet: a cacheless provider never counts.
-		rebillAssistant(5_000, 0),
-		rebillAssistant(9_000, 0),
-		// Cache appears; growth only.
-		rebillAssistant(12_000, 0, 0),
+		rebillAssistant(12_000, 0),
 		rebillAssistant(200, 11_904),
-		// Below the 1024-token noise floor, then real misses.
-		rebillAssistant(1_500, 11_000),
 		rebillAssistant(9_000, 11_000),
-		// Model switch re-bills and counts, as in Pi.
+		// Model switch with nothing read: the registry cache-read price applies.
 		rebillAssistant(20_000, 0, 0, "m2"),
-		// Zero-usage message leaves the previous request in place.
-		rebillAssistant(0, 0),
-		rebillAssistant(500, 1_000),
-		// Compaction resets: the next prompt is new content.
 		{ type: "compaction", usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
 		rebillAssistant(30_000, 0, 6_000),
-		// Cache warming refreshes the previous request.
 		{ type: "usage", kind: "cache_warm", provider: "p", model: "m1", timestamp: "2026-01-01T00:00:00.000Z", usage: { input: 0, output: 0, cacheRead: 40_000, cacheWrite: 0, cost: { total: 0 } } },
 		rebillAssistant(40_000, 2_000, 0),
 	];
 	const catalog = { cost: { cacheRead: 0.3 } };
-	const pi = computeCacheWaste(entries as never, { getModel: () => catalog });
-	const usage = collectUsageTotals(entries, { find: () => catalog });
-	assert.equal(usage.rebillCount, pi.missCount);
-	assert.equal(usage.rebillTokens, pi.missedTokens);
-	assert.ok(Math.abs((usage.rebillCost ?? 0) - pi.missedCost) < 1e-12);
-	assert.ok(pi.missCount >= 3);
-	assert.ok(pi.missedCost > 0);
+	const pi = computeCacheWaste(entries as never, { getModel: () => catalog } as never);
+	assert.ok(pi.missCount >= 3 && pi.missedCost > 0);
+	const footer = await installedFooter(entries, { find: () => catalog });
+	const expected = `RB${pi.missCount} ${formatTokens(pi.missedTokens)} $${pi.missedCost.toFixed(3)}`;
+	assert.ok(stripAnsi(footer.render(240)[0] ?? "").includes(` ${expected} | `), expected);
 });
 
-test("renders the session mean after CH and cumulative re-bills after cost", () => {
+test("renders RB after cost, then the session timing segment", () => {
 	const lines = renderFooterLines(
 		{
 			...baseRebillInput(),
-			usage: {
-				input: 103_000,
-				output: 8_800,
-				cacheRead: 1_200_000,
+			usage: lane({
+				input: 204_000,
+				output: 10_000,
+				cacheRead: 1_100_000,
 				cacheWrite: 0,
-				cost: 2.715,
-				cacheHitPercent: 99.2,
-				sessionCacheHitPercent: 92.1,
-				rebillCount: 2,
-				rebillTokens: 31_000,
-				rebillCost: 0.084,
-			},
+				cost: 3.591,
+				promptTokens: 1_313_000,
+				promptCacheRead: 1_100_000,
+				rebillCount: 14,
+				rebillTokens: 90_000,
+				rebillCost: 0.813,
+				thinkingMs: 130_000,
+				ttftMs: 81_000,
+				ttftCount: 10,
+				speedOutput: 10_000,
+				speedMs: 400_000,
+			}),
 		},
 		200,
 		identityTheme,
 	);
 	assert.ok(
-		stripAnsi(lines[0] ?? "").endsWith(" | ↑103k ↓8.8k R1.2M CH99.2% x\u030492.1% $2.715 RB2 $0.084 | 108k/272k (39.8%)"),
+		stripAnsi(lines[0] ?? "").endsWith(" | ↑204k ↓10k R1.1M CH83.8% $3.591 RB14 90k $0.813 | ✻ 2m10s TTFT 8.1s 25 tok/s | 108k/272k (39.8%)"),
+		stripAnsi(lines[0] ?? ""),
 	);
 
-	// Zero recorded rebill dollars (subscription or unknown price) fall back to tokens, as Pi's /session does.
+	// Re-bill dollars below the display floor (subscription or unknown price) are omitted; tokens stay.
 	const subscription = renderFooterLines(
 		{
 			...baseRebillInput(),
-			usage: { input: 103_000, output: 8_800, cacheRead: 1_200_000, cacheWrite: 0, cost: 0, cacheHitPercent: 99.2, rebillCount: 2, rebillTokens: 31_000, rebillCost: 0 },
+			usage: lane({ input: 103_000, output: 8_800, cacheRead: 1_200_000, cacheWrite: 0, cost: 0, promptTokens: 1_000, promptCacheRead: 992, rebillCount: 2, rebillTokens: 31_000, rebillCost: 0 }),
 		},
 		200,
 		identityTheme,
 	);
-	assert.ok(stripAnsi(subscription[0] ?? "").includes(" CH99.2% RB2 31k | "));
+	assert.ok(stripAnsi(subscription[0] ?? "").includes(" CH99.2% RB2 31k | 108k/272k"));
+});
+
+function timingEntry(messageTimestamp: number, thinkingMs: number, ttftMs: number) {
+	return { type: "custom", customType: REQUEST_TIMING_ENTRY_TYPE, data: { version: 1, messageTimestamp, thinkingMs, ttftMs } };
+}
+
+test("footer metrics change only when the request's assistant message is persisted", async () => {
+	const entries: unknown[] = [
+		timingEntry(11, 2_000, 1_500),
+		footerAssistant({ input: 1_000, output: 300, cacheRead: 0, total: 0.01 }, { timestamp: 11, durationMs: 10_000 }),
+	];
+	const footer = await installedFooter(entries);
+	const settled = stripAnsi(footer.render(240)[0] ?? "");
+	assert.ok(settled.includes(" | ↑1.0k ↓300 CH0.0% $0.010 | ✻ 2s TTFT 1.5s 30 tok/s | "), settled);
+	// work-timing appended its timing entry; Pi has not persisted the assistant message yet.
+	entries.push(timingEntry(12, 6_000, 4_500));
+	assert.equal(stripAnsi(footer.render(240)[0] ?? ""), settled);
+	entries.push(footerAssistant({ input: 1_000, output: 100, cacheRead: 1_000, total: 0.02 }, { timestamp: 12, durationMs: 10_000 }));
+	assert.ok(stripAnsi(footer.render(240)[0] ?? "").includes(" | ↑2.0k ↓400 R1.0k CH33.3% $0.030 | ✻ 8s TTFT 3.0s 20 tok/s | "));
+});
+
+test("without work-timing entries the footer omits ✻ and TTFT and keeps every other field", async () => {
+	const footer = await installedFooter([
+		footerAssistant({ input: 1_000, output: 300, cacheRead: 0, total: 0.01 }, { timestamp: 11, durationMs: 10_000 }),
+	]);
+	const line = stripAnsi(footer.render(240)[0] ?? "");
+	assert.ok(line.includes(" | ↑1.0k ↓300 CH0.0% $0.010 | 30 tok/s | 229k/500k (45.9%)"), line);
+	assert.equal(line.includes("✻"), false);
+	assert.equal(line.includes("TTFT"), false);
 });
 
 function baseRebillInput() {
@@ -325,14 +342,14 @@ test("renders one compact footer line without extension statuses", () => {
 			contextWindow: 500_000,
 			contextPercent: 45.9,
 			sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
-			usage: {
+			usage: lane({
 				input: 952_000,
 				output: 62_000,
 				cacheRead: 13_000_000,
 				cacheWrite: 0,
 				cost: 8.979,
-				cacheHitPercent: 99.7,
-			},
+				promptTokens: 1_000, promptCacheRead: 997,
+			}),
 		},
 		200,
 		identityTheme,
@@ -361,14 +378,14 @@ test("places a lightning mark after thinking when fast-gpt is requested", () => 
 			contextWindow: 200_000,
 			contextPercent: 6.0,
 			sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
-			usage: {
+			usage: lane({
 				input: 100,
 				output: 20,
 				cacheRead: 0,
 				cacheWrite: 0,
 				cost: 0.01,
-				cacheHitPercent: undefined,
-			},
+				
+			}),
 		},
 		200,
 		identityTheme,
@@ -393,14 +410,14 @@ test("places a lightning mark after thinking when fast-gpt is requested", () => 
 			contextWindow: 200_000,
 			contextPercent: 6.0,
 			sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
-			usage: {
+			usage: lane({
 				input: 100,
 				output: 20,
 				cacheRead: 0,
 				cacheWrite: 0,
 				cost: 0.01,
-				cacheHitPercent: undefined,
-			},
+				
+			}),
 		},
 		200,
 		identityTheme,
@@ -422,14 +439,14 @@ test("wraps field by field when a single line cannot fit", () => {
 		contextWindow: 500_000,
 		contextPercent: 45.9,
 		sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
-		usage: {
+		usage: lane({
 			input: 952_000,
 			output: 62_000,
 			cacheRead: 13_000_000,
 			cacheWrite: 0,
 			cost: 8.979,
-			cacheHitPercent: 99.7,
-		},
+			promptTokens: 1_000, promptCacheRead: 997,
+		}),
 	};
 
 	const wide = renderFooterLines(input, 200, identityTheme);
@@ -471,14 +488,14 @@ test("keeps every field when wrapping into more rows on very narrow terminals", 
 		contextWindow: 500_000,
 		contextPercent: 45.9,
 		sessionId: "01a08555-9ee8-72b3-9af1-481c7d4b58e1",
-		usage: {
+		usage: lane({
 			input: 952_000,
 			output: 62_000,
 			cacheRead: 13_000_000,
 			cacheWrite: 0,
 			cost: 8.979,
-			cacheHitPercent: 99.7,
-		},
+			promptTokens: 1_000, promptCacheRead: 997,
+		}),
 	}, 60, identityTheme);
 	assert.ok(lines.length >= 3);
 	const all = lines.map((line) => stripAnsi(line)).join("\n");
@@ -522,7 +539,7 @@ test("actual footer preserves the UUID whenever it fits alone", () => {
 				modelName, thinkingLevel: "high", reasoning: true, provider: "xai", usingSubscription: true,
 				workdir: "/workspace/project", gitBranch: "main", mcp: { enabled: 2, all: 2 }, sessionId,
 				contextTokens: 229_000, contextWindow: 500_000, contextPercent: 45.9,
-				usage: { input: 952_000, output: 62_000, cacheRead: 13_000_000, cacheWrite: 0, cost: 8.979, cacheHitPercent: 99.7 },
+				usage: lane({ input: 952_000, output: 62_000, cacheRead: 13_000_000, cacheWrite: 0, cost: 8.979, promptTokens: 1_000, promptCacheRead: 997 }),
 			}, width, identityTheme);
 			for (const line of lines) assert.ok(visibleWidth(line) <= width);
 			if (width >= sessionId.length) {
@@ -578,7 +595,7 @@ test("installs the compact footer in TUI mode and refreshes MCP counts", async (
 	assert.equal(beforeMcp.length, 1);
 	assert.equal(
 		stripAnsi(beforeMcp[0] ?? ""),
-		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% x\u030495.3% $5.378 RB0 | 229k/500k (45.9%)",
+		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% $5.378 | 229k/500k (45.9%)",
 	);
 
 	pi.events.emit("pi-mcp-adapter/status/v1", {
@@ -586,7 +603,7 @@ test("installs the compact footer in TUI mode and refreshes MCP counts", async (
 	});
 	assert.equal(
 		stripAnsi(footer.render(220)[0] ?? ""),
-		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% x\u030495.3% $5.378 RB0 | 229k/500k (45.9%) | MCP 2/2",
+		"Grok 4.6 high (xai sub) | /workspace/project | 01a08555-9ee8-72b3-9af1-481c7d4b58e1 | ↑421k ↓43k R8.6M CH95.3% $5.378 | 229k/500k (45.9%) | MCP 2/2",
 	);
 
 	await invoke(pi, "thinking_level_select", { level: "medium" }, ctx);

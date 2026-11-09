@@ -14,9 +14,7 @@ import {
 	createWorkTimingExtension as createExtension,
 	foldStatusLine,
 	formatDuration,
-	formatReasoningDuration,
-	formatReasoningShare,
-	formatTokenRate,
+	REQUEST_TIMING_ENTRY_TYPE,
 	WORK_TIMING_ENTRY_TYPE,
 	type WorkTimingEntryData,
 } from "../extensions/work-timing/index.ts";
@@ -31,9 +29,9 @@ import {
 	type LoopFacts,
 } from "../extensions/shared/loop-facts.ts";
 
-/** Unit instances never attach real stdout resize listeners; resize cases inject their own. */
+/** Unit instances never attach real stdout resize listeners or read its width; width cases inject their own. */
 const createWorkTimingExtension = (dependencies: Parameters<typeof createExtension>[0] = {}) =>
-	createExtension({ onResize: () => () => {}, ...dependencies });
+	createExtension({ onResize: () => () => {}, columns: () => 240, ...dependencies });
 
 type Handler = (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown;
 
@@ -55,14 +53,27 @@ class FakeEvents {
 	}
 }
 
+/** Entries of the most recently created fake session; contexts read the session they were created for. */
+let activeSession: unknown[] = [];
+
 class FakePi {
+	/** Completion entries only; request timing entries are kept separately. */
 	readonly entries: Array<{ customType: string; data: unknown }> = [];
+	readonly timings: unknown[] = [];
+	/** Every persisted session entry, in append order, as `sessionManager.getEntries()` reports it. */
+	readonly session: unknown[] = [];
+
+	constructor() {
+		activeSession = this.session;
+	}
 	readonly handlers = new Map<string, Handler[]>();
 	readonly renderers = new Map<string, EntryRenderer>();
 	readonly events = new FakeEvents();
 
 	appendEntry(customType: string, data: unknown): void {
-		this.entries.push({ customType, data });
+		this.session.push({ type: "custom", customType, data });
+		if (customType === REQUEST_TIMING_ENTRY_TYPE) this.timings.push(data);
+		else this.entries.push({ customType, data });
 	}
 
 	on(name: string, handler: Handler): void {
@@ -104,6 +115,7 @@ function context(
 	workingMessages: Array<string | undefined>,
 	mode: ExtensionContext["mode"] = "tui",
 ): FakeContext {
+	const session = activeSession;
 	return {
 		mode,
 		idle: true,
@@ -118,7 +130,9 @@ function context(
 		hasPendingMessages(this: FakeContext) {
 			return this.pending;
 		},
+		modelRegistry: { find: () => undefined },
 		sessionManager: {
+			getEntries: () => session,
 			getSessionId: () => SESSION_ID,
 			getLeafId: () => LEAF_ID,
 			getBranch: () => [{ id: LEAF_ID }],
@@ -220,395 +234,175 @@ function renderEntry(pi: FakePi, data: unknown, width = 120): string {
 	return component.render(width)[0]?.trim() ?? "";
 }
 
-test("formats elapsed time with second, minute, and hour carry", () => {
+test("formats elapsed time with compact second, minute, and hour carry", () => {
 	assert.equal(formatDuration(0), "0s");
 	assert.equal(formatDuration(59_999), "59s");
-	assert.equal(formatDuration(60_000), "1m 0s");
-	assert.equal(formatDuration(3_661_999), "1h 1m 1s");
+	assert.equal(formatDuration(60_000), "1m0s");
+	assert.equal(formatDuration(3_661_999), "1h1m1s");
 });
 
-test("derives tok/s from output tokens and decode time", () => {
-	assert.equal(formatTokenRate(0, 5_000), "");
-	assert.equal(formatTokenRate(100, 0), "");
-	assert.equal(formatTokenRate(4_321, 6_000), "720 tok/s");
-	assert.equal(formatTokenRate(17, 5_000), "3.4 tok/s");
-});
+interface RequestScript {
+	start: number;
+	/** First output: a thinking start when `thinkingEnd` is given, otherwise a text delta. */
+	firstOutputAt?: number;
+	thinkingEnd?: number;
+	end: number;
+	timestamp: number;
+	usage?: Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number; cost: Record<string, number> }>;
+	stopReason?: string;
+	/** Pi persists the assistant message after `message_end`; false keeps it unpersisted. */
+	persist?: boolean;
+}
 
-test("keeps a non-zero sub-second reasoning duration visible next to its share", () => {
-	assert.equal(formatReasoningDuration(0), "0s");
-	assert.equal(formatReasoningDuration(720), "<1s");
-	assert.equal(formatReasoningDuration(999), "<1s");
-	assert.equal(formatReasoningDuration(1_000), "1s");
-});
+function assistantMessage(script: RequestScript) {
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...script.usage };
+	return {
+		role: "assistant", provider: "p", model: "m", timestamp: script.timestamp,
+		stopReason: script.stopReason ?? "stop", durationMs: script.end - script.start,
+		content: [],
+		usage: { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, ...script.usage?.cost } },
+	};
+}
 
-test("derives a bounded wall-time reasoning share without rewriting durations", () => {
-	assert.equal(formatReasoningShare(7_000, 15_000), "47%");
-	assert.equal(formatReasoningShare(0, 0), "—");
-	assert.equal(formatReasoningShare(5_000, 0), "—");
-	assert.equal(formatReasoningShare(20_000, 10_000), "100%");
-});
+/** Real host order for one provider request inside a turn; the clock is the test's injected clock. */
+async function runRequest(pi: FakePi, ctx: ExtensionContext, setNow: (at: number) => void, script: RequestScript): Promise<void> {
+	setNow(script.start);
+	await invoke(pi, "turn_start", {}, ctx);
+	await invoke(pi, "before_provider_request", { type: "before_provider_request", payload: {} }, ctx);
+	if (script.firstOutputAt !== undefined) {
+		setNow(script.firstOutputAt);
+		if (script.thinkingEnd !== undefined) {
+			await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, ctx);
+			setNow(script.thinkingEnd);
+			await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
+		} else {
+			await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(40) } }, ctx);
+		}
+	}
+	await endRequest(pi, ctx, setNow, script);
+	await invoke(pi, "turn_end", {}, ctx);
+}
 
-test("shows live per-turn and request reasoning then appends the settled interaction", async () => {
+async function endRequest(pi: FakePi, ctx: ExtensionContext, setNow: (at: number) => void, script: RequestScript): Promise<void> {
+	setNow(script.end);
+	const message = assistantMessage(script);
+	await invoke(pi, "message_end", { type: "message_end", message }, ctx);
+	if (script.persist !== false) pi.session.push({ type: "message", message });
+}
+
+test("the request lane counts TTFT live, shows in-flight estimates, then settles at message_end", async () => {
 	let now = 0;
 	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
-	const extension = createWorkTimingExtension({
+	createWorkTimingExtension({
 		now: () => now,
 		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
 		clearInterval: (handle) => scheduler.clearInterval(handle),
-	});
-	extension(pi as unknown as ExtensionAPI);
+	})(pi as unknown as ExtensionAPI);
+	// An earlier cached request: this request's miss re-bills against it.
+	pi.session.push({ type: "message", message: assistantMessage({ start: 0, end: 1, timestamp: 1, usage: { input: 1_000, output: 10, cacheRead: 70_000 } }) });
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 
 	await beginInteraction(pi, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 0s • R 0s / ΣR 0s");
-
+	assert.equal(workingMessages.at(-1), "Working... 0s");
 	now = 1_000;
 	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-	}, ctx);
-	now = 5_000;
+	assert.equal(await invoke(pi, "before_provider_request", { type: "before_provider_request", payload: { model: "m" } }, ctx), undefined);
+	now = 3_000;
 	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 5s • R 3s / ΣR 3s");
+	assert.equal(workingMessages.at(-1), "Working... 3s • TTFT 2.0s…");
 
+	now = 4_200;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 4s • TTFT 3.2s", "the first output fixes the counter");
+	now = 6_200;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
 	now = 7_000;
 	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
-	}, ctx);
-	now = 7_500;
-	await invoke(pi, "turn_end", {}, ctx);
-
-	now = 8_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 9_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-	}, ctx);
-	now = 11_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
-	}, ctx);
-	now = 12_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 12s • R 2s / ΣR 7s");
-
-	now = 15_000;
-	await invoke(pi, "agent_settled", { aborted: false }, ctx);
-	assert.equal(workingMessages.at(-1), undefined);
-	assert.equal(scheduler.callback, undefined);
-	assert.deepEqual(pi.entries, [{
-		customType: WORK_TIMING_ENTRY_TYPE,
-		data: {
-			version: 4,
-			totalMs: 15_000,
-			reasoningMs: 7_000,
-			lastTurnReasoningMs: 2_000,
-			outputTokens: 0,
-			inputTokens: 0,
-			generationMs: 8_500,
-			streamedOutputTokens: 0,
-			scope: "interaction",
-			status: "settled",
-			humanWaitMs: 0,
-		},
-	}]);
-	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Worked for 15s • ΣR 7s (47%)");
-	assert.equal(
-		renderEntry(pi, { version: 1, totalMs: 8_000 }),
-		"Worked for 8s • ΣR 0s (0%)",
-	);
-	assert.equal(
-		renderEntry(pi, { version: 1, totalMs: 0, reasoningMs: 0, lastTurnReasoningMs: 0 }),
-		"Worked for 0s • ΣR 0s (—)",
-	);
-});
-
-test("starts decode on the first token, includes stream stalls, and pauses while tools run", async () => {
-	let now = 0;
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	const workingMessages: Array<string | undefined> = [];
-	const ctx = context(workingMessages);
-
-	await invoke(pi, "before_agent_start", {}, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_000;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { usage: { input: 5_000, output: 600 } } },
-	}, ctx);
-	now = 2_800;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400) },
+		message: { content: [{ type: "text", text: "x".repeat(1_680) }] },
+		assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "x".repeat(1_680) },
 	}, ctx);
 	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 750 tok/s");
+	// Output estimated from characters; live tok/s divides by the time since the request start.
+	assert.equal(workingMessages.at(-1), "Working... 7s • ↓420 • ✻ 2s • TTFT 3.2s • 70 tok/s");
 
-	now = 9_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "z".repeat(400) },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 9s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 86 tok/s");
-
-	now = 11_000;
-	await invoke(pi, "tool_execution_start", { toolName: "bash" }, ctx);
-	now = 13_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 13s • ⚙ 2s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 67 tok/s");
-	now = 16_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 16s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 67 tok/s");
-});
-
-test("times the longest-running tool and pauses that clock while the user is prompted", async () => {
-	let now = 0;
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	const workingMessages: Array<string | undefined> = [];
-	const ctx = context(workingMessages);
-
-	await invoke(pi, "before_agent_start", {}, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_000;
-	await invoke(pi, "tool_execution_start", { toolCallId: "a", toolName: "bash" }, ctx);
-	now = 3_000;
-	scheduler.callback?.();
-	// One second of work: below the two-second threshold, so the head clock is still the only timer.
-	assert.equal(workingMessages.at(-1), "Working... 3s • R 0s / ΣR 0s");
-
-	now = 4_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 4s • ⚙ 2s • R 0s / ΣR 0s");
-
-	now = 8_000;
-	await invoke(pi, "tool_execution_start", { toolCallId: "b", toolName: "read" }, ctx);
-	now = 13_000;
-	scheduler.callback?.();
-	// The longest-running tool leads and the other concurrent tool is counted.
-	assert.equal(workingMessages.at(-1), "Working... 13s • ⚙ 11s +1 • R 0s / ΣR 0s");
-
-	// Waiting on a blocking user prompt is not tool time: both tools freeze for its five seconds.
-	now = 20_000;
-	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
-	now = 25_000;
-	await invoke(pi, "ui_prompt_end", {}, ctx);
-	now = 26_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 26s • ⚙ 19s +1 • R 0s / ΣR 0s");
-
-	now = 27_000;
-	await invoke(pi, "tool_execution_end", { toolCallId: "a", toolName: "bash" }, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 27s • ⚙ 14s • R 0s / ΣR 0s");
-
-	now = 28_000;
-	await invoke(pi, "tool_execution_end", { toolCallId: "b", toolName: "read" }, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 28s • R 0s / ΣR 0s");
-
-	// The turn boundary clears leftover tool state even without an end event.
-	now = 29_000;
-	await invoke(pi, "tool_execution_start", { toolCallId: "c", toolName: "grep" }, ctx);
-	now = 40_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 40s • R 0s / ΣR 0s");
-});
-
-test("counts the user message's tokens live and interaction-cumulative tokens in the settled entry", async () => {
-	let now = 0;
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	const workingMessages: Array<string | undefined> = [];
-	const ctx = context(workingMessages);
-
-	await beginInteraction(pi, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↓ 100 tokens • R 0s / ΣR 0s");
-
-	now = 2_800;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 12_000, output: 3_500 } } },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s • 4,375 tok/s");
-
-	now = 3_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	now = 3_500;
-	await invoke(pi, "agent_settled", { aborted: false }, ctx);
-	assert.deepEqual(pi.entries, [{
-		customType: WORK_TIMING_ENTRY_TYPE,
-		data: {
-			version: 4,
-			totalMs: 3_500,
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: 3_500,
-			inputTokens: 12_000,
-			generationMs: 1_000,
-			streamedOutputTokens: 3_500,
-			scope: "interaction",
-			status: "settled",
-			humanWaitMs: 0,
-		},
-	}]);
-
-	assert.equal(
-		renderEntry(pi, pi.entries[0]?.data),
-		"Worked for 3s • ↑ 12,000 ↓ 3,500 tokens • ΣR 0s (0%) • 3,500 tok/s",
-	);
-	assert.equal(
-		renderEntry(pi, { version: 1, totalMs: 8_000, reasoningMs: 4_000, lastTurnReasoningMs: 1_000 }),
-		"Worked for 8s • ΣR 4s (50%)",
-	);
-});
-
-test("counts tool-call output and provider usage that arrives only at turn end", async () => {
-	let now = 0;
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	const workingMessages: Array<string | undefined> = [];
-	const ctx = context(workingMessages);
-
-	await beginInteraction(pi, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_000;
-	// Tool-call-only response: no text or thinking deltas, JSON arguments stream in.
-	const toolCall = { type: "toolCall", arguments: { command: "x".repeat(396) } };
-	await invoke(pi, "message_update", {
-		message: { content: [toolCall] },
-		assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: "y".repeat(200) },
-	}, ctx);
-	scheduler.callback?.();
-	const toolTokens = Math.round(JSON.stringify(toolCall.arguments).length / 4);
-	assert.ok(toolTokens > 0);
+	const script: RequestScript = {
+		start: 1_000, end: 14_400, timestamp: 77, stopReason: "toolUse",
+		usage: { input: 74_700, output: 241, cost: { input: 0.747, total: 0.759 } },
+	};
+	await endRequest(pi, ctx, (at) => { now = at; }, script);
+	assert.deepEqual(pi.timings, [{ version: 1, messageTimestamp: 77, ttftMs: 3_200, thinkingMs: 2_000 }]);
 	assert.equal(
 		workingMessages.at(-1),
-		`Working... 2s • ↓ ${new Intl.NumberFormat("en-US").format(toolTokens)} tokens • R 0s / ΣR 0s`,
+		"Working... 14s • ↑75k ↓241 CH0.0% $0.759 RB1 71k $0.710 • ✻ 2s • TTFT 3.2s • 18 tok/s",
+		"settled request values replace the estimates",
 	);
+	// The timing entry lands before Pi persists the assistant message.
+	const types = pi.session.slice(-2).map((entry) => (entry as { type: string }).type);
+	assert.deepEqual(types, ["custom", "message"]);
 
-	now = 3_000;
-	await invoke(pi, "turn_end", { message: { content: [toolCall] } }, ctx);
+	now = 15_000;
+	await invoke(pi, "tool_execution_start", { toolCallId: "call-1", toolName: "bash" }, ctx);
+	now = 17_000;
+	scheduler.callback?.();
+	assert.equal(
+		workingMessages.at(-1),
+		"Working... 17s • ⚙ 2s • ↑75k ↓241 CH0.0% $0.759 RB1 71k $0.710 • ✻ 2s • TTFT 3.2s • 18 tok/s",
+		"the settled request stays visible while its tools run",
+	);
+	await invoke(pi, "tool_execution_end", { toolCallId: "call-1", toolName: "bash" }, ctx);
+	await invoke(pi, "turn_end", {}, ctx);
+	now = 18_000;
+	await invoke(pi, "turn_start", {}, ctx);
+	// Pi may process queued messages and prepare the next request after turn_start.
+	now = 20_000;
+	scheduler.callback?.();
+	assert.equal(
+		workingMessages.at(-1),
+		"Working... 20s • ↑75k ↓241 CH0.0% $0.759 RB1 71k $0.710 • ✻ 2s • TTFT 3.2s • 18 tok/s",
+		"the settled values stay until the next request starts",
+	);
+	await invoke(pi, "before_provider_request", {}, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 20s • TTFT 0.0s…", "the next request start replaces them");
+});
+
+test("without a provider-request stage the stream start replaces the settled values and no live counter runs", async () => {
+	let now = 0;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+	const setNow = (at: number) => { now = at; };
+
+	await beginInteraction(pi, ctx);
+	now = 1_000;
+	await invoke(pi, "turn_start", {}, ctx);
+	now = 1_500;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(40) } }, ctx);
+	await endRequest(pi, ctx, setNow, { start: 1_000, end: 3_000, timestamp: 1, usage: { input: 100, output: 40 } });
+	assert.equal(workingMessages.at(-1), "Working... 3s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s", "settled TTFT and tok/s come from durationMs");
+	await invoke(pi, "turn_end", {}, ctx);
 	now = 4_000;
 	await invoke(pi, "turn_start", {}, ctx);
-	now = 5_000;
-	// Providers that report usage only in the final message must still count.
-	await invoke(pi, "turn_end", { message: { content: [{ type: "text", text: "" }], usage: { input: 900, output: 2_048 } } }, ctx);
 	now = 6_000;
-	await invoke(pi, "agent_settled", { aborted: false }, ctx);
-
-	const totalOutputTokens = toolTokens + 2_048;
-	assert.deepEqual(pi.entries, [{
-		customType: WORK_TIMING_ENTRY_TYPE,
-		data: {
-			version: 4,
-			totalMs: 6_000,
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: totalOutputTokens,
-			inputTokens: 900,
-			generationMs: 1_000,
-			streamedOutputTokens: toolTokens,
-			scope: "interaction",
-			status: "settled",
-			humanWaitMs: 0,
-		},
-	}]);
-	const expectedTokens = `• ↑ 900 ↓ ${new Intl.NumberFormat("en-US").format(totalOutputTokens)} tokens`;
-	assert.equal(
-		renderEntry(pi, pi.entries[0]?.data),
-		`Worked for 6s ${expectedTokens} • ΣR 0s (0%) • ${formatTokenRate(toolTokens, 1_000)}`,
-	);
-});
-
-test("samples the clock on a one-second tick", async () => {
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => 0,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	await invoke(pi, "before_agent_start", {}, context([]));
-	assert.equal(scheduler.intervalMs, 1_000);
-});
-
-test("stream and clock lanes publish the same complete line at different cadences", async () => {
-	let now = 0;
-	const scheduler = new FakeScheduler();
-	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
-	const workingMessages: Array<string | undefined> = [];
-	const ctx = context(workingMessages);
-
-	await invoke(pi, "before_agent_start", {}, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 1s • R 0s / ΣR 0s");
-
-	now = 1_050;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
-	}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 1s • ↓ 100 tokens • R 0s / ΣR 0s");
-
-	now = 1_200;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) + "y".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400) },
-	}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 1s • ↓ 200 tokens • R 0s / ΣR 0s • 1,333 tok/s");
-
-	now = 2_000;
 	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↓ 200 tokens • R 0s / ΣR 0s • 211 tok/s");
-	// Neither lane may publish a shortened, competing Working... template.
-	for (const line of workingMessages) assert.match(line!, /^Working\.\.\. .* • R .* \/ ΣR /);
-
-	const paintCount = workingMessages.length;
-	scheduler.callback?.();
-	assert.equal(workingMessages.length, paintCount, "unchanged snapshots do not repaint");
+	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s");
+	await invoke(pi, "message_start", { message: { role: "user" } }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s", "only an assistant stream starts the request");
+	await invoke(pi, "message_start", { message: { role: "assistant" } }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 6s");
+	now = 7_000;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) } }, ctx);
+	assert.equal(workingMessages.at(-1), "Working... 7s • ↓100", "no live TTFT counter or live tok/s without the request start");
 });
 
-test("excludes usage-only turns from tok/s", async () => {
+test("a provider retry restarts the live TTFT counter and the settled TTFT anchors on durationMs", async () => {
 	let now = 0;
 	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
@@ -623,145 +417,130 @@ test("excludes usage-only turns from tok/s", async () => {
 	await beginInteraction(pi, ctx);
 	now = 1_000;
 	await invoke(pi, "turn_start", {}, ctx);
-	now = 1_400;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { usage: { input: 5_000, output: 600 } } },
-	}, ctx);
-	now = 1_900;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400) },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 1s • ↑ 5,000 ↓ 600 tokens • R 0s / ΣR 0s • 1,200 tok/s");
-
-	now = 2_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	now = 2_500;
-	await invoke(pi, "turn_start", {}, ctx);
+	await invoke(pi, "before_provider_request", {}, ctx);
 	now = 3_000;
-	await invoke(pi, "turn_end", { message: { content: [{ type: "text", text: "" }], usage: { input: 900, output: 2_400 } } }, ctx);
 	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 3s • ↑ 5,900 ↓ 3,000 tokens • R 0s / ΣR 0s • 1,000 tok/s");
-
+	assert.equal(workingMessages.at(-1), "Working... 3s • TTFT 2.0s…");
 	now = 3_500;
-	await invoke(pi, "agent_settled", { aborted: false }, ctx);
-	assert.deepEqual(pi.entries, [{
-		customType: WORK_TIMING_ENTRY_TYPE,
-		data: {
-			version: 4,
-			totalMs: 3_500,
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: 3_000,
-			inputTokens: 5_900,
-			generationMs: 600,
-			streamedOutputTokens: 600,
-			scope: "interaction",
-			status: "settled",
-			humanWaitMs: 0,
-		},
-	}]);
+	await invoke(pi, "before_provider_request", {}, ctx);
+	now = 4_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 4s • TTFT 0.5s…");
+	now = 5_000;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "abcd" } }, ctx);
+	// Pi's durationMs belongs to the attempt that produced the message: 3.5s to 6s.
+	await endRequest(pi, ctx, (at) => { now = at; }, { start: 3_500, end: 6_000, timestamp: 9, usage: { input: 10, output: 50 } });
+	assert.deepEqual(pi.timings, [{ version: 1, messageTimestamp: 9, ttftMs: 1_500, thinkingMs: 0 }]);
+	assert.equal(workingMessages.at(-1), "Working... 6s • ↑10 ↓50 CH0.0% • TTFT 1.5s • 20 tok/s");
 });
 
-test("includes single-delta turns in the decode window", async () => {
+test("an unobserved first output, error or abort settles usage without timing fields", async () => {
 	let now = 0;
-	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
+	createWorkTimingExtension({ now: () => now, setInterval: () => ({}), clearInterval: () => {} })(pi as unknown as ExtensionAPI);
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
+	const setNow = (at: number) => { now = at; };
 
 	await beginInteraction(pi, ctx);
-	now = 1_000;
+	await runRequest(pi, ctx, setNow, { start: 1_000, end: 3_000, timestamp: 1, usage: { input: 100, output: 20 } });
+	assert.deepEqual(pi.timings.at(-1), { version: 1, messageTimestamp: 1, thinkingMs: 0 });
+	await runRequest(pi, ctx, setNow, { start: 4_000, firstOutputAt: 4_500, end: 5_000, timestamp: 2, stopReason: "error", usage: { input: 100, output: 20 } });
 	await invoke(pi, "turn_start", {}, ctx);
-	// Turn 1 streams twice (400 ms window) and reports usage.
-	now = 1_400;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { usage: { input: 5_000, output: 800 } } },
-	}, ctx);
-	now = 1_800;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400) },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 1s • ↑ 5,000 ↓ 800 tokens • R 0s / ΣR 0s • 2,000 tok/s");
-
-	now = 2_000;
-	await invoke(pi, "turn_end", {}, ctx);
-	await invoke(pi, "turn_start", {}, ctx);
-	now = 2_200;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "z".repeat(10) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "z".repeat(10), partial: { usage: { input: 0, output: 1_000 } } },
-	}, ctx);
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↑ 5,000 ↓ 1,800 tokens • R 0s / ΣR 0s • 1,333 tok/s");
-
-	now = 2_500;
+	await invoke(pi, "before_provider_request", {}, ctx);
+	await endRequest(pi, ctx, setNow, { start: 5_000, end: 6_000, timestamp: 3, stopReason: "aborted", usage: { input: 100, output: 0 } });
+	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 CH0.0%");
+	now = 7_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
-	assert.deepEqual(pi.entries, [{
-		customType: WORK_TIMING_ENTRY_TYPE,
-		data: {
-			version: 4,
-			totalMs: 2_500,
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: 1_800,
-			inputTokens: 5_000,
-			generationMs: 900,
-			streamedOutputTokens: 1_800,
-			scope: "interaction",
-			status: "settled",
-			humanWaitMs: 0,
-		},
-	}]);
-	assert.equal(
-		renderEntry(pi, pi.entries[0]?.data),
-		"Worked for 2s • ↑ 5,000 ↓ 1,800 tokens • ΣR 0s (0%) • 2,000 tok/s",
-	);
+	const metrics = entryData(pi).metrics;
+	// Every request contributes usage; only the first is speed-eligible, and none has a TTFT.
+	assert.equal(metrics.input, 300);
+	assert.equal(metrics.output, 40);
+	assert.equal(metrics.speedOutput, 20);
+	assert.equal(metrics.speedMs, 2_000);
+	assert.equal(metrics.ttftCount, 0);
 });
 
-test("excludes TTFT and pauses decode on assistant message_end", async () => {
+test("the completion entry aggregates the requests that settled during the interaction", async () => {
 	let now = 0;
-	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
-	createWorkTimingExtension({
-		now: () => now,
-		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
-		clearInterval: (handle) => scheduler.clearInterval(handle),
-	})(pi as unknown as ExtensionAPI);
+	createWorkTimingExtension({ now: () => now, setInterval: () => ({}), clearInterval: () => {} })(pi as unknown as ExtensionAPI);
+	// History before the interaction: never counted, but its cache baseline makes the first request re-bill.
+	pi.session.push({ type: "message", message: assistantMessage({ start: 0, end: 1, timestamp: 1, usage: { input: 1_000, output: 500, cacheRead: 9_000 } }) });
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
+	const setNow = (at: number) => { now = at; };
 
-	await invoke(pi, "before_agent_start", {}, ctx);
-	now = 1_000;
+	await beginInteraction(pi, ctx);
+	await runRequest(pi, ctx, setNow, {
+		start: 1_000, firstOutputAt: 3_000, thinkingEnd: 5_000, end: 9_000, timestamp: 10,
+		usage: { input: 6_000, output: 200, cacheRead: 4_000, cost: { input: 0.06, cacheRead: 0.004, total: 0.07 } },
+	});
+	pi.session.push({ type: "message", message: { role: "toolResult", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.03 } } } });
+	await runRequest(pi, ctx, setNow, {
+		start: 10_000, firstOutputAt: 13_000, thinkingEnd: 14_000, end: 15_000, timestamp: 11,
+		usage: { input: 500, output: 100, cacheRead: 10_000, cost: { total: 0.01 } },
+	});
+	now = 20_000;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+
+	assert.equal(pi.entries.length, 1);
+	const data = entryData(pi);
+	assert.equal(data.version, 5);
+	// The first request misses 6,000 of the previous 10,000-token prompt: $0.01/k paid minus $0.001/k read.
+	assert.ok(Math.abs(data.metrics.rebillCost - 0.054) < 1e-12);
+	assert.deepEqual({ ...data.metrics, rebillCost: 0.054 }, {
+		input: 6_500, output: 300, cacheRead: 14_000, cacheWrite: 0, cost: 0.11,
+		promptTokens: 20_500, promptCacheRead: 14_000,
+		rebillCount: 1, rebillTokens: 6_000, rebillCost: 0.054,
+		thinkingMs: 3_000, ttftMs: 5_000, ttftCount: 2, speedOutput: 300, speedMs: 13_000,
+	});
+	assert.equal(renderEntry(pi, data), "Worked for 20s • ↑6.5k ↓300 R14k CH68.3% $0.110 RB1 6.0k $0.054 • ✻ 3s (15%) • TTFT 2.5s • 23 tok/s");
+});
+
+test("the interaction population starts at the external input, including a pre-run compaction", async () => {
+	let now = 0;
+	const pi = new FakePi();
+	createWorkTimingExtension({ now: () => now, setInterval: () => ({}), clearInterval: () => {} })(pi as unknown as ExtensionAPI);
+	pi.session.push({ type: "message", message: assistantMessage({ start: 0, end: 1, timestamp: 1, usage: { input: 9_000, output: 9, cost: { total: 9 } } }) });
+	const ctx = context([]);
+	const setNow = (at: number) => { now = at; };
+
+	await invoke(pi, "input", { type: "input", text: "go", source: "interactive" }, ctx);
+	// Pi checks compaction after the input and before before_agent_start.
+	pi.session.push({ type: "compaction", usage: { input: 2_000, output: 300, cacheRead: 0, cacheWrite: 0, cost: { total: 0.5 } } });
+	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "go" }, ctx);
+	await runRequest(pi, ctx, setNow, { start: 1_000, firstOutputAt: 1_200, end: 2_000, timestamp: 2, usage: { input: 100, output: 20, cost: { total: 0.1 } } });
+	now = 3_000;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+
+	const metrics = entryData(pi).metrics;
+	assert.equal(metrics.input, 2_100, "the compaction settled during the interaction; earlier history did not");
+	assert.equal(metrics.output, 320);
+	assert.ok(Math.abs(metrics.cost - 0.6) < 1e-12);
+
+	// A later steering-only input or an extension-origin input never moves a later interaction's start.
+	await invoke(pi, "input", { type: "input", text: "auto", source: "extension" }, ctx);
+	pi.session.push({ type: "compaction", usage: { input: 7_000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 7 } } });
+	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
+	now = 4_000;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+	assert.equal(pi.entries.length, 1, "an extension-origin run opens no interaction");
+});
+
+test("timing observation never changes the provider payload or model context", async () => {
+	const pi = new FakePi();
+	createWorkTimingExtension({ setInterval: () => ({}), clearInterval: () => {} })(pi as unknown as ExtensionAPI);
+	const ctx = context([]);
+	await beginInteraction(pi, ctx);
 	await invoke(pi, "turn_start", {}, ctx);
-	now = 3_500;
-	await invoke(pi, "message_update", {
-		message: { content: [{ type: "text", text: "x".repeat(400) }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { usage: { input: 1_000, output: 100 } } },
-	}, ctx);
-	now = 4_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 4s • ↑ 1,000 ↓ 100 tokens • R 0s / ΣR 0s • 200 tok/s");
-
-	now = 4_000;
-	await invoke(pi, "message_end", { message: { role: "user" } }, ctx);
-	now = 5_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 5s • ↑ 1,000 ↓ 100 tokens • R 0s / ΣR 0s • 67 tok/s");
-
-	now = 5_500;
-	await invoke(pi, "message_end", { message: { role: "assistant" } }, ctx);
-	now = 8_000;
-	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 8s • ↑ 1,000 ↓ 100 tokens • R 0s / ΣR 0s • 50 tok/s");
+	const payload = { messages: [{ role: "user", content: "go" }] };
+	assert.equal(await invoke(pi, "before_provider_request", { type: "before_provider_request", payload }, ctx), undefined);
+	assert.deepEqual(payload, { messages: [{ role: "user", content: "go" }] });
+	for (const name of ["context", "context_with_system", "before_provider_headers"]) assert.equal(pi.handlers.has(name), false, name);
+	// The request entry is a custom entry, which Pi excludes from model context.
+	await endRequest(pi, ctx, () => {}, { start: 0, end: 1, timestamp: 5, usage: { input: 1, output: 1 } });
+	assert.equal((pi.session.at(-2) as { type: string }).type, "custom");
 });
 
 test("keeps one interaction open across an idle gap and summarizes once at quiescence", async () => {
@@ -780,20 +559,11 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 
+	const setNow = (at: number) => { now = at; };
 	await beginInteraction(pi, ctx);
-	now = 1_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-	}, ctx);
-	now = 2_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
-	}, ctx);
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { usage: { input: 1_000, output: 200 } } },
-	}, ctx);
-	await invoke(pi, "turn_end", {}, ctx);
+	await runRequest(pi, ctx, setNow, {
+		start: 1_000, firstOutputAt: 1_500, thinkingEnd: 2_000, end: 2_500, timestamp: 1, usage: { input: 1_000, output: 200 },
+	});
 	now = 3_000;
 	await invoke(pi, "tool_execution_start", { toolCallId: "call-bash", toolName: "bash" }, ctx);
 	await invoke(pi, "tool_execution_end", {
@@ -816,19 +586,9 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	// The delivery wake starts a native run that is part of the same interaction.
 	now = 50_000;
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
-	now = 52_000;
-	await invoke(pi, "turn_start", {}, ctx);
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-	}, ctx);
-	now = 53_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
-	}, ctx);
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 600, output: 300 } } },
-	}, ctx);
-	await invoke(pi, "turn_end", {}, ctx);
+	await runRequest(pi, ctx, setNow, {
+		start: 52_000, firstOutputAt: 52_500, thinkingEnd: 53_000, end: 54_000, timestamp: 2, usage: { input: 600, output: 300 },
+	});
 	now = 60_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
 	assert.equal(pi.entries.length, 0, "a reserved delivery keeps the interaction open after its last run");
@@ -842,21 +602,12 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 
 	assert.equal(pi.entries.length, 1, "one external interaction produces one summary");
 	const data = entryData(pi);
-	assert.deepEqual(data, {
-		version: 4,
-		totalMs: 62_000,
-		reasoningMs: 2_000,
-		lastTurnReasoningMs: 1_000,
-		outputTokens: 500,
-		inputTokens: 1_600,
-		generationMs: 2_000,
-		streamedOutputTokens: 500,
-		scope: "interaction",
-		status: "settled",
-		humanWaitMs: 0,
-	});
-	// The idle gap between the two native runs is part of the interaction, not a second entry.
-	assert.equal(renderEntry(pi, data), "Worked for 1m 2s • ↑ 1,600 ↓ 500 tokens • ΣR 2s (3%) • 250 tok/s");
+	assert.equal(data.version, 5);
+	assert.equal(data.totalMs, 62_000);
+	assert.equal(data.status, "settled");
+	assert.equal(data.humanWaitMs, 0);
+	// Both runs' requests belong to the interaction; the idle gap is work elapsed, not a second entry.
+	assert.equal(renderEntry(pi, data), "Worked for 1m2s • ↑1.6k ↓500 CH0.0% • ✻ 1s (2%) • TTFT 0.5s • 143 tok/s");
 
 	// A late notice for the already-finished job cannot resurrect the settled interaction.
 	now = 64_000;
@@ -1002,7 +753,7 @@ test("deducts pure human wait but keeps time while an owned job is progressing",
 	assert.equal(data.humanWaitMs, 10_000);
 	assert.equal(data.totalMs, 25_000, "autonomous wall time excludes only the pure human wait");
 	assert.equal(data.status, "settled");
-	assert.equal(renderEntry(pi, data), "Worked for 25s • waited 10s • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, data), "Worked for 25s • waited 10s");
 });
 
 test("cuts an awaiting interaction on new external input and never calls it complete", async () => {
@@ -1038,7 +789,7 @@ test("cuts an awaiting interaction on new external input and never calls it comp
 	assert.equal(pi.entries.length, 1);
 	assert.equal(entryData(pi).status, "interrupted", "new input cuts the span instead of completing it");
 	assert.equal(entryData(pi).totalMs, 20_000);
-	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Interrupted after 20s • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Interrupted after 20s");
 
 	now = 25_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
@@ -1070,7 +821,7 @@ test("keeps queued steering input inside the run that is still streaming", async
 	assert.equal(entryData(pi).totalMs, 5_000);
 });
 
-test("promotes an extension-started run at the input time without its historical metrics", async () => {
+test("promotion cuts the work clock at the input and counts the in-flight request wholly", async () => {
 	let now = 0;
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
@@ -1082,41 +833,27 @@ test("promotes an extension-started run at the input time without its historical
 		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
 		clearInterval: (handle) => scheduler.clearInterval(handle),
 	})(pi as unknown as ExtensionAPI);
+	const setNow = (at: number) => { now = at; };
 
-	// Automatic work with no human boundary measures a run span only.
+	// Automatic work with no human boundary measures a run span only; this request settles before any input.
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
+	await runRequest(pi, ctx, setNow, { start: 100, firstOutputAt: 200, end: 400, timestamp: 1, usage: { input: 500, output: 50 } });
 	now = 500;
 	await invoke(pi, "turn_start", {}, ctx);
+	await invoke(pi, "before_provider_request", {}, ctx);
 	now = 1_000;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-	}, ctx);
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, ctx);
 	now = 1_500;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 0 },
-	}, ctx);
-	now = 1_600;
-	await invoke(pi, "message_update", {
-		// Real providers can report no usage until their final event.
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
-	}, ctx);
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
 
-	// A person steers that run. Everything before this moment is not their interaction.
+	// A person steers that run mid-request. The request settles afterwards, so it belongs to the interaction.
 	now = 2_000;
 	await invoke(pi, "input", { type: "input", text: "steer", source: "interactive", streamingBehavior: "steer" }, ctx);
 	now = 2_100;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_start", contentIndex: 1 },
-	}, ctx);
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 1 } }, ctx);
 	now = 2_400;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "thinking_end", contentIndex: 1 },
-	}, ctx);
-	now = 2_500;
-	await invoke(pi, "message_update", {
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 1_200, output: 500 } } },
-	}, ctx);
-	now = 3_000;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 1 } }, ctx);
+	await endRequest(pi, ctx, setNow, { start: 500, end: 3_000, timestamp: 2, usage: { input: 1_200, output: 500 } });
 	await invoke(pi, "turn_end", {}, ctx);
 	now = 6_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
@@ -1125,14 +862,12 @@ test("promotes an extension-started run at the input time without its historical
 	const data = entryData(pi);
 	assert.equal(data.scope, "interaction");
 	assert.equal(data.status, "settled");
-	assert.equal(data.totalMs, 4_000, "the interaction starts at the input, not at the automatic run");
-	assert.equal(data.reasoningMs, 300, "only the post-cut thinking is attributed");
-	assert.equal(data.lastTurnReasoningMs, 300);
-	assert.equal(data.outputTokens, 100, "only post-cut characters are estimated; cumulative late usage cannot import prior output");
-	assert.equal(data.inputTokens, 0, "this turn's prompt was sent before the cut, even when usage arrives late");
-	assert.equal(data.generationMs, 1_000, "the decode window restarts at the cut");
-	assert.equal(data.streamedOutputTokens, 100);
-	assert.equal(renderEntry(pi, data), "Worked for 4s • ↓ 100 tokens • ΣR <1s (8%) • 100 tok/s");
+	assert.equal(data.totalMs, 4_000, "the work clock starts at the input, not at the automatic run");
+	assert.equal(data.metrics.input, 1_200, "the request that settled before the input is not interaction work");
+	assert.equal(data.metrics.output, 500, "usage is a whole-request fact");
+	assert.equal(data.metrics.thinkingMs, 800, "thinking before the input belongs to the same request");
+	assert.equal(data.metrics.ttftMs, 500);
+	assert.equal(renderEntry(pi, data), "Worked for 4s • ↑1.2k ↓500 CH0.0% • ✻ <1s (20%) • TTFT 0.5s • 200 tok/s");
 });
 
 test("promotion keeps the run's ongoing executions but excludes unrelated older work", async () => {
@@ -1229,7 +964,7 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
 	now = 20_000;
 	await invoke(pi, "ui_prompt_end", {}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 20s • ⚙ 8s • R 0s / ΣR 0s", "the tool clock froze but the prompt was autonomous");
+	assert.equal(workingMessages.at(-1), "Working... 20s • ⚙ 8s", "the tool clock froze but the prompt was autonomous");
 
 	now = 25_000;
 	state.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
@@ -1250,7 +985,7 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 	assert.equal(data.humanWaitMs, 10_000, "the in-tool prompt is human wait once owned work stopped");
 	assert.equal(data.totalMs, 40_000);
 	assert.equal(data.status, "settled");
-	assert.equal(renderEntry(pi, data), "Worked for 40s • waited 10s • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, data), "Worked for 40s • waited 10s");
 });
 
 test("does not bind stale human input to a later extension-triggered run", async () => {
@@ -1315,7 +1050,7 @@ test("reports an aborted run as interrupted without waiting for quiescence", asy
 	assert.equal(pi.entries.length, 1);
 	assert.equal(entryData(pi).status, "interrupted");
 	assert.equal(entryData(pi).totalMs, 7_000);
-	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Interrupted after 7s • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Interrupted after 7s");
 });
 
 test("ends a failed main run at the failure even while owned work still runs", async () => {
@@ -1348,7 +1083,7 @@ test("ends a failed main run at the failure even while owned work still runs", a
 	assert.equal(pi.entries.length, 1, "no automatic continuation can resume a failed main run");
 	assert.equal(entryData(pi).status, "failed");
 	assert.equal(entryData(pi).totalMs, 5_000);
-	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Failed after 5s • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Failed after 5s");
 
 	now = 9_000;
 	producer.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
@@ -1409,7 +1144,7 @@ test("unavailable execution state is reported instead of claiming completion", a
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
 	assert.equal(pi.entries.length, 1);
 	assert.equal(entryData(pi).status, "unavailable");
-	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Timed 2s (state unavailable) • ΣR 0s (0%)");
+	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Timed 2s (state unavailable)");
 });
 
 test("session replacement and branch changes release state without writing old scope", async () => {
@@ -1470,30 +1205,21 @@ test("folds labels only at field boundaries", () => {
 });
 
 test("compacts the working label to the single-line row", () => {
-	const label = "Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s • 4,375 tok/s";
+	const label = "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120 • ✻ 4s • TTFT 3.2s • 25 tok/s";
 	assert.equal(compactStatusLabel(label, 80), label);
-	assert.equal(compactStatusLabel(label, 41), "Working... 2s • R 0s / ΣR 0s");
-	// Rate fits after the protected core even when tokens do not.
-	assert.equal(compactStatusLabel(label, 44), "Working... 2s • R 0s / ΣR 0s • 4,375 tok/s");
-	// Tokens return before the core once the row allows them.
-	assert.equal(
-		compactStatusLabel(label, 62),
-		"Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s",
-	);
+	// Fields are omitted whole; a later field still fills in when an earlier one does not fit.
+	assert.equal(compactStatusLabel(label, 30), "Working... 2s • ✻ 4s");
+	assert.equal(compactStatusLabel(label, 40), "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120");
+	assert.equal(compactStatusLabel(label, 60), "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120 • ✻ 4s • TTFT 3.2s");
 });
 
 test("keeps the live tool timer at narrow widths", () => {
-	const label = "Working... 47m 29s • ⚙ 46m 51s • ↑ 9,861 ↓ 20,323 tokens • R 4s / ΣR 1m 33s • 217 tok/s";
+	const label = "Working... 47m29s • ⚙ 46m51s • ↑9.9k ↓20k CH0.0% • ✻ 4s • TTFT 1.2s • 217 tok/s";
 	assert.equal(compactStatusLabel(label, 200), label);
-	// The live tool timer and `R / ΣR` are both kept; tokens and rate are the optional fields.
-	assert.equal(
-		compactStatusLabel(label, 60),
-		"Working... 47m 29s • ⚙ 46m 51s • R 4s / ΣR 1m 33s",
-	);
-	assert.equal(
-		compactStatusLabel(label, 80),
-		"Working... 47m 29s • ⚙ 46m 51s • ↑ 9,861 ↓ 20,323 tokens • R 4s / ΣR 1m 33s",
-	);
+	// The live tool timer is kept; metric fields are the optional ones.
+	assert.equal(compactStatusLabel(label, 30), "Working... 47m29s • ⚙ 46m51s");
+	assert.equal(compactStatusLabel(label, 45), "Working... 47m29s • ⚙ 46m51s • ✻ 4s");
+	assert.equal(compactStatusLabel(label, 60), "Working... 47m29s • ⚙ 46m51s • ↑9.9k ↓20k CH0.0% • ✻ 4s");
 });
 
 test("compacts the working label on narrow terminals and on resize", async () => {
@@ -1521,20 +1247,21 @@ test("compacts the working label on narrow terminals and on resize", async () =>
 	assert.ok(resizeListener);
 	now = 1_000;
 	await invoke(pi, "turn_start", {}, ctx);
+	await invoke(pi, "before_provider_request", {}, ctx);
 	now = 2_000;
 	await invoke(pi, "message_update", {
 		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) },
 	}, ctx);
-	now = 2_800;
+	now = 3_000;
 	await invoke(pi, "message_update", {
 		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y".repeat(400), partial: { usage: { input: 12_000, output: 3_500 } } },
 	}, ctx);
 	scheduler.callback?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • R 0s / ΣR 0s");
+	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k");
 
 	width = 120;
 	resizeListener?.();
-	assert.equal(workingMessages.at(-1), "Working... 2s • ↑ 12,000 ↓ 3,500 tokens • R 0s / ΣR 0s • 4,375 tok/s");
+	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k • TTFT 1.0s • 1,750 tok/s");
 
 	await invoke(pi, "session_shutdown", { reason: "reload" }, ctx);
 	assert.equal(resizeListener, undefined);
@@ -1549,17 +1276,17 @@ test("folds the settled entry at field boundaries and word-wraps lone over-wide 
 	const component = renderer(
 		{
 			data: {
-				version: 4,
-				totalMs: 12_000,
-				reasoningMs: 5_400,
-				lastTurnReasoningMs: 1_000,
-				inputTokens: 17_234,
-				outputTokens: 4_321,
-				generationMs: 16_000,
-				streamedOutputTokens: 11_520,
+				version: 5,
+				totalMs: 415_000,
+				humanWaitMs: 0,
 				scope: "interaction",
 				status: "settled",
-				humanWaitMs: 0,
+				metrics: {
+					input: 204_000, output: 10_000, cacheRead: 1_100_000, cacheWrite: 0, cost: 3.591,
+					promptTokens: 1_313_000, promptCacheRead: 1_100_000,
+					rebillCount: 14, rebillTokens: 90_000, rebillCost: 0.813,
+					thinkingMs: 19_000, ttftMs: 81_000, ttftCount: 10, speedOutput: 10_000, speedMs: 400_000,
+				},
 			},
 		} as never,
 		{ expanded: false },
@@ -1567,30 +1294,33 @@ test("folds the settled entry at field boundaries and word-wraps lone over-wide 
 	);
 	assert.ok(component);
 
-	const folded = component.render(40).map((line) => stripAnsi(line).trim());
-	assert.deepEqual(folded, [
-		"Worked for 12s",
-		"↑ 17,234 ↓ 4,321 tokens • ΣR 5s (45%)",
-		"720 tok/s",
+	assert.deepEqual(component.render(200).map((line) => stripAnsi(line).trim()), [
+		"Worked for 6m55s • ↑204k ↓10k R1.1M CH83.8% $3.591 RB14 90k $0.813 • ✻ 19s (5%) • TTFT 8.1s • 25 tok/s",
 	]);
-	for (const line of component.render(40)) assert.ok(visibleWidth(line) <= 40);
+	const folded = component.render(60).map((line) => stripAnsi(line).trim());
+	assert.deepEqual(folded, [
+		"Worked for 6m55s",
+		"↑204k ↓10k R1.1M CH83.8% $3.591 RB14 90k $0.813",
+		"✻ 19s (5%) • TTFT 8.1s • 25 tok/s",
+	]);
+	for (const line of component.render(60)) assert.ok(visibleWidth(line) <= 60);
 
 	const narrow = component.render(10);
 	assert.ok(narrow.length > folded.length);
 	for (const line of narrow) assert.ok(visibleWidth(line) <= 10);
 	const joined = narrow.map((line) => stripAnsi(line).trim()).join(" ");
 	assert.ok(joined.includes("Worked for"));
-	assert.ok(joined.includes("720 tok/s"));
+	assert.ok(joined.includes("25 tok/s"));
 });
 
-test("normalizes unsupported fields on historical entries without rewriting their meaning", () => {
+test("older entries render only what their stored fields support", () => {
 	const pi = new FakePi();
 	createWorkTimingExtension()(pi as unknown as ExtensionAPI);
-	// A version-3 entry has no scope/status/human-wait fields: it stays one settled run.
+	// Forward-only: a version-4 entry keeps its head and wait; its old token fields are not interpreted.
 	assert.equal(
-		renderEntry(pi, { version: 3, totalMs: 9_000, reasoningMs: 3_000, outputTokens: 100, inputTokens: 200, generationMs: 0, streamedOutputTokens: 0 }),
-		"Worked for 9s • ↑ 200 ↓ 100 tokens • ΣR 3s (33%)",
+		renderEntry(pi, { version: 4, totalMs: 9_000, humanWaitMs: 2_000, status: "interrupted", reasoningMs: 3_000, outputTokens: 100 }),
+		"Interrupted after 9s • waited 2s",
 	);
-	// Unknown payloads fall back to a zero-duration settled run instead of throwing.
-	assert.equal(renderEntry(pi, { version: 99 }), "Worked for 0s • ΣR 0s (—)");
+	// Unknown payloads render a zero-duration head instead of throwing.
+	assert.equal(renderEntry(pi, { version: 99 }), "Worked for 0s");
 });

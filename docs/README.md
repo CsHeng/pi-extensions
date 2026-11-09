@@ -9,6 +9,7 @@ These documents own self-contained extension behavior, maintenance and removal c
 - [Agents UI](architecture/agents-ui.md)
 - [Tasklist](architecture/tasklist.md)
 - [Job Notifications](architecture/job-notifications.md)
+- [Usage metrics](architecture/usage-metrics.md)
 - [Work-timing metrics](architecture/work-timing.md)
 - [Async Bash](architecture/async-bash.md)
 - [Cache Keepalive](architecture/cache-keepalive.md)

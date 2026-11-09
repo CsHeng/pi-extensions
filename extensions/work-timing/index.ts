@@ -3,13 +3,29 @@ import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
 	createInteractionBoundary,
 	type InteractionClose,
-	type InteractionKind,
 	type InteractionSpan,
 	type InteractionStatus,
 } from "../shared/interaction-boundary.ts";
+import {
+	collectLaneTotals,
+	emptyLaneTotals,
+	formatDuration,
+	parseLaneTotals,
+	REQUEST_TIMING_ENTRY_TYPE,
+	REQUEST_TIMING_VERSION,
+	requestLaneTotals,
+	timingMetricFields,
+	usageMetricFields,
+	type AssistantMessageLike,
+	type LaneTotals,
+	type RequestTimingData,
+	type TimingFormatOptions,
+} from "../shared/usage-metrics.ts";
+
+export { formatDuration, REQUEST_TIMING_ENTRY_TYPE };
 
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
-const WORK_TIMING_VERSION = 4;
+const WORK_TIMING_VERSION = 5;
 /**
  * Clock cadence. Time fields are re-sampled on this tick, so every duration on the
  * label advances in the same frame; the label is only reposted when it changed.
@@ -18,7 +34,7 @@ const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
 /** A live tool field appears only after this much work, so quick reads never flash. */
 const TOOL_ELAPSED_MIN_MS = 2_000;
-/** The tool field's `⚙ ` prefix; the field survives narrow-width compaction like `R / ΣR`. */
+/** The tool field's `⚙ ` prefix; the field survives narrow-width compaction. */
 const TOOL_FIELD_PREFIX = "⚙ ";
 /** Entry rows mirror the host Text component's one-column side padding. */
 const TEXT_PADDING_X = 1;
@@ -68,23 +84,18 @@ const FIELD_SEPARATOR_WIDTH = 3;
 /**
  * Compact the live label to ONE line for the host's single-line working row
  * (fullscreen renders only the first line of a multi-line or over-wide
- * message). Fields keep their order; the `R x / ΣR y` structure is always
- * kept; fields that no longer fit are omitted whole rather than truncated
- * mid-field — matching the zero-state label, which omits tokens and rate
- * until they exist.
+ * message). Fields keep their order; the elapsed head and a live tool field
+ * are always kept; other fields that no longer fit are omitted whole rather
+ * than truncated mid-field.
  */
 export function compactStatusLabel(status: string, width: number): string {
 	if (width <= 0) return status;
 	const budget = Math.max(1, width);
 	if (visibleWidth(status) <= budget) return status;
 	const fields = status.split(" • ");
-	const coreIndex = fields.findIndex((field) => /^R .* \/ ΣR /.test(field));
-	if (coreIndex < 0) return status;
-	// `R / ΣR` and a live tool field are the row's identity while work is in flight;
-	// optional fields fill back in around them only while the budget allows.
-	const required = new Set<number>([coreIndex]);
+	const required = new Set<number>();
 	const toolIndex = fields.findIndex((field) => field.startsWith(TOOL_FIELD_PREFIX));
-	if (toolIndex >= 0) required.add(toolIndex);
+	if (toolIndex > 0) required.add(toolIndex);
 	const head = fields[0]!;
 	const kept: string[] = [head];
 	let current = visibleWidth(head);
@@ -109,30 +120,19 @@ export function compactStatusLabel(status: string, width: number): string {
 	return kept.join(" • ");
 }
 
-/** What an entry measures: one external interaction, or the restored single-run meaning of v1-v3. */
-export type WorkTimingScope = InteractionKind;
 /** A settled interaction reached quiescence; failed, interrupted and unavailable did not. */
 export type WorkTimingStatus = InteractionStatus;
 
 export interface WorkTimingEntryData {
-	version: 1 | 2 | 3 | 4;
+	version: typeof WORK_TIMING_VERSION;
+	/** Autonomous wall time of the interaction, human wait excluded. */
 	totalMs: number;
-	reasoningMs: number;
-	lastTurnReasoningMs: number;
-	/** Request-cumulative output (downstream) tokens; absent before version 2. */
-	outputTokens: number;
-	/** Request-cumulative input (upstream) tokens; absent before version 3. */
-	inputTokens: number;
-	/** Decode-window milliseconds used as the `tok/s` denominator; absent before version 3. */
-	generationMs: number;
-	/** Output tokens from turns that had a decode window; the `tok/s` numerator. */
-	streamedOutputTokens: number;
-	/** Version 4: interaction span, or the historical single-run scope of v1-v3. */
-	scope: WorkTimingScope;
-	/** Version 4: whether the span reached quiescence, failed, was cut short, or could not be verified. */
-	status: WorkTimingStatus;
-	/** Version 4: pure human wait already excluded from `totalMs`. */
+	/** Pure human wait already excluded from `totalMs`. */
 	humanWaitMs: number;
+	scope: "interaction";
+	status: WorkTimingStatus;
+	/** Interaction-lane aggregate of the requests that settled during the interaction. */
+	metrics: LaneTotals;
 }
 
 interface WorkTimingDependencies {
@@ -145,23 +145,25 @@ interface WorkTimingDependencies {
 	onResize?: (listener: () => void) => () => void;
 }
 
-interface TurnTiming {
-	completedReasoningMs: number;
-	activeReasoning: Map<number, number>;
+/** The main loop's in-flight provider request. */
+interface RequestTiming {
+	/**
+	 * The request has started: `before_provider_request`, or the first assistant stream event on
+	 * transports that never expose it. Until then the row keeps the previous request's settled values.
+	 */
+	begun: boolean;
+	/** Main-agent `before_provider_request`; restarts on a provider retry. Drives the live counters. */
+	startedAt: number | undefined;
+	/** First thinking start or thinking, text or tool-call delta. */
+	firstOutputAt: number | undefined;
+	completedThinkingMs: number;
+	activeThinking: Map<number, number>;
 	/** Characters seen in streamed text, thinking, and tool-call deltas. */
 	deltaChars: number;
 	/** Characters in the current assistant message content, when the host exposes it. */
 	messageChars: number;
+	/** Output tokens a partial message already reports. */
 	providerOutputTokens: number;
-	providerInputTokens: number;
-	/** Character prefix already produced before an interaction joined this turn. */
-	outputBaseline: number;
-	/** A joined turn cannot attribute cumulative provider usage to its post-cut portion. */
-	partial: boolean;
-	/** First thinking or output token of this turn. */
-	decodeStartedAt: number | undefined;
-	/** First pause: assistant output ended or a tool started. */
-	decodePausedAt: number | undefined;
 }
 
 interface ActiveTool {
@@ -172,11 +174,13 @@ interface ActiveTool {
 	promptMs: number;
 }
 
+/** The slow-lane sample of every duration on the row. */
 interface ClockSample {
 	totalMs: number;
-	reasoningMs: number;
-	turnReasoningMs: number;
 	toolMs: number;
+	thinkingMs: number;
+	/** Running TTFT counter while the request waits for its first output. */
+	ttftWaitMs: number | undefined;
 }
 
 /**
@@ -185,95 +189,18 @@ interface ClockSample {
  * what it measures inside that span.
  */
 interface TimingData {
-	/** Completed-run totals; the in-flight turn is added by each snapshot. */
-	reasoningMs: number;
-	lastTurnReasoningMs: number;
-	outputTokens: number;
-	inputTokens: number;
-	generationMs: number;
-	streamedOutputTokens: number;
-	turn: TurnTiming | undefined;
+	/** Session entries before the interaction; later usage-bearing entries are its population. */
+	entryStart: number;
+	request: RequestTiming | undefined;
+	/** The last settled request's values, shown while its tools run. */
+	settled: LaneTotals | undefined;
 	/** Tools executing right now, in start order. */
 	tools: ActiveTool[];
-	/** The slow-lane duration sample shared by both paint lanes. */
 	clock: ClockSample | undefined;
 	lastStatus: string | undefined;
 }
 
 type TimingSpan = InteractionSpan<TimingData>;
-
-interface TimingSnapshot {
-	totalMs: number;
-	reasoningMs: number;
-	turnReasoningMs: number;
-	outputTokens: number;
-	inputTokens: number;
-	generationMs: number;
-	streamedOutputTokens: number;
-	/** Longest-running active tool, zero when no tool is executing. */
-	toolMs: number;
-	toolCount: number;
-}
-
-export function formatReasoningShare(reasoningMs: number, totalMs: number): string {
-	if (!(totalMs > 0) || !Number.isFinite(totalMs) || !Number.isFinite(reasoningMs)) return "—";
-	const percent = Math.round((Math.max(0, reasoningMs) / totalMs) * 100);
-	return `${Math.min(100, Math.max(0, percent))}%`;
-}
-
-export function formatDuration(durationMs: number): string {
-	const totalSeconds = Math.floor(Math.max(0, durationMs) / 1_000);
-	const hours = Math.floor(totalSeconds / 3_600);
-	const minutes = Math.floor((totalSeconds % 3_600) / 60);
-	const seconds = totalSeconds % 60;
-
-	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-	if (minutes > 0) return `${minutes}m ${seconds}s`;
-	return `${seconds}s`;
-}
-
-/** Group digits the same way Pi's own counters do. */
-export function formatTokens(count: number): string {
-	return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(count)));
-}
-
-/** `↑ input ↓ output tokens` as one field, omitting whichever side is unreported. */
-export function tokenCountFields(inputTokens: number, outputTokens: number): string[] {
-	const parts: string[] = [];
-	if (inputTokens > 0) parts.push(`↑ ${formatTokens(inputTokens)}`);
-	if (outputTokens > 0) parts.push(`↓ ${formatTokens(outputTokens)}`);
-	return parts.length === 0 ? [] : [`${parts.join(" ")} tokens`];
-}
-
-/** ` • ↑ input ↓ output tokens`, omitting whichever side the provider has not reported. */
-export function formatTokenCounts(inputTokens: number, outputTokens: number): string {
-	const fields = tokenCountFields(inputTokens, outputTokens);
-	return fields.length === 0 ? "" : ` • ${fields[0]}`;
-}
-
-/**
- * Downstream throughput over the decode window, e.g. `720 tok/s`.
- * Decode time runs from the first thinking or output token through stream stalls
- * until assistant `message_end` or the first `tool_execution_start`.
- */
-export function formatTokenRate(outputTokens: number, generationMs: number): string {
-	if (!(outputTokens > 0) || !(generationMs > 0)) return "";
-	const rate = outputTokens / (generationMs / 1_000);
-	if (rate >= 10) return `${formatTokens(Math.round(rate))} tok/s`;
-	return `${Math.round(rate * 10) / 10} tok/s`;
-}
-
-/** ` • 720 tok/s`, or nothing while the rate is not measurable. */
-function rateSuffix(outputTokens: number, generationMs: number): string {
-	const rate = formatTokenRate(outputTokens, generationMs);
-	return rate ? ` • ${rate}` : "";
-}
-
-/** Reasoning durations keep their share readable: a non-zero sub-second value is not "0s". */
-export function formatReasoningDuration(durationMs: number): string {
-	const value = Math.max(0, durationMs);
-	return value > 0 && value < 1_000 ? "<1s" : formatDuration(value);
-}
 
 function defaultSetInterval(callback: () => void, intervalMs: number): unknown {
 	const handle = globalThis.setInterval(callback, intervalMs);
@@ -285,88 +212,11 @@ function defaultClearInterval(handle: unknown): void {
 	globalThis.clearInterval(handle as ReturnType<typeof globalThis.setInterval>);
 }
 
-function validDuration(value: unknown): number {
+function nonNegative(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-function normalizeEntryData(data: unknown): WorkTimingEntryData {
-	const candidate = (data && typeof data === "object" ? data : {}) as Partial<WorkTimingEntryData>;
-	const version = candidate.version === 1 || candidate.version === 2 || candidate.version === 3
-		? candidate.version
-		: WORK_TIMING_VERSION;
-	const current = version === WORK_TIMING_VERSION;
-	return {
-		version,
-		totalMs: validDuration(candidate.totalMs),
-		reasoningMs: validDuration(candidate.reasoningMs),
-		lastTurnReasoningMs: validDuration(candidate.lastTurnReasoningMs),
-		outputTokens: validDuration(candidate.outputTokens),
-		inputTokens: validDuration(candidate.inputTokens),
-		generationMs: validDuration(candidate.generationMs),
-		streamedOutputTokens: validDuration(candidate.streamedOutputTokens),
-		// Older entries recorded one settled native run and claim no human-wait exclusion.
-		scope: current && candidate.scope === "interaction" ? "interaction" : "run",
-		status: current && (candidate.status === "interrupted" || candidate.status === "failed" || candidate.status === "unavailable")
-			? candidate.status
-			: "settled",
-		humanWaitMs: current ? validDuration(candidate.humanWaitMs) : 0,
-	};
-}
-
-function turnOutputTokens(turn: TurnTiming): number {
-	const chars = Math.max(turn.deltaChars, turn.messageChars);
-	if (turn.partial) return Math.round(Math.max(0, chars - turn.outputBaseline) / OUTPUT_CHARS_PER_TOKEN);
-	return Math.max(turn.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
-}
-
-/** Provider input tokens this interaction can attribute to the turn. */
-function turnInputTokens(turn: TurnTiming): number {
-	// This request's prompt was sent before the person joined, even if usage arrives later.
-	return turn.partial ? 0 : turn.providerInputTokens;
-}
-
-/**
- * Cut an in-flight turn at the moment an interaction joined it. Nothing produced, reasoned
- * or decoded before the cut belongs to the interaction: the decode window restarts at the cut,
- * completed reasoning is dropped, and token metrics subtract the already-seen prefix so only
- * the rest of the turn is attributed. A turn that had finished decoding contributes no
- * decode window at all.
- */
-function cutTurnAt(turn: TurnTiming, at: number): TurnTiming {
-	const chars = Math.max(turn.deltaChars, turn.messageChars);
-	const decoding = turn.decodeStartedAt !== undefined && turn.decodePausedAt === undefined;
-	return {
-		completedReasoningMs: 0,
-		activeReasoning: new Map([...turn.activeReasoning.keys()].map((index) => [index, at])),
-		deltaChars: turn.deltaChars,
-		messageChars: turn.messageChars,
-		providerOutputTokens: turn.providerOutputTokens,
-		providerInputTokens: turn.providerInputTokens,
-		outputBaseline: chars,
-		partial: true,
-		decodeStartedAt: decoding ? at : undefined,
-		decodePausedAt: undefined,
-	};
-}
-
-function startTurnDecode(turn: TurnTiming, at: number): void {
-	if (turn.decodeStartedAt !== undefined || turn.decodePausedAt !== undefined) return;
-	turn.decodeStartedAt = at;
-}
-
-function pauseTurnDecode(turn: TurnTiming, at: number): void {
-	if (turn.decodePausedAt !== undefined || turn.decodeStartedAt === undefined) return;
-	turn.decodePausedAt = Math.max(turn.decodeStartedAt, at);
-}
-
-/** First-token-to-pause decode time of one turn, including thinking and stream stalls. */
-function turnDecodeMs(turn: TurnTiming, at: number): number {
-	if (turn.decodeStartedAt === undefined) return 0;
-	const end = turn.decodePausedAt ?? at;
-	return Math.max(0, end - turn.decodeStartedAt);
-}
-
-function isDecodeSignal(type: unknown): boolean {
+function isOutputSignal(type: unknown): boolean {
 	return type === "thinking_start" || type === "thinking_delta" || type === "text_delta" || type === "toolcall_delta";
 }
 
@@ -400,26 +250,64 @@ function messageOutputChars(message: unknown): number {
 	return chars;
 }
 
-function usageTokenCount(source: unknown, field: "input" | "output"): number {
-	const usage = (source as { usage?: Record<string, unknown> } | undefined)?.usage;
-	const value = Number(usage?.[field]);
+function usageOutputTokens(source: unknown): number {
+	const value = Number((source as { usage?: { output?: unknown } } | undefined)?.usage?.output);
 	return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
 }
 
-function recordTurnOutput(turn: TurnTiming, event: { type?: unknown; delta?: unknown; partial?: unknown }, message: unknown): void {
-	const deltaChars = streamedOutputChars(event);
-	turn.deltaChars += deltaChars;
-	turn.messageChars = Math.max(turn.messageChars, messageOutputChars(message));
-	turn.providerOutputTokens = Math.max(
-		turn.providerOutputTokens,
-		usageTokenCount(message, "output"),
-		usageTokenCount(event.partial, "output"),
-	);
-	turn.providerInputTokens = Math.max(
-		turn.providerInputTokens,
-		usageTokenCount(message, "input"),
-		usageTokenCount(event.partial, "input"),
-	);
+function newRequest(startedAt: number | undefined): RequestTiming {
+	return {
+		begun: startedAt !== undefined,
+		startedAt,
+		firstOutputAt: undefined,
+		completedThinkingMs: 0,
+		activeThinking: new Map(),
+		deltaChars: 0,
+		messageChars: 0,
+		providerOutputTokens: 0,
+	};
+}
+
+function thinkingAt(request: RequestTiming, at: number): number {
+	let total = request.completedThinkingMs;
+	for (const startedAt of request.activeThinking.values()) total += Math.max(0, at - startedAt);
+	return total;
+}
+
+/** In-flight output estimate: provider-reported partial output or characters / 4. */
+function estimatedOutputTokens(request: RequestTiming): number {
+	const chars = Math.max(request.deltaChars, request.messageChars);
+	return Math.max(request.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
+}
+
+/**
+ * The persisted timing fact of a settled request. `TTFT` anchors the request start at
+ * `message_end − durationMs`, so it shares its start point with Pi's request duration.
+ */
+function settledTiming(request: RequestTiming, message: AssistantMessageLike, at: number): RequestTimingData | undefined {
+	if (typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)) return undefined;
+	const durationMs = typeof message.durationMs === "number" && Number.isFinite(message.durationMs) && message.durationMs > 0
+		? message.durationMs
+		: undefined;
+	const startedAt = durationMs === undefined ? request.startedAt : at - durationMs;
+	const ttftMs = request.firstOutputAt === undefined || startedAt === undefined ? undefined : request.firstOutputAt - startedAt;
+	const validTtft = ttftMs !== undefined && ttftMs > 0 && (durationMs === undefined || ttftMs <= durationMs);
+	return {
+		version: REQUEST_TIMING_VERSION,
+		messageTimestamp: message.timestamp,
+		...(validTtft ? { ttftMs } : {}),
+		thinkingMs: thinkingAt(request, at),
+	};
+}
+
+function sessionEntries(ctx: ExtensionContext): readonly unknown[] {
+	return ctx.sessionManager.getEntries();
+}
+
+/** The lane's metric block: usage fields as one field, then each timing field. */
+function metricBlock(totals: LaneTotals, options?: TimingFormatOptions): string[] {
+	const usage = usageMetricFields(totals).map((field) => field.text).join(" ");
+	return [...(usage ? [usage] : []), ...timingMetricFields(totals, options).map((field) => field.text)];
 }
 
 export function createWorkTimingExtension(
@@ -434,15 +322,13 @@ export function createWorkTimingExtension(
 	return (pi: ExtensionAPI): void => {
 		let intervalHandle: unknown;
 		let unsubscribeResize: (() => void) | undefined;
+		/** Session entries at the latest external input; the interaction it opens starts there. */
+		let pendingEntryStart: number | undefined;
 
 		const emptyData = (): TimingData => ({
-			reasoningMs: 0,
-			lastTurnReasoningMs: 0,
-			outputTokens: 0,
-			inputTokens: 0,
-			generationMs: 0,
-			streamedOutputTokens: 0,
-			turn: undefined,
+			entryStart: 0,
+			request: undefined,
+			settled: undefined,
 			tools: [],
 			clock: undefined,
 			lastStatus: undefined,
@@ -458,19 +344,18 @@ export function createWorkTimingExtension(
 		const finalize = ({ span: current, status, totalMs, humanWaitMs }: InteractionClose<TimingData>): void => {
 			stopInterval();
 			current.ctx.ui.setWorkingMessage();
-			const data = current.data;
+			// Usage-bearing entries that settled during the interaction, re-bills against the whole session.
+			const metrics = collectLaneTotals(sessionEntries(current.ctx), {
+				models: current.ctx.modelRegistry,
+				from: current.data.entryStart,
+			});
 			pi.appendEntry<WorkTimingEntryData>(WORK_TIMING_ENTRY_TYPE, {
 				version: WORK_TIMING_VERSION,
 				totalMs,
-				reasoningMs: data.reasoningMs,
-				lastTurnReasoningMs: data.lastTurnReasoningMs,
-				outputTokens: data.outputTokens,
-				inputTokens: data.inputTokens,
-				generationMs: data.generationMs,
-				streamedOutputTokens: data.streamedOutputTokens,
+				humanWaitMs,
 				scope: "interaction",
 				status,
-				humanWaitMs,
+				metrics,
 			});
 		};
 
@@ -479,28 +364,25 @@ export function createWorkTimingExtension(
 			now,
 			createData: emptyData,
 			/**
-			 * The earlier run's completed metrics are not historical interaction work, and a
-			 * mid-turn cut keeps only its post-cut part. The live tool clocks measure the tools
-			 * themselves, not the interaction, so they continue.
+			 * A request belongs to the interaction in which it settles, so the in-flight request
+			 * and the live tool clocks continue; the interaction's entry population starts now.
 			 */
-			promoteData: (previous, at) => ({
+			promoteData: (previous) => ({
 				...emptyData(),
 				tools: previous.tools,
-				turn: previous.turn ? cutTurnAt(previous.turn, at) : undefined,
+				request: previous.request,
+				settled: previous.settled,
 			}),
+			onStart: (span) => {
+				// The population starts at the external input that opened the interaction, so work Pi does
+				// between that input and the run start (such as a pre-run compaction) is included.
+				span.data.entryStart = pendingEntryStart ?? sessionEntries(span.ctx).length;
+				pendingEntryStart = undefined;
+			},
 			onClose: finalize,
 		});
 
-		const turnReasoningAt = (turn: TurnTiming, at: number): number => {
-			let total = turn.completedReasoningMs;
-			for (const startedAt of turn.activeReasoning.values()) {
-				total += Math.max(0, at - startedAt);
-			}
-
-			return total;
-		};
-
-		const toolSnapshotAt = (current: TimingSpan, at: number): Pick<TimingSnapshot, "toolMs" | "toolCount"> => {
+		const toolSnapshotAt = (current: TimingSpan, at: number): { toolMs: number; toolCount: number } => {
 			const tools = current.data.tools;
 			if (tools.length === 0) return { toolMs: 0, toolCount: 0 };
 			const openPromptMs = current.promptStartedAt === undefined ? 0 : Math.max(0, at - current.promptStartedAt);
@@ -515,62 +397,62 @@ export function createWorkTimingExtension(
 			return { toolMs, toolCount: tools.length };
 		};
 
-		const snapshotAt = (current: TimingSpan, at: number): TimingSnapshot => {
-			const data = current.data;
-			const turn = data.turn;
-			const turnReasoningMs = turn ? turnReasoningAt(turn, at) : data.lastTurnReasoningMs;
-			const currentOutputTokens = turn ? turnOutputTokens(turn) : 0;
-			const currentInputTokens = turn ? turnInputTokens(turn) : 0;
-			const currentGenerationMs = turn ? turnDecodeMs(turn, at) : 0;
-			const currentStreamedTokens = turn && turn.decodeStartedAt !== undefined && currentGenerationMs > 0
-				? currentOutputTokens
-				: 0;
-			const outputTokens = data.outputTokens + currentOutputTokens;
+		const clockAt = (current: TimingSpan, at: number): ClockSample => {
+			const request = current.data.request;
 			return {
 				// Human wait is excluded: the span reports autonomous wall time.
 				totalMs: Math.max(0, at - current.startedAt - current.humanWaitMs),
-				reasoningMs: data.reasoningMs + (turn ? turnReasoningMs : 0),
-				turnReasoningMs,
-				outputTokens,
-				inputTokens: data.inputTokens + currentInputTokens,
-				generationMs: data.generationMs + currentGenerationMs,
-				streamedOutputTokens: data.streamedOutputTokens + currentStreamedTokens,
-				...toolSnapshotAt(current, at),
+				toolMs: toolSnapshotAt(current, at).toolMs,
+				thinkingMs: request ? thinkingAt(request, at) : 0,
+				ttftWaitMs: request?.startedAt !== undefined && request.firstOutputAt === undefined
+					? Math.max(0, at - request.startedAt)
+					: undefined,
 			};
 		};
 
-		// The slow lane samples durations; the stream lane refreshes tokens/rate.
+		/** In-flight estimates of the request lane; settlement replaces them. */
+		const liveRequest = (request: RequestTiming, durations: ClockSample, at: number): { totals: LaneTotals; ttftLive: boolean } => {
+			const totals = emptyLaneTotals();
+			totals.output = estimatedOutputTokens(request);
+			totals.thinkingMs = durations.thinkingMs;
+			let ttftLive = false;
+			if (request.startedAt !== undefined) {
+				totals.ttftCount = 1;
+				if (request.firstOutputAt === undefined) {
+					totals.ttftMs = durations.ttftWaitMs ?? Math.max(0, at - request.startedAt);
+					ttftLive = true;
+				} else {
+					totals.ttftMs = Math.max(0, request.firstOutputAt - request.startedAt);
+					totals.speedOutput = totals.output;
+					totals.speedMs = Math.max(0, at - request.startedAt);
+				}
+			}
+			return { totals, ttftLive };
+		};
+
+		// The slow lane samples durations; the stream lane refreshes output and rate.
 		// Both publish through the same formatter and working-message writer.
-		const sampleClock = (current: TimingSpan, at: number): void => {
-			const snapshot = snapshotAt(current, at);
-			current.data.clock = {
-				totalMs: snapshot.totalMs,
-				reasoningMs: snapshot.reasoningMs,
-				turnReasoningMs: snapshot.turnReasoningMs,
-				toolMs: snapshot.toolMs,
-			};
-		};
-
 		const paint = (at: number, resampleClock: boolean): void => {
 			const current = boundary.current;
 			if (!current) return;
-			if (resampleClock) sampleClock(current, at);
-			const snapshot = snapshotAt(current, at);
-			const durations = current.data.clock ?? snapshot;
+			if (resampleClock || !current.data.clock) current.data.clock = clockAt(current, at);
+			const durations = current.data.clock;
+			const toolCount = current.data.tools.length;
 			// Live tool timing: only a long-running tool is worth surfacing, and it
 			// vanishes the moment the tool ends.
-			const toolField = durations.toolMs >= TOOL_ELAPSED_MIN_MS
-				? `${TOOL_FIELD_PREFIX}${formatDuration(durations.toolMs)}${snapshot.toolCount > 1 ? ` +${snapshot.toolCount - 1}` : ""}`
-				: "";
-			const status =
-				`Working... ${formatDuration(durations.totalMs)}` +
-				(toolField ? ` • ${toolField}` : "") +
-				formatTokenCounts(snapshot.inputTokens, snapshot.outputTokens) +
-				` • R ${formatReasoningDuration(durations.turnReasoningMs)}` +
-				` / ΣR ${formatReasoningDuration(durations.reasoningMs)}` +
-				rateSuffix(snapshot.streamedOutputTokens, snapshot.generationMs);
+			const fields = [`Working... ${formatDuration(durations.totalMs)}`];
+			if (durations.toolMs >= TOOL_ELAPSED_MIN_MS && toolCount > 0) {
+				fields.push(`${TOOL_FIELD_PREFIX}${formatDuration(durations.toolMs)}${toolCount > 1 ? ` +${toolCount - 1}` : ""}`);
+			}
+			const request = current.data.request;
+			if (request?.begun) {
+				const live = liveRequest(request, durations, at);
+				fields.push(...metricBlock(live.totals, { ttftLive: live.ttftLive }));
+			} else if (current.data.settled) {
+				fields.push(...metricBlock(current.data.settled));
+			}
 			// Compact to the host's single-line working row; fields that cannot fit are omitted.
-			const label = compactStatusLabel(status, Math.max(1, columns() - WORKING_ROW_CHROME));
+			const label = compactStatusLabel(fields.join(" • "), Math.max(1, columns() - WORKING_ROW_CHROME));
 			if (label === current.data.lastStatus) return;
 			current.data.lastStatus = label;
 			current.ctx.ui.setWorkingMessage(label);
@@ -586,41 +468,27 @@ export function createWorkTimingExtension(
 			}, STATUS_UPDATE_INTERVAL_MS);
 		};
 
+		/** Tool and prompt events precede the turn boundary; close any leftover state. */
 		const finishTurn = (current: TimingSpan, at: number): void => {
-			// Tool and prompt events always precede the turn boundary; close any leftover
-			// state so a stale timer can never outlive its turn.
 			boundary.closePrompt(at);
-			const data = current.data;
-			data.tools.length = 0;
-			if (!data.turn) return;
-			const reasoningMs = turnReasoningAt(data.turn, at);
-			pauseTurnDecode(data.turn, at);
-			const outputTokens = turnOutputTokens(data.turn);
-			const generationMs = turnDecodeMs(data.turn, at);
-			data.reasoningMs += reasoningMs;
-			data.lastTurnReasoningMs = reasoningMs;
-			data.outputTokens += outputTokens;
-			data.inputTokens += turnInputTokens(data.turn);
-			data.generationMs += generationMs;
-			if (generationMs > 0) data.streamedOutputTokens += outputTokens;
-			data.turn = undefined;
+			current.data.tools.length = 0;
+			current.data.request = undefined;
 		};
 
 		const teardown = (): void => {
 			stopInterval();
 			unsubscribeResize?.();
 			unsubscribeResize = undefined;
+			pendingEntryStart = undefined;
 			boundary.reset();
 		};
 
 		pi.registerEntryRenderer<WorkTimingEntryData>(
 			WORK_TIMING_ENTRY_TYPE,
 			(entry, _options, theme) => {
-				const data = normalizeEntryData(entry.data);
-				const share = formatReasoningShare(data.reasoningMs, data.totalMs);
-				// Settled summary: cumulative values only (turn detail stays in the live label).
-				const rate = formatTokenRate(data.streamedOutputTokens, data.generationMs);
-				const elapsed = formatDuration(data.totalMs);
+				const data = (entry.data && typeof entry.data === "object" ? entry.data : {}) as Partial<WorkTimingEntryData>;
+				const totalMs = nonNegative(data.totalMs);
+				const elapsed = formatDuration(totalMs);
 				const head = data.status === "interrupted"
 					? `Interrupted after ${elapsed}`
 					: data.status === "failed"
@@ -628,13 +496,11 @@ export function createWorkTimingExtension(
 						: data.status === "unavailable"
 							? `Timed ${elapsed} (state unavailable)`
 							: `Worked for ${elapsed}`;
-				const waited = data.humanWaitMs >= 1_000 ? formatDuration(data.humanWaitMs) : "";
+				const humanWaitMs = nonNegative(data.humanWaitMs);
 				const fields = [
 					head,
-					...(waited ? [`waited ${waited}`] : []),
-					...tokenCountFields(data.inputTokens, data.outputTokens),
-					`ΣR ${formatReasoningDuration(data.reasoningMs)} (${share})`,
-					...(rate ? [rate] : []),
+					...(humanWaitMs >= 1_000 ? [`waited ${formatDuration(humanWaitMs)}`] : []),
+					...metricBlock(parseLaneTotals(data.metrics), { thinkingShareOfMs: totalMs }),
 				];
 				const text = fields.join(" • ");
 				return {
@@ -656,6 +522,9 @@ export function createWorkTimingExtension(
 
 		pi.on("input", (event, ctx) => {
 			if (ctx.mode !== "tui") return;
+			// Mirrors the boundary's pending start: every input replaces or clears it.
+			const external = event.source === "interactive" || event.source === "rpc";
+			pendingEntryStart = external ? sessionEntries(ctx).length : undefined;
 			boundary.input(event.source, ctx, now());
 		});
 
@@ -674,48 +543,86 @@ export function createWorkTimingExtension(
 		pi.on("turn_start", (_event, ctx) => {
 			const current = boundary.current;
 			if (ctx.mode !== "tui" || !current) return;
-			finishTurn(current, now());
-			current.data.turn = {
-				completedReasoningMs: 0,
-				activeReasoning: new Map(),
-				deltaChars: 0,
-				messageChars: 0,
-				providerOutputTokens: 0,
-				providerInputTokens: 0,
-				outputBaseline: 0,
-				partial: false,
-				decodeStartedAt: undefined,
-				decodePausedAt: undefined,
-			};
+			const at = now();
+			finishTurn(current, at);
+			// Pi may still process queued messages and prepare the request; the previous request's
+			// settled values stay until the next request actually starts.
+			current.data.request = newRequest(undefined);
+			paint(at, true);
+		});
+
+		/** The next request started: the previous request's settled values leave the row. */
+		const beginRequest = (current: TimingSpan): void => {
+			const request = current.data.request;
+			if (!request || request.begun) return;
+			request.begun = true;
+			current.data.settled = undefined;
+		};
+
+		pi.on("message_start", (event, ctx) => {
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current?.data.request || current.data.request.begun) return;
+			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
+			// Transports without a provider-request stage: the stream start marks the request, with no live counters.
+			beginRequest(current);
 			paint(now(), true);
+		});
+
+		pi.on("before_provider_request", (_event, ctx) => {
+			const current = boundary.current;
+			if (ctx.mode !== "tui" || !current?.data.request) return;
+			// The main request is about to be sent; a retry restarts the live counter.
+			const at = now();
+			current.data.request = newRequest(at);
+			current.data.settled = undefined;
+			paint(at, true);
+			// Observation only: never replaces the provider payload.
+			return undefined;
 		});
 
 		pi.on("message_update", (event, ctx) => {
-			const turn = boundary.current?.data.turn;
-			if (ctx.mode !== "tui" || !turn) return;
+			const current = boundary.current;
+			const request = current?.data.request;
+			if (ctx.mode !== "tui" || !current || !request) return;
+			beginRequest(current);
+			const at = now();
 			const assistantEvent = event.assistantMessageEvent;
 			if (assistantEvent.type === "thinking_start") {
-				if (!turn.activeReasoning.has(assistantEvent.contentIndex)) {
-					turn.activeReasoning.set(assistantEvent.contentIndex, now());
+				if (!request.activeThinking.has(assistantEvent.contentIndex)) {
+					request.activeThinking.set(assistantEvent.contentIndex, at);
 				}
 			} else if (assistantEvent.type === "thinking_end") {
-				const startedAt = turn.activeReasoning.get(assistantEvent.contentIndex);
+				const startedAt = request.activeThinking.get(assistantEvent.contentIndex);
 				if (startedAt !== undefined) {
-					turn.completedReasoningMs += Math.max(0, now() - startedAt);
-					turn.activeReasoning.delete(assistantEvent.contentIndex);
+					request.completedThinkingMs += Math.max(0, at - startedAt);
+					request.activeThinking.delete(assistantEvent.contentIndex);
 				}
 			}
-			if (isDecodeSignal(assistantEvent.type)) startTurnDecode(turn, now());
-			recordTurnOutput(turn, assistantEvent, event.message);
-			paint(now(), false);
+			const firstOutput = isOutputSignal(assistantEvent.type) && request.firstOutputAt === undefined;
+			if (firstOutput) request.firstOutputAt = at;
+			request.deltaChars += streamedOutputChars(assistantEvent);
+			request.messageChars = Math.max(request.messageChars, messageOutputChars(event.message));
+			request.providerOutputTokens = Math.max(
+				request.providerOutputTokens,
+				usageOutputTokens(event.message),
+				usageOutputTokens((assistantEvent as { partial?: unknown }).partial),
+			);
+			// The first output fixes the TTFT counter in the same frame.
+			paint(at, firstOutput);
 		});
 
 		pi.on("message_end", (event, ctx) => {
-			const turn = boundary.current?.data.turn;
-			if (ctx.mode !== "tui" || !turn) return;
-			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
-			pauseTurnDecode(turn, now());
-			paint(now(), true);
+			const current = boundary.current;
+			const message = (event as { message?: AssistantMessageLike }).message;
+			if (ctx.mode !== "tui" || !current || message?.role !== "assistant") return;
+			const at = now();
+			const request = current.data.request;
+			// Append before Pi persists the message, so the timing fact exists when usage settles.
+			const timing = request ? settledTiming(request, message, at) : undefined;
+			if (timing) pi.appendEntry<RequestTimingData>(REQUEST_TIMING_ENTRY_TYPE, timing);
+			current.data.settled = requestLaneTotals(sessionEntries(ctx), message, ctx.modelRegistry);
+			current.data.request = undefined;
+			paint(at, true);
 		});
 
 		const toolNameOf = (event: { toolName?: unknown }): string =>
@@ -735,7 +642,6 @@ export function createWorkTimingExtension(
 			if (ctx.mode !== "tui" || !current) return;
 			const at = now();
 			boundary.toolStart(event.toolCallId, at);
-			if (current.data.turn) pauseTurnDecode(current.data.turn, at);
 			const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
 			current.data.tools.push({
 				toolCallId,
@@ -771,12 +677,12 @@ export function createWorkTimingExtension(
 			paint(at, true);
 		});
 
-		pi.on("turn_end", (event, ctx) => {
+		pi.on("turn_end", (_event, ctx) => {
 			const current = boundary.current;
 			if (ctx.mode !== "tui" || !current) return;
-			if (current.data.turn) recordTurnOutput(current.data.turn, {}, event.message);
-			finishTurn(current, now());
-			paint(now(), true);
+			const at = now();
+			finishTurn(current, at);
+			paint(at, true);
 		});
 
 		pi.on("agent_settled", (event, ctx) => {
@@ -784,6 +690,7 @@ export function createWorkTimingExtension(
 			if (ctx.mode !== "tui" || !current) return;
 			const settledAt = now();
 			finishTurn(current, settledAt);
+			current.data.settled = undefined;
 			current.data.clock = undefined;
 			current.data.lastStatus = undefined;
 			// One summary only after the main loop and all work this interaction owns are quiet,

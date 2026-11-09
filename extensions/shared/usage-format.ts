@@ -1,4 +1,4 @@
-/** Token units and latest-prompt cache hit use the same meaning in main and agent views. */
+/** Token units and the prompt cache-hit share, used with the same meaning in main and agent views. */
 export function formatTokens(count: number): string {
 	if (count < 1_000) return count.toString();
 	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
