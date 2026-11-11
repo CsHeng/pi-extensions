@@ -5,7 +5,7 @@ import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@ear
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import notifications from "../extensions/notices/index.ts";
 import { EXECUTION_FACTS_EVENT, NOTICE_ACK, NOTICE_TYPE, EXECUTION_FACTS_REQUEST, type ProducerFacts } from "../extensions/shared/execution-facts.ts";
-import { createHostHarness, type HostHarness } from "./fixtures/host-fixture.ts";
+import { createHostHarness, waitForTrace, type HostHarness } from "./fixtures/host-fixture.ts";
 
 function publisher() {
 	let ctx: ExtensionContext;
@@ -106,6 +106,32 @@ test("provider retry retains the same native notification and does not acknowled
 	assert.equal(requests.length, 4);
 	for (const request of requests.slice(1)) assert.equal(noticeMessages(request).length, 1);
 	assert.deepEqual(noticeMessages(requests[1]!), noticeMessages(requests[2]!));
+	assert.deepEqual(source.acks, [["fixture-result"]]);
+	assert.deepEqual(h.errors, []);
+});
+
+for (const retried of [true, false]) test(`a result that becomes ready during a failed request reaches the main agent ${retried ? "through the retry" : "after the final error"}`, async t => {
+	const source = publisher();
+	const h = await createHostHarness({ extensions: [notifications, source.extension], settings: { retry: { maxRetries: retried ? 1 : 0, baseDelayMs: 5 } } });
+	t.after(() => h.dispose());
+	const requests: TranscriptContext[] = [];
+	const failing = (context: TranscriptContext) => {
+		requests.push(structuredClone(context));
+		source.facts.branchAnchor = h.session.sessionManager.getLeafId();
+		source.facts.executions = [{ id: "fixture-result", phase: "terminal", status: "exited", exitCode: 0, summary: "Fixture execution finished successfully.", disposition: "pending" }];
+		source.publish();
+		return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: synthetic transient" });
+	};
+	const later = (retried ? [ordinaryTool(), fauxAssistantMessage("done")] : [fauxAssistantMessage("noted")])
+		.map(response => (context: TranscriptContext) => { requests.push(structuredClone(context)); return response; });
+	h.faux.setResponses([failing, ...later]);
+	await h.session.prompt("work while a background result finishes");
+	await waitForTrace(h.trace, () => h.faux.state.callCount >= (retried ? 3 : 2));
+	await h.session.waitForIdle();
+	assert.equal(requests.length, retried ? 3 : 2);
+	assert.equal(noticeMessages(requests[0]!).length, 0);
+	for (const request of requests.slice(retried ? 2 : 1)) assert.equal(noticeMessages(request).length, 1, "the main agent sees the result after the error");
+	assert.equal(h.session.sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.customType === NOTICE_TYPE).length, 1);
 	assert.deepEqual(source.acks, [["fixture-result"]]);
 	assert.deepEqual(h.errors, []);
 });

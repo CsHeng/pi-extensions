@@ -169,10 +169,12 @@ export default function noticesExtension(pi: ExtensionAPI): void {
 		publishDelivery();
 	});
 	pi.on("message_end", (event) => {
-		if (event.message.role === "assistant" && (event.message.stopReason === "aborted" || event.message.stopReason === "error")) { wakeStopped = true; publishDelivery(); }
+		// Only a user abort stops result delivery. A provider error ends the request, not the
+		// user's interest in results: Pi's retry or the idle settlement still delivers them.
+		if (event.message.role === "assistant" && event.message.stopReason === "aborted") { wakeStopped = true; publishDelivery(); }
 	});
 	pi.on("agent_end", (event) => {
-		if (event.messages.some(message => message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error"))) {
+		if (event.messages.some(message => message.role === "assistant" && message.stopReason === "aborted")) {
 			wakeStopped = true;
 			for (const notice of pendingKeys()) suppressed.add(notice);
 			publishDelivery();
