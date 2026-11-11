@@ -6,7 +6,7 @@ import { registerContinuationTool, type ContinuationService } from "../../extens
 import { ManagedSessionStore } from "../../extensions/agents/managed-sessions.ts";
 import { defaultConfig } from "../../extensions/agents/config.ts";
 import { emptyUsage } from "../../extensions/agents/contracts.ts";
-import { LOOP_FACTS_EVENT, type LoopFacts } from "../../extensions/shared/loop-facts.ts";
+import { EXECUTION_FACTS_EVENT, type ProducerFacts } from "../../extensions/shared/execution-facts.ts";
 import { WORK_TIMING_ENTRY_TYPE } from "../../extensions/work-timing/index.ts";
 import { observeExecutionQuiescence, readExecutionQuiescence } from "../../extensions/shared/execution-quiescence.ts";
 
@@ -74,10 +74,10 @@ export default function timingAsyncFixture(pi: ExtensionAPI): void {
 	});
 	pi.on("input", (event, ctx) => { trace.push({ input: event.source, mode: ctx.mode }); });
 	pi.on("before_agent_start", event => { kinds.push(event.messageType); startedAt ||= performance.now(); });
-	pi.events.on(LOOP_FACTS_EVENT, raw => {
-		const facts = raw as LoopFacts;
-		if (facts.producer === "retained-shell") bashDone ||= facts.executions.some(item => item.phase === "terminal");
-		if (facts.producer === "subagents") agentDone ||= facts.executions.some(item => item.phase === "terminal");
+	pi.events.on(EXECUTION_FACTS_EVENT, raw => {
+		const facts = raw as ProducerFacts;
+		if (facts.producer === "async-bash") bashDone ||= facts.executions.some(item => item.phase === "terminal");
+		if (facts.producer === "agents") agentDone ||= facts.executions.some(item => item.phase === "terminal");
 		if (!notifications && bashDone && agentDone) { settledAt = performance.now(); finish(); }
 	});
 	pi.on("agent_settled", async (_event, ctx) => {

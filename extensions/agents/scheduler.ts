@@ -7,7 +7,7 @@ import {
 	truncateUtf8,
 	type ChildActivity,
 	type RoleName,
-	type SubagentRunResult,
+	type AgentRunResult,
 	type TaskExecutionPhase,
 	type TaskResult,
 	type UsageTotals,
@@ -96,7 +96,7 @@ function aggregate(
 		peakConcurrency: number;
 		peakConcurrencyByRole: Record<RoleName, number>;
 	},
-): SubagentRunResult {
+): AgentRunResult {
 	metrics.timing.scheduler!.endMs = metrics.clock.offset();
 	const runDurationMs = metrics.clock.elapsed();
 	metrics.timing.complete &&= metrics.clock.valid && spanDuration(metrics.timing.scheduler!) !== null &&
@@ -104,7 +104,7 @@ function aggregate(
 		results.every((result) => !result.telemetry?.childStarted || metrics.timing.children.some((span) => span.taskId === result.id));
 	const usage = emptyUsage();
 	for (const result of results) addUsage(usage, result.usage);
-	let status: SubagentRunResult["status"];
+	let status: AgentRunResult["status"];
 	if (aborted || results.some((result) => result.status === "aborted")) status = "aborted";
 	else if (results.every((result) => result.status === "succeeded")) status = "succeeded";
 	else if (results.some((result) => result.status === "succeeded")) status = "partial";
@@ -136,7 +136,7 @@ function boundedPredecessor(result: TaskResult): TaskResult {
 	return { ...result, output: truncateUtf8(result.output, HARD_LIMITS.maxPredecessorOutputBytes).text };
 }
 
-export async function runScheduledTasks(tasks: readonly NormalizedTask[], options: SchedulerOptions): Promise<SubagentRunResult> {
+export async function runScheduledTasks(tasks: readonly NormalizedTask[], options: SchedulerOptions): Promise<AgentRunResult> {
 	const clock = options.clock ?? createRunClock(options.now);
 	const now = clock.now;
 	const started = now();

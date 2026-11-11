@@ -4,11 +4,11 @@ These documents own self-contained extension behavior, maintenance and removal c
 
 - [Multi-skill mentions](architecture/multi-skill-mentions.md)
 - [Fast GPT](architecture/fast-gpt.md)
-- [Managed subagents](architecture/agents.md) and [execution](architecture/agent-execution.md)
+- [Managed agents](architecture/agents.md) and [execution](architecture/agent-execution.md)
 - [Execution primitives](architecture/agent-execution-primitives.md)
 - [Agents UI](architecture/agents-ui.md)
 - [Tasklist](architecture/tasklist.md)
-- [Job Notifications](architecture/job-notifications.md)
+- [Notices](architecture/notices.md)
 - [Usage metrics](architecture/usage-metrics.md)
 - [Work-timing metrics](architecture/work-timing.md)
 - [Async Bash](architecture/async-bash.md)

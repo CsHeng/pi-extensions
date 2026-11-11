@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { openListOverlay } from "../shared/list-overlay.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sharedAboveEditor, type AboveEditorComposer } from "../shared/above-editor.ts";
-import { TASKLIST_STATE_VERSION, type TasklistState, type TasklistView } from "../tasklist/goal-contracts.ts";
+import { TASKLIST_STATE_VERSION, type TasklistState, type TasklistView } from "../tasklist/contracts.ts";
 import {
 	parseTasksViewChanged,
 	parseTasksViewReply,
@@ -18,7 +18,6 @@ import {
 import { taskRows, tasksRenderBudget, type TasklistUiTheme } from "./render.ts";
 
 export const TASKS_UI_COMMAND = "tasks-ui";
-export const TASKS_UI_ALIAS = "tasklist-ui";
 export const TASKS_VIEW_TIMEOUT_MS = 4_000;
 
 export interface TasksUiOptions {
@@ -184,7 +183,7 @@ export function createTasksUi(options: TasksUiOptions = {}): (pi: ExtensionAPI) 
 		};
 		const openList = async () => {
 			if (!tui() || !ctx) return;
-			await openListOverlay(ctx, "Tasklist", (width, theme) => taskRows(currentView(), width, 1000, themeOf(theme)));
+			await openListOverlay(ctx, "Tasks", (width, theme) => taskRows(currentView(), width, 1000, themeOf(theme)));
 		};
 		const handle = async (args: string, commandCtx: ExtensionContext) => {
 			ctx = commandCtx;
@@ -202,13 +201,6 @@ export function createTasksUi(options: TasksUiOptions = {}): (pi: ExtensionAPI) 
 		};
 		listen();
 		pi.registerCommand(TASKS_UI_COMMAND, { description: "Show, hide, fold, or list the read-only task view", handler: handle });
-		pi.registerCommand(TASKS_UI_ALIAS, {
-			description: "Toggle the read-only task list view (show/hide/list)",
-			handler: async (args, commandCtx) => {
-				const arg = args.trim();
-				await handle(arg === "show" || arg === "hide" || arg === "list" ? arg : "", commandCtx);
-			},
-		});
 		pi.on("session_start", (_event, sessionCtx) => bind(sessionCtx));
 		pi.on("session_tree", (_event, sessionCtx) => bind(sessionCtx));
 		pi.on("session_shutdown", shutdown);

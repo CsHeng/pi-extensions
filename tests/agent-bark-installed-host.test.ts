@@ -30,7 +30,7 @@ printf '\\n' >> "$HOME/bark-events.jsonl"
 `, { mode: 0o700 });
 
 	// The minimal environment is deliberate: a worker that is itself a managed child must not
-	// leak CSHENG_SUBAGENT_CHILD into this simulated parent session.
+	// leak PI_EXTENSIONS_AGENT_CHILD into this simulated parent session.
 	const child = spawn("pi", ["--mode", "rpc", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-session", "--approve",
 		"-e", join(root, "extensions", "agent-bark.ts"),
 		"-e", join(root, "tests/fixtures/agent-bark/custom-wake.ts"),

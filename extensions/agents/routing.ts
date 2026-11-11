@@ -6,7 +6,7 @@ import type {
 	TaskError,
 	ThinkingLevel,
 } from "./contracts.ts";
-import type { EffectiveSubagentConfig, RouteCandidateConfig } from "./config.ts";
+import type { EffectiveAgentConfig, RouteCandidateConfig } from "./config.ts";
 
 export interface RouteModel {
 	provider: string;
@@ -143,7 +143,7 @@ function thinkingUnavailable(message: string): RouteResolution {
 }
 
 function resolveExplicitModelRoute(
-	config: EffectiveSubagentConfig,
+	config: EffectiveAgentConfig,
 	context: RouteContext,
 	profiles: TaskRouteProfiles,
 	allModels: readonly RouteModel[],
@@ -193,7 +193,7 @@ function resolveExplicitModelRoute(
 
 export function resolveRoute(
 	role: RoleName,
-	config: EffectiveSubagentConfig,
+	config: EffectiveAgentConfig,
 	context: RouteContext,
 	profiles: TaskRouteProfiles = {},
 ): RouteResolution {

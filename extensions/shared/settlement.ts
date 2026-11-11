@@ -17,7 +17,7 @@ export interface SettlementBarrier {
  * Keep it through preflight until request preparation or explicit invalidation. */
 interface WakeState { sessionId?: string; listening?: boolean }
 const wakeStates = new WeakMap<ExtensionAPI["events"], WakeState>();
-const WAKE_STATE_EVENT = "csheng.model-wake.state";
+const WAKE_STATE_EVENT = "model-wake.state";
 function wakeState(pi: ExtensionAPI): WakeState {
 	const cached = wakeStates.get(pi.events);
 	if (cached) return cached;

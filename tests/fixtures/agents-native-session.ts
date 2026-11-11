@@ -1,0 +1,227 @@
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { rename, writeFile } from "node:fs/promises";
+
+function grantPaths(input: string): string[] {
+	const fromPrompt = [...input.matchAll(/(?:read|write) (\/[^"\\\s]+)/g)].map((match) => match[1]!);
+	let fromCapability: string[] = [];
+	const manifest = process.env.PI_EXTENSIONS_AGENT_CAPABILITY;
+	if (manifest) {
+		try { fromCapability = (JSON.parse(readFileSync(manifest, "utf8")) as { grants?: Array<{ path?: string }> }).grants?.flatMap((grant) => grant.path ? [grant.path] : []) ?? []; }
+		catch { fromCapability = []; }
+	}
+	return [...fromPrompt, ...fromCapability].filter((path, index, all) => path.startsWith("/") && all.indexOf(path) === index);
+}
+function explorerReadPath(input: string): string {
+	const grants = grantPaths(input);
+	const external = grants.find((path) => path.endsWith("external.txt") || path.includes("/sibling/"));
+	if (external) return external.endsWith("external.txt") ? external : `${external}/external.txt`;
+	return "external.txt";
+}
+
+function workerCommand(input: string, count: number): string {
+	if (process.env.PI_EXTENSIONS_ASYNC_GATES) return `node -e 'const fs=require("node:fs"), root=process.env.PI_EXTENSIONS_ASYNC_GATES, id=process.env.PI_EXTENSIONS_ASYNC_TASK; if(!["fast","slow"].includes(id))process.exit(8); fs.writeFileSync(root+"/started-"+id,"ready"); const timer=setInterval(()=>{if(!fs.existsSync(root+"/release-"+id))return;clearInterval(timer);if(${count}===1&&fs.existsSync("parent-progress"))process.exit(9);fs.writeFileSync(id+".txt","candidate-${count}");},10);setTimeout(()=>process.exit(10),20000).unref();'`;
+	if (input.includes("host-inputs-fixture")) return `node -e 'const fs = require("node:fs"); fs.mkdirSync("node_modules/pkg", {recursive:true}); fs.writeFileSync("node_modules/pkg/index.js", "module.exports = \\\"local-dependency\\\""); fs.writeFileSync("candidate.txt", require("pkg"))' && git add -- candidate.txt && git diff --cached --name-only -- candidate.txt`;
+	if (input.includes("after-child-compaction-fixture")) return `node -e 'const fs=require("node:fs"); if(fs.readFileSync("candidate.txt","utf8")!=="candidate-1" || fs.readFileSync("node_modules/fixture-state","utf8")!=="retained-local")process.exit(3); fs.appendFileSync("candidate.txt","|continued")'`;
+	if (input.includes("two-root-fixture")) {
+		const prepared = [...input.matchAll(/- write (\/[^"\\\s]+) -> (\/[^"\\\s]+)/g)];
+		const left = prepared.find(match => match[1]!.endsWith("/repo"))?.[2];
+		const right = prepared.find(match => match[1]!.endsWith("/other"))?.[2];
+		const evidence = input.match(/- read (\/[^"\\\s]+)/)?.[1];
+		if (!left || !right || !evidence) return "exit 4";
+		const q = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+		const script = [
+			"const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process');",
+			"const [api,client,spec]=process.argv.slice(1);",
+			"fs.writeFileSync(p.join(api,'package.json'),JSON.stringify({name:'alpha'}));",
+			"fs.writeFileSync(p.join(client,'package.json'),JSON.stringify({name:'beta'}));",
+			`fs.writeFileSync(p.join(api,'api.cjs'),${JSON.stringify('module.exports = () => "from-a";\n')});`,
+			`fs.writeFileSync(p.join(client,'client.cjs'),${JSON.stringify('module.exports = () => require(require("node:path").join(process.env.API_ROOT, "api.cjs"))() + "|client-v2";\n')});`,
+			"const checked=cp.spawnSync(process.execPath,['check.cjs'],{cwd:client,env:{...process.env,API_ROOT:api,SPEC_FILE:spec},stdio:'inherit'});",
+			"process.exit(checked.status ?? 1);",
+		].join("\n");
+		return `node -e ${q(script)} ${q(left)} ${q(right)} ${q(evidence)}`;
+	}
+	if (input.includes("private-continuity-fixture")) return "mkdir -p node_modules && printf retained-local > node_modules/fixture-state && printf candidate-1 > candidate.txt";
+	if (input.includes("cancel-fixture")) return '(sleep 30; printf orphan > orphan.txt) & descendant=$!; printf \'%s\' "$descendant" > "$TMPDIR/descendant.pid"; wait';
+	return `printf 'candidate-${count}' > candidate.txt`;
+}
+
+/** In-process synthetic provider: no sockets, credentials, or external requests. */
+export default function nativeSessionFixture(pi: ExtensionAPI): void {
+	let compactionTriggered = false;
+	pi.registerProvider("agent-fixture", {
+		baseUrl: "http://invalid.invalid",
+		apiKey: "synthetic-not-a-credential",
+		api: "openai-completions",
+		models: [{
+			id: "fixture", name: "Fixture", reasoning: false, input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: process.env.PI_EXTENSIONS_NATIVE_COMPACTION_MODE ? 4096 : 128000, maxTokens: 1024,
+		}],
+		streamSimple(model, context, options) {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(async () => {
+				// The real managed context hook appends an ephemeral index after the
+				// request. It is context, not another scripted user/tool transition.
+				const last = context.messages.filter((item) => !(item.role === "user" && JSON.stringify(item.content).includes("Stored local-task index"))).at(-1);
+				let text = `users=${context.messages.filter((message) => message.role === "user").length}${last?.role === "toolResult" ? `;tool=${JSON.stringify(last.content)}` : ""}`;
+				if (process.env.PI_EXTENSIONS_NATIVE_CONTEXT_MODE) {
+					const initial = {
+						systemPrompt: getCurrentSystemPrompt(context.messages),
+						messages: context.messages,
+						tools: getCurrentTools(context.messages).map((tool) => ({ name: tool.name })),
+					};
+					const payload = (await options?.onPayload?.(initial, model) ?? initial) as typeof initial;
+					const serialized = JSON.stringify(payload.messages);
+					text = serialized.includes("<conversation>") ? "SYNTHETIC_SUMMARY" : `index=${serialized.split("Stored local-task index").length - 1};private=${serialized.includes("PRIVATE_INDEX_PROSE") ? 1 : 0}`;
+				}
+				// Pi 0.87 identifies summary requests in the system prompt; older hosts
+				// also expose a <conversation> wrapper in the user message.
+				const isSummary = getCurrentSystemPrompt(context.messages).startsWith("You are a context summarization assistant") ||
+					JSON.stringify(context.messages).includes("<conversation>");
+				if (isSummary) text = "SYNTHETIC_SUMMARY";
+				const message: AssistantMessage = {
+					role: "assistant", content: [{ type: "text", text }], api: model.api,
+					provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "stop",
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				};
+				const compaction = process.env.PI_EXTENSIONS_NATIVE_COMPACTION_MODE;
+				if (compaction && !compactionTriggered && text !== "SYNTHETIC_SUMMARY" && (!JSON.stringify(context.messages).includes("host-worker-fixture") || last?.role === "toolResult")) {
+					compactionTriggered = true;
+					if (compaction === "threshold") { message.usage.input = 3800; message.usage.totalTokens = 3801; }
+					else if (compaction === "overflow") {
+						message.content = []; message.stopReason = "error"; message.errorMessage = "exceeds the context window";
+						stream.push({ type: "error", reason: "error", error: message }); stream.end(); return;
+					}
+				}
+				const input = last?.role === "user" ? JSON.stringify(last.content) : "";
+				await import("node:fs/promises").then(fs => fs.appendFile("/tmp/dbg.txt", JSON.stringify({ text: text.slice(0,160), last: last?.role, mode: process.env.PI_EXTENSIONS_NATIVE_CONTEXT_MODE, cm: process.env.PI_EXTENSIONS_NATIVE_COMPACTION_MODE, err: Boolean(message.errorMessage), stop: message.stopReason, n: context.messages.length }) + "\n"));
+				if (process.env.PI_EXTENSIONS_APPEND_EXPECT_PARTS) {
+					const system = getCurrentSystemPrompt(context.messages);
+					const parts: string[] = JSON.parse(process.env.PI_EXTENSIONS_APPEND_EXPECT_PARTS);
+					message.content = [{ type: "text", text: JSON.stringify({ counts: parts.map(part => system.split(part).length - 1), native: system.includes("<tools>") && system.includes("<rules>") }) }];
+				}
+				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("catalog-child-fixture")) {
+					// First turn calls the ordinary configured custom tool; then report the
+					// request's effective tools and the observed tool result.
+					const results = context.messages.filter((item) => item.role === "toolResult");
+					if (results.length === 0) {
+						message.content = [{ type: "toolCall", id: "catalog-probe", name: "fixture_custom", arguments: {} }];
+						message.stopReason = "toolUse";
+						stream.push({ type: "done", reason: "toolUse", message });
+						stream.end();
+						return;
+					}
+					const tools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
+					message.content = [{ type: "text", text: `probe=${results.map((item) => (item as { toolName?: string }).toolName ?? "?").join(",")};tools=${tools.join(",")}` }];
+				}
+				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("configured-write-fixture")) {
+					// Call the configured native `write` override and report which implementation ran.
+					const results = context.messages.filter((item) => item.role === "toolResult");
+					if (results.length === 0) {
+						message.content = [{ type: "toolCall", id: "configured-write", name: "write", arguments: { path: "candidate.txt", content: "configured", then_run: "printf configured-then-run" } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					const first = results[0] as { content?: Array<{ text?: string }> };
+					const tools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
+					message.content = [{ type: "text", text: `override=${first.content?.map(part => part.text ?? "").join("") ?? "?"};tools=${tools.join(",")}` }];
+				}
+				else if (JSON.stringify(context.messages).includes("guidance-reachability-fixture")) {
+					const messages = context.messages;
+					const lastUserIndex = messages.findLastIndex(item => item.role === "user");
+					const turn = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
+					const results = turn.filter(item => item.role === "toolResult");
+					const latestSystem = [...messages].reverse().find(item => item.role === "system");
+					const current = JSON.stringify(latestSystem ?? {});
+					const userText = JSON.stringify(messages[lastUserIndex]?.content ?? "");
+					const guide = process.env.PI_EXTENSIONS_GUIDANCE_EXPECT_PATH ?? "";
+					const temporary = process.env.PI_EXTENSIONS_GUIDANCE_TEMPORARY_MARKER ?? "<no-temporary>";
+					const decision = process.env.PI_EXTENSIONS_GUIDANCE_DECISION_MARKER ?? "<no-decision>";
+					const reference = process.env.PI_EXTENSIONS_GUIDANCE_REFERENCE_MARKER ?? "reference marker";
+					if (guide && current.includes(guide) && results.length < 2) {
+						message.content = [{ type: "toolCall", id: `reach-${results.length}`, name: "read", arguments: { path: results.length === 0 ? guide : guide.replace(/SKILL\.md$/, "references/rule.md") } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					message.content = [{ type: "text", text: `catalog=${guide && current.includes(guide) ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes(reference) ? 1 : 0};temporary=${current.includes(temporary) ? 1 : 0};decision=${userText.includes(decision) ? 1 : 0}` }];
+				}
+				else if (JSON.stringify(context.messages).includes("guidance-worker-fixture") || JSON.stringify(context.messages).includes("guidance-fixture")) {
+					const worker = JSON.stringify(context.messages).includes("guidance-worker-fixture");
+					const system = getCurrentSystemPrompt(context.messages);
+					const guide = process.env.PI_EXTENSIONS_GUIDANCE_EXPECT_PATH ?? "";
+					const results = context.messages.filter(item => item.role === "toolResult");
+					if (guide && system.includes(guide) && results.length < 2) {
+						message.content = [{ type: "toolCall", id: `guidance-${results.length}`, name: "read", arguments: { path: results.length === 0 ? guide : guide.replace(/SKILL\.md$/, "references/rule.md") } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					if (worker && results.length === 2 && JSON.stringify(results).includes("export const answer = 42;")) {
+						message.content = [{ type: "toolCall", id: "guidance-candidate", name: "bash", arguments: { command: "printf 'export const answer = 42;\\n' > candidate.ts" } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					message.content = [{ type: "text", text: `catalog=${guide && system.includes(guide) ? 1 : 0};ancestor=${system.includes("ancestor context") ? 1 : 0};snapshot=${system.includes("snapshot override") ? 1 : 0};managed=${system.includes("unrelated managed context") ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes("reference marker") ? 1 : 0};forbidden=${system.includes(process.env.PI_EXTENSIONS_GUIDANCE_FORBIDDEN_PATH ?? "<no-forbidden-path>") ? 1 : 0}` }];
+				}
+				else if (text !== "SYNTHETIC_SUMMARY" && input.includes("parent-observation-fixture")) {
+					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1);
+					const priorText = prior?.role === "toolResult" ? prior.content.find((part) => part.type === "text") : undefined;
+					const view = priorText?.type === "text" ? JSON.parse(priorText.text).sessions[0] : undefined;
+					const arguments_ = input.includes("continue-parent-observation-fixture")
+						? { action: "continue", episodes: [{ handle: view.handle, expectedEpisode: view.episode, message: "host-worker-fixture" }] }
+						: { action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.cwd() }] }] };
+					// A host re-delivery repeats the original tool call id; a new call gets a new one.
+					const priorCallId = input.includes("replay-parent-observation-fixture")
+						? context.messages.filter((item) => item.role === "assistant").flatMap((item) => Array.isArray(item.content) ? item.content : []).filter((part) => part.type === "toolCall" && (part as { name?: string }).name === "agent").map((part) => (part as { id?: string }).id).at(-1)
+						: undefined;
+					message.content = [{ type: "toolCall", id: priorCallId ?? `parent-${context.messages.filter((item) => item.role === "user").length}`, name: "agent", arguments: arguments_ }];
+					message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+				}
+				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("nested-delegation-fixture")) {
+					// A managed child invokes the co-loaded typed delegation tool for an explicit scope.
+					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1) as { content?: Array<{ type?: string; text?: string }> } | undefined;
+					if (!prior) {
+						message.content = [{ type: "toolCall", id: "nested-delegation", name: "agent", arguments: { action: "create", tasks: [{ id: "nested", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.env.PI_EXTENSIONS_NESTED_SCOPE ?? "." }] }] } }];
+						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+					}
+					const part = prior.content?.find((item) => item.type === "text");
+					let parsed: { status?: string; error?: { code?: string } } = {};
+					try { parsed = JSON.parse(part?.text ?? "{}"); } catch { parsed = {}; }
+					message.content = [{ type: "text", text: `nested=${parsed.status ?? "?"};code=${parsed.error?.code ?? "none"}` }];
+				}
+				if (input.includes("after-child-compaction-fixture") && !JSON.stringify(context.messages).includes("SYNTHETIC_SUMMARY")) {
+					message.stopReason = "error"; message.errorMessage = "fixture_requires_retained_summary";
+					stream.push({ type: "error", reason: "error", error: message }); stream.end(); return;
+				}
+				if (text !== "SYNTHETIC_SUMMARY" && (input.includes("host-worker-fixture") || input.includes("host-reviewer-fixture") || input.includes("host-explorer-fixture"))) {
+					const count = context.messages.filter((item) => item.role === "user").length;
+					if (input.includes("capability-invalidated-fixture") && process.env.PI_EXTENSIONS_NATIVE_REPLACE_ROOT) {
+						const root = process.env.PI_EXTENSIONS_NATIVE_REPLACE_ROOT;
+						await rename(root, `${root}.old`);
+						await writeFile(root, "replacement");
+					}
+					const granted = grantPaths(input)[0];
+					message.content = [input.includes("host-reviewer-fixture")
+						? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: granted ? `${granted}/candidate.txt` : "candidate.txt" } }
+						: input.includes("host-explorer-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "read", arguments: { path: explorerReadPath(input) } }
+						: input.includes("host-search-fixture") ? { type: "toolCall", id: `fixture-${count}`, name: "find", arguments: { pattern: "*.txt", path: "." } }
+						: { type: "toolCall", id: `fixture-${count}|provider:command`, name: "bash", arguments: { command: workerCommand(input, count) } }];
+					message.stopReason = "toolUse";
+					stream.push({ type: "done", reason: "toolUse", message });
+					stream.end();
+					return;
+				}
+				const thinking = text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("thinking-fixture");
+				if (thinking) message.content.unshift({ type: "thinking", thinking: "fixture-private-thinking" });
+				stream.push({ type: "start", partial: message });
+				if (thinking && !JSON.stringify(context.messages).includes("done-only-thinking-fixture")) {
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta: "fixture-private-thinking", partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: "fixture-private-thinking", partial: message });
+				}
+				stream.push({ type: "text_delta", contentIndex: thinking ? 1 : 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+				stream.end();
+			});
+			return stream;
+		},
+	});
+}

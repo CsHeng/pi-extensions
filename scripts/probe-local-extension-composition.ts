@@ -15,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import type { HostHarness } from "../tests/fixtures/workflow/host-fixture.ts";
+import type { HostHarness } from "../tests/fixtures/host-fixture.ts";
 
 const receiptOut = (value: unknown) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 const receiptError = (value: unknown) => process.stderr.write(`${JSON.stringify(value)}\n`);
@@ -87,7 +87,7 @@ try {
  const pack = await jiti.import(packPath) as { createObservationPackExtension(): ExtensionFactory };
  const cc = await jiti.import(ccPath) as { installWriteOverride(pi: ExtensionAPI): unknown };
  const rtk = await jiti.import(rtkSource, { default: true }) as ExtensionFactory;
- const { createHostHarness } = await import("../tests/fixtures/workflow/host-fixture.ts");
+ const { createHostHarness } = await import("../tests/fixtures/host-fixture.ts");
  const { fauxAssistantMessage, fauxToolCall } = await import("@earendil-works/pi-ai");
  const call = (name: string, args: unknown) => fauxAssistantMessage(fauxToolCall(name, args as never));
  const text = (message: { content?: unknown }) => Array.isArray(message.content)
@@ -144,10 +144,10 @@ try {
  let rewrites = 0;
  const rtkStub: ExtensionFactory = pi => rtk({ ...pi, exec: async (command, args) => {
   assert.equal(command, "rtk", "only RTK protocol may hit exec stub");
-  if (args[0] === "--version") return { stdout: "rtk 0.23.0", stderr: "", code: 0, killed: false };
+  if (args[0] === "--version") return { stdout: "rtk 0.23.0", stderr: "", code: 0, killed: false, truncated: false };
   assert.equal(args[0], "rewrite");
   rewrites++;
-  return { stdout: "printf 'rewritten-marker'", stderr: "", code: 0, killed: false };
+  return { stdout: "printf 'rewritten-marker'", stderr: "", code: 0, killed: false, truncated: false };
  } });
  const events: string[] = [];
  const observer: ExtensionFactory = pi => {

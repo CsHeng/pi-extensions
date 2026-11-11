@@ -7,7 +7,7 @@ import type { ConfigSourceSnapshot } from "./config.ts";
 import { COLLABORATION_CONTRACT_VERSION, type ProvenanceTelemetry } from "./contracts.ts";
 import { isProductId, mintProductId } from "./identity.ts";
 
-export const PROVENANCE_DIR = "subagent-provenance";
+export const PROVENANCE_DIR = "agent-provenance";
 export const PROVENANCE_MANIFEST = `current-v${COLLABORATION_CONTRACT_VERSION}.json`;
 export const PROVENANCE_LOCK = ".provenance-lock";
 const MANIFEST_VERSION = 1 as const;

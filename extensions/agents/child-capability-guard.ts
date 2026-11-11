@@ -5,7 +5,7 @@ import { CHILD_MARKER_ENV } from "./contracts.ts";
 import { authorizePath, loadCapability } from "./path-policy.ts";
 import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
 import { getManagedRole, toolsForAccess } from "./roles.ts";
-import { isNativePathTool, isNativeShellTool } from "./native-context.ts";
+import { isNativePathTool, isNativeBashTool } from "./native-context.ts";
 
 function requestedPath(toolName: string, input: unknown): string | undefined {
 	if (typeof input !== "object" || input === null) return undefined;
@@ -41,7 +41,7 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 		}
 		// The typed tool checks all repository/path/revision inputs itself on every execution.
 		const granted = new Set(toolsForAccess(loaded.manifest.grants.some(grant => grant.permission === "write")));
-		if (isNativeShellTool(event.toolName)) {
+		if (isNativeBashTool(event.toolName)) {
 			// A read or write grant keeps the cooperative host shell; it is not a path grant.
 			return undefined;
 		}

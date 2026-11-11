@@ -4,13 +4,13 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 /**
  * Idle prompt-cache keepalive.
  *
- * Pi 1.5.0 idle cache warming stops once the context holds a rebuilt message
- * (custom_message, compaction or branch summary). While Pi's `cacheWarming`
- * setting is "streaming", Pi still warms during runs and this extension covers
- * only the idle phase: it replays the last real provider payload with a
- * one-token response, on Pi's own schedule and economics.
+ * Pi's idle cache warming (rechecked through 1.5.1) stops once the context holds
+ * a rebuilt message (custom_message, compaction or branch summary). While Pi's
+ * `cacheWarming` setting is explicitly "streaming", Pi still warms during runs
+ * and this extension covers only the idle phase: it replays the last real
+ * provider payload with a one-token response, on Pi's own schedule and economics.
  */
-export const CACHE_KEEPALIVE_ENTRY_TYPE = "csheng-cache-keepalive";
+export const CACHE_KEEPALIVE_ENTRY_TYPE = "cache-keepalive.refresh";
 
 const ENTRY_VERSION = 1 as const;
 const IDLE_CONTINUATION_PROBABILITY = 0.15;
@@ -53,6 +53,8 @@ interface Run {
 	deadlineAt: number;
 	timer?: unknown;
 	controller?: AbortController | undefined;
+	/** Cost of this idle period's successful refreshes, shown as one cumulative notice. */
+	warmedCost: number;
 }
 
 export interface RefreshEconomics {
@@ -67,7 +69,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Same refresh delay Pi 1.5.0 uses: 90% of the lifetime, at least 10 s before expiry. */
+/** Same refresh delay Pi uses: 90% of the lifetime, at least 10 s before expiry. */
 export function refreshDelayMs(ttlMs: number): number | undefined {
 	if (ttlMs <= 10_000) return undefined;
 	return Math.max(1, Math.floor(Math.min(ttlMs * 0.9, ttlMs - 10_000)));
@@ -96,7 +98,7 @@ function price(model: AnyModel, tokens: Partial<Pick<Usage, "input" | "output" |
 	return calculateCost(model, usage).total;
 }
 
-/** Pi 1.5.0 idle economics: warm when 15% of the avoided rewrite exceeds the refresh by $0.05. */
+/** Pi's idle economics: warm when 15% of the avoided rewrite exceeds the refresh by $0.05. */
 export function refreshEconomics(model: AnyModel, promptTokens: number): RefreshEconomics {
 	const hit = price(model, { cacheRead: promptTokens });
 	const miss = price(model, model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens });
@@ -124,9 +126,14 @@ function lastPromptTokens(ctx: ExtensionContext): number {
 	return 0;
 }
 
-function cacheWarmingMode(pi: ExtensionAPI): string {
-	const mode = (pi.getSettings() as { cacheWarming?: unknown }).cacheWarming;
-	return typeof mode === "string" ? mode : "streaming";
+/** Active only for an explicit "streaming"; an absent or unknown value means Pi's default, "idle" since Pi 1.5.1. */
+function streamingMode(pi: ExtensionAPI): boolean {
+	return (pi.getSettings() as { cacheWarming?: unknown }).cacheWarming === "streaming";
+}
+
+/** Pi's cache-warming notice amount: at least three decimals, up to six. */
+export function formatWarmedCost(total: number): string {
+	return total.toFixed(6).replace(/(\.\d{3}\d*?)0+$/, "$1");
 }
 
 function showNotices(pi: ExtensionAPI): boolean {
@@ -178,7 +185,7 @@ export function createCacheKeepalive(clock: KeepaliveClock = realClock): (pi: Ex
 		async function refresh(current: Run): Promise<void> {
 			current.timer = undefined;
 			if (run !== current) return;
-			if (clock.now() > current.deadlineAt || cacheWarmingMode(pi) !== "streaming") {
+			if (clock.now() > current.deadlineAt || !streamingMode(pi)) {
 				stop();
 				return;
 			}
@@ -195,6 +202,8 @@ export function createCacheKeepalive(clock: KeepaliveClock = realClock): (pi: Ex
 			try {
 				message = await current.ctx.modelRegistry.streamSimple(current.model, placeholderContext(), {
 					maxTokens: 1,
+					// Like Pi's warmer: leave the session's Anthropic message thread untouched.
+					disableContinuation: true,
 					maxRetries: 0,
 					signal: controller.signal,
 					sessionId: current.ctx.sessionManager.getSessionId(),
@@ -219,7 +228,9 @@ export function createCacheKeepalive(clock: KeepaliveClock = realClock): (pi: Ex
 				return;
 			}
 			record(current, { outcome: "warmed", usage: message.usage, expectedSavings: economics.expectedSavings });
-			if (showNotices(pi)) current.ctx.ui.notify(`Cache kept warm: $${message.usage.cost.total.toFixed(3)}`, "info");
+			current.warmedCost += message.usage.cost.total;
+			// Pi updates a still-last status line in place, so consecutive refreshes read as one cumulative line.
+			if (showNotices(pi)) current.ctx.ui.notify(`Cache kept warm: $${formatWarmedCost(current.warmedCost)}`, "info");
 			schedule(current, startedAt + current.delayMs);
 		}
 
@@ -227,13 +238,13 @@ export function createCacheKeepalive(clock: KeepaliveClock = realClock): (pi: Ex
 			stop();
 			const captured = capture;
 			const model = ctx.model as AnyModel | undefined;
-			if (!captured || !ctx.hasUI || !model || cacheWarmingMode(pi) !== "streaming") return;
+			if (!captured || !ctx.hasUI || !model || !streamingMode(pi)) return;
 			if (model.provider !== captured.provider || model.id !== captured.modelId || model.api !== "anthropic-messages") return;
 			if (!isReplayablePayload(captured.payload, model.id)) return;
 			const ttlMs = promptCacheTtlMs(model);
 			const delayMs = ttlMs === undefined ? undefined : refreshDelayMs(ttlMs);
 			if (ttlMs === undefined || delayMs === undefined) return;
-			const current: Run = { capture: captured, ctx, model, ttlMs, delayMs, deadlineAt: 0 };
+			const current: Run = { capture: captured, ctx, model, ttlMs, delayMs, deadlineAt: 0, warmedCost: 0 };
 			run = current;
 			schedule(current, captured.sentAt + delayMs);
 		}

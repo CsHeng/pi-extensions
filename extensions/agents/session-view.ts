@@ -12,11 +12,11 @@ import {
 	type RecordedUsageProjection,
 } from "./observability.ts";
 
-export const SESSION_VIEW_REQUEST_EVENT = "csheng.subagents.session-view.request";
-export const SESSION_VIEW_EVENT = "csheng.subagents.session-view";
+export const SESSION_VIEW_REQUEST_EVENT = "agents.session-view.request";
+export const SESSION_VIEW_EVENT = "agents.session-view";
 /** Invalidation only; contains no owner data and prompts an open consumer to requery its current scope. */
-export const SESSION_VIEW_CHANGED_EVENT = "csheng.subagents.session-view.changed";
-export const SESSION_VIEW_QUERY_EVENT = "csheng-subagent-view-query";
+export const SESSION_VIEW_CHANGED_EVENT = "agents.session-view.changed";
+export const SESSION_VIEW_QUERY_EVENT = "agents.view-query";
 export const SESSION_VIEW_VERSION = COLLABORATION_CONTRACT_VERSION;
 /** Display delivery bounds; intentionally independent of open-session admission limits. */
 export const SESSION_VIEW_LIMITS = Object.freeze({ pageSize: 20, maxLiveRows: 16, maxRequestPage: 1_000_000, maxPayloadBytes: 256 * 1024 });

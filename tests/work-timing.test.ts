@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type {
 	EntryRenderer,
+	EntryRenderOptions,
 	ExtensionAPI,
 	ExtensionContext,
 	Theme,
@@ -19,19 +20,21 @@ import {
 	type WorkTimingEntryData,
 } from "../extensions/work-timing/index.ts";
 import {
-	LOOP_DELIVERY_CHANGED,
-	LOOP_DELIVERY_REQUEST,
-	LOOP_FACTS_EVENT,
-	LOOP_SNAPSHOT_REQUEST,
-	type LoopExecutionReference,
-	type LoopDeliverySnapshot,
-	type LoopExecution,
-	type LoopFacts,
-} from "../extensions/shared/loop-facts.ts";
+	NOTICE_DELIVERY_CHANGED,
+	NOTICE_DELIVERY_REQUEST,
+	EXECUTION_FACTS_EVENT,
+	EXECUTION_FACTS_REQUEST,
+	type ExecutionRef,
+	type NoticeDeliverySnapshot,
+	type ExecutionFact,
+	type ProducerFacts,
+} from "../extensions/shared/execution-facts.ts";
 
 /** Unit instances never attach real stdout resize listeners or read its width; width cases inject their own. */
 const createWorkTimingExtension = (dependencies: Parameters<typeof createExtension>[0] = {}) =>
 	createExtension({ onResize: () => () => {}, columns: () => 240, ...dependencies });
+
+const ENTRY_RENDER_OPTIONS: EntryRenderOptions = { expanded: false, keyText: () => "", keyHint: (_key, description) => description };
 
 type Handler = (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown;
 
@@ -163,13 +166,13 @@ async function settle(): Promise<void> {
 	await new Promise((resolve) => setImmediate(resolve));
 }
 
-function shellFacts(
-	executions: Array<Partial<LoopExecution> & { id: string }>,
-	availability: LoopFacts["availability"] = "ready",
-): LoopFacts {
+function bashFacts(
+	executions: Array<Partial<ExecutionFact> & { id: string }>,
+	availability: ProducerFacts["availability"] = "ready",
+): ProducerFacts {
 	return {
 		version: 1,
-		producer: "retained-shell",
+		producer: "async-bash",
 		availability,
 		sessionId: SESSION_ID,
 		branchAnchor: LEAF_ID,
@@ -186,33 +189,33 @@ function shellFacts(
 }
 
 function deliveryFacts(
-	pending: LoopExecutionReference[] = [],
-	scheduled: LoopExecutionReference[] = [],
-): LoopDeliverySnapshot {
+	pending: ExecutionRef[] = [],
+	scheduled: ExecutionRef[] = [],
+): NoticeDeliverySnapshot {
 	return { version: 1, sessionId: SESSION_ID, branchAnchor: LEAF_ID, pending, scheduled, blocked: false };
 }
 
 interface ProducerState {
-	facts: LoopFacts[];
-	delivery: LoopDeliverySnapshot;
+	facts: ProducerFacts[];
+	delivery: NoticeDeliverySnapshot;
 }
 
 /** Answers the neutral pull queries; it never starts work or a model turn. */
 function installProducer(pi: FakePi, state: ProducerState): ProducerState {
-	pi.events.on(LOOP_SNAPSHOT_REQUEST, (raw) => {
-		const request = raw as { accept: (facts: LoopFacts) => void };
+	pi.events.on(EXECUTION_FACTS_REQUEST, (raw) => {
+		const request = raw as { accept: (facts: ProducerFacts) => void };
 		for (const facts of state.facts) request.accept(facts);
 	});
-	pi.events.on(LOOP_DELIVERY_REQUEST, (raw) => {
-		const request = raw as { accept: (value: LoopDeliverySnapshot) => void };
+	pi.events.on(NOTICE_DELIVERY_REQUEST, (raw) => {
+		const request = raw as { accept: (value: NoticeDeliverySnapshot) => void };
 		request.accept(state.delivery);
 	});
 	return state;
 }
 
 function publish(pi: FakePi): void {
-	pi.events.emit(LOOP_FACTS_EVENT, {});
-	pi.events.emit(LOOP_DELIVERY_CHANGED, {});
+	pi.events.emit(EXECUTION_FACTS_EVENT, {});
+	pi.events.emit(NOTICE_DELIVERY_CHANGED, {});
 }
 
 function entryData(pi: FakePi, index = 0): WorkTimingEntryData {
@@ -229,7 +232,7 @@ function renderEntry(pi: FakePi, data: unknown, width = 120): string {
 	const renderer = pi.renderers.get(WORK_TIMING_ENTRY_TYPE);
 	assert.ok(renderer);
 	const theme = { fg: (_tone: string, text: string) => text } as unknown as Theme;
-	const component = renderer({ data } as never, { expanded: false }, theme);
+	const component = renderer({ data } as never, ENTRY_RENDER_OPTIONS, theme);
 	assert.ok(component);
 	return component.render(width)[0]?.trim() ?? "";
 }
@@ -548,7 +551,7 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
 	const state = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	createWorkTimingExtension({
@@ -577,8 +580,8 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 
 	// The job is terminal, but its result has not been delivered yet: still no summary.
 	now = 40_000;
-	state.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0, disposition: "pending" }])];
-	state.delivery = deliveryFacts([{ producer: "retained-shell", id: "exec-1", toolCallId: "call-bash" }]);
+	state.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0, disposition: "pending" }])];
+	state.delivery = deliveryFacts([{ producer: "async-bash", id: "exec-1", toolCallId: "call-bash" }]);
 	publish(pi);
 	await settle();
 	assert.equal(pi.entries.length, 0, "pending or reserved result delivery prolongs the interaction");
@@ -628,7 +631,7 @@ test("compares producer registration order without changing the outcome", async 
 		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
 		clearInterval: (handle) => scheduler.clearInterval(handle),
 	})(pi as unknown as ExtensionAPI);
-	const state = installProducer(pi, { facts: [shellFacts([])], delivery: deliveryFacts() });
+	const state = installProducer(pi, { facts: [bashFacts([])], delivery: deliveryFacts() });
 
 	await beginInteraction(pi, ctx);
 	now = 4_000;
@@ -644,8 +647,8 @@ test("ignores pre-existing and late unrelated work", async () => {
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const state = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-old", toolCallId: "old-call" }])],
-		delivery: deliveryFacts([{ producer: "retained-shell", id: "exec-old", toolCallId: "old-call" }]),
+		facts: [bashFacts([{ id: "exec-old", toolCallId: "old-call" }])],
+		delivery: deliveryFacts([{ producer: "async-bash", id: "exec-old", toolCallId: "old-call" }]),
 	});
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
@@ -662,7 +665,7 @@ test("ignores pre-existing and late unrelated work", async () => {
 	assert.equal(entryData(pi).totalMs, 10_000);
 
 	// Its terminal notice starts an automatic run, which has no human interaction to summarize.
-	state.facts = [shellFacts([{ id: "exec-old", toolCallId: "old-call", phase: "terminal", status: "exited", exitCode: 0 }])];
+	state.facts = [bashFacts([{ id: "exec-old", toolCallId: "old-call", phase: "terminal", status: "exited", exitCode: 0 }])];
 	state.delivery = deliveryFacts();
 	now = 20_000;
 	publish(pi);
@@ -681,7 +684,7 @@ test("adopts pre-existing work only through an explicit control receipt", async 
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const state = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-old", toolCallId: "old-call" }])],
+		facts: [bashFacts([{ id: "exec-old", toolCallId: "old-call" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -704,7 +707,7 @@ test("adopts pre-existing work only through an explicit control receipt", async 
 	assert.equal(pi.entries.length, 0, "an explicit receipt adopts the older execution into this interaction");
 
 	now = 30_000;
-	state.facts = [shellFacts([{ id: "exec-old", toolCallId: "old-call", phase: "terminal", status: "exited", exitCode: 0 }])];
+	state.facts = [bashFacts([{ id: "exec-old", toolCallId: "old-call", phase: "terminal", status: "exited", exitCode: 0 }])];
 	publish(pi);
 	await settle();
 	assert.equal(pi.entries.length, 1);
@@ -717,7 +720,7 @@ test("deducts pure human wait but keeps time while an owned job is progressing",
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const state = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -740,7 +743,7 @@ test("deducts pure human wait but keeps time while an owned job is progressing",
 	now = 10_000;
 	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
 	now = 20_000;
-	state.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
+	state.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
 	publish(pi);
 	await settle();
 	// From here nothing but the human is progressing, so the remainder of the prompt is pure wait.
@@ -762,7 +765,7 @@ test("cuts an awaiting interaction on new external input and never calls it comp
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -803,7 +806,7 @@ test("keeps queued steering input inside the run that is still streaming", async
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
-	installProducer(pi, { facts: [shellFacts([])], delivery: deliveryFacts() });
+	installProducer(pi, { facts: [bashFacts([])], delivery: deliveryFacts() });
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
 		now: () => now,
@@ -826,7 +829,7 @@ test("promotion cuts the work clock at the input and counts the in-flight reques
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
-	installProducer(pi, { facts: [shellFacts([])], delivery: deliveryFacts() });
+	installProducer(pi, { facts: [bashFacts([])], delivery: deliveryFacts() });
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
 		now: () => now,
@@ -876,7 +879,7 @@ test("promotion keeps the run's ongoing executions but excludes unrelated older 
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const state = installProducer(pi, {
-		facts: [shellFacts([
+		facts: [bashFacts([
 			{ id: "exec-run", toolCallId: "call-bash" },
 			{ id: "exec-adopted", toolCallId: "older-call" },
 			{ id: "exec-old", toolCallId: "old-call" },
@@ -910,7 +913,7 @@ test("promotion keeps the run's ongoing executions but excludes unrelated older 
 	assert.equal(pi.entries.length, 0, "the run's ongoing execution is now the interaction's work");
 
 	now = 7_000;
-	state.facts = [shellFacts([
+	state.facts = [bashFacts([
 		{ id: "exec-run", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 },
 		{ id: "exec-adopted", toolCallId: "older-call" },
 		{ id: "exec-old", toolCallId: "old-call" },
@@ -919,7 +922,7 @@ test("promotion keeps the run's ongoing executions but excludes unrelated older 
 	await settle();
 	assert.equal(pi.entries.length, 0, "promotion retains explicit control receipts from the automatic run");
 	now = 8_000;
-	state.facts = [shellFacts([
+	state.facts = [bashFacts([
 		{ id: "exec-run", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 },
 		{ id: "exec-adopted", toolCallId: "older-call", phase: "terminal", status: "exited", exitCode: 0 },
 		{ id: "exec-old", toolCallId: "old-call" },
@@ -937,7 +940,7 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const state = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -967,7 +970,7 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 	assert.equal(workingMessages.at(-1), "Working... 20s • ⚙ 8s", "the tool clock froze but the prompt was autonomous");
 
 	now = 25_000;
-	state.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
+	state.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
 	publish(pi);
 	await settle();
 	now = 30_000;
@@ -993,7 +996,7 @@ test("does not bind stale human input to a later extension-triggered run", async
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
-	installProducer(pi, { facts: [shellFacts([])], delivery: deliveryFacts() });
+	installProducer(pi, { facts: [bashFacts([])], delivery: deliveryFacts() });
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
 		now: () => now,
@@ -1027,7 +1030,7 @@ test("reports an aborted run as interrupted without waiting for quiescence", asy
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -1062,7 +1065,7 @@ test("ends a failed main run at the failure even while owned work still runs", a
 		{ id: LEAF_ID, type: "message", message: { role: "assistant", stopReason: "error", content: [] } },
 	];
 	const producer = installProducer(pi, {
-		facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
+		facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])],
 		delivery: deliveryFacts(),
 	});
 	const scheduler = new FakeScheduler();
@@ -1076,7 +1079,7 @@ test("ends a failed main run at the failure even while owned work still runs", a
 	await beginInteraction(pi, ctx);
 	now = 1_000;
 	await invoke(pi, "tool_execution_start", { toolCallId: "call-bash", toolName: "bash" }, ctx);
-	producer.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])];
+	producer.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])];
 	await invoke(pi, "tool_execution_end", { toolCallId: "call-bash", toolName: "bash", result: { details: {} } }, ctx);
 	now = 5_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
@@ -1086,7 +1089,7 @@ test("ends a failed main run at the failure even while owned work still runs", a
 	assert.equal(renderEntry(pi, pi.entries[0]?.data), "Failed after 5s");
 
 	now = 9_000;
-	producer.facts = [shellFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
+	producer.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
 	publish(pi);
 	await settle();
 	assert.equal(pi.entries.length, 1, "a late terminal cannot reopen or extend the failed interaction");
@@ -1131,7 +1134,7 @@ test("unavailable execution state is reported instead of claiming completion", a
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	// A loaded producer that cannot answer its queries makes quiescence unverifiable.
-	installProducer(pi, { facts: [shellFacts([], "unavailable")], delivery: deliveryFacts() });
+	installProducer(pi, { facts: [bashFacts([], "unavailable")], delivery: deliveryFacts() });
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
 		now: () => now,
@@ -1154,7 +1157,7 @@ test("session replacement and branch changes release state without writing old s
 		const pi = new FakePi();
 		const workingMessages: Array<string | undefined> = [];
 		const ctx = context(workingMessages);
-		installProducer(pi, { facts: [shellFacts([{ id: "exec-1", toolCallId: "call-bash" }])], delivery: deliveryFacts() });
+		installProducer(pi, { facts: [bashFacts([{ id: "exec-1", toolCallId: "call-bash" }])], delivery: deliveryFacts() });
 		createWorkTimingExtension({
 			now: () => now,
 			setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
@@ -1164,12 +1167,12 @@ test("session replacement and branch changes release state without writing old s
 		await beginInteraction(pi, ctx);
 		now = 1_000;
 		await invoke(pi, "tool_execution_start", { toolCallId: "call-bash", toolName: "bash" }, ctx);
-		assert.equal(pi.events.count(LOOP_FACTS_EVENT), 1);
+		assert.equal(pi.events.count(EXECUTION_FACTS_EVENT), 1);
 
 		now = 2_000;
 		await invoke(pi, eventName, { reason: "reload" }, ctx);
 		assert.equal(scheduler.callback, undefined, `${eventName} stops the timer`);
-		assert.equal(pi.events.count(LOOP_FACTS_EVENT), 0, `${eventName} releases the quiescence observer`);
+		assert.equal(pi.events.count(EXECUTION_FACTS_EVENT), 0, `${eventName} releases the quiescence observer`);
 		assert.deepEqual(pi.entries, [], `${eventName} writes nothing into the next scope`);
 	}
 });
@@ -1289,7 +1292,7 @@ test("folds the settled entry at field boundaries and word-wraps lone over-wide 
 				},
 			},
 		} as never,
-		{ expanded: false },
+		ENTRY_RENDER_OPTIONS,
 		theme,
 	);
 	assert.ok(component);

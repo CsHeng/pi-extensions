@@ -13,10 +13,10 @@
     "pi-package",
     "multi-skill-mentions",
     "fast-gpt",
-    "subagents",
+    "agents",
     "status-footer",
     "work-timing",
-    "subagents-ui"
+    "agents-ui"
   ],
   "scripts": {
     "check": "bun run typecheck && bun run test:fast && bun run test:isolated && bun run test:host-optional && bash -n scripts/*.sh",
@@ -24,7 +24,7 @@
     "e2e:host-offline": "bun scripts/run-test-lane.ts host-required",
     "e2e:ui-offline": "bun scripts/run-test-lane.ts ui-required",
     "e2e:agents": "bun scripts/run-live-agents-e2e.ts",
-    "e2e:agents-ui": "bun test ./tests/subagents-ui-tui.e2e.ts",
+    "e2e:agents-ui": "bun test ./tests/agents-ui-tui.e2e.ts",
     "test": "bun test --timeout 120000 ./tests/*.test.ts",
     "test:fast": "bun scripts/run-test-lane.ts fast",
     "test:isolated": "bun scripts/run-test-lane.ts isolated",
@@ -38,9 +38,9 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.2.0",
-    "@earendil-works/pi-coding-agent": "1.2.0",
-    "@earendil-works/pi-tui": "1.2.0",
+    "@earendil-works/pi-ai": "1.5.1",
+    "@earendil-works/pi-coding-agent": "1.5.1",
+    "@earendil-works/pi-tui": "1.5.1",
     "@types/node": "^24.10.1",
     "@xterm/headless": "6.0.0",
     "typebox": "1.3.7",
@@ -55,9 +55,9 @@
       "./extensions/work-timing/index.ts",
       "./extensions/agents-ui/index.ts",
       "./extensions/tasklist/index.ts",
-      "./extensions/job-notifications/index.ts",
+      "./extensions/notices/index.ts",
       "./extensions/tasks-ui/index.ts",
-      "./extensions/bash-jobs-ui/index.ts",
+      "./extensions/jobs-ui/index.ts",
       "./extensions/agent-bark.ts",
       "./extensions/async-bash/index.ts",
       "./extensions/cache-keepalive/index.ts"

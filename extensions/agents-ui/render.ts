@@ -1,13 +1,13 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatDuration } from "../agents/render.ts";
 import type { ObserverSnapshot, ObserverTask, ObserverToolCall } from "../agents/observer-events.ts";
 import type { SessionViewHistoryRow, SessionViewReply } from "../agents/session-view.ts";
 import type { RecordedUsageProjection } from "../agents/observability.ts";
-import { panelHeading, type PanelHeadingOptions } from "../shared/panel-heading.ts";
+import { panelHeading, panelTheme, type PanelHeadingContent, type PanelTheme, type PanelTone } from "../shared/panel-heading.ts";
+import { formatPanelDuration as formatDuration, panelRows, type PanelRowSpec } from "../shared/panel-rows.ts";
 
-export const SUBAGENTS_UI_STATUS_KEY = "csheng.subagents.status";
-export const SUBAGENTS_UI_PANEL_KEY = "csheng.subagents.panel";
-export const SUBAGENTS_UI_COMMAND = "agents-ui";
+export const AGENTS_UI_STATUS_KEY = "agents.status";
+export const AGENTS_UI_PANEL_KEY = "agents.panel";
+export const AGENTS_UI_COMMAND = "agents-ui";
 export const OBSERVER_HEARTBEAT_MS = 5_000;
 export const OBSERVER_STALE_MISSED_HEARTBEATS = 3;
 export const OBSERVER_STALE_MS = OBSERVER_HEARTBEAT_MS * OBSERVER_STALE_MISSED_HEARTBEATS;
@@ -291,47 +291,46 @@ export function formatStatus(snapshot: ObserverSnapshot): string {
 
 import { formatTokens } from "../shared/usage-format.ts";
 
-export interface SubagentsSummaryCounts {
+export interface AgentsSummaryCounts {
 	running: number | "unknown";
 	queued: number;
 	agents: number | "unknown";
 }
 
 /** Accepted facts already held by the summary. Omitted tasks or history are not invented. */
-export interface SubagentsInlineModel {
-	counts: SubagentsSummaryCounts;
+export interface AgentsInlineModel {
+	counts: AgentsSummaryCounts;
 	tasks?: readonly ObserverTask[];
 	history?: readonly SessionViewHistoryRow[];
 	historyTotal?: number;
 }
 
-export interface SubagentsInlineOptions {
+export interface AgentsInlineOptions {
 	folded?: boolean;
 	theme?: unknown;
 }
 
-function summaryWarning(counts: SubagentsSummaryCounts): boolean {
-	return counts.running === "unknown" || counts.agents === "unknown";
-}
-
-/** Count text only. Disclosure and warning markers belong to the shared heading. */
-function summaryContent(counts: SubagentsSummaryCounts): string {
-	const running = counts.running === "unknown" ? "running unknown" : `${counts.running} running`;
-	const queued = counts.running !== "unknown" && counts.queued > 0 ? ` · ${counts.queued} queued` : "";
-	const agents = counts.agents === "unknown" ? "agents unknown" : `${counts.agents} agents`;
-	return `Agents (${running}${queued} / ${agents})`;
-}
-
-function headingTheme(value: unknown): PanelHeadingOptions["theme"] | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	return typeof (value as { fg?: unknown }).fg === "function" ? value as PanelHeadingOptions["theme"] : undefined;
+/** Unknown counts are the only current condition that warns; settled failures stay on their rows. */
+function summaryHeading(counts: AgentsSummaryCounts): PanelHeadingContent {
+	const alerts: string[] = [];
+	const focus: string[] = [];
+	if (counts.running === "unknown") alerts.push("running unknown");
+	else {
+		if (counts.running > 0) focus.push(`${counts.running} running`);
+		if (counts.queued > 0) focus.push(`${counts.queued} queued`);
+	}
+	if (counts.agents === "unknown") alerts.push("agents unknown");
+	// An unknown live count keeps the known total visible.
+	const done = typeof counts.agents !== "number" ? undefined
+		: typeof counts.running === "number" ? `${Math.max(0, counts.agents - counts.running - counts.queued)}/${counts.agents} done` : `?/${counts.agents} done`;
+	return { title: "Agents", ...(done ? { progress: done } : {}), focus, alerts };
 }
 
 /**
  * Above-editor row budget. Folded stays one title line; expanded adds a few agent rows
  * and leaves the editor plus the other sections room.
  */
-export function subagentsInlineBudget(terminalRows: number): number {
+export function agentsInlineBudget(terminalRows: number): number {
 	const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 36;
 	return Math.max(1, Math.min(6, Math.floor(rows / 4)));
 }
@@ -365,75 +364,105 @@ export function formatAgentUsage(usage: RecordedUsageProjection | null | undefin
 	return parts.join(" ") + (coverage ? ` (${coverage})` : "");
 }
 
-function inlineAgents(model: SubagentsInlineModel): string[] {
+function inlineRoute(route: ObserverTask["route"] | undefined): string {
+	return route ? `${route.provider} ${route.model} ${route.thinking}` : "route unavailable";
+}
+
+function liveGlyph(task: ObserverTask): { glyph: string; tone: PanelTone } {
+	if (task.status === "running") return { glyph: "◐", tone: "accent" };
+	if (task.status === "pending") return { glyph: "○", tone: "dim" };
+	if (task.status === "succeeded") return { glyph: "✓", tone: "success" };
+	if (task.status === "failed") return { glyph: "✗", tone: "error" };
+	return { glyph: task.status === "blocked" ? "!" : "⊘", tone: "warning" };
+}
+
+function historyTone(row: SessionViewHistoryRow): { glyph: string; tone: PanelTone } {
+	const glyph = historyGlyph(row);
+	if (glyph === "?") return { glyph, tone: "warning" };
+	if (row.latestOutcome === "succeeded") return { glyph: "✓", tone: "success" };
+	if (row.latestOutcome === "failed") return { glyph: "✗", tone: "error" };
+	if (row.latestOutcome === "aborted") return { glyph: "⊘", tone: "warning" };
+	return { glyph: "·", tone: "dim" };
+}
+
+/**
+ * Inline rows share one short-label map across live and retained agents, so a live handle is
+ * shown with the same 8-character prefix as its history row and the central list. Fields run
+ * from most to least identifying (state, route, usage) so a narrow terminal clips usage first.
+ */
+function inlineAgentSpecs(model: AgentsInlineModel): PanelRowSpec[] {
 	const historyRows = model.history ?? [];
 	// Retained rows carry the episode state/outcome, route and recorded usage. Prefer
 	// them for a settled observer's same episode; fresh live facts still take priority.
 	const taskRows = (model.tasks ?? []).filter(task => !historyRows.some(row => row.handle === task.id
 		&& (task.episode === null || row.episode > task.episode || (row.episode === task.episode && !isLiveTask(task)))));
 	const tasks = taskRows.map((task, index) => ({ task, index }))
-		.sort((a, b) => taskRank(a.task) - taskRank(b.task) || a.index - b.index)
-		.map(({ task }) => `${task.role} ${task.id} ep${task.episode ?? "?"} ${taskStatusLabel(task)} t${task.assistantTurns} usage pending`
-			+ (task.route ? ` ${task.route.provider} ${task.route.model} ${task.route.thinking}` : " route unavailable"));
+		.sort((a, b) => taskRank(a.task) - taskRank(b.task) || a.index - b.index);
 	const history = historyRows.filter(row => !taskRows.some(task => task.id === row.handle)).map((row, index) => ({ row, index }))
 		.sort((a, b) => historyRank(a.row) - historyRank(b.row) || a.index - b.index);
-	const labels = shortLabelMap(history.map(({ row }) => row.handle));
-	return [...tasks, ...history.map(({ row }) => `${row.role} ${labels.get(row.handle) ?? row.handle} ep${row.episode} ${historyStateLabel(row)} ${row.latestOutcome} ${formatAgentUsage(row.recordedUsage)}`
-		+ (row.route ? ` ${row.route.provider} ${row.route.model} ${row.route.thinking}` : " route unavailable"))];
+	const labels = shortLabelMap([...tasks.map(({ task }) => task.id), ...history.map(({ row }) => row.handle)]);
+	const roleWidth = Math.max(0, ...tasks.map(({ task }) => task.role.length), ...history.map(({ row }) => row.role.length));
+	const name = (role: string, handle: string, episode: number | string) => `${role.padEnd(roleWidth)} ${labels.get(handle) ?? handle} ep${episode}`;
+	return [
+		...tasks.map(({ task }) => {
+			const state = liveGlyph(task);
+			return {
+				glyph: state.glyph,
+				glyphTone: state.tone,
+				primary: name(task.role, task.id, task.episode ?? "?"),
+				primaryTone: "text" as const,
+				fields: [taskStatusLabel(task), inlineRoute(task.route), `t${task.assistantTurns}`],
+			};
+		}),
+		...history.map(({ row }) => {
+			const state = historyTone(row);
+			return {
+				glyph: state.glyph,
+				glyphTone: state.tone,
+				primary: name(row.role, row.handle, row.episode),
+				primaryTone: row.state === "closed" ? "dim" as const : "text" as const,
+				fields: [`${historyStateLabel(row)} ${row.latestOutcome}`, inlineRoute(row.route), formatAgentUsage(row.recordedUsage)],
+			};
+		}),
+	];
 }
 
 function shortLabelMap(handles: readonly string[]): Map<string, string> {
 	return new Map(handles.map(handle => [handle, shortLabel(handle, handles)]));
 }
 
-function inlineAgentLines(model: SubagentsInlineModel, width: number, room: number): string[] {
+function inlineAgentLines(model: AgentsInlineModel, width: number, room: number, theme: PanelTheme): string[] {
 	if (room <= 0) return [];
-	const agents = inlineAgents(model);
 	const unloaded = Math.max(0, (model.historyTotal ?? model.history?.length ?? 0) - (model.history?.length ?? 0));
-	const overflow = agents.length + unloaded > room;
-	const hint = overflow && room >= 2;
-	const shown = agents.slice(0, Math.max(0, room - (hint ? 1 : 0)));
-	const lines = shown.map((agent, index) => {
-		const branch = index === shown.length - 1 && !hint ? "└─ " : "├─ ";
-		return truncateToWidth(`${branch}${agent}`, width, "…");
-	});
-	if (hint) {
-		const more = agents.length - shown.length + unloaded;
-		lines.push(truncateToWidth(`… ${more} more · /${SUBAGENTS_UI_COMMAND} list`, width, "…"));
-	}
-	return lines;
+	return panelRows(inlineAgentSpecs(model), width, theme, { maxRows: room, hidden: unloaded, primary: "fixed", hint: `/${AGENTS_UI_COMMAND} list` });
 }
 
 /**
  * Folded heading, or the same heading plus bounded agent/status rows.
  * The title stays first. Agent metadata is shared with the central list; long rows clip safely.
  */
-export function formatSubagentsInline(
-	model: SubagentsInlineModel,
+export function formatAgentsInline(
+	model: AgentsInlineModel,
 	width: number,
 	maxRows = 1,
-	options: SubagentsInlineOptions = {},
+	options: AgentsInlineOptions = {},
 ): string[] {
 	width = Math.max(0, Math.floor(width));
 	maxRows = Math.max(0, Math.floor(maxRows));
 	if (!Number.isFinite(width) || !width || !Number.isFinite(maxRows) || !maxRows) return [];
 	const folded = options.folded !== false;
-	const theme = headingTheme(options.theme);
-	const heading = panelHeading(summaryContent(model.counts), width, {
-		folded,
-		warning: summaryWarning(model.counts),
-		...(theme ? { theme } : {}),
-	});
+	const theme = panelTheme(options.theme) ?? { fg: (_color: PanelTone, text: string) => text };
+	const heading = panelHeading(summaryHeading(model.counts), width, { folded, theme });
 	if (folded || maxRows < 2) return [heading];
-	return [heading, ...inlineAgentLines(model, width, maxRows - 1)];
+	return [heading, ...inlineAgentLines(model, width, maxRows - 1, theme)];
 }
 
 /** One session-inventory line, using the same collapsed grammar as Tasks. */
-export function formatSubagentsSummary(counts: SubagentsSummaryCounts, width: number): string {
-	return formatSubagentsInline({ counts }, width, 1, { folded: true })[0] ?? "";
+export function formatAgentsSummary(counts: AgentsSummaryCounts, width: number): string {
+	return formatAgentsInline({ counts }, width, 1, { folded: true })[0] ?? "";
 }
 
-export function subagentsSummaryHasState(counts: SubagentsSummaryCounts): boolean {
+export function agentsSummaryHasState(counts: AgentsSummaryCounts): boolean {
 	return (typeof counts.running === "number" && counts.running > 0) || counts.queued > 0 || (typeof counts.agents === "number" && counts.agents > 0);
 }
 

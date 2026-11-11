@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { NormalizedTask } from "./graph.ts";
-import { SubagentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
+import { AgentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import { Check } from "typebox/value";
 import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
@@ -62,7 +62,7 @@ export interface ManagedRecord {
 	execution?: EpisodeExecution;
 	handle: string;
 	owner: SessionOwner;
-	task: import("./contracts.ts").SubagentTask;
+	task: import("./contracts.ts").AgentTask;
 	roots: ManagedRootState[];
 	state: ManagedState;
 	episode: number;
@@ -170,9 +170,9 @@ const resultSchema = Type.Object({ id: productId, label: Type.Optional(Type.Stri
 	durationMs: Type.Number(), changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), convergence: Type.String({ pattern: "^(not-applicable|applied|not-applied|conflict)$" }), reportComplete: Type.Optional(Type.Boolean()),
 });
 const gitOid = Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" });
-const gitWorkspaceSchema = Type.Object({ version: Type.Literal(1), id: Type.String({ pattern: "^[a-z0-9]{32}$" }), repo: Type.String(), path: Type.String(), commonDir: Type.String(), gitDir: Type.String(), inputBase: gitOid, ownedRefs: Type.Record(Type.String({ pattern: "^refs/csheng/subagents/" }), gitOid), pendingRefs: Type.Optional(Type.Record(Type.String({ pattern: "^refs/csheng/subagents/" }), gitOid)) }, { additionalProperties: false });
+const gitWorkspaceSchema = Type.Object({ version: Type.Literal(1), id: Type.String({ pattern: "^[a-z0-9]{32}$" }), repo: Type.String(), path: Type.String(), commonDir: Type.String(), gitDir: Type.String(), inputBase: gitOid, ownedRefs: Type.Record(Type.String({ pattern: "^refs/pi-extensions/agents/" }), gitOid), pendingRefs: Type.Optional(Type.Record(Type.String({ pattern: "^refs/pi-extensions/agents/" }), gitOid)) }, { additionalProperties: false });
 const gitCandidateSchema = Type.Object({ id: Type.String({ pattern: "^[a-z0-9]{32}$" }), workspaceId: Type.String({ pattern: "^[a-z0-9]{32}$" }), inputBase: gitOid, commit: gitOid, tree: gitOid, changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }) }, { additionalProperties: false });
-const applyAttemptSchema = Type.Object({ parentCommit: gitOid, parentTree: gitOid, mergeTree: gitOid, paths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), integrationRef: Type.String({ pattern: "^refs/csheng/subagents/" }) }, { additionalProperties: false });
+const applyAttemptSchema = Type.Object({ parentCommit: gitOid, parentTree: gitOid, mergeTree: gitOid, paths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), integrationRef: Type.String({ pattern: "^refs/pi-extensions/agents/" }) }, { additionalProperties: false });
 const candidateRootSchema = Type.Object({ rootId: productId, destination: Type.String(), status: Type.String({ pattern: "^(not-applied|applying|applied|partial|conflict|unknown)$" }), changedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), appliedPaths: Type.Array(Type.String(), { maxItems: MANAGED_LIMITS.maxEntries }), git: Type.Optional(gitCandidateSchema), attempt: Type.Optional(applyAttemptSchema) }, { additionalProperties: false });
 const candidateSchema = Type.Object({ id: productId, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }),
 	status: Type.String({ pattern: "^(not-applied|applying|applied|partial|conflict|unknown)$" }),
@@ -186,7 +186,7 @@ const rootSchema = Type.Object({
 	target: Type.Optional(Type.Object({ declared: Type.String(), root: Type.String(), identities: Type.Array(Type.Object({ path: Type.String(), dev: Type.Number(), ino: Type.Number() }, { additionalProperties: false }), { minItems: 3, maxItems: 3 }) }, { additionalProperties: false })),
 	pins: Type.Optional(Type.Array(Type.Object({ path: Type.String(), dev: Type.Number(), ino: Type.Number() }, { additionalProperties: false }), { maxItems: 32 })),
 	input: Type.Optional(Type.Object({ commit: gitOid, tree: gitOid }, { additionalProperties: false })),
-	inputRef: Type.Optional(Type.String({ pattern: "^refs/csheng/subagents/inputs/[a-z0-9]{32}$" })),
+	inputRef: Type.Optional(Type.String({ pattern: "^refs/pi-extensions/agents/inputs/[a-z0-9]{32}$" })),
 	inputs: Type.Optional(Type.Object({ version: Type.Literal(2), gitWorkspace: gitWorkspaceSchema }, { additionalProperties: false })),
 	workspaceReleased: Type.Optional(Type.Boolean()),
 	released: Type.Optional(Type.Boolean()),
@@ -201,7 +201,7 @@ const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSc
 const recordSchema = Type.Object({
 	version: storageVersion, handle: productId, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: hostId, anchor: Type.Union([hostId, Type.Null()]) }, { additionalProperties: false }),
-	task: SubagentTaskSchema, roots: Type.Array(rootSchema, { maxItems: 32 }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
+	task: AgentTaskSchema, roots: Type.Array(rootSchema, { maxItems: 32 }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
 	dispatch: Type.Optional(Type.Object({ runId: productId, generation: hostId, toolCallId: Type.String({ maxLength: 256 }), taskId: productId }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([hostId, Type.Null()]),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
@@ -246,7 +246,7 @@ async function readJson<T>(file: string): Promise<T> {
 const rootWriters = new Map<string, Promise<void>>();
 export class ManagedSessionStore {
 	readonly root: string;
-	constructor(agentDirectory: string) { this.root = join(agentDirectory, "subagent-managed-sessions"); }
+	constructor(agentDirectory: string) { this.root = join(agentDirectory, "managed-agents"); }
 	private async ensure(create: boolean): Promise<void> { await privateDirectory(this.root, create); }
 	path(handle: string): string {
 		if (!safeHandle(handle)) throw new ManagedError("invalid_handle");
@@ -524,7 +524,7 @@ export class ManagedSessionStore {
 			const handles = tasks.map(() => mintProductId());
 			if (new Set(handles).size !== handles.length) throw new ManagedError("duplicate_task_id");
 			for (const handle of handles) {
-				try { await lstat(this.path(handle)); throw new ManagedError("subagent_id_conflict"); }
+				try { await lstat(this.path(handle)); throw new ManagedError("agent_id_conflict"); }
 				catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof ManagedError)) throw error; if (error instanceof ManagedError) throw error; }
 			}
 			await this.write(requestPath, { version: MANAGED_SESSION_VERSION, fingerprint: digest, handles, complete: false, ...(requestFingerprint ? { requestFingerprint } : {}) } satisfies BatchRecord);

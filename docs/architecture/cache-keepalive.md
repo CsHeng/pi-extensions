@@ -1,27 +1,27 @@
 # Cache Keepalive
 
-`extensions/cache-keepalive/index.ts` keeps an idle main session's prompt cache warm while Pi 1.5.0's own idle cache warming is unreliable. That warmer stops silently once the active context contains a `custom_message`, compaction summary or branch summary. Job Notifications delivers results as custom messages, so most working sessions are affected. The extension registers no tool, command, UI or context content.
+`extensions/cache-keepalive/index.ts` keeps an idle main session's prompt cache warm while Pi's own idle cache warming is unreliable. In Pi 1.5.0 and 1.5.1 that warmer stops silently once the active context contains a `custom_message`, compaction summary or branch summary. Notices delivers results as custom messages, so most working sessions are affected. The extension registers no tool, command, UI or context content.
 
 ## Activation
 
-The extension acts only while Pi's effective `cacheWarming` setting is `"streaming"`, Pi's default. In that mode Pi still warms during long tool runs and stops when the run settles, and this extension covers the idle phase that follows. With `"idle"` it stands down so the official warmer is not doubled; with `"off"` it respects the choice of no warming. Returning to the official warmer is therefore a settings change: set `"idle"`. The setting is read again before every refresh, so a change applies to a pending refresh.
+The extension acts only while Pi's `cacheWarming` setting is explicitly `"streaming"`. In that mode Pi still warms during long tool runs and stops when the run settles, and this extension covers the idle phase that follows. With `"idle"` it stands down so the official warmer is not doubled; with `"off"` it respects the choice of no warming. An absent or unknown value means Pi's default, which is `"idle"` since Pi 1.5.1 (`"streaming"` in 1.5.0), so the extension stands down then too. Returning to the official warmer is therefore a settings change: set `"idle"` or remove the key. The setting is read again before every refresh, so a change applies to a pending refresh. Pi reads `cacheWarming` from global settings only while extensions see merged settings, so keep the key in global settings.
 
 Only TUI and RPC sessions are warmed; print and JSON runs, including managed children, exit after their run. The model API must be `anthropic-messages`, and the model must declare `promptCache` for the active retention tier (`PI_CACHE_RETENTION=long` selects `long`; otherwise `short`).
 
 ## Behavior
 
-The extension remembers the last `before_provider_request` payload of the current run and when it was sent. It never returns a replacement, so real requests are unchanged. Pi's own one-token warm replays are not captured. After `agent_settled`, if the payload names the active model and its thinking configuration is absent, disabled or adaptive, the extension schedules a refresh on Pi 1.5.0's warmer schedule:
+The extension remembers the last `before_provider_request` payload of the current run and when it was sent. It never returns a replacement, so real requests are unchanged. Pi's own one-token warm replays are not captured. After `agent_settled`, if the payload names the active model and its thinking configuration is absent, disabled or adaptive, the extension schedules a refresh on Pi's warmer schedule, unchanged through 1.5.1:
 
 - The first refresh is `min(0.9 × TTL, TTL − 10 s)` after the captured request: 270 s for a 300 s lifetime. Later refreshes use the same delay after each refresh starts.
 - A timer that fires more than half the remaining margin late stops instead of paying a full rewrite of an expired entry.
 - Warming ends 30 minutes after the last real request.
 - Each refresh must satisfy Pi's idle economics, `0.15 × missCost − warmCost ≥ $0.05`, priced from the last assistant usage with the model's cost table.
 
-A refresh calls `ctx.modelRegistry.streamSimple` with `maxRetries: 0`, the session ID and an `onPayload` that substitutes the captured payload with `max_tokens: 1`. Pi resolves the provider authentication, and no extension hook sees the refresh. Input, a new run or provider request, model or thinking-level change, compaction, tree navigation, and session start or shutdown cancel the schedule and abort an in-flight refresh. A failed refresh is recorded and not retried, because the next slot would come after the entry expired.
+A refresh calls `ctx.modelRegistry.streamSimple` with `maxRetries: 0`, the session ID, `disableContinuation: true` and an `onPayload` that substitutes the captured payload with `max_tokens: 1`. As with Pi's warmer, `disableContinuation` keeps the refresh out of the session's Anthropic message thread, so on thread-enabled endpoints the next real request still continues the thread. The captured payload is complete because Pi calls `before_provider_request` before trimming a request to its thread. Pi resolves the provider authentication, and no extension hook sees the refresh. Input, a new run or provider request, model or thinking-level change, compaction, tree navigation, and session start or shutdown cancel the schedule and abort an in-flight refresh. A failed refresh is recorded and not retried, because the next slot would come after the entry expired.
 
 ## Records
 
-Each refresh appends one context-free custom entry, `csheng-cache-keepalive` (version 1). It holds provider, model, `outcome` (`warmed` or `error`), the response `usage` with cost, and the expected saving, or a bounded error text. Extensions cannot append Pi `usage` entries, so refresh cost appears in neither Pi's session totals nor the footer; these entries are the audit record. With `showCacheMissNotices: true` each successful refresh also shows a `Cache kept warm: $…` notice.
+Each refresh appends one context-free custom entry, `cache-keepalive.refresh` (version 1). It holds provider, model, `outcome` (`warmed` or `error`), the response `usage` with cost, and the expected saving, or a bounded error text. Extensions cannot append Pi `usage` entries, so refresh cost appears in neither Pi's session totals nor the footer; these entries are the audit record. With `showCacheMissNotices: true` each successful refresh shows `Cache kept warm: $…` with the cumulative cost of the current idle period, in Pi's `Cache warmed` precision. Pi updates an info status line in place while it is still the last chat line, so consecutive refreshes read as one line.
 
 ## Limits And Removal
 

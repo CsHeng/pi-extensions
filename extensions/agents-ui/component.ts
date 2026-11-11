@@ -77,7 +77,7 @@ function moreRow(text: string): OverlayRow {
  * Session-scoped overlay: a pinned live area driven by fresh observer snapshots and a
  * separately navigable history section driven by the core session-view contract.
  */
-export class SubagentsOverlay {
+export class AgentsOverlay {
 	focused = true;
 	private historyOpen = false;
 	private liveOffset = 0;

@@ -1,14 +1,14 @@
 import type { ExtensionAPI, ExtensionContext, Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, sep } from "node:path";
 import { loadConfig } from "./config.ts";
-import { SUBAGENT_STATUS_COMMAND } from "./contracts.ts";
+import { AGENT_STATUS_COMMAND } from "./contracts.ts";
 import { createProvenance, type ProvenanceCore } from "./provenance.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
 import { registerObservationHooks } from "./observation-hooks.ts";
 import { defaultEnclosingCapability, registerContinuationTool, type ContinuationDependencies } from "./continuation.ts";
-import { SUBAGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
+import { AGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
 
-export interface SubagentDependencies extends Partial<ContinuationDependencies> {
+export interface AgentDependencies extends Partial<ContinuationDependencies> {
 	createProvenance?(): ProvenanceCore;
 }
 function routeContext(ctx: ExtensionContext): RouteContext {
@@ -18,7 +18,7 @@ function routeContext(ctx: ExtensionContext): RouteContext {
 		modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"],
 	};
 }
-export function createSubagentsExtension(dependencies: SubagentDependencies = {}): (pi: ExtensionAPI) => void {
+export function createAgentsExtension(dependencies: AgentDependencies = {}): (pi: ExtensionAPI) => void {
 	return (pi) => {
 		const config = dependencies.loadConfig ?? loadConfig;
 		const provenance = dependencies.createProvenance?.() ?? dependencies.provenance ?? createProvenance();
@@ -32,7 +32,7 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 				return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path)) ? parentSkills : undefined;
 			},
 		});
-		pi.registerCommand(SUBAGENT_STATUS_COMMAND, {
+		pi.registerCommand(AGENT_STATUS_COMMAND, {
 			description: "Show Agent capabilities, routes and limits",
 			handler: async (_args, ctx) => {
 				const loaded = await config();
@@ -40,7 +40,7 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 					ctx.ui.notify(`Agents unavailable: ${loaded.diagnostic?.message ?? "invalid configuration"}`, "error");
 					return;
 				}
-				const lines = [`tool=${SUBAGENT_SESSION_TOOL_NAME}`, `routes=${loaded.source?.userFile ?? "package-default"}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
+				const lines = [`tool=${AGENT_SESSION_TOOL_NAME}`, `routes=${loaded.source?.userFile ?? "package-default"}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
 				for (const role of ["explorer", "reviewer", "worker"] as const) {
 					const selected = resolveRoute(role, loaded.config, routeContext(ctx));
 					lines.push(selected.ok
@@ -51,7 +51,7 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 			},
 		});
 		pi.on("before_agent_start", async (event, ctx) => {
-			if (!pi.getActiveTools().includes(SUBAGENT_SESSION_TOOL_NAME)) return;
+			if (!pi.getActiveTools().includes(AGENT_SESSION_TOOL_NAME)) return;
 			if (Array.isArray(event.systemPromptOptions?.skills)) {
 				parentSkills = event.systemPromptOptions.skills.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo } }));
 				parentSkillCwd = ctx.cwd;
@@ -59,4 +59,4 @@ export function createSubagentsExtension(dependencies: SubagentDependencies = {}
 		});
 	};
 }
-export default createSubagentsExtension();
+export default createAgentsExtension();

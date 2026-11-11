@@ -24,7 +24,7 @@ pi_bin=$(command -v pi)
 run_pi() {
 	env -i PATH="${PATH}" HOME="${home_root}" TMPDIR="${TMPDIR:-/tmp}" TERM=dumb \
 		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 PI_TELEMETRY=0 \
-		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" \
+		PI_EXTENSIONS_PROBE_PACKAGE_ROOT="${repo_root}" \
 		timeout --signal=TERM --kill-after=5s 45s "${pi_bin}" "$@"
 }
 
@@ -36,15 +36,14 @@ probe_extension="${work_root}/probe.ts"
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const packageRoot = process.env.CSHENG_PROBE_PACKAGE_ROOT ?? "";
+const packageRoot = process.env.PI_EXTENSIONS_PROBE_PACKAGE_ROOT ?? "";
 
 const isPackagePath = (value: unknown): boolean =>
 	typeof value === "string" && packageRoot.length > 0 && (value === packageRoot || value.startsWith(packageRoot + "/"));
 const publicNames = ["agent", "bash", "tasklist"];
-const retiredNames = ["csheng_subagent_sessions", "csheng_workflow"];
 
 export default function probe(pi: ExtensionAPI): void {
-	pi.registerCommand("workflow-probe", {
+	pi.registerCommand("tasklist-probe", {
 		description: "Redacted Tasklist package probe",
 		handler: async () => {
 			const tools = pi.getAllTools();
@@ -53,14 +52,14 @@ export default function probe(pi: ExtensionAPI): void {
 			const catalog = publicNames.every((name) => {
 				const matches = tools.filter((candidate) => candidate.name === name);
 				return matches.length === 1 && isPackagePath(matches[0]?.sourceInfo?.path);
-			}) && !tools.some((candidate) => retiredNames.includes(candidate.name));
+			});
 			const commands = pi.getCommands();
-			pi.appendEntry("csheng-workflow-probe", {
+			pi.appendEntry("tasklist-probe", {
 				tool: tool !== undefined,
 				source: isPackagePath(tool?.sourceInfo?.path),
 				catalog,
 				managed,
-				subagents: commands.some((command) => command.name === "agents"),
+				agents: commands.some((command) => command.name === "agents"),
 				ui: commands.some((command) => command.name === "agents-ui"),
 				todo: pi.getAllTools().some((candidate) => candidate.name === "todo"),
 			});
@@ -73,9 +72,9 @@ rpc_output=$(
 	cd -- "${work_root}"
 	printf '%s\n' \
 		'{"type":"get_commands"}' \
-		'{"type":"prompt","message":"/workflow-probe"}' \
+		'{"type":"prompt","message":"/tasklist-probe"}' \
 		'{"type":"get_entries"}' |
-		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 run_pi \
+		PI_EXTENSIONS_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 run_pi \
 			--mode rpc \
 			--no-session \
 			--no-skills \
@@ -84,17 +83,17 @@ rpc_output=$(
 			--extension "${probe_extension}"
 )
 
-present_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "csheng-workflow-probe" and .data.tool == true and .data.source == true and .data.catalog == true and .data.todo == false)] | length' <<<"${rpc_output}")
-probe_command_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_commands" and .success == true) | .data.commands[]? | select(.name == "workflow-probe")] | length' <<<"${rpc_output}")
+present_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-probe" and .data.tool == true and .data.source == true and .data.catalog == true and .data.todo == false)] | length' <<<"${rpc_output}")
+probe_command_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_commands" and .success == true) | .data.commands[]? | select(.name == "tasklist-probe")] | length' <<<"${rpc_output}")
 [[ ${present_count} -ge 1 ]]
 [[ ${probe_command_count} -eq 1 ]]
 
 off_output=$(
 	cd -- "${work_root}"
 	printf '%s\n' \
-		'{"type":"prompt","message":"/workflow-probe"}' \
+		'{"type":"prompt","message":"/tasklist-probe"}' \
 		'{"type":"get_entries"}' |
-		CSHENG_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 run_pi \
+		PI_EXTENSIONS_PROBE_PACKAGE_ROOT="${repo_root}" PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 run_pi \
 			--mode rpc \
 			--no-session \
 			--no-skills \
@@ -103,24 +102,24 @@ off_output=$(
 			--no-extensions \
 			--extension "${probe_extension}"
 )
-off_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "csheng-workflow-probe" and .data.tool == false and .data.source == false and .data.catalog == false and .data.todo == false)] | length' <<<"${off_output}")
+off_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-probe" and .data.tool == false and .data.source == false and .data.catalog == false and .data.todo == false)] | length' <<<"${off_output}")
 [[ ${off_count} -ge 1 ]]
 
-# Co-load probe: workflow alongside the managed executor, observer, footer, and timing extensions.
+# Co-load probe: Tasklist alongside the managed executor, observer, footer, and timing extensions.
 coload_extension="${work_root}/coload-probe.ts"
 cat >"${coload_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function probe(pi: ExtensionAPI): void {
-	pi.registerCommand("workflow-coload-probe", {
+	pi.registerCommand("tasklist-coload-probe", {
 		description: "Redacted co-load probe",
 		handler: async () => {
 			const tools = pi.getAllTools().map((tool) => tool.name);
 			const commands = pi.getCommands().map((command) => command.name);
-			pi.appendEntry("csheng-workflow-coload", {
-				workflow: tools.includes("tasklist"),
+			pi.appendEntry("tasklist-coload", {
+				tasklist: tools.includes("tasklist"),
 				managed: tools.includes("agent"),
-				subagents: commands.includes("agents"),
+				agents: commands.includes("agents"),
 				ui: commands.includes("agents-ui"),
 			});
 		},
@@ -131,7 +130,7 @@ EOF
 coload_output=$(
 	cd -- "${work_root}"
 	printf '%s\n' \
-		'{"type":"prompt","message":"/workflow-coload-probe"}' \
+		'{"type":"prompt","message":"/tasklist-coload-probe"}' \
 		'{"type":"get_entries"}' |
 		PI_CODING_AGENT_DIR="${agent_root}" PI_OFFLINE=1 run_pi \
 			--mode rpc \
@@ -142,10 +141,10 @@ coload_output=$(
 			--extension "${coload_extension}"
 )
 
-coload_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "csheng-workflow-coload" and .data.workflow == true and .data.managed == true and .data.subagents == true and .data.ui == true)] | length' <<<"${coload_output}")
+coload_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-coload" and .data.tasklist == true and .data.managed == true and .data.agents == true and .data.ui == true)] | length' <<<"${coload_output}")
 [[ ${coload_count} -ge 1 ]]
 
-# Synthetic-provider lane: the real host executes one workflow tool call and persists a snapshot.
+# Synthetic-provider lane: the real host executes one tasklist tool call and persists a snapshot.
 synthetic_extension="${work_root}/synthetic.ts"
 cat >"${synthetic_extension}" <<'EOF'
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -197,15 +196,15 @@ synthetic_output=$(
 		--extension "${synthetic_extension}" \
 		--model wf-probe/fixture \
 		--session-dir "${session_root}" \
-		-p "run the synthetic workflow" 2>&1
+		-p "run the synthetic tasklist" 2>&1
 )
 
 grep -Fq 'PROBE_DONE' <<<"${synthetic_output}"
 session_file=$(find "${session_root}" -name '*.jsonl' -print -quit)
 [[ -n ${session_file} ]]
-snapshot_count=$(jq -s '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | length' "${session_file}")
+snapshot_count=$(jq -s '[.[] | select(.type == "custom" and .customType == "tasklist.state")] | length' "${session_file}")
 [[ ${snapshot_count} -ge 1 ]]
-goal=$(jq -sr '[.[] | select(.type == "custom" and .customType == "csheng-workflow-state")] | last | .data.state.title' "${session_file}")
-[[ ${goal} == "Synthetic tasklist probe" ]]
+title=$(jq -sr '[.[] | select(.type == "custom" and .customType == "tasklist.state")] | last | .data.state.title' "${session_file}")
+[[ ${title} == "Synthetic tasklist probe" ]]
 
 jq -cn '{result:"pass",source:"installed",fixture:"synthetic-tasklist",tool:1,source_identity:1,extension_off_tool:0,coload:1,synthetic_snapshots:1}'

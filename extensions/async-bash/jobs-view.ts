@@ -1,16 +1,16 @@
 /** Owner-scoped read-only Jobs snapshot. Queries never start, cancel, renew, wake, or enter model context. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ShellExecutionView, ShellScope, ShellStatus } from "./execution.ts";
+import type { BashExecutionView, BashScope, BashStatus } from "./execution.ts";
 
 export const JOBS_VIEW_VERSION = 1;
-export const JOBS_VIEW_REQUEST_EVENT = "csheng.shell.jobs-view.request";
-export const JOBS_VIEW_EVENT = "csheng.shell.jobs-view";
+export const JOBS_VIEW_REQUEST_EVENT = "async-bash.jobs-view.request";
+export const JOBS_VIEW_EVENT = "async-bash.jobs-view";
 /** Invalidation only; contains no execution payload and prompts an open consumer to requery. */
-export const JOBS_VIEW_CHANGED_EVENT = "csheng.shell.jobs-view.changed";
+export const JOBS_VIEW_CHANGED_EVENT = "async-bash.jobs-view.changed";
 /** Owner reset or shutdown. Consumers drop cached snapshots and requery after a new bind. */
-export const JOBS_VIEW_RESET_EVENT = "csheng.shell.jobs-view.reset";
+export const JOBS_VIEW_RESET_EVENT = "async-bash.jobs-view.reset";
 
-const STATUSES = ["running", "exited", "cancelled", "deadline", "interrupted"] as const;
+const STATUSES = ["running", "exited", "cancelled", "timeout", "interrupted"] as const;
 const REASONS = ["untrusted", "other-owner", "unreachable"] as const;
 const TERMINAL_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 const REQUEST_KEYS = ["version", "requestId"];
@@ -29,9 +29,11 @@ export interface JobsViewReset { version: typeof JOBS_VIEW_VERSION; generation: 
 export interface JobsViewRecord {
 	executionId: string;
 	label: string;
-	/** Human-only bounded first command line; not persisted in shell events. */
+	/** Human-only bounded first command line; not persisted in Async Bash events. */
 	commandPreview?: string;
-	status: ShellStatus;
+	status: BashStatus;
+	/** Running past its checkpoint until the model renews it. Absent means false. */
+	overdue?: boolean;
 	exitCode: number | null;
 	startedAt: number;
 	terminalAt: number | null;
@@ -49,7 +51,7 @@ export interface JobsViewReply {
 	records?: JobsViewRecord[];
 }
 export interface JobsViewSource {
-	list(scope: ShellScope): ShellExecutionView[];
+	list(scope: BashScope): BashExecutionView[];
 	subscribeDisplay(listener: () => void): () => void;
 }
 
@@ -73,7 +75,7 @@ function leafId(ctx: ExtensionContext): string | null {
 	const leaf = ctx.sessionManager.getLeafId();
 	return typeof leaf === "string" && leaf.length > 0 ? leaf : null;
 }
-function scopeOf(ctx: ExtensionContext): ShellScope {
+function scopeOf(ctx: ExtensionContext): BashScope {
 	return {
 		sessionId: ctx.sessionManager.getSessionId(),
 		branchAnchor: leafId(ctx),
@@ -115,10 +117,11 @@ function parseRecords(value: unknown): JobsViewRecord[] | undefined {
 	return records;
 }
 function parseRecord(value: unknown): JobsViewRecord | undefined {
-	if (!isRecord(value) || !keysExact(value, RECORD_KEYS, ["commandPreview"])) return undefined;
+	if (!isRecord(value) || !keysExact(value, RECORD_KEYS, ["commandPreview", "overdue"])) return undefined;
+	if (value.overdue !== undefined && (typeof value.overdue !== "boolean" || (value.overdue && value.status !== "running"))) return undefined;
 	if (!boundedText(value.executionId, 64) || !boundedText(value.label, 32)) return undefined;
 	if (value.commandPreview !== undefined && !boundedText(value.commandPreview, 512)) return undefined;
-	if (typeof value.status !== "string" || !STATUSES.includes(value.status as ShellStatus)) return undefined;
+	if (typeof value.status !== "string" || !STATUSES.includes(value.status as BashStatus)) return undefined;
 	if (!exitCode(value.exitCode) || !instant(value.startedAt)) return undefined;
 	if (value.terminalAt !== null && !instant(value.terminalAt)) return undefined;
 	if (value.lastOutputAt !== null && !instant(value.lastOutputAt)) return undefined;
@@ -127,7 +130,8 @@ function parseRecord(value: unknown): JobsViewRecord | undefined {
 		executionId: value.executionId,
 		label: value.label,
 		...(value.commandPreview === undefined ? {} : { commandPreview: value.commandPreview as string }),
-		status: value.status as ShellStatus,
+		status: value.status as BashStatus,
+		...(value.overdue === true ? { overdue: true } : {}),
 		exitCode: value.exitCode,
 		startedAt: value.startedAt,
 		terminalAt: value.terminalAt as number | null,
@@ -153,14 +157,14 @@ export function parseJobsViewReply(value: unknown): { ok: true; value: JobsViewR
 export const JOBS_MIN_VISIBLE_SUCCESS_MS = 0;
 
 /** Foreground work stays out. A positive threshold can hide short successful background exits. */
-export function isVisibleBackgroundJob(view: ShellExecutionView, minSuccessMs = JOBS_MIN_VISIBLE_SUCCESS_MS): boolean {
+export function isVisibleBackgroundJob(view: BashExecutionView, minSuccessMs = JOBS_MIN_VISIBLE_SUCCESS_MS): boolean {
 	if (!view.background) return false;
 	if (view.status === "running" || view.status !== "exited" || view.exitCode !== 0) return true;
 	if (minSuccessMs <= 0) return true;
 	return view.terminalAt !== null && view.terminalAt - view.startedAt >= minSuccessMs;
 }
 
-function statusRank(status: ShellStatus): number {
+function statusRank(status: BashStatus): number {
 	return status === "running" ? 0 : 1;
 }
 
@@ -169,13 +173,14 @@ export function compareJobsViewRecords(left: JobsViewRecord, right: JobsViewReco
 	return statusRank(left.status) - statusRank(right.status) || left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId);
 }
 
-function project(view: ShellExecutionView): JobsViewRecord {
+function project(view: BashExecutionView): JobsViewRecord {
 	const running = view.status === "running";
 	return {
 		executionId: view.executionId,
 		label: view.label,
 		commandPreview: view.commandPreview,
 		status: view.status,
+		...(running && view.overdue ? { overdue: true } : {}),
 		exitCode: running ? null : view.exitCode,
 		startedAt: view.startedAt,
 		terminalAt: running ? null : view.terminalAt,

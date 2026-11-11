@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const FAST_GPT_ENTRY_TYPE = "csheng-fast-gpt";
+export const FAST_GPT_ENTRY_TYPE = "fast-gpt.state";
 
 const FAST_GPT_STATE_VERSION = 1 as const;
 const STATUS_KEY = "fast-gpt";

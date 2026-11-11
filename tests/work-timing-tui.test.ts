@@ -23,7 +23,7 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
 	// CC's optional working-message writer must not co-own this row.
 	await writeFile(join(agent, "claude-code-style.json"), JSON.stringify({ enableWorkingMessage: false, showStartupHeader: false,
-		enableSessionReference: false, enableSubagentAutocomplete: false, enableAgentSummary: false }));
+		enableSessionReference: false, enableAgentAutocomplete: false, enableAgentSummary: false }));
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
 		"-e", join(root, "extensions/work-timing/index.ts"), "-e", cc, "-e", join(root, "tests/fixtures/work-timing-tui.ts"),
 		"--model", "working-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "working fixture"];
@@ -86,7 +86,7 @@ for (const mode of ["timing-first", "notifications-first", "no-notifications"] a
 	const git = spawnSync("git", ["init", "-q", base], { env: { PATH: installedPath, HOME: base, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
 	assert.equal(git.status, 0);
 	const timing = join(root, "extensions/work-timing/index.ts");
-	const notifications = join(root, "extensions/job-notifications/index.ts");
+	const notifications = join(root, "extensions/notices/index.ts");
 	const observers = mode === "notifications-first" ? [notifications, timing] : mode === "timing-first" ? [timing, notifications] : [timing];
 	// Bark evaluates the same interaction boundary independently; a stub hook records its events.
 	await mkdir(join(base, ".local", "bin"), { recursive: true });

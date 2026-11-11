@@ -15,28 +15,28 @@ import {
 	parseSessionViewReply,
 } from "../agents/session-view.ts";
 import { sharedAboveEditor, type AboveEditorComposer } from "../shared/above-editor.ts";
-import { SubagentsOverlay, type OverlaySnapshot, type OverlayTheme, type SessionViewState } from "./component.ts";
+import { AgentsOverlay, type OverlaySnapshot, type OverlayTheme, type SessionViewState } from "./component.ts";
 import {
 	OBSERVER_STALE_MS,
 	OVERLAY_HORIZONTAL_MARGIN,
-	SUBAGENTS_UI_COMMAND,
-	SUBAGENTS_UI_PANEL_KEY,
-	SUBAGENTS_UI_STATUS_KEY,
-	formatSubagentsInline,
-	subagentsInlineBudget,
-	subagentsSummaryHasState,
-	type SubagentsInlineModel,
-	type SubagentsSummaryCounts,
+	AGENTS_UI_COMMAND,
+	AGENTS_UI_PANEL_KEY,
+	AGENTS_UI_STATUS_KEY,
+	formatAgentsInline,
+	agentsInlineBudget,
+	agentsSummaryHasState,
+	type AgentsInlineModel,
+	type AgentsSummaryCounts,
 } from "./render.ts";
 
 export {
 	OBSERVER_STALE_MS,
-	SUBAGENTS_UI_COMMAND,
-	SUBAGENTS_UI_PANEL_KEY,
-	SUBAGENTS_UI_STATUS_KEY,
+	AGENTS_UI_COMMAND,
+	AGENTS_UI_PANEL_KEY,
+	AGENTS_UI_STATUS_KEY,
 };
 
-export interface SubagentsUiOptions {
+export interface AgentsUiOptions {
 	enableWidget?: boolean;
 	composer?: AboveEditorComposer;
 	now?: () => number;
@@ -113,8 +113,8 @@ function isStaleCache(cache: CachedObservation, at: number): boolean {
 	return !isSettled(cache.snapshot) && at - cache.receivedAt > OBSERVER_STALE_MS;
 }
 
-export function createSubagentsUiExtension(
-	options: SubagentsUiOptions = {},
+export function createAgentsUiExtension(
+	options: AgentsUiOptions = {},
 ): (pi: ExtensionAPI) => void {
 	const enableWidget = options.enableWidget === true;
 	const now = options.now ?? (() => performance.now());
@@ -132,7 +132,7 @@ export function createSubagentsUiExtension(
 		let coreWatch: unknown;
 		let requeryArmed = false;
 		let viewObservedAt = 0;
-		let overlay: SubagentsOverlay | undefined;
+		let overlay: AgentsOverlay | undefined;
 		let overlayOpen = false;
 		let overlayLayout: OverlayOptions | undefined;
 		let overlayTui: TUI | undefined;
@@ -184,12 +184,12 @@ export function createSubagentsUiExtension(
 			stopStale();
 			if (!summaryMounted) return;
 			summaryMounted = false;
-			composer.set("subagents", undefined);
+			composer.set("agents", undefined);
 		};
 
-		const summaryCounts = (): SubagentsSummaryCounts => {
+		const summaryCounts = (): AgentsSummaryCounts => {
 			if (!ctx?.isProjectTrusted()) return { running: "unknown", queued: 0, agents: "unknown" };
-			let running: SubagentsSummaryCounts["running"] = "unknown";
+			let running: AgentsSummaryCounts["running"] = "unknown";
 			let queued = 0;
 			if (current) {
 				const fresh = isSettled(current.snapshot) || !isStaleCache(current, now());
@@ -218,7 +218,7 @@ export function createSubagentsUiExtension(
 			}, remaining);
 		};
 
-		const inlineModel = (): SubagentsInlineModel => {
+		const inlineModel = (): AgentsInlineModel => {
 			const counts = summaryCounts();
 			if (!ctx?.isProjectTrusted()) return { counts };
 			const model = displayed();
@@ -235,16 +235,16 @@ export function createSubagentsUiExtension(
 
 		const publishSummary = (): void => {
 			const counts = summaryCounts();
-			if (!summaryWanted() || !ctx || summaryFailed || !(enableWidget || subagentsSummaryHasState(counts))) {
+			if (!summaryWanted() || !ctx || summaryFailed || !(enableWidget || agentsSummaryHasState(counts))) {
 				releaseSummary();
 				return;
 			}
 			composer.attach(ctx);
-			const ok = composer.set("subagents", {
+			const ok = composer.set("agents", {
 				render(width, terminalRows, theme) {
 					try {
 						const bounded = Math.min(120, Math.max(0, Math.floor(Number(width) || 0)));
-						return formatSubagentsInline(inlineModel(), bounded, subagentsInlineBudget(terminalRows), {
+						return formatAgentsInline(inlineModel(), bounded, agentsInlineBudget(terminalRows), {
 							folded: summaryFolded,
 							theme,
 						});
@@ -399,7 +399,7 @@ export function createSubagentsUiExtension(
 				(tuiInstance, theme, _kb, done) => {
 					dismissOverlay = () => done(null);
 					overlayOpen = true;
-					overlay = new SubagentsOverlay(model, tuiInstance, dismissOverlay, { now, theme, onPage: requestSessionView });
+					overlay = new AgentsOverlay(model, tuiInstance, dismissOverlay, { now, theme, onPage: requestSessionView });
 					overlayTui = tuiInstance;
 					overlayLayout = layout;
 					syncOverlayWidth();
@@ -528,7 +528,7 @@ export function createSubagentsUiExtension(
 			else publishSummary();
 		};
 
-		pi.registerCommand(SUBAGENTS_UI_COMMAND, {
+		pi.registerCommand(AGENTS_UI_COMMAND, {
 			description: "Show, hide, or fold the Agents summary; list opens the inspector",
 			handler: async (args, commandCtx) => {
 				ctx = commandCtx;
@@ -593,4 +593,4 @@ export function createSubagentsUiExtension(
 	};
 }
 
-export default createSubagentsUiExtension();
+export default createAgentsUiExtension();

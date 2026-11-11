@@ -1,4 +1,4 @@
-/** Read-only list dialog in the same central overlay surface as the Subagents inspector. */
+/** Read-only list dialog in the same central overlay surface as the Agents inspector. */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, SelectList, Text, truncateToWidth, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 

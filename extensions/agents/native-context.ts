@@ -15,17 +15,17 @@ export const NATIVE_PATH_TOOLS = Object.freeze(["read", "grep", "find", "ls", "e
 export const NATIVE_WRITE_TOOLS = Object.freeze(["edit", "write"] as const);
 
 /** Native cooperative shell tools. A read or write grant keeps them; neither is a path grant. */
-export const NATIVE_SHELL_TOOLS = Object.freeze(["bash", "powershell"] as const);
+export const NATIVE_BASH_TOOLS = Object.freeze(["bash", "powershell"] as const);
 
 const PATH_TOOL_SET: ReadonlySet<string> = new Set(NATIVE_PATH_TOOLS);
-const SHELL_TOOL_SET: ReadonlySet<string> = new Set(NATIVE_SHELL_TOOLS);
+const BASH_TOOL_SET: ReadonlySet<string> = new Set(NATIVE_BASH_TOOLS);
 
 export function isNativePathTool(toolName: string): boolean {
 	return PATH_TOOL_SET.has(toolName);
 }
 
-export function isNativeShellTool(toolName: string): boolean {
-	return SHELL_TOOL_SET.has(toolName);
+export function isNativeBashTool(toolName: string): boolean {
+	return BASH_TOOL_SET.has(toolName);
 }
 
 /**

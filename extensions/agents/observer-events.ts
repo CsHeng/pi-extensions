@@ -14,7 +14,7 @@ import {
 
 import { isProductId } from "./identity.ts";
 
-export const OBSERVER_EVENT = "csheng.subagents.observer.v4";
+export const OBSERVER_EVENT = "agents.observer.v4";
 export const OBSERVER_VERSION = 4 as const;
 export const OBSERVER_PHASES = ["accepted", "running", "settling", "settled"] as const;
 export const MAX_HEADLINE_BYTES = 240;

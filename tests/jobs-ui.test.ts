@@ -7,10 +7,10 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAboveEditor } from "../extensions/shared/above-editor.ts";
-import { createJobsUi, JOBS_LIST_PAGE_SIZE } from "../extensions/bash-jobs-ui/index.ts";
-import { formatJobDuration, jobRows, jobsRenderBudget } from "../extensions/bash-jobs-ui/render.ts";
-import { commandLabel, commandPreview, createShellExecutionOwner, type ShellExecutionView, type ShellScope } from "../extensions/async-bash/execution.ts";
-import { bindRetainedShell } from "../extensions/async-bash/index.ts";
+import { createJobsUi, JOBS_LIST_PAGE_SIZE } from "../extensions/jobs-ui/index.ts";
+import { formatJobDuration, jobRows, jobsRenderBudget } from "../extensions/jobs-ui/render.ts";
+import { commandLabel, commandPreview, createBashExecutionOwner, type BashExecutionView, type BashScope } from "../extensions/async-bash/execution.ts";
+import { bindAsyncBash } from "../extensions/async-bash/index.ts";
 import {
 	JOBS_VIEW_CHANGED_EVENT,
 	JOBS_VIEW_EVENT,
@@ -24,7 +24,7 @@ import {
 	type JobsViewReply,
 } from "../extensions/async-bash/jobs-view.ts";
 
-const scope: ShellScope = { sessionId: "session-a", branchAnchor: "leaf-a", branchIds: ["leaf-a"] };
+const scope: BashScope = { sessionId: "session-a", branchAnchor: "leaf-a", branchIds: ["leaf-a"] };
 
 async function scratch(): Promise<string> {
 	const root = join(process.env.TMPDIR ?? tmpdir(), "extensions");
@@ -115,7 +115,7 @@ test("owner metadata is a bounded executable label plus actual close and output 
 	let stops = 0;
 	const events: unknown[] = [];
 	const { operations, executions } = fakeBashOperations({ onAbort: (execution) => { stops += 1; execution.close(null); } });
-	const owner = createShellExecutionOwner({
+	const owner = createBashExecutionOwner({
 		operations,
 		now: () => clock,
 		onEvent: event => events.push(event),
@@ -157,7 +157,7 @@ test("owner metadata is a bounded executable label plus actual close and output 
 	assert.equal(closed?.lastOutputAt, 2_000);
 	assert.notEqual(closed?.terminalAt, closed?.deadlineAt);
 	const silent = fakeBashOperations();
-	const silentOwner = createShellExecutionOwner({ operations: silent.operations, now: () => 8_000 });
+	const silentOwner = createBashExecutionOwner({ operations: silent.operations, now: () => 8_000 });
 	t.after(async () => { await silentOwner.shutdown(); });
 	const quiet = await silentOwner.start({
 		command: "SECRET=token sleep 1",
@@ -184,7 +184,7 @@ test("Bash jobs excludes foreground completions and keeps background work while 
 		onExec: (execution) => { if (execution.command === "true") queueMicrotask(() => execution.close(0)); },
 		onAbort: (execution) => execution.close(null),
 	});
-	const owner = createShellExecutionOwner({ operations });
+	const owner = createBashExecutionOwner({ operations });
 	t.after(async () => { await owner.shutdown(); await rm(dir, { recursive: true, force: true }); });
 	const completed = await owner.start({ command: "true", cwd: dir, env: process.env, ...scope, toolCallId: null, deadlineMs: 60_000, foregroundWindowMs: 5_000 });
 	assert.equal(completed.status, "exited");
@@ -201,8 +201,9 @@ test("Bash jobs excludes foreground completions and keeps background work while 
 	assert.equal(commandPreview("mise exec -- python3 - <<'PY'\nprint('private body')"), "mise exec -- python3 - <<'PY'");
 	assert.equal(commandPreview("TOKEN=private curl --password hidden https://example.test"), "TOKEN=… curl --password … https://example.test");
 	const rendered = jobRows({ records: [record({ executionId: "exec_hidden-id", status: "exited", commandPreview: "mise exec -- " + "command ".repeat(30) })] }, 80, 4, 10_000).join("\n");
-	assert.match(rendered, /Bash "mise exec/);
-	assert.match(rendered.replace(/\u001b\[[0-9;]*m/g, ""), /…".*exited/);
+	assert.match(rendered, /✓ mise exec/);
+	// The preview clips before the duration column, which stays visible.
+	assert.match(rendered.replace(/\u001b\[[0-9;]*m/g, ""), /… +\d+s$/);
 	assert.doesNotMatch(rendered, /hidden-id/);
 });
 
@@ -210,7 +211,7 @@ test("jobs query returns the current branch snapshot and does not control or wak
 	const dir = await scratch();
 	const { operations, executions } = fakeBashOperations({ onAbort: (execution) => execution.close(null) });
 	const calls = { start: 0, cancel: 0, renew: 0, wait: 0 };
-	const owner = createShellExecutionOwner({ operations, now: () => 1_000 });
+	const owner = createBashExecutionOwner({ operations, now: () => 1_000 });
 	const wrapped = {
 		...owner,
 		async start(...args: Parameters<typeof owner.start>) { calls.start += 1; return owner.start(...args); },
@@ -266,10 +267,10 @@ test("jobs query returns the current branch snapshot and does not control or wak
 
 test("jobs view sorts running jobs before stopped jobs and keeps start time ascending", () => {
 	const h = harness();
-	const view = (executionId: string, status: ShellExecutionView["status"], startedAt: number, background = true): ShellExecutionView => ({
+	const view = (executionId: string, status: BashExecutionView["status"], startedAt: number, background = true): BashExecutionView => ({
 		...record({ executionId, status, startedAt, terminalAt: status === "running" ? null : startedAt + 10, exitCode: status === "exited" ? 0 : null }),
 		owner: "pi-bash", sessionId: "session-a", branchAnchor: "leaf-a", toolCallId: null,
-		commandPreview: executionId, deadlineAt: 60_000, output: "", truncated: false, background,
+		commandPreview: executionId, deadlineAt: 60_000, timeoutAt: null, overdue: false, checkpoint: 0, output: "", truncated: false, background,
 	});
 	const jobs = registerJobsView(h.pi, {
 		list: () => [
@@ -295,7 +296,7 @@ test("jobs list projection keeps same-scope background jobs and drops foreground
 		onExec: (execution) => { if (execution.command === "true-foreground") queueMicrotask(() => execution.close(0)); },
 		onAbort: (execution) => execution.close(null),
 	});
-	const owner = createShellExecutionOwner({ operations, now: () => 1_000 });
+	const owner = createBashExecutionOwner({ operations, now: () => 1_000 });
 	const h = harness();
 	const jobs = registerJobsView(h.pi, owner, () => "ready");
 	jobs.bind(h.ctx);
@@ -324,12 +325,12 @@ test("jobs list projection keeps same-scope background jobs and drops foreground
 test("background snapshots remain complete across display-size boundaries", () => {
 	for (const count of [256, 257, 1001]) {
 		const h = harness();
-		const views: ShellExecutionView[] = Array.from({ length: count }, (_, index) => {
+		const views: BashExecutionView[] = Array.from({ length: count }, (_, index) => {
 			const background = index < count - 8;
 			return {
 				...record({ executionId: `exec_${String(index).padStart(4, "0")}`, status: background ? "running" : "exited", exitCode: background ? null : 0, terminalAt: background ? null : 2_000, startedAt: index }),
 				owner: "pi-bash", sessionId: "session-a", branchAnchor: "leaf-a", toolCallId: null,
-				commandPreview: `command-${index}`, deadlineAt: 60_000, output: "", truncated: false, background,
+				commandPreview: `command-${index}`, deadlineAt: 60_000, timeoutAt: null, overdue: false, checkpoint: 0, output: "", truncated: false, background,
 			};
 		});
 		let queries = 0;
@@ -397,7 +398,7 @@ test("foreign and stale replies are not an empty local jobs list", () => {
 	h.fire("session_start");
 	const current = requestIds.at(-1)!;
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: current, ownerSessionId: "session-a", anchor: "leaf-a", generation: "9", availability: "ready", records: [record({ executionId: "exec_ready1111", status: "running", startedAt: 1_000, terminalAt: null })] });
-	assert.match(lines(h.widget).join("\n"), /1 running \/ 1 total/);
+	assert.match(lines(h.widget).join("\n"), /Jobs \(0\/1 done\) 1 running/);
 	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "9" });
 	const next = requestIds.at(-1)!;
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: next, ownerSessionId: "other-session", anchor: "leaf-a", generation: "9", availability: "ready", records: [] });
@@ -417,7 +418,8 @@ test("foreign and stale replies are not an empty local jobs list", () => {
 });
 
 test("collapsed and expanded rows keep exact facts and freeze terminal duration", () => {
-	assert.equal(formatJobDuration(723_000), "12m03s");
+	assert.equal(formatJobDuration(723_000), "12m 3s");
+	assert.equal(formatJobDuration(3_826_000), "1h 3m 46s");
 	assert.equal(formatJobDuration(null), "unknown");
 	const now = 10_000_000;
 	const records = [
@@ -428,21 +430,21 @@ test("collapsed and expanded rows keep exact facts and freeze terminal duration"
 	];
 	const folded = jobRows({ records }, 80, 4, now, undefined, { folded: true });
 	assert.equal(folded.length, 1);
-	assert.match(folded[0]!, /1 running \/ 4 total/);
-	assert.match(folded[0]!, /longest 12m03s/);
-	assert.match(folded[0]!, /failed/);
-	assert.match(folded[0]!, /interrupted/);
-	assert.match(folded[0]!, /!/);
+	assert.match(folded[0]!, /^▸ Jobs \(3\/4 done\) 1 running$/);
+	// Finished failures are row facts; the heading warns only about current conditions.
+	assert.doesNotMatch(folded[0]!, /failed|interrupted|!/);
 	const expanded = jobRows({ records }, 100, 8, now).join("\n");
-	assert.match(expanded, /Bash "sleep"  running  12m03s  output 4s/);
-	assert.doesNotMatch(expanded, /a1111[^\n]*exit/);
-	assert.match(expanded, /Bash "sleep"  exited  5s  no output  exit 0/);
+	assert.match(expanded, /◐ sleep +12m 3s  output 4s ago/);
+	assert.doesNotMatch(expanded, /◐[^\n]*exit/);
+	assert.match(expanded, /✓ sleep +5s$/m);
 	assert.doesNotMatch(expanded, /accepted|stalled|success/);
-	assert.match(expanded, /Bash "sleep"  exited  5s  output 4s  exit 2/);
-	assert.match(expanded, /Bash "sleep"  interrupted  2s  no output  exit unknown/);
+	assert.match(expanded, /✗ sleep +5s  exit 2$/m);
+	assert.match(expanded, /⊘ sleep +2s  interrupted$/m);
+	const unknownExit = jobRows({ records: [record({ executionId: "exec_eeee4444", status: "exited", exitCode: null, startedAt: 0, terminalAt: 1_000 })] }, 80, 4, now).join("\n");
+	assert.match(unknownExit, /\? sleep +1s  exit unknown/);
 	assert.doesNotMatch(expanded, /2h/);
 	const knownEmpty = jobRows({ records: [] }, 80, 2, now, undefined, { folded: true });
-	assert.match(knownEmpty[0]!, /0 running \/ 0 total/);
+	assert.match(knownEmpty[0]!, /Jobs \(0\/0 done\)$/);
 	assert.doesNotMatch(knownEmpty[0]!, /unavailable|!/);
 	const missing = jobRows({ unavailable: "other-owner" }, 80, 4, now);
 	assert.match(missing[0]!, /unavailable · other-owner/);
@@ -460,30 +462,30 @@ test("hide survives fact updates and list reaches rows that do not fit", async (
 	const records = [1, 2, 3, 4].map((item) => record({ executionId: `exec_job${item}aaaa`, label: `tool${item}`, status: "exited", exitCode: 0, startedAt: item, terminalAt: item + 1 }));
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "3", availability: "ready", records });
 	const beforeExpand = h.selects.length;
-	await h.commands.get("bash-jobs-ui")!("expand", h.ctx);
+	await h.commands.get("jobs-ui")!("expand", h.ctx);
 	assert.equal(h.selects.length, beforeExpand);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /tool1/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	const shown = lines(h.widget, 10, 20);
-	assert.match(shown.join("\n"), /Bash jobs/);
+	assert.match(shown.join("\n"), /Jobs \(4\/4 done\)/);
 	assert.equal(shown.filter(Boolean).length, 1);
 	assert.equal(h.wakes.length, 0);
-	await h.commands.get("bash-jobs-ui")!("hide", h.ctx);
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
 	assert.equal(h.widget, undefined);
 	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "3" });
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "3", availability: "ready", records: [...records, record({ executionId: "exec_extra9999", label: "extra", status: "running", startedAt: 1, terminalAt: null })] });
 	assert.equal(h.widget, undefined);
-	await h.commands.get("bash-jobs-ui")!("show", h.ctx);
-	assert.match(lines(h.widget, 36, 80).join("\n"), /1 running \/ 5 total/);
+	await h.commands.get("jobs-ui")!("show", h.ctx);
+	assert.match(lines(h.widget, 36, 80).join("\n"), /Jobs \(4\/5 done\) 1 running/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /tool1/);
-	await h.commands.get("bash-jobs-ui")!("list", h.ctx);
+	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.match(h.selects.at(-1)!.join("\n"), /extra/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /tool1/);
-	await h.commands.get("bash-jobs-ui")!("collapse", h.ctx);
-	await h.commands.get("bash-jobs-ui")!("hide", h.ctx);
-	await h.commands.get("bash-jobs-ui")!("show", h.ctx);
+	await h.commands.get("jobs-ui")!("collapse", h.ctx);
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
+	await h.commands.get("jobs-ui")!("show", h.ctx);
 	assert.equal(lines(h.widget, 36, 80).filter(Boolean).length, 1);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
 	assert.equal(jobsRenderBudget(10), 1);
@@ -503,26 +505,26 @@ test("jobs list shows the same background jobs as the bottom section without cha
 		records: [visible, brief],
 	});
 	const collapsed = lines(h.widget, 36, 80).join("\n");
-	assert.match(collapsed, /1 running \/ 2 total/);
+	assert.match(collapsed, /Jobs \(1\/2 done\) 1 running/);
 	assert.doesNotMatch(collapsed, /true-brief|sleep-visible/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
 	const requests = ids.length;
-	await h.commands.get("bash-jobs-ui")!("list", h.ctx);
+	await h.commands.get("jobs-ui")!("list", h.ctx);
 	const overlay = h.selects.at(-1)!.join("\n");
 	assert.match(overlay, /true-brief/);
 	assert.match(overlay, /sleep-visible/);
 	assert.equal(ids.length, requests);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
 	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /true-brief/);
-	await h.commands.get("bash-jobs-ui")!("expand", h.ctx);
+	await h.commands.get("jobs-ui")!("expand", h.ctx);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /sleep-visible/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /true-brief/);
-	await h.commands.get("bash-jobs-ui")!("list", h.ctx);
+	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /sleep-visible/);
-	await h.commands.get("bash-jobs-ui")!("hide", h.ctx);
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
 	assert.equal(h.widget, undefined);
-	await h.commands.get("bash-jobs-ui")!("list", h.ctx);
+	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.equal(h.widget, undefined);
 	assert.match(h.selects.at(-1)!.join("\n"), /true-brief/);
 	assert.equal(h.wakes.length, 0);
@@ -556,7 +558,7 @@ test("jobs list pages through every background job without dropping later rows",
 		version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready",
 		records,
 	});
-	await h.commands.get("bash-jobs-ui")!("list", h.ctx);
+	await h.commands.get("jobs-ui")!("list", h.ctx);
 	assert.doesNotMatch(firstPage, /last-background-job/);
 	assert.match(overlayRows.join("\n"), /last-background-job/);
 	assert.match(overlayRows.join("\n"), /1001–1001 of 1001/);
@@ -575,10 +577,10 @@ test("fullscreen Bash jobs header click toggles inline and does not open a dialo
 	const pressed = clickHeader(h.widget);
 	assert.equal(pressed?.focus, undefined);
 	assert.equal(h.selects.length, 0);
-	assert.match(lines(h.widget, 36, 80).join("\n"), /Bash "sleep"/);
+	assert.match(lines(h.widget, 36, 80).join("\n"), /◐ sleep/);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	clickHeader(h.widget, 1);
-	assert.match(lines(h.widget, 36, 80).join("\n"), /Bash "sleep"/);
+	assert.match(lines(h.widget, 36, 80).join("\n"), /◐ sleep/);
 	clickHeader(h.widget);
 	assert.equal(h.selects.length, 0);
 	assert.equal(lines(h.widget, 36, 80).filter(Boolean).length, 1);
@@ -598,14 +600,14 @@ test("running timer redraw keeps folded and hidden choices", async () => {
 	h.fire("session_start");
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", records: [record({ executionId: "exec_tick1111", status: "running", startedAt: 1_000, terminalAt: null })] });
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
-	assert.match(lines(h.widget, 36, 80)[0]!, /longest 19s/);
+	assert.match(lines(h.widget, 36, 80)[0]!, /Jobs \(0\/1 done\) 1 running$/);
 	now = 25_000;
 	h.timers.find((timer) => timer.ms === 1_000)?.cb();
 	assert.equal(lines(h.widget, 36, 80).filter(Boolean).length, 1);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▸/);
-	assert.match(lines(h.widget, 36, 80)[0]!, /longest 24s/);
+	assert.doesNotMatch(lines(h.widget, 36, 80).join("\n"), /24s/, "the folded heading carries counts, not a clock");
 	assert.equal(h.selects.length, 0);
-	await h.commands.get("bash-jobs-ui")!("expand", h.ctx);
+	await h.commands.get("jobs-ui")!("expand", h.ctx);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /24s/);
 	now = 30_000;
@@ -613,12 +615,12 @@ test("running timer redraw keeps folded and hidden choices", async () => {
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /29s/);
 	assert.equal(h.selects.length, 0);
-	await h.commands.get("bash-jobs-ui")!("hide", h.ctx);
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
 	now = 40_000;
 	assert.equal(h.widget, undefined);
 	for (const timer of h.timers.filter((item) => item.ms === 1_000)) timer.cb();
 	assert.equal(h.widget, undefined);
-	await h.commands.get("bash-jobs-ui")!("show", h.ctx);
+	await h.commands.get("jobs-ui")!("show", h.ctx);
 	assert.match(lines(h.widget, 36, 80)[0]!, /▾/);
 	assert.match(lines(h.widget, 36, 80).join("\n"), /39s/);
 });
@@ -632,9 +634,9 @@ test("elapsed redraw stops when nothing visible is running, and headless mounts 
 	h.fire("session_start");
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", records: [record({ executionId: "exec_run1111", status: "running", startedAt: 1_000, terminalAt: null })] });
 	assert.equal(h.timers.some((timer) => timer.ms === 1_000), true);
-	await h.commands.get("bash-jobs-ui")!("hide", h.ctx);
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
 	assert.equal(h.timers.some((timer) => timer.ms === 1_000), false);
-	await h.commands.get("bash-jobs-ui")!("show", h.ctx);
+	await h.commands.get("jobs-ui")!("show", h.ctx);
 	assert.equal(h.timers.some((timer) => timer.ms === 1_000), true);
 	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" });
 	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", records: [record({ executionId: "exec_run1111", status: "exited", exitCode: 0, startedAt: 1_000, terminalAt: 4_000 })] });
@@ -653,7 +655,7 @@ test("elapsed redraw stops when nothing visible is running, and headless mounts 
 		assert.equal(headless.widget, undefined);
 		assert.deepEqual(headlessComposer.slots(), []);
 		assert.deepEqual(headless.tools, ["bash"]);
-		await headless.commands.get("bash-jobs-ui")!("expand", headless.ctx);
+		await headless.commands.get("jobs-ui")!("expand", headless.ctx);
 		assert.equal(headless.selects.length, 0);
 		assert.equal(headless.widget, undefined);
 	}
@@ -681,8 +683,8 @@ test("print and another bash owner do not become an empty retained jobs list", (
 			sendMessage() { throw new Error("wake"); },
 			on(name: string, fn: (event: unknown, ctx: ExtensionContext) => void) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); },
 		};
-		const owner = createShellExecutionOwner({ operations: { exec: () => { throw new Error("spawned"); } } });
-		bindRetainedShell(pi as unknown as ExtensionAPI, owner);
+		const owner = createBashExecutionOwner({ operations: { exec: () => { throw new Error("spawned"); } } });
+		bindAsyncBash(pi as unknown as ExtensionAPI, owner);
 		const ctx = { mode: item.mode, hasUI: true, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "session-a", getLeafId: () => "leaf-a", getBranch: () => [{ id: "leaf-a" }] } } as ExtensionContext;
 		for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
 		const replies: JobsViewReply[] = [];
@@ -694,4 +696,19 @@ test("print and another bash owner do not become an empty retained jobs list", (
 		assert.equal(tools.includes("bash"), item.mode === "tui" && item.source === "builtin");
 		assert.equal(owner.startCount, 0);
 	}
+});
+
+test("a job past its checkpoint is a current alert; a timeout kill is a row fact", () => {
+	const now = 10_000_000;
+	const records = [
+		record({ executionId: "exec_over1111", status: "running", overdue: true, startedAt: now - 700_000, terminalAt: null, lastOutputAt: now - 30_000 }),
+		record({ executionId: "exec_kill2222", status: "timeout", exitCode: null, startedAt: 0, terminalAt: 9_000, lastOutputAt: null }),
+	];
+	const folded = jobRows({ records }, 100, 4, now, undefined, { folded: true });
+	assert.match(folded[0]!, /^▸ ! Jobs \(1\/2 done\) 1 running · 1 past checkpoint$/);
+	const expanded = jobRows({ records }, 100, 4, now).join("\n");
+	assert.match(expanded, /◐ sleep +11m 40s  past checkpoint · output 30s ago/);
+	assert.match(expanded, /⊘ sleep +9s  timeout$/m);
+	const after = jobRows({ records: [records[1]!] }, 100, 4, now, undefined, { folded: true });
+	assert.doesNotMatch(after[0]!, /!/);
 });

@@ -5,25 +5,33 @@ import { access } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 import { scheduleDelay, requireDurationMs, timestampAfter, type CancellableDelay } from "../shared/duration-timer.ts";
-import { OUTPUT_MAX_BYTES, SHELL_OWNER } from "./policy.ts";
+import { OUTPUT_MAX_BYTES, BASH_OWNER } from "./policy.ts";
 
-export type ShellStatus = "running" | "exited" | "cancelled" | "deadline" | "interrupted";
-export type ShellPhase = "started" | "renewed" | "exited" | "cancelled" | "deadline" | "interrupted" | "unavailable";
-export type ShellNotification = "idle-wake-or-next-request" | "wake-unavailable" | "not-a-completion";
+/** `timeout` is the opt-in hard lifetime; reaching the checkpoint deadline never ends an execution. */
+export type BashStatus = "running" | "exited" | "cancelled" | "timeout" | "interrupted";
+export type BashPhase = "started" | "renewed" | "checkpoint" | "exited" | "cancelled" | "timeout" | "interrupted" | "unavailable";
+export type BashNotice = "idle-wake-or-next-request" | "wake-unavailable" | "not-a-completion";
 
-export interface ShellScope {
+export interface BashScope {
 	sessionId: string | null;
 	branchAnchor: string | null;
 	/** Entry ids on the current branch. A stored anchor remains in scope while it is still on this branch. */
 	branchIds?: readonly string[];
 }
 
-export interface ShellExecutionView {
+export interface BashExecutionView {
 	executionId: string;
-	owner: typeof SHELL_OWNER;
-	status: ShellStatus;
+	owner: typeof BASH_OWNER;
+	status: BashStatus;
 	startedAt: number;
+	/** Checkpoint: when the model is asked whether to renew or cancel. The process keeps running. */
 	deadlineAt: number;
+	/** Opt-in hard lifetime; null when the model did not request a kill time. */
+	timeoutAt: number | null;
+	/** True after the checkpoint passed while running, until renew. */
+	overdue: boolean;
+	/** Increments at each reached checkpoint; identifies its notice. */
+	checkpoint: number;
 	exitCode: number | null;
 	output: string;
 	truncated: boolean;
@@ -41,26 +49,29 @@ export interface ShellExecutionView {
 	lastOutputAt: number | null;
 }
 
-export interface ShellExecutionEvent {
+export interface BashExecutionEvent {
 	version: 1;
 	executionId: string;
-	owner: typeof SHELL_OWNER;
+	owner: typeof BASH_OWNER;
 	sessionId: string | null;
 	branchAnchor: string | null;
 	toolCallId: string | null;
-	phase: ShellPhase;
-	status: ShellStatus | "unavailable";
+	phase: BashPhase;
+	status: BashStatus | "unavailable";
 	exitCode: number | null;
 	deadlineAt: string | null;
+	timeoutAt: string | null;
+	overdue: boolean;
+	checkpoint: number;
 	truncated: boolean;
 	outputTail: string;
-	notification: ShellNotification;
+	notice: BashNotice;
 	label: string;
 	terminalAt: string | null;
 	lastOutputAt: string | null;
 }
 
-export interface StartShellInput {
+export interface StartBashInput {
 	command: string;
 	/** Configured command prefix, applied once before the command. The label and preview use the command alone. */
 	commandPrefix?: string;
@@ -69,9 +80,14 @@ export interface StartShellInput {
 	sessionId: string | null;
 	branchAnchor: string | null;
 	toolCallId: string | null;
+	/** Checkpoint delay. */
 	deadlineMs: number;
+	/** Opt-in hard lifetime. */
+	timeoutMs?: number;
 	foregroundWindowMs: number;
 	signal?: AbortSignal;
+	/** Releases the foreground window early; the execution continues. */
+	yieldSignal?: AbortSignal;
 }
 
 interface ExecutionRecord {
@@ -79,17 +95,23 @@ interface ExecutionRecord {
 	sessionId: string | null;
 	branchAnchor: string | null;
 	toolCallId: string | null;
-	status: ShellStatus;
+	status: BashStatus;
 	startedAt: number;
 	deadlineAt: number;
+	timeoutAt: number | null;
+	overdue: boolean;
+	checkpoint: number;
 	exitCode: number | null;
 	output: BoundedOutput;
 	/** Execution-scoped cancellation. Native abort tears down the process tree. */
 	abort: AbortController;
 	deadlineTimer: CancellableDelay | undefined;
+	timeoutTimer: CancellableDelay | undefined;
 	waiters: Array<() => void>;
+	/** Observation windows that end when the checkpoint is reached. */
+	checkpointWaiters: Array<() => void>;
 	settled: boolean;
-	terminalCause: Exclude<ShellStatus, "running" | "exited"> | undefined;
+	terminalCause: Exclude<BashStatus, "running" | "exited"> | undefined;
 	closed: Promise<void>;
 	resolveClosed: () => void;
 	label: string;
@@ -99,24 +121,25 @@ interface ExecutionRecord {
 	lastOutputAt: number | null;
 }
 
-export interface ShellExecutionOwner {
+export interface BashExecutionOwner {
 	readonly startCount: number;
-	start(input: StartShellInput): Promise<ShellExecutionView>;
-	inspect(executionId: string, scope: ShellScope): ShellExecutionView | undefined;
+	start(input: StartBashInput): Promise<BashExecutionView>;
+	inspect(executionId: string, scope: BashScope): BashExecutionView | undefined;
 	/** Read-only in-scope snapshot. It does not start, wait, renew, cancel, or trim. */
-	list(scope: ShellScope): ShellExecutionView[];
+	list(scope: BashScope): BashExecutionView[];
 	/** Display-fact invalidation only. The listener receives no output and cannot affect execution. */
 	subscribeDisplay(listener: () => void): () => void;
-	wait(executionId: string, scope: ShellScope, options: { signal?: AbortSignal; waitMs: number }): Promise<ShellExecutionView>;
-	renew(executionId: string, scope: ShellScope, deadlineMs: number): ShellExecutionView;
-	cancel(executionId: string, scope: ShellScope): Promise<ShellExecutionView>;
+	/** Ends at terminal, checkpoint, waitMs, abort or yield. Only terminal changes the execution. */
+	wait(executionId: string, scope: BashScope, options: { signal?: AbortSignal; yieldSignal?: AbortSignal; waitMs: number }): Promise<BashExecutionView>;
+	renew(executionId: string, scope: BashScope, deadlineMs: number): BashExecutionView;
+	cancel(executionId: string, scope: BashScope): Promise<BashExecutionView>;
 	/** Interrupt running executions that belong to a different session or branch. Same-scope idle is not a switch. */
-	interruptOthers(scope: ShellScope): Promise<void>;
+	interruptOthers(scope: BashScope): Promise<void>;
 	shutdown(): Promise<void>;
 }
 
-const ABORTED_BEFORE_START = "Shell start aborted before execution";
-const OUTSIDE_SCOPE = "Shell execution is outside the current session branch";
+const ABORTED_BEFORE_START = "Job start aborted before execution";
+const OUTSIDE_SCOPE = "Bash job is outside the current session branch";
 const LABEL_LIMIT = 24;
 
 /** Conservative executable basename, or Bash. Arguments, assignments, and shell syntax are not labels. */
@@ -145,18 +168,18 @@ function isoTime(value: number | null): string | null {
 }
 
 /**
- * Retained execution over Pi's exported local bash operations.
+ * Async Bash job execution over Pi's exported local bash operations.
  *
  * Pi owns shell discovery, spawn, output streaming, process-tree teardown and
  * shutdown tracking. This owner retains the execution promise, a renewable
  * wrapper deadline, observation waits and the published terminal facts.
  */
-export function createShellExecutionOwner(options: {
+export function createBashExecutionOwner(options: {
 	operations: BashOperations | (() => BashOperations);
-	onEvent?: (event: ShellExecutionEvent) => void;
+	onEvent?: (event: BashExecutionEvent) => void;
 	maxOutputBytes?: number;
 	now?: () => number;
-}): ShellExecutionOwner {
+}): BashExecutionOwner {
 	const records = new Map<string, ExecutionRecord>();
 	const displayListeners = new Set<() => void>();
 	const maxOutputBytes = options.maxOutputBytes ?? OUTPUT_MAX_BYTES;
@@ -168,12 +191,12 @@ export function createShellExecutionOwner(options: {
 		}
 	};
 
-	const emit = (record: ExecutionRecord, phase: ShellPhase): void => {
+	const emit = (record: ExecutionRecord, phase: BashPhase): void => {
 		try {
 			options.onEvent?.({
 				version: 1,
 				executionId: record.executionId,
-				owner: SHELL_OWNER,
+				owner: BASH_OWNER,
 				sessionId: record.sessionId,
 				branchAnchor: record.branchAnchor,
 				toolCallId: record.toolCallId,
@@ -181,9 +204,12 @@ export function createShellExecutionOwner(options: {
 				status: record.status,
 				exitCode: record.exitCode,
 				deadlineAt: new Date(record.deadlineAt).toISOString(),
+				timeoutAt: isoTime(record.timeoutAt),
+				overdue: record.overdue,
+				checkpoint: record.checkpoint,
 				truncated: record.output.truncated,
 				outputTail: record.output.text(),
-				notification: phase === "started" || phase === "renewed" ? "not-a-completion" : "idle-wake-or-next-request",
+				notice: phase === "started" || phase === "renewed" ? "not-a-completion" : "idle-wake-or-next-request",
 				label: record.label,
 				terminalAt: isoTime(record.terminalAt),
 				lastOutputAt: isoTime(record.lastOutputAt),
@@ -191,12 +217,15 @@ export function createShellExecutionOwner(options: {
 		} catch { /* An observer failure must not strand or fail the execution. */ }
 	};
 
-	const viewOf = (record: ExecutionRecord): ShellExecutionView => ({
+	const viewOf = (record: ExecutionRecord): BashExecutionView => ({
 		executionId: record.executionId,
-		owner: SHELL_OWNER,
+		owner: BASH_OWNER,
 		status: record.status,
 		startedAt: record.startedAt,
 		deadlineAt: record.deadlineAt,
+		timeoutAt: record.timeoutAt,
+		overdue: record.overdue,
+		checkpoint: record.checkpoint,
 		exitCode: record.exitCode,
 		output: record.output.text(),
 		truncated: record.output.truncated,
@@ -210,11 +239,11 @@ export function createShellExecutionOwner(options: {
 		lastOutputAt: record.lastOutputAt,
 	});
 
-	const sameScope = (record: ExecutionRecord, scope: ShellScope): boolean => inShellScope(record, scope);
+	const sameScope = (record: ExecutionRecord, scope: BashScope): boolean => inBashScope(record, scope);
 
-	const requireRecord = (executionId: string, scope: ShellScope): ExecutionRecord => {
+	const requireRecord = (executionId: string, scope: BashScope): ExecutionRecord => {
 		const record = records.get(executionId);
-		if (!record || !sameScope(record, scope)) throw new Error(record ? OUTSIDE_SCOPE : `Unknown shell execution: ${executionId}`);
+		if (!record || !sameScope(record, scope)) throw new Error(record ? OUTSIDE_SCOPE : `Unknown job: ${executionId}`);
 		return record;
 	};
 
@@ -225,7 +254,7 @@ export function createShellExecutionOwner(options: {
 		notifyDisplay();
 	};
 
-	const finish = (record: ExecutionRecord, status: Exclude<ShellStatus, "running">, exitCode: number | null): void => {
+	const finish = (record: ExecutionRecord, status: Exclude<BashStatus, "running">, exitCode: number | null): void => {
 		if (record.settled) return;
 		record.settled = true;
 		record.status = status;
@@ -233,6 +262,10 @@ export function createShellExecutionOwner(options: {
 		record.terminalAt = now();
 		record.deadlineTimer?.cancel();
 		record.deadlineTimer = undefined;
+		record.timeoutTimer?.cancel();
+		record.timeoutTimer = undefined;
+		record.overdue = false;
+		record.checkpointWaiters = [];
 		const waiters = record.waiters;
 		record.waiters = [];
 		for (const waiter of waiters) waiter();
@@ -244,12 +277,30 @@ export function createShellExecutionOwner(options: {
 	/** Execution-scoped cancellation. The native abort handler owns process-tree teardown. */
 	const stop = (record: ExecutionRecord): void => { record.abort.abort(); };
 
+	/** The checkpoint asks the model to decide; the process keeps running and no later checkpoint arms without renew. */
 	const armDeadline = (record: ExecutionRecord): void => {
 		record.deadlineTimer?.cancel();
 		const delay = Math.max(0, record.deadlineAt - now());
 		record.deadlineTimer = scheduleDelay(delay, () => {
+			record.deadlineTimer = undefined;
 			if (record.settled) return;
-			record.terminalCause = "deadline";
+			record.overdue = true;
+			record.checkpoint += 1;
+			const waiters = record.checkpointWaiters;
+			record.checkpointWaiters = [];
+			for (const waiter of waiters) waiter();
+			emit(record, "checkpoint");
+			notifyDisplay();
+		});
+	};
+
+	/** Only an explicit timeout ends the process at a fixed time. */
+	const armTimeout = (record: ExecutionRecord): void => {
+		record.timeoutTimer?.cancel();
+		if (record.timeoutAt === null) { record.timeoutTimer = undefined; return; }
+		record.timeoutTimer = scheduleDelay(Math.max(0, record.timeoutAt - now()), () => {
+			if (record.settled) return;
+			record.terminalCause = "timeout";
 			stop(record);
 		});
 	};
@@ -262,6 +313,7 @@ export function createShellExecutionOwner(options: {
 			if (input.signal?.aborted) throw new Error(ABORTED_BEFORE_START);
 			if (input.command.trim().length === 0) throw new Error("Shell command is empty");
 			const deadlineMs = requireDurationMs(input.deadlineMs);
+			const timeoutMs = input.timeoutMs === undefined ? undefined : requireDurationMs(input.timeoutMs);
 			if (!Number.isFinite(input.foregroundWindowMs) || input.foregroundWindowMs < 0) throw new Error("Invalid foreground window");
 			if (input.foregroundWindowMs > 0) requireDurationMs(input.foregroundWindowMs);
 			try {
@@ -272,6 +324,7 @@ export function createShellExecutionOwner(options: {
 			if (input.signal?.aborted) throw new Error(ABORTED_BEFORE_START);
 			const startedAt = now();
 			const deadlineAt = timestampAfter(startedAt, deadlineMs);
+			const timeoutAt = timeoutMs === undefined ? null : timestampAfter(startedAt, timeoutMs);
 			let resolveClosed: () => void = () => {};
 			const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
 			const record: ExecutionRecord = {
@@ -282,11 +335,16 @@ export function createShellExecutionOwner(options: {
 				status: "running",
 				startedAt,
 				deadlineAt,
+				timeoutAt,
+				overdue: false,
+				checkpoint: 0,
 				exitCode: null,
 				output: new BoundedOutput(maxOutputBytes),
 				abort: new AbortController(),
 				deadlineTimer: undefined,
+				timeoutTimer: undefined,
 				waiters: [],
+				checkpointWaiters: [],
 				settled: false,
 				terminalCause: undefined,
 				closed,
@@ -314,6 +372,7 @@ export function createShellExecutionOwner(options: {
 				},
 			);
 			armDeadline(record);
+			armTimeout(record);
 			emit(record, "started");
 			notifyDisplay();
 			if (input.signal?.aborted && !record.settled) {
@@ -327,7 +386,7 @@ export function createShellExecutionOwner(options: {
 				return viewOf(record);
 			};
 			if (input.foregroundWindowMs <= 0) return release();
-			const outcome = await raceWindow(record, input.foregroundWindowMs, input.signal);
+			const outcome = await raceWindow(record, input.foregroundWindowMs, input.signal, input.yieldSignal);
 			if (outcome === "abort" && !record.settled) {
 				record.terminalCause = "cancelled";
 				stop(record);
@@ -356,28 +415,37 @@ export function createShellExecutionOwner(options: {
 			const waitMs = requireDurationMs(waitOptions.waitMs);
 			return new Promise((resolve) => {
 				let timer: CancellableDelay | undefined;
+				let finished = false;
 				const done = () => {
+					if (finished) return;
+					finished = true;
 					timer?.cancel();
 					waitOptions.signal?.removeEventListener("abort", onAbort);
+					waitOptions.yieldSignal?.removeEventListener("abort", onAbort);
 					record.waiters = record.waiters.filter((waiter) => waiter !== onTerminal);
+					record.checkpointWaiters = record.checkpointWaiters.filter((waiter) => waiter !== onTerminal);
 					resolve(viewOf(record));
 				};
 				const onTerminal = () => done();
 				const onAbort = () => done();
 				record.waiters.push(onTerminal);
+				// A reached checkpoint is for the model to judge; the wait returns it instead of sitting on it.
+				if (!record.overdue) record.checkpointWaiters.push(onTerminal);
 				timer = scheduleDelay(waitMs, done);
-				if (record.status !== "running" || waitOptions.signal?.aborted) {
+				if (record.status !== "running" || waitOptions.signal?.aborted || waitOptions.yieldSignal?.aborted) {
 					onAbort();
 					return;
 				}
 				waitOptions.signal?.addEventListener("abort", onAbort, { once: true });
+				waitOptions.yieldSignal?.addEventListener("abort", onAbort, { once: true });
 			});
 		},
 		renew(executionId, scope, deadlineMs) {
 			const record = requireRecord(executionId, scope);
-			if (record.status !== "running") throw new Error(`Cannot renew shell execution ${executionId}; status is ${record.status}`);
+			if (record.status !== "running") throw new Error(`Cannot renew job ${executionId}; status is ${record.status}`);
 			const duration = requireDurationMs(deadlineMs);
 			record.deadlineAt = timestampAfter(now(), duration);
+			record.overdue = false;
 			armDeadline(record);
 			emit(record, "renewed");
 			return viewOf(record);
@@ -413,13 +481,14 @@ export function createShellExecutionOwner(options: {
 	};
 }
 
-export function inShellScope(record: { sessionId: string | null; branchAnchor: string | null }, scope: ShellScope): boolean {
+export function inBashScope(record: { sessionId: string | null; branchAnchor: string | null }, scope: BashScope): boolean {
 	if (record.sessionId !== scope.sessionId) return false;
 	if (!record.branchAnchor || !scope.branchAnchor || record.branchAnchor === scope.branchAnchor) return true;
 	return scope.branchIds?.includes(record.branchAnchor) === true;
 }
 
-function raceWindow(record: ExecutionRecord, windowMs: number, signal: AbortSignal | undefined): Promise<"terminal" | "window" | "abort"> {
+/** Foreground window. Tool abort cancels the execution; a yield or checkpoint only ends the window. */
+function raceWindow(record: ExecutionRecord, windowMs: number, signal: AbortSignal | undefined, yieldSignal: AbortSignal | undefined): Promise<"terminal" | "window" | "abort"> {
 	return new Promise((resolve) => {
 		let settled = false;
 		let timer: CancellableDelay | undefined;
@@ -428,13 +497,17 @@ function raceWindow(record: ExecutionRecord, windowMs: number, signal: AbortSign
 			settled = true;
 			timer?.cancel();
 			signal?.removeEventListener("abort", onAbort);
+			yieldSignal?.removeEventListener("abort", onYield);
 			record.waiters = record.waiters.filter((waiter) => waiter !== onTerminal);
+			record.checkpointWaiters = record.checkpointWaiters.filter((waiter) => waiter !== onYield);
 			resolve(outcome);
 		};
 		const onTerminal = () => finish("terminal");
 		const onAbort = () => finish("abort");
+		const onYield = () => finish("window");
 		timer = scheduleDelay(windowMs, () => finish("window"));
 		record.waiters.push(onTerminal);
+		record.checkpointWaiters.push(onYield);
 		if (record.settled) {
 			onTerminal();
 			return;
@@ -443,7 +516,12 @@ function raceWindow(record: ExecutionRecord, windowMs: number, signal: AbortSign
 			onAbort();
 			return;
 		}
+		if (yieldSignal?.aborted) {
+			onYield();
+			return;
+		}
 		signal?.addEventListener("abort", onAbort, { once: true });
+		yieldSignal?.addEventListener("abort", onYield, { once: true });
 	});
 }
 

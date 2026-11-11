@@ -74,7 +74,7 @@ command -v jq >/dev/null || die "jq is required"
 
 [[ -f "${repo_root}/package.json" ]] || die "package.json is missing"
 [[ $(jq -r '.name // empty' "${repo_root}/package.json") == "@csheng/pi-extensions" ]] || die "source is not @csheng/pi-extensions"
-[[ -f "${repo_root}/config/csheng-agents.json" ]] || die "packaged route baseline is missing"
+[[ -f "${repo_root}/config/agent-routes.json" ]] || die "packaged route baseline is missing"
 [[ -d "${repo_root}/extensions" ]] || die "extensions/ is missing"
 
 agent_dir=$(resolved "${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}")
@@ -110,7 +110,7 @@ rsync -a -- "${repo_root}/config/" "${staging}/config/"
 rsync -a -- "${repo_root}/extensions/" "${staging}/extensions/"
 
 [[ -f "${staging}/package.json" ]] || die "staged package.json is missing"
-[[ -f "${staging}/config/csheng-agents.json" ]] || die "staged route baseline is missing"
+[[ -f "${staging}/config/agent-routes.json" ]] || die "staged route baseline is missing"
 if [[ -e "${staging}/tests" || -e "${staging}/node_modules" || -e "${staging}/.git" ]]; then
 	die "staging included excluded source paths"
 fi
@@ -128,7 +128,7 @@ chmod 700 -- "${destination}"
 rsync -a --checksum --delete -- "${staging}/" "${destination}/"
 
 [[ -f "${destination}/package.json" ]] || die "published package.json is missing"
-[[ -f "${destination}/config/csheng-agents.json" ]] || die "published route baseline is missing"
+[[ -f "${destination}/config/agent-routes.json" ]] || die "published route baseline is missing"
 [[ -f "${destination}/extensions/agents/index.ts" ]] || die "published extensions are missing"
 
 log_info "published destination=${destination}"

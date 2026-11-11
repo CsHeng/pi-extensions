@@ -1,4 +1,4 @@
-# Subagent execution primitives
+# Agent execution primitives
 
 ## Availability
 
@@ -24,8 +24,8 @@ Capture and apply require coordination with parent file writers. They are not at
 sequenceDiagram
     participant Parent
     participant Host as Managed host
-    participant Notices as Loop notifications
-    participant Child as One logical subagent
+    participant Notices as Notices
+    participant Child as One logical agent
     participant Inputs as Isolated API and client roots
     participant API as API destination
     participant Client as Client destination
@@ -60,10 +60,10 @@ Execution/report state, per-root application, parent acceptance and resource rel
 
 The receipt follows input preparation, not child completion. The initial tool signal governs preparation only; each accepted run has its own cancellation signal. One-shot hosts can explicitly `join` the same execution. Runner callbacks must honor cancellation and retain their existing bounded process cleanup. Runs are retained in memory with a finite admission bound; persistent request replay, close/reclaim and cross-process recovery are not supplied by this class.
 
-Terminal facts are recorded in the in-memory view before `onEvent`, which may await persistence. `onEvent` receives old-owner cancellation facts too, so it must filter owner/generation before updating a current workflow or UI. Parent-model delivery is owned by [Job Notifications](job-notifications.md), not by this supervisor. `onWake` remains a source publication hook; it must not call Pi's message API. A delivery failure does not erase the result or imply the model consumed it.
+Terminal facts are recorded in the in-memory view before `onEvent`, which may await persistence. `onEvent` receives old-owner cancellation facts too, so it must filter owner/generation before updating a current consumer or UI. Parent-model delivery is owned by [Notices](notices.md), not by this supervisor. `onWake` remains a source publication hook; it must not call Pi's message API. A delivery failure does not erase the result or imply the model consumed it.
 
 Use `suppressWake` for a real parent abort/provider error, not ordinary `agent_end` or compaction. `replaceOwner` fences the old generation before cancelling its work. Completion can precede the tool-result consumer, so any pending-run observer must reconcile by owned run identity. Execution results are not task acceptance.
 
 ## Validation boundary
 
-The three component test files use Node's test runner, controlled promises, and disposable Git repositories, without Pi packages or provider calls. They prove local library behavior and composition, not TUI/RPC re-entry, native history reuse, workflow task tracking, package co-load, macOS behavior, or wall-clock economic gains. The integrated runtime has separate full-package, offline host/native-child and workflow tests; see the verification handoff for their actual results. Neither component nor offline host results establish live-provider effectiveness, macOS coverage or wall-clock economic gains.
+The three component test files use Node's test runner, controlled promises, and disposable Git repositories, without Pi packages or provider calls. They prove local library behavior and composition, not TUI/RPC re-entry, native history reuse, Tasklist task tracking, package co-load, macOS behavior, or wall-clock economic gains. The integrated runtime has separate full-package, offline host/native-child and tasklist tests; see the verification handoff for their actual results. Neither component nor offline host results establish live-provider effectiveness, macOS coverage or wall-clock economic gains.

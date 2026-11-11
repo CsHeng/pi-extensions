@@ -90,7 +90,7 @@ export function adoptionFromToolResult(result: unknown): { executionKeys: string
 	const record = details as { executionId?: unknown; runId?: unknown };
 	return {
 		executionKeys: typeof record.executionId === "string" && record.executionId
-			? [executionKey("retained-shell", record.executionId)]
+			? [executionKey("async-bash", record.executionId)]
 			: [],
 		runIds: typeof record.runId === "string" && record.runId ? [record.runId] : [],
 	};

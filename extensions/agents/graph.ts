@@ -10,8 +10,8 @@ import {
 	type ExecutionProfile,
 	type ThinkingProfile,
 	type RoleName,
-	type SubagentTask,
-	type SubagentToolInput,
+	type AgentTask,
+	type AgentToolInput,
 	type TaskError,
 } from "./contracts.ts";
 
@@ -21,7 +21,7 @@ const EXECUTION_PROFILE_SET = new Set<ExecutionProfile>(EXECUTION_PROFILES);
 const THINKING_PROFILE_SET = new Set<ThinkingProfile>(THINKING_PROFILES);
 const SAFE_LOCK = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
 
-export interface NormalizedTask extends SubagentTask {
+export interface NormalizedTask extends AgentTask {
 	access: Array<{ permission: "read" | "write"; scope: string[] }>;
 	grants: NormalizedAccessPath[];
 	/** Admission-only root bindings; stored separately from the model-authored task. */
@@ -53,7 +53,7 @@ function hasDependencyPath(from: string, to: string, dependencies: ReadonlyMap<s
 	return false;
 }
 
-export function validateGraphStructure(input: SubagentToolInput): GraphValidation {
+export function validateGraphStructure(input: AgentToolInput): GraphValidation {
 	if (!Array.isArray(input.tasks) || input.tasks.length < 1 || input.tasks.length > HARD_LIMITS.maxTasks) {
 		return fail("invalid_graph_size", `A graph must contain 1 through ${HARD_LIMITS.maxTasks} tasks.`);
 	}

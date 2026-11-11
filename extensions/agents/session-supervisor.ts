@@ -39,7 +39,7 @@ export interface Submission<P, R> {
 	execute(prepared: P, context: ExecutionContext): Promise<R>;
 }
 export interface SupervisorHooks {
-	/** Persists owner-tagged terminal facts, including cancellation during shutdown. Filter by owner before projecting to a current UI/workflow. */
+	/** Persists owner-tagged terminal facts, including cancellation during shutdown. Filter by owner before projecting to a current UI. */
 	onEvent?(event: ExecutionEvent): void | Promise<void>;
 	onWake?(events: readonly ExecutionEvent[]): void | Promise<void>;
 	onDeliveryError?(error: unknown): void;

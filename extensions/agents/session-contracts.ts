@@ -1,11 +1,10 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { validateGraphStructure } from "./graph.ts";
 import { observationWaitMilliseconds } from "../shared/observation-budget.ts";
-import { COLLABORATION_CONTRACT_VERSION, HARD_LIMITS, SubagentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
+import { COLLABORATION_CONTRACT_VERSION, HARD_LIMITS, StringEnum, AgentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
-export const SUBAGENT_SESSION_TOOL_NAME = "agent";
+export const AGENT_SESSION_TOOL_NAME = "agent";
 export const MANAGED_SESSION_VERSION = COLLABORATION_CONTRACT_VERSION;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
@@ -14,7 +13,7 @@ export const MANAGED_LIMITS = Object.freeze({
 	maxEntries: 100_000, maxNativeLineBytes: 1024 * 1024, maxCandidateBytes: 64 * 1024 * 1024,
 });
 // Legacy warning shape remains readable in historical responses; no current action estimates aggregate storage.
-const cleanupGuidance = "Cleanup is optional and user-owned: close unneeded handles with disposition=discard to remove their working files (registry/native history remains). For a full reset, stop all Pi/subagent processes using this agent directory, then back up and remove <agent-dir>/subagent-managed-sessions (default ~/.pi/agent/subagent-managed-sessions). A reset loses retained histories, candidates and replay records. No automatic cleanup is performed.";
+const cleanupGuidance = "Cleanup is optional and user-owned: close unneeded handles with disposition=discard to remove their working files (registry/native history remains). For a full reset, stop all Pi/agent processes using this agent directory, then back up and remove <agent-dir>/managed-agents (default ~/.pi/agent/managed-agents). A reset loses retained histories, candidates and replay records. No automatic cleanup is performed.";
 export const MANAGED_STORAGE_WARNINGS = {
 	high: { code: "managed_storage_high", message: `Managed storage exceeds the advisory 8 GiB or 1,000,000-entry threshold; work is not blocked. ${cleanupGuidance}` },
 	unavailable: { code: "managed_storage_unavailable", message: `Managed storage could not be fully estimated; work is not blocked. ${cleanupGuidance}` },
@@ -26,18 +25,18 @@ const version = Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }
 const episode = Type.Object({ handle: opaque, expectedEpisode: version,
 	message: Type.String({ minLength: 1, maxLength: HARD_LIMITS.maxInputBytes }),
 }, { additionalProperties: false });
-export const SubagentSessionToolSchema = Type.Object({
+export const AgentSessionToolSchema = Type.Object({
 	action: StringEnum(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"] as const, { description: "create starts a batch of bounded tasks; continue sends a message using an existing Agent's pinned input and worktree, not the latest parent files; inspect alone lists this session's Agents, or one handle/runId; join waits for a run within a bounded observation budget; cancel stops a run or one task; apply merges one accepted candidate; close retains or discards an owned session; refresh explicitly merges current parent files into an idle Agent's input; it may conflict, and success invalidates the old candidate." }),
-	tasks: Type.Optional(Type.Array(SubagentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares a role, objective, readable label and explicit access grants. A write grant may name several repository roots. Role selects purpose and routing, not permission. Independent tasks may run in parallel." })),
+	tasks: Type.Optional(Type.Array(AgentTaskSchema, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Create tasks. Each task declares a role, objective, readable label and explicit access grants. A write grant may name several repository roots. Role selects purpose and routing, not permission. Independent tasks may run in parallel." })),
 	episodes: Type.Optional(Type.Array(episode, { minItems: 1, maxItems: HARD_LIMITS.maxTasks, description: "Continue episodes: each names an idle Agent handle, the exact expectedEpisode, and the next message." })),
 	handle: Type.Optional(opaque), expectedEpisode: Type.Optional(Type.Integer({ ...version, description: "Required for apply, refresh and close. Use the exact episode returned by the latest relevant result." })), candidateId: Type.Optional(opaque),
 	disposition: Type.Optional(StringEnum(["retain", "discard"] as const)),
 	runId: Type.Optional(opaque),
 	mode: Type.Optional(StringEnum(["async", "foreground"] as const, { description: "create/continue: foreground waits within this call for one run; async returns a submission receipt." })),
-	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for create/continue/join; default 180 seconds, with explicit finite durations honored without a product cap. Expiry returns this call while execution continues. inspect returns immediately." })),
+	waitSeconds: Type.Optional(Type.Number({ minimum: 0, description: "Observation budget for foreground create/continue and join; default 180 seconds, with explicit finite durations honored without a product cap. Expiry, a waiting user steering message, or another run/execution notice returns this call while execution continues; follow-up messages stay queued. inspect returns immediately." })),
 	taskId: Type.Optional(Type.String({ minLength: 1, maxLength: 64, pattern: "\\S", description: "cancel only: optional task handle within the run, or its readable label. Omit for join, which waits for the whole run." })),
 }, { additionalProperties: false });
-export type SessionRequest = Static<typeof SubagentSessionToolSchema>;
+export type SessionRequest = Static<typeof AgentSessionToolSchema>;
 
 export interface ConflictScope {
 	rootId: string;
@@ -69,9 +68,9 @@ export class ManagedError extends Error implements ManagedErrorDiagnostics {
 	}
 }
 export function parseSessionRequest(raw: unknown): SessionRequest {
-	if (!Check(SubagentSessionToolSchema, raw)) {
+	if (!Check(AgentSessionToolSchema, raw)) {
 		// Keep the rejection addressable: name the failing field, never echo the value.
-		const failing = Errors(SubagentSessionToolSchema, raw)[0];
+		const failing = Errors(AgentSessionToolSchema, raw)[0];
 		const params = failing?.params as { additionalProperties?: unknown; requiredProperties?: unknown } | undefined;
 		const named = failing?.keyword === "additionalProperties" && Array.isArray(params?.additionalProperties) ? params.additionalProperties[0]
 			: failing?.keyword === "required" && Array.isArray(params?.requiredProperties) ? params.requiredProperties[0]
@@ -196,8 +195,8 @@ export interface SessionActionResult {
 	runId?: string;
 	generation?: string;
 	cancelOutcome?: string;
-	/** Observation budget expired; this does not cancel or settle the execution. */
-	wait?: { status: "expired"; waitSeconds: number };
+	/** Observation ended without cancelling or settling execution. */
+	wait?: { status: "expired"; waitSeconds: number } | { status: "yielded"; reason: import("../shared/main-loop-yield.ts").YieldReason };
 	sessions: SessionView[];
 	error?: ManagedErrorDiagnostics & { code: string; detail?: string };
 }

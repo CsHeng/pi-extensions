@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Text } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
-import { CAPABILITY_RECOVERY_HINT, CHILD_CAPABILITY_MANIFEST_VERSION, CHILD_MARKER_ENV, HARD_LIMITS, emptyUsage, type ChildCapabilityManifest, type EffectiveRoute, type SubagentTask, type TaskResult } from "./contracts.ts";
+import { CAPABILITY_RECOVERY_HINT, CHILD_CAPABILITY_MANIFEST_VERSION, CHILD_MARKER_ENV, HARD_LIMITS, emptyUsage, type ChildCapabilityManifest, type EffectiveRoute, type AgentTask, type TaskResult } from "./contracts.ts";
 import { assertCanonicalGrants, authorizePath, loadCapability } from "./path-policy.ts";
 import { normalizeAccess } from "./access.ts";
 import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
@@ -20,17 +20,19 @@ import { ManagedSessionStore, fingerprint, managedWriteRoots, type ManagedRecord
 import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitInput, retainGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
-import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
+import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
 import type { ProvenanceCore } from "./provenance.ts";
 import { ManagedObserver } from "./managed-observer.ts";
 import { OBSERVER_EVENT, type ObserverSnapshot, type ObserverTask } from "./observer-events.ts";
 import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_CHANGED_EVENT, SESSION_VIEW_QUERY_EVENT, SessionViewBuilder, parseSessionViewReply, parseSessionViewRequest, type SessionViewReply, type SessionViewRequest } from "./session-view.ts";
-import { SUBAGENT_EXECUTION_EVENT, type SubagentExecutionEvent } from "../shared/subagent-execution.ts";
-import { emptyLoopFacts, LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST, type LoopExecution, type LoopFacts, type LoopSnapshotRequest } from "../shared/loop-facts.ts";
+import { AGENT_EXECUTION_EVENT, type AgentExecutionEvent } from "../shared/agent-execution.ts";
+import { emptyProducerFacts, EXECUTION_FACTS_EVENT, NOTICE_ACK, EXECUTION_FACTS_REQUEST, type ExecutionFact, type ProducerFacts, type NoticeAck, type ProducerFactsRequest } from "../shared/execution-facts.ts";
+import { createMainLoopYield, type MainLoopYield, type YieldReason } from "../shared/main-loop-yield.ts";
+import { AgentInactivityCheckpoints, type ScheduleCheckpoint } from "./inactivity.ts";
 
 export interface ContinuationDependencies {
 	store: ManagedSessionStore;
@@ -45,8 +47,11 @@ export interface ContinuationDependencies {
 	provenance?: ProvenanceCore;
 	onObserver?: (snapshot: ObserverSnapshot) => void;
 	onSessionViewChange?: () => void;
-	onExecution?: (event: SubagentExecutionEvent) => void | Promise<void>;
-	onWake?: (events: readonly SubagentExecutionEvent[]) => void | Promise<void>;
+	onExecution?: (event: AgentExecutionEvent) => void | Promise<void>;
+	onWake?: (events: readonly AgentExecutionEvent[]) => void | Promise<void>;
+	mainLoopYield?: MainLoopYield;
+	onFactsChanged?: () => void;
+	scheduleInactivity?: ScheduleCheckpoint;
 }
 interface RunBinding {
 	owner: CurrentOwner;
@@ -114,7 +119,7 @@ export class ContinuationService {
 	private supervisor: SessionExecutionSupervisor | undefined;
 	private supervisorOwner: string | undefined;
 	private readonly bindings = new Map<string, RunBinding>();
-	private readonly delivered = new Map<string, SubagentExecutionEvent>();
+	private readonly delivered = new Map<string, AgentExecutionEvent>();
 	private readonly observedEpisodes = new Map<string, number>();
 	private readonly closedHandles = new Set<string>();
 	private readonly observers = new Set<ManagedObserver>();
@@ -126,9 +131,11 @@ export class ContinuationService {
 	private admissionToolCallId: string | undefined;
 	private stopped = false;
 	private readonly sessionViewBuilder: SessionViewBuilder;
+	private readonly inactivity: AgentInactivityCheckpoints;
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
 		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
 		this.sessionViewBuilder = new SessionViewBuilder({ store: this.dependencies.store });
+		this.inactivity = new AgentInactivityCheckpoints(this.dependencies.now, () => this.dependencies.onFactsChanged?.(), this.dependencies.scheduleInactivity);
 	}
 	get busy(): boolean { return this.admission || this.supervisor?.hasActiveWork === true; }
 	private invalidateSessionView(): void {
@@ -153,7 +160,7 @@ export class ContinuationService {
 	suppressWake(): void { this.supervisor?.suppressWake(); }
 	allowWake(): void { this.supervisor?.allowWake(); }
 	async shutdown(): Promise<void> {
-		this.stopped = true; await this.supervisor?.shutdown();
+		this.stopped = true; this.inactivity.clear(); await this.supervisor?.shutdown();
 		for (const observer of this.observers) observer.finish(true, true);
 		this.observers.clear();
 	}
@@ -165,8 +172,10 @@ export class ContinuationService {
 		try { return await this.dependencies.store.list(await this.owner(ctx)); }
 		catch (error) { if (error instanceof RepositoryPolicyError && error.code === "repository_root_unavailable") return []; throw error; }
 	}
+	acknowledgeNotices(ids: readonly string[]): void { this.inactivity.acknowledge(ids); }
 	/** A returned pull or request-prepared projection consumes future wakes, never accepts work. */
 	acknowledge(result: Pick<SessionActionResult, "sessions">): void {
+		this.inactivity.observe(result.sessions.map(view => view.handle));
 		for (const view of result.sessions) {
 			if (view.state === "closed") {
 				this.closedHandles.add(view.handle);
@@ -175,12 +184,12 @@ export class ContinuationService {
 			else if (view.result && ["idle", "interrupted"].includes(view.state)) this.observedEpisodes.set(view.handle, Math.max(view.episode, this.observedEpisodes.get(view.handle) ?? 0));
 		}
 	}
-	async unobservedWake(events: readonly SubagentExecutionEvent[], ctx: ExtensionContext): Promise<SubagentExecutionEvent[]> {
+	async unobservedWake(events: readonly AgentExecutionEvent[], ctx: ExtensionContext): Promise<AgentExecutionEvent[]> {
 		if (!events.length || !ctx.isProjectTrusted()) return [];
-		const owner = await this.owner(ctx); const remaining: SubagentExecutionEvent[] = [];
+		const owner = await this.owner(ctx); const remaining: AgentExecutionEvent[] = [];
 		for (const event of events) {
 			if (event.owner.repository !== owner.repo || event.owner.sessionId !== owner.parentSessionId || (event.owner.branchAnchor && event.owner.branchAnchor !== owner.anchor && !owner.branch.includes(event.owner.branchAnchor))) continue;
-			const sessions: SubagentExecutionEvent["sessions"] = [];
+			const sessions: AgentExecutionEvent["sessions"] = [];
 			for (const view of event.sessions) {
 				try {
 					const record = await this.dependencies.store.load(view.handle, owner);
@@ -209,8 +218,8 @@ export class ContinuationService {
 		});
 	}
 	/** Current admission and live execution facts. Replay and idle candidates are not live work. */
-	notificationFacts(sessionId: string, branchAnchor: string | null): LoopFacts {
-		const executions: LoopExecution[] = [];
+	executionFacts(sessionId: string, branchAnchor: string | null): ProducerFacts {
+		const executions: ExecutionFact[] = [];
 		if (this.admission) executions.push({ id: "admission", ...(this.admissionToolCallId ? { toolCallId: this.admissionToolCallId } : {}), phase: "preparing", status: "preparing", exitCode: null, summary: "", disposition: "pending" });
 		for (const view of this.supervisor?.inspect() ?? []) {
 			const binding = this.bindings.get(view.runId);
@@ -221,7 +230,11 @@ export class ContinuationService {
 				disposition: live ? "pending" : binding?.foreground ? "returning" : "pending",
 			});
 			for (const task of view.tasks) {
-				if (task.phase === "preparing" || task.phase === "queued" || task.phase === "running") continue;
+				if (task.phase === "preparing" || task.phase === "queued" || task.phase === "running") {
+					const checkpoint = this.inactivity.checkpoint(view.runId, task.taskId);
+					executions.push({ id: `${view.runId}:${task.taskId}`, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: task.phase, status: task.phase, exitCode: null, summary: "", disposition: "pending", ...(checkpoint ? { checkpoint } : {}) });
+					continue;
+				}
 				const record = binding?.records.find(item => item.handle === task.taskId);
 				const observed = this.closedHandles.has(task.taskId) || record?.state === "closed" || (!!record && (this.observedEpisodes.get(record.handle) ?? 0) >= record.episode);
 				const label = record?.task.id ?? task.taskId;
@@ -237,7 +250,7 @@ export class ContinuationService {
 				});
 			}
 		}
-		return { version: 1, producer: "subagents", availability: this.stopped ? "unavailable" : "ready", sessionId, branchAnchor, generation: this.generation, executions };
+		return { version: 1, producer: "agents", availability: this.stopped ? "unavailable" : "ready", sessionId, branchAnchor, generation: this.generation, executions };
 	}
 	/** Current scoped activity for request preparation, never a new authority or a wake per output. */
 	async liveContext(ctx: ExtensionContext): Promise<SessionView[]> {
@@ -277,6 +290,7 @@ export class ContinuationService {
 			let result = await this.action(request, owner, ctx, signal, onProgress, dispatchCallId, callIdentity, telemetry);
 			telemetry.durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
 			result = { ...result, sessions: this.projectLiveSessions(result.sessions), requestTelemetry: { ...telemetry, ...(result.kind === "submission" ? { launchedChildren: 0 } : {}) } };
+			if (request.action === "inspect" || request.action === "join") this.inactivity.observe(result.sessions.map(view => view.handle));
 			return result;
 		} catch (error) {
 			const result = this.failed(action, error, signal?.aborted);
@@ -298,15 +312,14 @@ export class ContinuationService {
 		if (request.action === "join" || request.action === "cancel") {
 			const binding = this.binding(request.runId!, owner);
 			if (request.action === "join") {
-				await this.supervisor!.join(request.runId!, signal, request.waitSeconds);
-				const result = await this.runResult(request.runId!, "join", owner);
-				return result.status === "accepted" ? { ...result, wait: { status: "expired", waitSeconds: request.waitSeconds ?? DEFAULT_OBSERVATION_WAIT_SECONDS } } : result;
+				return this.observeRun(request.runId!, request, owner, signal);
 			}
 			// One run belongs to one call, so its labels are unambiguous; the handle still wins.
 			const target = request.taskId && !binding.records.some(record => record.handle === request.taskId)
 				? binding.records.find(record => record.task.id === request.taskId)?.handle ?? request.taskId
 				: request.taskId;
 			const outcome = target ? binding.control?.cancelTask(target) ?? "not-active" : this.supervisor!.cancel(request.runId!) ? "accepted" : "not-active";
+			if (outcome === "accepted") this.inactivity.stop(request.runId!, target);
 			return { ...(await this.runResult(request.runId!, "cancel", owner)), cancelOutcome: typeof outcome === "string" ? outcome : String(outcome) };
 		}
 		if (["apply", "close", "refresh"].includes(request.action)) {
@@ -324,6 +337,7 @@ export class ContinuationService {
 						if (record.state === "closed" && record.retained === false && request.disposition !== "discard") throw new ManagedError("close_disposition_conflict");
 						if (request.disposition === "discard") await releaseManagedResources(store, record);
 						record.state = "closed"; record.retained = request.disposition !== "discard" || record.release?.status === "partial"; await store.save(record);
+						if (record.dispatch) this.inactivity.stop(record.dispatch.runId, record.handle);
 					}
 					return store.view(record);
 				});
@@ -520,13 +534,25 @@ export class ContinuationService {
 		const abort = () => { this.supervisor!.cancel(runId!); };
 		signal?.addEventListener("abort", abort, { once: true });
 		if (signal?.aborted) abort();
-		try { await this.supervisor!.join(runId!, undefined, request.waitSeconds); }
+		try { return await this.observeRun(runId!, request, owner); }
 		finally {
 			signal?.removeEventListener("abort", abort);
 			// After this observer returns, later completion belongs to the ordinary async wake path.
 			const binding = this.bindings.get(runId!); if (binding) binding.foreground = false;
 		}
-		const result = await this.runResult(runId!, request.action, owner);
+	}
+	/** Release observation for main-loop events without forwarding that signal to execution. */
+	private async observeRun(runId: string, request: SessionRequest, owner: CurrentOwner, signal?: AbortSignal): Promise<SessionActionResult> {
+		const window = this.dependencies.mainLoopYield?.open({ ignore: ref => ref.runId === runId });
+		let reason: YieldReason | undefined;
+		try {
+			await this.supervisor!.join(runId, window ? signal ? AbortSignal.any([signal, window.signal]) : window.signal : signal, request.waitSeconds);
+		} catch (error) {
+			if (!window?.signal.aborted || signal?.aborted) throw error;
+			reason = window.reason;
+		} finally { window?.close(); }
+		const result = await this.runResult(runId, request.action, owner);
+		if (reason) return { ...result, wait: { status: "yielded", reason } };
 		return result.status === "accepted" ? { ...result, wait: { status: "expired", waitSeconds: request.waitSeconds ?? DEFAULT_OBSERVATION_WAIT_SECONDS } } : result;
 	}
 	/** Unwind facts and refs a rejected admission prepared; never touch state this call cannot prove it wrote. */
@@ -571,7 +597,7 @@ export class ContinuationService {
 		catch { return false; }
 	}
 	/** A child may request only what its own enclosing grants already cover; a main actor is unrestricted. */
-	private async constrainNestedAccess(tasks: readonly Pick<SubagentTask, "id" | "access">[]): Promise<void> {
+	private async constrainNestedAccess(tasks: readonly Pick<AgentTask, "id" | "access">[]): Promise<void> {
 		const enclosing = await this.dependencies.enclosingCapability?.();
 		if (!enclosing) return;
 		for (const task of tasks) for (const requested of normalizeAccess(task.access)) {
@@ -621,7 +647,7 @@ export class ContinuationService {
 			return this.boundView(binding, record);
 		}));
 		const run = this.supervisor?.inspect(event.runId)[0];
-		const value: SubagentExecutionEvent = { version: 4, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
+		const value: AgentExecutionEvent = { version: 4, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
 			...(run && Number.isFinite(run.submittedAt) ? { timing: { clockKey: createRunClock(this.dependencies.now).clockKey, submittedAtMs: run.submittedAt, preparedAtMs: run.preparedAt, finishedAtMs: event.task?.finishedAt ?? run.finishedAt, ...(event.task ? { queuedAtMs: event.task.queuedAt, startedAtMs: event.task.startedAt } : {}) } } : {}),
 			...(!event.task && binding.runObservation ? { runObservation: binding.runObservation } : {}),
 		};
@@ -651,7 +677,12 @@ export class ContinuationService {
 					if (replay) return Promise.resolve({ ...replay.result!, id: task.id, label: record.task.id, usage: emptyUsage(), durationMs: 0, telemetry: { childStarted: false, queueMs: 0, workspaceMs: 0, childMs: 0, convergenceMs: 0 } });
 					return execution.runTask({ ...task, signal: episodeSignal }, sharedSignal => {
 					const message = request.episodes?.[index]?.message ?? [...(record.task.inputs ?? []), ...predecessors.map(result => `Predecessor ${labelFor.get(result.id) ?? result.id} (${result.status}):\n${result.output || "(no output)"}`)].join("\n\n");
-					return this.episode(record.handle, owner, message, AbortSignal.any([episodeSignal, sharedSignal]), lifecycle, telemetry, observer, () => binding.control!.enterConvergence(task.id)).then(result => ({ ...result, id: task.id, label: record.task.id }));
+					const childSignal = AbortSignal.any([episodeSignal, sharedSignal]);
+					const stopInactivity = () => this.inactivity.stop(execution.runId, record.handle);
+					if (!childSignal.aborted) this.inactivity.start(execution.runId, record.handle, record.task.id);
+					childSignal.addEventListener("abort", stopInactivity, { once: true });
+					const trackedLifecycle: ChildLifecycle = { ...lifecycle, activity: activity => { this.inactivity.activity(execution.runId, record.handle, activity); lifecycle.activity(activity); } };
+					return this.episode(record.handle, owner, message, childSignal, trackedLifecycle, telemetry, observer, () => binding.control!.enterConvergence(task.id)).then(result => ({ ...result, id: task.id, label: record.task.id })).finally(() => { childSignal.removeEventListener("abort", stopInactivity); stopInactivity(); });
 					});
 				},
 			});
@@ -691,7 +722,7 @@ export class ContinuationService {
 			} catch { /* Optional observation. */ }
 			observer?.finish(scheduled.status !== "succeeded", scheduled.status === "aborted");
 			return response;
-		} finally { if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
+		} finally { this.inactivity.stop(execution.runId); if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
 	}
 	private route(task: Pick<NormalizedTask, "role" | "model" | "thinking" | "executionProfile" | "thinkingProfile">, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
 		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
@@ -822,17 +853,19 @@ export class ContinuationService {
 
 export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial<ContinuationDependencies> = {}): ContinuationService {
 	let context: ExtensionContext | undefined;
-	const current = (event: SubagentExecutionEvent) => context?.isProjectTrusted() && context.sessionManager.getSessionId() === event.owner.sessionId && (!event.owner.branchAnchor || context.sessionManager.getLeafId() === event.owner.branchAnchor || context.sessionManager.getBranch().some(entry => entry.id === event.owner.branchAnchor));
+	const current = (event: AgentExecutionEvent) => context?.isProjectTrusted() && context.sessionManager.getSessionId() === event.owner.sessionId && (!event.owner.branchAnchor || context.sessionManager.getLeafId() === event.owner.branchAnchor || context.sessionManager.getBranch().some(entry => entry.id === event.owner.branchAnchor));
 	const publishFacts = (): void => {
 		if (!context) return;
-		try { pi.events.emit(LOOP_FACTS_EVENT, service.notificationFacts(context.sessionManager.getSessionId(), context.sessionManager.getLeafId())); }
+		try { pi.events.emit(EXECUTION_FACTS_EVENT, service.executionFacts(context.sessionManager.getSessionId(), context.sessionManager.getLeafId())); }
 		catch { /* Fact publication cannot fail an admitted execution. */ }
 	};
 	const service = new ContinuationService({ ...dependencies,
+		mainLoopYield: dependencies.mainLoopYield ?? createMainLoopYield(pi),
+		onFactsChanged: () => { publishFacts(); dependencies.onFactsChanged?.(); },
 		onObserver: dependencies.onObserver ?? (snapshot => pi.events.emit(OBSERVER_EVENT, snapshot)),
 		onSessionViewChange: dependencies.onSessionViewChange ?? (() => pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {})),
 		onExecution: event => {
-			if (!dependencies.onExecution && current(event)) { pi.appendEntry(SUBAGENT_EXECUTION_EVENT, event); pi.events.emit(SUBAGENT_EXECUTION_EVENT, event); }
+			if (!dependencies.onExecution && current(event)) { pi.appendEntry(AGENT_EXECUTION_EVENT, event); pi.events.emit(AGENT_EXECUTION_EVENT, event); }
 			else dependencies.onExecution?.(event);
 			publishFacts();
 		},
@@ -841,11 +874,15 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 			await dependencies.onWake?.(events);
 		},
 	});
-	pi.events.on(LOOP_SNAPSHOT_REQUEST, (raw) => {
-		const accept = (raw as Partial<LoopSnapshotRequest> | undefined)?.accept;
+	pi.events.on(EXECUTION_FACTS_REQUEST, (raw) => {
+		const accept = (raw as Partial<ProducerFactsRequest> | undefined)?.accept;
 		if (typeof accept !== "function") return;
-		if (!context) { accept(emptyLoopFacts("subagents", "unknown")); return; }
-		accept(service.notificationFacts(context.sessionManager.getSessionId(), context.sessionManager.getLeafId()));
+		if (!context) { accept(emptyProducerFacts("agents", "unknown")); return; }
+		accept(service.executionFacts(context.sessionManager.getSessionId(), context.sessionManager.getLeafId()));
+	});
+	pi.events.on(NOTICE_ACK, raw => {
+		const ack = raw as Partial<NoticeAck> | undefined;
+		if (ack?.version === 1 && ack.producer === "agents" && Array.isArray(ack.ids) && ack.ids.every(id => typeof id === "string")) service.acknowledgeNotices(ack.ids);
 	});
 	pi.events.on(SESSION_VIEW_REQUEST_EVENT, (data: unknown) => {
 		// Display-only request/reply: malformed or foreign requests never affect execution.
@@ -878,20 +915,20 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	pi.on("input", event => { if (event.source === "interactive" || event.source === "rpc") service.allowWake(); });
 	pi.on("agent_end", (event) => { if (event.messages.some(message => message.role === "assistant" && ["aborted", "error"].includes(message.stopReason))) service.suppressWake(); });
 	pi.on("context_with_system", (event) => {
-		if (!event.messages.some(message => message.role === "custom" && message.customType === "csheng-subagent-live-activity")) return;
-		return { messages: event.messages.filter(message => !(message.role === "custom" && message.customType === "csheng-subagent-live-activity")) };
+		if (!event.messages.some(message => message.role === "custom" && message.customType === "agents.live-activity")) return;
+		return { messages: event.messages.filter(message => !(message.role === "custom" && message.customType === "agents.live-activity")) };
 	});
 	pi.on("tool_execution_end", event => {
-		if (event.toolName !== SUBAGENT_SESSION_TOOL_NAME) return;
+		if (event.toolName !== AGENT_SESSION_TOOL_NAME) return;
 		const details = event.result.details as SessionActionResult | undefined;
 		if (details?.schemaVersion === MANAGED_SESSION_VERSION) { service.acknowledge(details); publishFacts(); }
 	});
 	pi.registerTool({
-		name: SUBAGENT_SESSION_TOOL_NAME, label: "Agents",
-		description: SUBAGENT_TOOL_DESCRIPTION,
-		promptSnippet: SUBAGENT_TOOL_PROMPT_SNIPPET,
-		promptGuidelines: [...SUBAGENT_TOOL_PROMPT_GUIDELINES],
-		parameters: SubagentSessionToolSchema,
+		name: AGENT_SESSION_TOOL_NAME, label: "Agents",
+		description: AGENT_TOOL_DESCRIPTION,
+		promptSnippet: AGENT_TOOL_PROMPT_SNIPPET,
+		promptGuidelines: [...AGENT_TOOL_PROMPT_GUIDELINES],
+		parameters: AgentSessionToolSchema,
 		async execute(id, input, signal, onUpdate, ctx) {
 			context = ctx;
 			const details = await service.execute(input, ctx, signal, (tasks, elapsedMs) => onUpdate?.({ content: [{ type: "text", text: formatProgress(tasks, elapsedMs) }], details: undefined }), id);
@@ -903,7 +940,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		},
 	});
 	pi.on("tool_result", event => {
-		if (event.toolName !== SUBAGENT_SESSION_TOOL_NAME) return;
+		if (event.toolName !== AGENT_SESSION_TOOL_NAME) return;
 		const details = event.details as SessionActionResult | undefined;
 		if (details && details.schemaVersion === MANAGED_SESSION_VERSION) return { isError: !["accepted", "succeeded"].includes(details.status) };
 	});

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import workflow from "../extensions/tasklist/index.ts";
-import { createTasklistStore } from "../extensions/tasklist/goal-store.ts";
+import tasklistExtension from "../extensions/tasklist/index.ts";
+import { createTasklistStore } from "../extensions/tasklist/store.ts";
 import { registerTasksView, TASKS_VIEW_CHANGED_EVENT, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT, TASKS_VIEW_VERSION, parseTasksViewReply } from "../extensions/tasklist/tasks-view.ts";
 
 function harness() {
@@ -89,22 +89,22 @@ test("untrusted and unsupported owners publish unavailable without task payloads
  assert.equal(denied.ok && denied.value.state, undefined);
  assert.equal(JSON.stringify(denied).includes("Hidden"), false);
  view.bind(h.ctx);
- store.replay([{ type: "custom", customType: "csheng-workflow-state", data: { schemaVersion: 2, state: { goal: "old" } } }]);
+ store.replay([{ type: "custom", customType: "tasklist.state", data: { schemaVersion: 2, state: { heading: "old" } } }]);
  const ignored = parseTasksViewReply(request(h.events, h.listeners, "query-history"));
  assert.equal(ignored.ok && ignored.value.availability, "unavailable");
  assert.equal(ignored.ok && ignored.value.reason, "unsupported");
  assert.equal(ignored.ok && ignored.value.state, undefined);
- assert.equal(JSON.stringify(ignored).includes("goal"), false);
+ assert.equal(JSON.stringify(ignored).includes("heading"), false);
  view.unbind();
 });
-test("malformed requests are ignored and headless workflow keeps its tool", () => {
+test("malformed requests are ignored and headless tasklist keeps its tool", () => {
  const h = harness();
  const tools: string[] = [];
  const widgets: unknown[] = [];
  const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => void>>();
  const pi = { registerCommand() {}, registerTool(tool: { name: string }) { tools.push(tool.name); }, getActiveTools: () => tools, appendEntry() {}, sendUserMessage() { throw new Error("wake"); },
   on(name: string, fn: (event: unknown, ctx: ExtensionContext) => void) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); }, events: h.events } as unknown as ExtensionAPI;
- workflow(pi);
+ tasklistExtension(pi);
  const ctx = { mode: "print", hasUI: true, isProjectTrusted: () => true, isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getSessionId: () => "session-a", getLeafId: () => null, getBranch: () => [] }, ui: { setWidget() { widgets.push("mounted"); } } } as unknown as ExtensionContext;
  for (const fn of handlers.get("session_start") ?? []) fn({}, ctx);
  let replies = 0;
@@ -113,6 +113,5 @@ test("malformed requests are ignored and headless workflow keeps its tool", () =
  h.events.emit(TASKS_VIEW_REQUEST_EVENT, { version: 9, requestId: "bad" });
  assert.equal(replies, 1);
  assert.equal(tools.includes("tasklist"), true);
- assert.equal(tools.includes("csheng_workflow"), false);
  assert.deepEqual(widgets, []);
 });

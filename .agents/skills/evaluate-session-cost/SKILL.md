@@ -37,7 +37,7 @@ bun \
 
 Useful options: `--agent-dir <dir>` (default `$PI_CODING_AGENT_DIR` or `~/.pi/agent`), `--now <iso>` to freeze a window for a reproducible report, `--format json`, `--output <new-file>` (refuses to overwrite), `--calibration <n>`, `--min-miss-tokens <n>`.
 
-`--window-hours` scans both `sessions/**` parent sessions and `subagent-managed-sessions/session_*/native.jsonl` child sessions. Child spend is real spend and belongs in the total; child ledgers are matched by session id.
+`--window-hours` scans both `sessions/**` parent sessions and `managed-agents/session_*/native.jsonl` child sessions. Child spend is real spend and belongs in the total; child ledgers are matched by session id.
 
 ## Interpret
 

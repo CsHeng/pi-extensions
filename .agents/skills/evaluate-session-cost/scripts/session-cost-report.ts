@@ -494,7 +494,7 @@ export function scanAgentDir(options: ScanOptions): SessionSource[] {
 		}
 	};
 	walkSessions(sessionsRoot);
-	const managedRoot = join(options.agentDir, "subagent-managed-sessions");
+	const managedRoot = join(options.agentDir, "managed-agents");
 	let managed: string[];
 	try {
 		managed = readdirSync(managedRoot).filter((entry) => entry.startsWith("session_"));
@@ -533,7 +533,7 @@ export function resolveSessionSource(agentDir: string, selector: string): Sessio
 		}
 	};
 	walk(join(agentDir, "sessions"), "parent");
-	walk(join(agentDir, "subagent-managed-sessions"), "child");
+	walk(join(agentDir, "managed-agents"), "child");
 	const chosen = candidates[0];
 	if (!chosen) return undefined;
 	const sessionText = readFileSync(chosen.filePath, "utf8");

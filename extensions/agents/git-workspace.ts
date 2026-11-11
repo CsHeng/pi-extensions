@@ -57,8 +57,8 @@ function environment(index?: string): NodeJS.ProcessEnv {
 	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
 	return { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_TERMINAL_PROMPT: "0", GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C",
-		GIT_AUTHOR_NAME: "Managed subagent", GIT_AUTHOR_EMAIL: "subagent@localhost",
-		GIT_COMMITTER_NAME: "Managed subagent", GIT_COMMITTER_EMAIL: "subagent@localhost",
+		GIT_AUTHOR_NAME: "Managed agent", GIT_AUTHOR_EMAIL: "agent@localhost",
+		GIT_COMMITTER_NAME: "Managed agent", GIT_COMMITTER_EMAIL: "agent@localhost",
 		...(index ? { GIT_INDEX_FILE: index } : {}) };
 }
 interface Result { status: number; stdout: Buffer; stderr: Buffer }
@@ -147,7 +147,7 @@ async function supportedInput(repo: string): Promise<string[]> {
 export async function captureGitInput(repository: string, parent?: string): Promise<GitInput> {
 	const repo = await root(repository);
 	const files = await supportedInput(repo);
-	const directory = await mkdtemp(join(tmpdir(), "csheng-git-index-"));
+	const directory = await mkdtemp(join(tmpdir(), "pi-extensions-git-index-"));
 	const index = join(directory, "index");
 	try {
 		// A fresh index has no stat-cache false positives and no stale deleted
@@ -163,7 +163,7 @@ export async function captureGitInput(repository: string, parent?: string): Prom
 }
 function ownedRefName(workspace: GitTaskWorkspace, suffix: string): string {
 	if (!ID.test(workspace.id) || !/^[a-z0-9/-]+$/.test(suffix)) throw new GitWorkspaceError("invalid_workspace_identity");
-	return `refs/csheng/subagents/${workspace.id}/${suffix}`;
+	return `refs/pi-extensions/agents/${workspace.id}/${suffix}`;
 }
 async function retain(workspace: GitTaskWorkspace, suffix: string, commit: string): Promise<string> {
 	const ref = ownedRefName(workspace, suffix);
@@ -176,18 +176,18 @@ async function retain(workspace: GitTaskWorkspace, suffix: string, commit: strin
 export async function retainGitInput(repository: string, id: string, input: GitInput): Promise<string> {
 	if (!ID.test(id)) throw new GitWorkspaceError("invalid_workspace_identity");
 	const repo = await root(repository);
-	const ref = `refs/csheng/subagents/inputs/${id}`;
+	const ref = `refs/pi-extensions/agents/inputs/${id}`;
 	await run(repo, ["update-ref", ref, oid(input.commit), ""]);
 	return ref;
 }
 export async function inspectGitInput(repository: string, ref: string, input: GitInput): Promise<void> {
-	if (!/^refs\/csheng\/subagents\/inputs\/[a-z0-9]{32}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
+	if (!/^refs\/pi-extensions\/agents\/inputs\/[a-z0-9]{32}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
 	const repo = await root(repository);
 	if (await text(repo, ["rev-parse", "--verify", ref]) !== oid(input.commit)) throw new GitWorkspaceError("owned_ref_changed");
 	if (await text(repo, ["rev-parse", `${input.commit}^{tree}`]) !== oid(input.tree)) throw new GitWorkspaceError("input_tree_mismatch");
 }
 export async function discardGitInput(repository: string, ref: string, input: GitInput): Promise<void> {
-	if (!/^refs\/csheng\/subagents\/inputs\/[a-z0-9]{32}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
+	if (!/^refs\/pi-extensions\/agents\/inputs\/[a-z0-9]{32}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
 	const repo = await root(repository);
 	// A released input ref stays released: retry is idempotent, but a substituted ref is not deleted.
 	const current = await text(repo, ["rev-parse", "--verify", ref], { allowed: [0, 128] });
@@ -227,12 +227,12 @@ export async function inspectGitWorkspace(workspace: GitTaskWorkspace): Promise<
 	const records = (await run(workspace.repo, ["worktree", "list", "--porcelain", "-z"])).stdout.toString("utf8").split("\0\0");
 	if (!records.some(record => record.split("\0").includes(`worktree ${workspace.path}`))) throw new GitWorkspaceError("workspace_not_registered");
 	for (const [ref, value] of Object.entries(workspace.ownedRefs)) {
-		if (!ref.startsWith(`refs/csheng/subagents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
+		if (!ref.startsWith(`refs/pi-extensions/agents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
 		if (await text(workspace.repo, ["rev-parse", "--verify", ref]) !== value) throw new GitWorkspaceError("owned_ref_changed");
 	}
 	// An uncreated intent is not yet a published ref; a matching created ref is allowed and a substitution fails closed.
 	for (const [ref, value] of Object.entries(workspace.pendingRefs ?? {})) {
-		if (!ref.startsWith(`refs/csheng/subagents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
+		if (!ref.startsWith(`refs/pi-extensions/agents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
 		const current = await text(workspace.repo, ["rev-parse", "--verify", ref], { allowed: [0, 128] });
 		if (current && current !== value) throw new GitWorkspaceError("owned_ref_changed");
 	}
@@ -255,7 +255,7 @@ export async function freezeGitCandidate(workspace: GitTaskWorkspace): Promise<G
 	return { id, workspaceId: workspace.id, inputBase: workspace.inputBase, ...input, changedPaths };
 }
 function candidateOwner(workspace: GitTaskWorkspace, candidate: GitCandidate): void {
-	if (candidate.workspaceId !== workspace.id || !ID.test(candidate.id) || workspace.ownedRefs[`refs/csheng/subagents/${workspace.id}/candidate/${candidate.id}`] !== candidate.commit) throw new GitWorkspaceError("candidate_owner_mismatch");
+	if (candidate.workspaceId !== workspace.id || !ID.test(candidate.id) || workspace.ownedRefs[`refs/pi-extensions/agents/${workspace.id}/candidate/${candidate.id}`] !== candidate.commit) throw new GitWorkspaceError("candidate_owner_mismatch");
 	oid(candidate.inputBase); oid(candidate.commit); oid(candidate.tree);
 }
 /** The explicit base prevents inherited dirty input from becoming a worker change. */

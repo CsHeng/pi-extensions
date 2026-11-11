@@ -1,15 +1,15 @@
-import { inShellScope, type ShellExecutionEvent, type ShellScope } from "./execution.ts";
+import { inBashScope, type BashExecutionEvent, type BashScope } from "./execution.ts";
 
-const TERMINAL = new Set(["exited", "cancelled", "deadline", "interrupted"]);
+const TERMINAL = new Set(["exited", "cancelled", "timeout", "interrupted"]);
 /** Consumed wake copies only. This is not the Jobs list. */
-const MAX_OBSOLETE_SHELL_FACTS = 8;
+const MAX_OBSOLETE_BASH_FACTS = 8;
 
-function textOf(facts: ShellFact[]): string | undefined {
+function textOf(facts: BashFact[]): string | undefined {
 	if (facts.length === 0) return undefined;
-	return facts.map((fact) => `Shell execution ${fact.executionId} finished with status ${fact.status}, exit_code ${fact.exitCode === null ? "unknown" : String(fact.exitCode)}. This is the same execution, not a second tool result.\n${fact.outputTail}`.trim()).join("\n");
+	return facts.map((fact) => `Bash job ${fact.executionId} finished with status ${fact.status}, exit_code ${fact.exitCode === null ? "unknown" : String(fact.exitCode)}. This is the same execution, not a second tool result.\n${fact.outputTail}`.trim()).join("\n");
 }
 
-export interface ShellFact {
+export interface BashFact {
 	executionId: string;
 	toolCallId?: string;
 	sessionId: string | null;
@@ -26,21 +26,21 @@ export interface ShellFact {
  * Queuing a wake is not consumption. A fact is consumed only when a model request
  * projects it or a tool result returns that terminal. A dropped queue stays inspectable.
  */
-export function createShellDelivery() {
-	const facts = new Map<string, ShellFact>();
+export function createBashDelivery() {
+	const facts = new Map<string, BashFact>();
 	const trimObsolete = (): void => {
 		const obsolete = [...facts.values()].filter(fact => fact.consumed || fact.suppressed);
 		// Durable inspect belongs to the execution owner; delivered/suppressed
-		// notification metadata must not retain another copy of terminal output.
+		// notice metadata must not retain another copy of terminal output.
 		for (const fact of obsolete) fact.outputTail = "";
-		for (const fact of obsolete.slice(0, Math.max(0, obsolete.length - MAX_OBSOLETE_SHELL_FACTS))) facts.delete(fact.executionId);
+		for (const fact of obsolete.slice(0, Math.max(0, obsolete.length - MAX_OBSOLETE_BASH_FACTS))) facts.delete(fact.executionId);
 	};
 
-	const scoped = (fact: ShellFact, scope: ShellScope): boolean => inShellScope(fact, scope);
+	const scoped = (fact: BashFact, scope: BashScope): boolean => inBashScope(fact, scope);
 
-	const deliverable = (fact: ShellFact, scope: ShellScope): boolean => !fact.consumed && !fact.returning && !fact.suppressed && scoped(fact, scope) && TERMINAL.has(fact.status);
+	const deliverable = (fact: BashFact, scope: BashScope): boolean => !fact.consumed && !fact.returning && !fact.suppressed && scoped(fact, scope) && TERMINAL.has(fact.status);
 
-	const remember = (event: ShellExecutionEvent, returning: boolean): void => {
+	const remember = (event: BashExecutionEvent, returning: boolean): void => {
 		if (!event.executionId || !TERMINAL.has(event.status)) return;
 		const existing = facts.get(event.executionId);
 		if (existing?.consumed) return;
@@ -60,8 +60,8 @@ export function createShellDelivery() {
 	};
 
 	return {
-		noteReady(event: ShellExecutionEvent): void { remember(event, false); },
-		noteReturning(event: ShellExecutionEvent): void { remember(event, true); },
+		noteReady(event: BashExecutionEvent): void { remember(event, false); },
+		noteReturning(event: BashExecutionEvent): void { remember(event, true); },
 		notePull(executionId: string): void {
 			const fact = facts.get(executionId);
 			if (fact) fact.consumed = true;
@@ -71,13 +71,13 @@ export function createShellDelivery() {
 			for (const fact of facts.values()) if (!fact.consumed) fact.suppressed = true;
 			trimObsolete();
 		},
-		hasDeliverable(scope: ShellScope): boolean {
+		hasDeliverable(scope: BashScope): boolean {
 			return [...facts.values()].some((fact) => deliverable(fact, scope));
 		},
-		preview(scope: ShellScope): string | undefined {
+		preview(scope: BashScope): string | undefined {
 			return textOf([...facts.values()].filter((fact) => deliverable(fact, scope)));
 		},
-		project(scope: ShellScope): string | undefined {
+		project(scope: BashScope): string | undefined {
 			const ready = [...facts.values()].filter((fact) => deliverable(fact, scope));
 			const text = textOf(ready);
 			if (!text) return undefined;
@@ -86,7 +86,7 @@ export function createShellDelivery() {
 			return text;
 		},
 		/** In-scope terminals not yet projected or observed. Survives owner output eviction. */
-		pending(scope: ShellScope): ShellFact[] {
+		pending(scope: BashScope): BashFact[] {
 			return [...facts.values()].filter((fact) => deliverable(fact, scope)).map((fact) => ({ ...fact }));
 		},
 		acknowledge(executionIds: readonly string[]): void {
@@ -96,7 +96,7 @@ export function createShellDelivery() {
 			}
 			trimObsolete();
 		},
-		inspectable(executionId: string): ShellFact | undefined {
+		inspectable(executionId: string): BashFact | undefined {
 			return facts.get(executionId);
 		},
 	};

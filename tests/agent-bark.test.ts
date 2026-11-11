@@ -7,9 +7,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import agentBark from "../extensions/agent-bark.ts";
 import {
-	LOOP_DELIVERY_REQUEST, LOOP_FACTS_EVENT, LOOP_SNAPSHOT_REQUEST,
-	type LoopDeliverySnapshot, type LoopFacts,
-} from "../extensions/shared/loop-facts.ts";
+	NOTICE_DELIVERY_REQUEST, EXECUTION_FACTS_EVENT, EXECUTION_FACTS_REQUEST,
+	type NoticeDeliverySnapshot, type ProducerFacts,
+} from "../extensions/shared/execution-facts.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => Promise<unknown>;
 
@@ -33,17 +33,17 @@ class FakeEvents {
 async function fixture(t: TestContext, childMarker?: string, installHook = true, mode: ExtensionContext["mode"] = "json") {
 	const home = await mkdtemp(join(tmpdir(), "pi-agent-bark-test-"));
 	const previousHome = process.env.HOME;
-	const previousMarker = process.env.CSHENG_SUBAGENT_CHILD;
+	const previousMarker = process.env.PI_EXTENSIONS_AGENT_CHILD;
 	t.after(async () => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
-		if (previousMarker === undefined) delete process.env.CSHENG_SUBAGENT_CHILD;
-		else process.env.CSHENG_SUBAGENT_CHILD = previousMarker;
+		if (previousMarker === undefined) delete process.env.PI_EXTENSIONS_AGENT_CHILD;
+		else process.env.PI_EXTENSIONS_AGENT_CHILD = previousMarker;
 		await rm(home, { recursive: true, force: true });
 	});
 	process.env.HOME = home;
-	if (childMarker === undefined) delete process.env.CSHENG_SUBAGENT_CHILD;
-	else process.env.CSHENG_SUBAGENT_CHILD = childMarker;
+	if (childMarker === undefined) delete process.env.PI_EXTENSIONS_AGENT_CHILD;
+	else process.env.PI_EXTENSIONS_AGENT_CHILD = childMarker;
 
 	if (installHook) {
 		const hookDirectory = join(home, ".local", "bin");
@@ -88,7 +88,7 @@ printf '\\n' >> "$HOME/events.jsonl"
 	};
 }
 
-test("subagents register no Bark handlers and never start the notification hook", async t => {
+test("agents register no Bark handlers and never start the notification hook", async t => {
 	const state = await fixture(t, "1");
 	assert.equal(state.handlers.size, 0);
 	assert.deepEqual(await state.hookEvents(), []);
@@ -150,7 +150,7 @@ test("a completed user run does not leak eligibility into the next custom run", 
 	// The next run is internal. Its start must reclassify the run, so neither its start
 	// nor its settlement may reuse the previous user run's eligibility.
 	state.entries.push({ type: "message", message: {
-		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "subagent wake" }],
+		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "agent wake" }],
 	} });
 	await state.start(CUSTOM_START);
 	await state.settle();
@@ -165,7 +165,7 @@ test("an unsettled user run does not leak its eligibility into a later custom ru
 	// The user run never settles (for example the session was interrupted). The next run is
 	// internal, and its start must reclassify before its settlement is considered.
 	state.entries.push({ type: "message", message: {
-		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "subagent wake" }],
+		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "agent wake" }],
 	} });
 	await state.start(CUSTOM_START);
 	await state.settle();
@@ -215,17 +215,17 @@ test("an absent user-owned notification hook does not fail the main agent", asyn
 
 // Interactive hosts: one notification per external interaction, at the same boundary that
 // ends work timing, never at an intermediate main-run settlement.
-interface Producer { facts: LoopFacts[]; delivery: LoopDeliverySnapshot }
+interface Producer { facts: ProducerFacts[]; delivery: NoticeDeliverySnapshot }
 function installProducer(bus: FakeEvents, producer: Producer): Producer {
-	bus.on(LOOP_SNAPSHOT_REQUEST, raw => { for (const facts of producer.facts) (raw as { accept: (facts: LoopFacts) => void }).accept(facts); });
-	bus.on(LOOP_DELIVERY_REQUEST, raw => (raw as { accept: (value: LoopDeliverySnapshot) => void }).accept(producer.delivery));
+	bus.on(EXECUTION_FACTS_REQUEST, raw => { for (const facts of producer.facts) (raw as { accept: (facts: ProducerFacts) => void }).accept(facts); });
+	bus.on(NOTICE_DELIVERY_REQUEST, raw => (raw as { accept: (value: NoticeDeliverySnapshot) => void }).accept(producer.delivery));
 	return producer;
 }
-function shell(phase: "running" | "terminal", availability: LoopFacts["availability"] = "ready"): LoopFacts {
-	return { version: 1, producer: "retained-shell", availability, sessionId: "main-session", branchAnchor: null, generation: phase,
+function shell(phase: "running" | "terminal", availability: ProducerFacts["availability"] = "ready"): ProducerFacts {
+	return { version: 1, producer: "async-bash", availability, sessionId: "main-session", branchAnchor: null, generation: phase,
 		executions: [{ id: "exec-1", toolCallId: "call-bash", phase, status: phase === "terminal" ? "exited" : "running", exitCode: phase === "terminal" ? 0 : null, summary: phase === "terminal" ? "done" : "", disposition: "pending" }] };
 }
-const delivery = (pending: LoopDeliverySnapshot["pending"] = []): LoopDeliverySnapshot =>
+const delivery = (pending: NoticeDeliverySnapshot["pending"] = []): NoticeDeliverySnapshot =>
 	({ version: 1, sessionId: "main-session", branchAnchor: null, pending, scheduled: [], blocked: false });
 function reply(entries: unknown[], text: string, stopReason = "stop"): void {
 	entries.push({ type: "message", message: { role: "assistant", stopReason, content: [{ type: "text", text }] } });
@@ -252,8 +252,8 @@ for (const mode of ["tui", "rpc"] as const) {
 
 		// The job ends; its result is pending delivery, so the interaction is still open.
 		producer.facts = [shell("terminal")];
-		producer.delivery = delivery([{ producer: "retained-shell", id: "exec-1", toolCallId: "call-bash" }]);
-		state.bus.emit(LOOP_FACTS_EVENT, {});
+		producer.delivery = delivery([{ producer: "async-bash", id: "exec-1", toolCallId: "call-bash" }]);
+		state.bus.emit(EXECUTION_FACTS_EVENT, {});
 		await drain();
 		assert.deepEqual((await state.hookEvents()).map(event => event.hook_event_name), ["UserPromptSubmit"]);
 

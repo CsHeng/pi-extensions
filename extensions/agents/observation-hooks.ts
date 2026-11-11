@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CHILD_CAPABILITY_FAILURE_EVENT, HARD_LIMITS, type RunTelemetry } from "./contracts.ts";
 import { boundNativeObservation, collectNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
-import { MANAGED_LIMITS, SUBAGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
+import { MANAGED_LIMITS, AGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
 import { LocalTimingRecorder, monotonicNow, type LocalTiming } from "./telemetry.ts";
 
 /** Native audit is optional; inability to record must never permit a rejected tool. */
@@ -10,7 +10,7 @@ export function recordCapabilityInvalidation(pi: Pick<ExtensionAPI, "appendEntry
 }
 
 const MAX_CUSTOM_BYTES = 64 * 1024;
-const DELEGATION_TOOLS = new Set([SUBAGENT_SESSION_TOOL_NAME]);
+const DELEGATION_TOOLS = new Set([AGENT_SESSION_TOOL_NAME]);
 export interface ObservedRun { telemetry: RunTelemetry; clockKey: string; originMs: number | null }
 export interface ParentObservation {
 	version: 1;
@@ -41,16 +41,16 @@ export function registerObservationHooks(pi: ExtensionAPI, options: { child?: bo
 		if (!current) return;
 		if (shutdown) current.recorder.invalidate();
 		const timing = current.recorder.finish();
-		if (options.child) { if (current.usageComplete) append("csheng-episode-timing", timing); return; }
+		if (options.child) { if (current.usageComplete) append("agents.episode-timing", timing); return; }
 		if (!current.relevant || !pi.getActiveTools().some((name) => current.usedTools.has(name))) return;
-		for (const failure of current.failures) current.usageComplete = append("csheng-compaction-unavailable", failure) && current.usageComplete;
+		for (const failure of current.failures) current.usageComplete = append("agents.compaction-unavailable", failure) && current.usageComplete;
 		const endLeaf = physicalLast(ctx);
 		const range = current.startLeaf === undefined || endLeaf === undefined ? null : { startLeaf: current.startLeaf, endLeaf };
-		append("csheng-parent-observation", { version: 1, native: current.usageComplete ? ownNative(ctx, range) : unavailableObservation(), range, timing, runs: current.runs } satisfies ParentObservation);
+		append("agents.parent-observation", { version: 1, native: current.usageComplete ? ownNative(ctx, range) : unavailableObservation(), range, timing, runs: current.runs } satisfies ParentObservation);
 	};
 	pi.on("before_agent_start", (_event, ctx) => observe(() => {
 		begin(ctx);
-		if (options.child) append("csheng-episode-observation", {
+		if (options.child) append("agents.episode-observation", {
 			contextWindow: ctx.model?.contextWindow ?? null,
 			// Configured host tools, not a claim about later provider payload handlers.
 			toolNames: pi.getActiveTools(), capabilityKey: options.capabilityKey ?? null,
@@ -106,7 +106,7 @@ export function registerObservationHooks(pi: ExtensionAPI, options: { child?: bo
 		mainRun?.recorder.end("compaction", "compact");
 		const failure = { reason: event.reason, aborted: event.aborted };
 		if (options.child) {
-			if (!append("csheng-compaction-unavailable", failure) && mainRun) mainRun.usageComplete = false;
+			if (!append("agents.compaction-unavailable", failure) && mainRun) mainRun.usageComplete = false;
 		} else if (mainRun) {
 			if (mainRun.failures.length >= HARD_LIMITS.maxWaitSpans) { mainRun.usageComplete = false; mainRun.recorder.invalidate(); }
 			else mainRun.failures.push(failure);

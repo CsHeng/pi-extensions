@@ -388,7 +388,7 @@ interface TrackedCall {
 	truncated: boolean;
 }
 
-const SHELL_TOOLS = new Set(["bash", "powershell"]);
+const BASH_TOOLS = new Set(["bash", "powershell"]);
 const SUMMARY_FIELDS = ["command", "pattern", "path", "query", "url"] as const;
 const SENSITIVE_ARG = /password|passwd|secret|token|credential|authorization|api[_-]?key|private[_-]?key|cookie|^env$/i;
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
@@ -407,8 +407,8 @@ function describeCall(tool: string, args: unknown): { summary?: string; deadline
 	const deadlineMs = shellDeadline(tool, args);
 	const parts: string[] = [];
 	for (const key of SUMMARY_FIELDS) {
-		if (SHELL_TOOLS.has(tool) && key !== "command") continue;
-		if (!SHELL_TOOLS.has(tool) && key === "command") continue;
+		if (BASH_TOOLS.has(tool) && key !== "command") continue;
+		if (!BASH_TOOLS.has(tool) && key === "command") continue;
 		const value = args[key];
 		if (typeof value !== "string" || !value.trim() || SENSITIVE_ARG.test(key)) continue;
 		parts.push(redactText(value));
@@ -421,7 +421,7 @@ function describeCall(tool: string, args: unknown): { summary?: string; deadline
 }
 
 function shellDeadline(tool: string, args: Record<string, unknown>): number | undefined {
-	if (!SHELL_TOOLS.has(tool) || typeof args.timeout !== "number" || !Number.isFinite(args.timeout) || args.timeout < 0) return undefined;
+	if (!BASH_TOOLS.has(tool) || typeof args.timeout !== "number" || !Number.isFinite(args.timeout) || args.timeout < 0) return undefined;
 	const ms = Math.round(args.timeout * 1000);
 	return Number.isSafeInteger(ms) ? ms : undefined;
 }

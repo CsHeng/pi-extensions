@@ -116,18 +116,18 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 				modelKey: modelKey(entry.provider, entry.model),
 				usage: parseUsage(entry.usage),
 			});
-		} else if (entry.type === "custom" && entry.customType === "csheng-worker-command") {
+		} else if (entry.type === "custom" && entry.customType === "agents.worker-command") {
 			const command = parseCommand(ownerSessionId, id, entry.data);
 			if (!command.toolCallId || !pendingCommands.delete(command.toolCallId) || !completeCommandEvidence(command)) commandCoverage = false;
 			commands.push(command);
-		} else if (entry.type === "custom" && entry.customType === "csheng-episode-observation") {
+		} else if (entry.type === "custom" && entry.customType === "agents.episode-observation") {
 			const data = isRecord(entry.data) ? entry.data : undefined;
 			contextWindow = positiveFinite(data?.contextWindow);
 			toolNames = parseToolNames(data?.toolNames);
 			capabilityKey = sha256Key(data?.capabilityKey);
-		} else if (entry.type === "custom" && entry.customType === "csheng-episode-timing") {
+		} else if (entry.type === "custom" && entry.customType === "agents.episode-timing") {
 			timing = isLocalTiming(entry.data) ? entry.data : null;
-		} else if (entry.type === "custom" && entry.customType === "csheng-compaction-unavailable") {
+		} else if (entry.type === "custom" && entry.customType === "agents.compaction-unavailable") {
 			entries.push({
 				ownerSessionId, entryId: id, kind: "compaction",
 				modelKey: null, usage: nullUsage(),

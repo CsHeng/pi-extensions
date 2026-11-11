@@ -7,6 +7,7 @@ import {
 import { truncateUtf8, utf8Bytes, type ChildActivity, type TaskResult, type EffectiveRoute } from "./contracts.ts";
 import { isNativeObservation, type ObservedUsage } from "./observability.ts";
 import type { SessionActionResult, SessionView } from "./session-contracts.ts";
+import { yieldNote } from "../shared/main-loop-yield.ts";
 
 const SUMMARY_SCALAR_CHARS = 300;
 /** Control acknowledgements name the durable outcome; the prior report stays recoverable through explicit inspect(handle). */
@@ -198,7 +199,7 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		...(details.generation ? { generation: boundScalar(details.generation) } : {}),
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget, omitReport)),
 	};
-	if (details.wait) payload.wait = details.wait;
+	if (details.wait) payload.wait = details.wait.status === "yielded" ? { ...details.wait, note: yieldNote(details.wait.reason) } : details.wait;
 	if (details.warnings?.length) payload.warnings = details.warnings;
 	if (details.error) payload.error = {
 		code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}),
@@ -253,7 +254,7 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 	const lines = [
 		`Managed session ${details.action ?? "request"}: ${details.status}${details.runId ? ` run=${boundScalar(details.runId)}` : ""}${details.kind === "submission" ? " (receipt, not completion)" : ""}`,
 	];
-	if (details.wait) lines.push(`Observation budget expired after ${details.wait.waitSeconds}s; execution continues. In TUI/RPC, leave work unfinished and resume on completion notification rather than polling.`);
+	if (details.wait) lines.push(details.wait.status === "yielded" ? yieldNote(details.wait.reason)! : `Observation budget expired after ${details.wait.waitSeconds}s; execution continues. In TUI/RPC, leave work unfinished and resume on the completion notice rather than polling.`);
 	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
 	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}${details.error.unexpectedFields?.length ? ` unexpected=${details.error.unexpectedFields.join(",")}` : ""}${details.error.invalidFields?.length ? ` invalid=${details.error.invalidFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {

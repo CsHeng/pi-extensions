@@ -17,9 +17,9 @@ import { GIT_READ_TOOL, registerGitRead } from "./git-read.ts";
 import { workerGitEnvironment } from "./worker-inputs.ts";
 import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
 import { getManagedRole, toolsForAccess } from "./roles.ts";
-import { isNativePathTool, isNativeShellTool } from "./native-context.ts";
+import { isNativePathTool, isNativeBashTool } from "./native-context.ts";
 
-export const WORKER_SCRATCH_ENV = "CSHENG_SUBAGENT_WORKER_SCRATCH";
+export const WORKER_SCRATCH_ENV = "PI_EXTENSIONS_AGENT_WORKER_SCRATCH";
 
 export interface CommandObservation {
 	startMs: number;
@@ -240,7 +240,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 	// evidence only ever describe these; an opaque configured implementation is not
 	// certified as drained merely because the toolkit lifecycle settled.
 	let ownedTools: string[] = [];
-	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("csheng-worker-lifecycle", { phase, ok, owned: [...ownedTools] });
+	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("agents.worker-lifecycle", { phase, ok, owned: [...ownedTools] });
 	// CLI extensions run session_start before configured extensions, so ownership cannot
 	// be decided there. before_agent_start runs only after every session_start handler,
 	// including configured same-name registrations. The kit then claims only builtin names.
@@ -250,7 +250,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 			if (!loaded.manifest || !scratch || await realpath(process.cwd()) !== loaded.manifest.cwd) throw new Error("managed_worker_state_invalid");
 			const root = loaded.manifest.cwd;
 			worker = await createWorkerTools({ cwd: root, scratch,
-				onCommand: (value) => pi.appendEntry("csheng-worker-command", { ...value, version: 2,
+				onCommand: (value) => pi.appendEntry("agents.worker-command", { ...value, version: 2,
 					status: value.endMs === null ? "unknown" : value.status === "exited" ? (value.exitCode === 0 ? "succeeded" : "failed") : value.status === "aborted" ? "aborted" : value.status === "timed-out" ? "timeout" : "failed",
 				}),
 			});
@@ -276,7 +276,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 	});
 	pi.on("tool_call", async (event) => {
 		if (fatal || !loaded.manifest) return { block: true, terminate: true, reason: "Managed worker state is unavailable." };
-		if (isNativeShellTool(event.toolName)) return;
+		if (isNativeBashTool(event.toolName)) return;
 		// The typed Git tool authorizes its repository selector and every requested path
 		// itself. A native single-path check would authorize the child cwd (git_read has no
 		// `path`) and reject valid scoped history queries, so only its grant membership is

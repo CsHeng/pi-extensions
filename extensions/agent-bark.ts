@@ -63,7 +63,7 @@ const interactive = (ctx: ExtensionContext): boolean => ctx.mode === "tui" || ct
 
 export default function (pi: ExtensionAPI): void {
 	// This marker excludes child processes, not internal wake runs in the parent session.
-	if (process.env.CSHENG_SUBAGENT_CHILD === "1") return;
+	if (process.env.PI_EXTENSIONS_AGENT_CHILD === "1") return;
 
 	const now = () => performance.now();
 	// Hook deliveries in flight; host handlers await them so the hook keeps its event order.

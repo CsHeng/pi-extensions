@@ -15,10 +15,10 @@ import {
 } from "./contracts.ts";
 
 export { THINKING_LEVELS } from "./contracts.ts";
-export const ROUTE_CONFIG_FILE = "csheng-agents.json";
+export const ROUTE_CONFIG_FILE = "agent-routes.json";
 export type ConfiguredThinking = "$parent" | ThinkingLevel;
 
-const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/csheng-agents.json", import.meta.url));
+const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/agent-routes.json", import.meta.url));
 const DEFAULT_GLOBAL_CONCURRENCY = 10;
 const DEFAULT_ROLE_CONCURRENCY: Record<RoleName, number> = {
 	explorer: 4,
@@ -43,7 +43,7 @@ export interface RoleRouteConfig {
 	executionProfiles: Partial<Record<ExecutionProfile, ProfileRouteConfig>>;
 }
 
-export interface EffectiveSubagentConfig {
+export interface EffectiveAgentConfig {
 	maxConcurrency: number;
 	routes: Record<RoleName, RoleRouteConfig>;
 	roles: Record<RoleName, { inheritSkills: boolean }>;
@@ -52,7 +52,7 @@ export interface EffectiveSubagentConfig {
 }
 
 export interface ConfigLoadResult {
-	config?: EffectiveSubagentConfig;
+	config?: EffectiveAgentConfig;
 	diagnostic?: { code: "invalid_route_config"; message: string };
 	source?: ConfigSourceSnapshot;
 }
@@ -65,7 +65,7 @@ export interface ConfigSourceSnapshot {
 }
 
 interface ParseOptions {
-	base?: EffectiveSubagentConfig;
+	base?: EffectiveAgentConfig;
 	source?: RouteSource;
 }
 
@@ -78,7 +78,7 @@ function neutralRoute(role: RoleName): RoleRouteConfig {
 	};
 }
 
-export function defaultConfig(): EffectiveSubagentConfig {
+export function defaultConfig(): EffectiveAgentConfig {
 	return {
 		maxConcurrency: DEFAULT_GLOBAL_CONCURRENCY,
 		roles: { explorer: { inheritSkills: true }, reviewer: { inheritSkills: true }, worker: { inheritSkills: true } },
@@ -92,10 +92,10 @@ export function defaultConfig(): EffectiveSubagentConfig {
 	};
 }
 
-function cloneConfig(config: EffectiveSubagentConfig): EffectiveSubagentConfig {
+function cloneConfig(config: EffectiveAgentConfig): EffectiveAgentConfig {
 	return {
 		maxConcurrency: config.maxConcurrency,
-		roles: Object.fromEntries(ROLE_NAMES.map(role => [role, { ...config.roles[role] }])) as EffectiveSubagentConfig["roles"],
+		roles: Object.fromEntries(ROLE_NAMES.map(role => [role, { ...config.roles[role] }])) as EffectiveAgentConfig["roles"],
 		routes: Object.fromEntries(ROLE_NAMES.map((role) => [role, {
 			...config.routes[role],
 			candidates: config.routes[role].candidates.map((candidate) => ({ ...candidate })),
@@ -197,7 +197,7 @@ function rejectLegacyProfileConfig(value: Record<string, unknown>): void {
 	}
 }
 
-export function parseConfig(value: unknown, options: ParseOptions = {}): EffectiveSubagentConfig {
+export function parseConfig(value: unknown, options: ParseOptions = {}): EffectiveAgentConfig {
 	if (!isRecord(value)) throw new Error("route configuration must be an object");
 	rejectLegacyProfileConfig(value);
 	assertKnownKeys(value, ["maxConcurrency", "routes", "roles", "thinkingProfiles"], "configuration");

@@ -2,10 +2,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI, TuiMouseEvent } from "@earendil-works/pi-tui";
 
-const COMPOSER_EVENT = "csheng.above-editor.composer";
+const COMPOSER_EVENT = "above-editor.composer";
 
-export const ABOVE_EDITOR_WIDGET_KEY = "csheng-above-editor";
-export const ABOVE_EDITOR_SLOTS = ["tasks", "jobs", "subagents"] as const;
+export const ABOVE_EDITOR_WIDGET_KEY = "above-editor";
+export const ABOVE_EDITOR_SLOTS = ["tasks", "jobs", "agents"] as const;
 export type AboveEditorSlot = (typeof ABOVE_EDITOR_SLOTS)[number];
 
 export interface AboveEditorContribution {

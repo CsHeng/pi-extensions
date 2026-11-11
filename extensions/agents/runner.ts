@@ -80,7 +80,7 @@ export interface ChildRunOptions {
 	onChildSettled?(): void;
 }
 
-const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "CSHENG_SUBAGENT_TEST_MODE", "CSHENG_SUBAGENT_WORKER_SCRATCH", "CSHENG_SUBAGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
+const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "PI_EXTENSIONS_AGENT_TEST_MODE", "PI_EXTENSIONS_AGENT_WORKER_SCRATCH", "PI_EXTENSIONS_AGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
 
 export function resolvePiInvocation(extraArgs: string[], runtime = { executable: process.execPath, script: process.argv[1], platform: process.platform, pid: process.pid }): PiInvocation {
 	const executableFile = (file: string) => {
@@ -108,9 +108,9 @@ function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, man
 	env[CHILD_MARKER_ENV] = "1";
 	env[CHILD_CAPABILITY_ENV] = capabilityPath;
 	if (managedWorkerScratch) {
-		env.CSHENG_SUBAGENT_WORKER_SCRATCH = managedWorkerScratch;
+		env.PI_EXTENSIONS_AGENT_WORKER_SCRATCH = managedWorkerScratch;
 		env.TMPDIR = managedWorkerScratch;
-		if (managedWorkerInputs) env.CSHENG_SUBAGENT_WORKER_INPUTS = JSON.stringify(managedWorkerInputs);
+		if (managedWorkerInputs) env.PI_EXTENSIONS_AGENT_WORKER_INPUTS = JSON.stringify(managedWorkerInputs);
 		env.PI_OFFLINE = "1";
 	}
 	return managedWorkerScratch ? workerGitEnvironment(env) : env;
@@ -178,7 +178,7 @@ function closedActivity(activity: Readonly<ChildActivity>, elapsedMs: number): C
 export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	const now = options.now ?? (() => performance.now());
 	const started = now();
-	const privateDir = await mkdtemp(join(tmpdir(), "csheng-subagent-"));
+	const privateDir = await mkdtemp(join(tmpdir(), "pi-extensions-agent-"));
 	await chmod(privateDir, 0o700);
 	const taskPromptPath = join(privateDir, "task.md");
 	const capabilityPath = join(privateDir, "capability.json");
@@ -375,7 +375,7 @@ async function workerToolsSettled(path: string, start: number): Promise<boolean>
 			// exact owned set and never imply that an opaque implementation's processes settled.
 			let owned: readonly string[] | undefined;
 			for await (const entry of nativeLines(file, start)) {
-				if (entry.type !== "custom" || entry.customType !== "csheng-worker-lifecycle") continue;
+				if (entry.type !== "custom" || entry.customType !== "agents.worker-lifecycle") continue;
 				const data = entry.data as { ok?: unknown; phase?: unknown; owned?: unknown } | undefined;
 				if (data?.ok !== true) return false;
 				if (!Array.isArray(data.owned) || data.owned.length > 64 || data.owned.some(name => typeof name !== "string" || name.length === 0 || name.length > 64)) return false;

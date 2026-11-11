@@ -5,13 +5,13 @@
 import { Type, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "./delegation-probe-guidance.ts";
-import { SubagentTaskSchema } from "../../extensions/agents/contracts.ts";
-import { SUBAGENT_SESSION_TOOL_NAME, SubagentSessionToolSchema, parseSessionRequest } from "../../extensions/agents/session-contracts.ts";
-import { SUBAGENT_TOOL_DESCRIPTION, SUBAGENT_TOOL_PROMPT_GUIDELINES, SUBAGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/agents/tool-surface.ts";
+import { AgentTaskSchema } from "../../extensions/agents/contracts.ts";
+import { AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest } from "../../extensions/agents/session-contracts.ts";
+import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/agents/tool-surface.ts";
 
-export const PROBE_SHAPE_ENV = "CSHENG_PROBE_SHAPE";
-export const PROBE_GUIDANCE_ENV = "CSHENG_PROBE_GUIDANCE";
-export const PROBE_TOOL_NAMES = [SUBAGENT_SESSION_TOOL_NAME, "Agent"] as const;
+export const PROBE_SHAPE_ENV = "PI_EXTENSIONS_PROBE_SHAPE";
+export const PROBE_GUIDANCE_ENV = "PI_EXTENSIONS_PROBE_GUIDANCE";
+export const PROBE_TOOL_NAMES = [AGENT_SESSION_TOOL_NAME, "Agent"] as const;
 
 export type ProbeShape = "production" | "flat" | "agent-shape";
 export type ProbeGuidance = "off" | "balanced" | "aggressive";
@@ -20,7 +20,7 @@ export const PROBE_SHAPES: readonly ProbeShape[] = ["production", "flat", "agent
 export const PROBE_GUIDANCE_LEVELS: readonly ProbeGuidance[] = ["off", "balanced", "aggressive"];
 
 /** The flat shape is derived from the production task object, not copied, so it cannot drift from the real fields. */
-export const FLAT_SHAPE_PARAMETERS = Type.Pick(SubagentTaskSchema, ["objective", "role", "access", "inputs", "verification"]);
+export const FLAT_SHAPE_PARAMETERS = Type.Pick(AgentTaskSchema, ["objective", "role", "access", "inputs", "verification"]);
 
 /** External reference shape only; it corresponds to no production contract and is never derived. */
 export const AGENT_SHAPE_PARAMETERS = Type.Object({
@@ -63,12 +63,12 @@ export interface ProbeShapeDefinition {
 
 export function probeShapeDefinition(shape: ProbeShape): ProbeShapeDefinition {
 	if (shape === "flat") {
-		return { name: SUBAGENT_SESSION_TOOL_NAME, description: SUBAGENT_TOOL_DESCRIPTION, promptSnippet: SUBAGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...SUBAGENT_TOOL_PROMPT_GUIDELINES], parameters: FLAT_SHAPE_PARAMETERS };
+		return { name: AGENT_SESSION_TOOL_NAME, description: AGENT_TOOL_DESCRIPTION, promptSnippet: AGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...AGENT_TOOL_PROMPT_GUIDELINES], parameters: FLAT_SHAPE_PARAMETERS };
 	}
 	if (shape === "agent-shape") {
 		return { name: "Agent", description: AGENT_SHAPE_DESCRIPTION, promptSnippet: AGENT_SHAPE_SNIPPET, promptGuidelines: [...AGENT_SHAPE_GUIDELINES], parameters: AGENT_SHAPE_PARAMETERS };
 	}
-	return { name: SUBAGENT_SESSION_TOOL_NAME, description: SUBAGENT_TOOL_DESCRIPTION, promptSnippet: SUBAGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...SUBAGENT_TOOL_PROMPT_GUIDELINES], parameters: SubagentSessionToolSchema };
+	return { name: AGENT_SESSION_TOOL_NAME, description: AGENT_TOOL_DESCRIPTION, promptSnippet: AGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...AGENT_TOOL_PROMPT_GUIDELINES], parameters: AgentSessionToolSchema };
 }
 
 /** Lifecycle operations never request new task roles, even with invalid stray tasks. */
@@ -85,7 +85,7 @@ export default function delegationProbe(pi: ExtensionAPI): void {
 	const definition = probeShapeDefinition(shape);
 	pi.registerTool({
 		...definition,
-		label: "Subagent sessions",
+		label: "Agent sessions",
 		async execute(_id: string, params: Record<string, unknown>) {
 			if (shape === "production") parseSessionRequest(params); // Mirror field validation, never execute a lifecycle action.
 			const roles = probeRequestedTasks(params).map(value => { const task = value && typeof value === "object" ? value as Record<string, unknown> : {}; return task.role ?? task.subagent_type ?? "unknown"; });

@@ -5,8 +5,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor, sharedAboveEditor } from "../extensions/shared/above-editor.ts";
 import { createTasksUi } from "../extensions/tasks-ui/index.ts";
 import { taskRows } from "../extensions/tasks-ui/render.ts";
-import workflow from "../extensions/tasklist/index.ts";
-import { createTasklistStore } from "../extensions/tasklist/goal-store.ts";
+import tasklistExtension from "../extensions/tasklist/index.ts";
+import { createTasklistStore } from "../extensions/tasklist/store.ts";
 import { registerTasksView, TASKS_VIEW_EVENT, TASKS_VIEW_REQUEST_EVENT, TASKS_VIEW_RESET_EVENT, TASKS_VIEW_VERSION } from "../extensions/tasklist/tasks-view.ts";
 
 function harness(mode = "tui") {
@@ -64,7 +64,7 @@ test("fold summary distinguishes done from cancelled and reports blocked items w
  // A blocked item is item data: it is reported, and no list-level pause/resume row can appear.
  store.mutate({ operation: "update", tasks: [{ id: "b", status: "blocked", note: "Need a decision" }] });
  await h.commands.get("tasks-ui")!("collapse", h.ctx);
- assert.match(lines(h.widget)[0]!, /! blocked/);
+ assert.match(lines(h.widget)[0]!, /! Tasks \(1\/2 done\) 1 blocked$/);
  assert.doesNotMatch(lines(h.widget)[0]!, / · done/);
  assert.doesNotMatch(lines(h.widget).join("\n"), /paused|resumed/);
  assert.doesNotMatch(lines(h.widget).join("\n"), /Updated task/);
@@ -93,21 +93,20 @@ test("unavailable, foreign, and stale replies are not a successful empty list", 
  assert.doesNotMatch(lines(h.widget).join("\n"), /Stale title|Owned task/);
  assert.match(lines(h.widget).join("\n"), /▸ Tasks/);
 });
-test("tasklist-ui remains a show/hide/list alias and does not keep a second renderer", async () => {
+test("tasks-ui is the only Tasks command and lists through the shared overlay", async () => {
  const h = harness();
  const store = createTasklistStore(() => {});
  const view = registerTasksView(h.pi, store);
  createTasksUi({ composer: createAboveEditor() })(h.pi);
  view.bind(h.ctx); h.fire("session_start");
  store.mutate({ operation: "set", title: "Fixture", tasks: [{ id: "a", title: "Task" }] });
- await h.commands.get("tasklist-ui")!("expand", h.ctx);
- assert.equal(h.widget, undefined);
- await h.commands.get("tasklist-ui")!("show", h.ctx);
+ assert.deepEqual([...h.commands.keys()], ["tasks-ui"]);
+ await h.commands.get("tasks-ui")!("show", h.ctx);
  assert.match(lines(h.widget).join("\n"), /Task/);
  let title = "";
  h.ctx.ui.custom = captureListOverlay(rows => { title = rows.join("\n"); assert.match(title, /Task/); });
- await h.commands.get("tasklist-ui")!("list", h.ctx);
- assert.match(title, /Tasklist/);
+ await h.commands.get("tasks-ui")!("list", h.ctx);
+ assert.match(title, /Tasks +×/);
  assert.equal(h.key, ABOVE_EDITOR_WIDGET_KEY);
  view.unbind();
 });
@@ -129,42 +128,41 @@ test("session shutdown releases the tasks slot and its listeners", () => {
  assert.equal(h.key, before);
  assert.doesNotMatch(String(h.widget), /After shutdown/);
 });
-test("headless tasks-ui mounts nothing and does not disable workflow", () => {
+test("headless tasks-ui mounts nothing and keeps the tasklist tool", () => {
  const h = harness("print");
- workflow(h.pi);
+ tasklistExtension(h.pi);
  createTasksUi({ composer: createAboveEditor() })(h.pi);
  h.fire("session_start");
  assert.equal(h.tools.includes("tasklist"), true);
- assert.equal(h.tools.includes("csheng_workflow"), false, "no legacy duplicate tool remains");
  assert.equal(h.widget, undefined);
  assert.equal(h.key, "");
 });
-test("above-editor helper keeps Tasks, Jobs, Subagents order and isolates removal", () => {
+test("above-editor helper keeps Tasks, Jobs, Agents order and isolates removal", () => {
  const composer = createAboveEditor();
  let widget: unknown;
  let key = "";
  const ctx = { mode: "tui", hasUI: true, ui: { setWidget(next: string, value: unknown) { key = next; widget = value; } } };
  composer.attach(ctx);
- composer.set("subagents", { render: () => ["Subagents"] });
+ composer.set("agents", { render: () => ["Agents"] });
  composer.set("tasks", { render: () => ["Tasks"] });
  composer.set("jobs", { render: () => ["Jobs"] });
  assert.equal(key, ABOVE_EDITOR_WIDGET_KEY);
- assert.deepEqual(lines(widget), ["Tasks", "", "Jobs", "", "Subagents", ""]);
+ assert.deepEqual(lines(widget), ["Tasks", "", "Jobs", "", "Agents", ""]);
  composer.set("jobs", undefined);
- assert.deepEqual(lines(widget), ["Tasks", "", "Subagents", ""]);
+ assert.deepEqual(lines(widget), ["Tasks", "", "Agents", ""]);
  composer.set("tasks", { render() { throw new Error("tasks failed"); } });
- assert.deepEqual(lines(widget), ["Subagents", ""]);
- assert.deepEqual(composer.slots(), ["tasks", "subagents"]);
+ assert.deepEqual(lines(widget), ["Agents", ""]);
+ assert.deepEqual(composer.slots(), ["tasks", "agents"]);
  composer.set("tasks", undefined);
- assert.deepEqual(lines(widget), ["Subagents", ""]);
- composer.set("subagents", undefined);
+ assert.deepEqual(lines(widget), ["Agents", ""]);
+ composer.set("agents", undefined);
  assert.equal(widget, undefined);
  assert.deepEqual(composer.slots(), []);
 });
 test("collapsed blocked state stays a warning and the expanded oracle still has its fields", () => {
  const blocked = taskRows({ state: { version: 6, revision: 1, title: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }] } }, 80, 4, undefined, { folded: true });
  assert.equal(blocked.length, 1);
- assert.match(blocked[0]!, /! blocked · Tasks/);
+ assert.match(blocked[0]!, /^▸ ! Tasks \(0\/1 done\) 1 blocked$/);
  assert.doesNotMatch(blocked[0]!, /Waiting/);
  const expanded = taskRows({ state: { version: 6, revision: 1, title: "Hold", tasks: [{ id: "c", title: "Waiting", status: "blocked", note: "Needs input" }] } }, 80, 4);
  assert.match(expanded.join("\n"), /Waiting/);
@@ -190,10 +188,10 @@ test("co-loaded extensions share one above-editor widget", () => {
  let widget: unknown;
  first.attach({ mode: "tui", hasUI: true, ui: { setWidget(_key: string, value: unknown) { widget = value; } } });
  first.set("tasks", { render: () => ["▸ Tasks (1/1 done)"] });
- second.set("subagents", { render: () => ["▸ Subagents (1 running / 2 agents)"] });
+ second.set("agents", { render: () => ["▸ Agents (1 running / 2 agents)"] });
  const rendered = (widget as (tui: unknown) => { render(width: number): string[] })({ mode: "fullscreen", terminal: { rows: 24 } }).render(80);
  assert.match(rendered.join("\n"), /Tasks/);
- assert.match(rendered.join("\n"), /Subagents/);
+ assert.match(rendered.join("\n"), /Agents/);
 });
 test("fullscreen header click toggles Tasks inline and does not open a dialog", async () => {
  const h = harness();

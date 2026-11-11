@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 /**
  * Real installed Pi with a synthetic provider only (no network or private API). The first
  * run is an RPC user prompt. Once that run settles and Pi is idle, the fixture starts an
- * internal run exactly the way the subagent extension wakes the parent:
+ * internal run exactly the way the agent extension wakes the parent:
  * `pi.sendMessage(..., { triggerTurn: true })`. The Bark adapter must notify only for the
  * user run. The fixture records the observed run kinds so the test can prove both runs ran.
  */
@@ -35,7 +35,7 @@ export default function agentBarkCustomWake(pi: ExtensionAPI): void {
 				if (attempts++ < 40 && !ctx.isIdle()) { setTimeout(wake, 25); return; }
 				pi.sendMessage({
 					customType: "agent-bark-fixture-wake",
-					content: "Subagent execution evidence is ready (fixture).",
+					content: "Agent execution evidence is ready (fixture).",
 					display: false,
 				}, { triggerTurn: true });
 			};

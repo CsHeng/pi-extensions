@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Provider-gated measurement lane for the parent-visible subagent surface.
+// Provider-gated measurement lane for the parent-visible agent surface.
 //
 // It runs headless `pi` against a throwaway project and one mock subagent tool
 // (scripts/fixtures/delegation-probe-extension.ts), then reports how often the
@@ -17,14 +17,14 @@ import { parseArgs, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { PROBE_GUIDANCE_ENV, PROBE_GUIDANCE_LEVELS, PROBE_SHAPES, PROBE_SHAPE_ENV, PROBE_TOOL_NAMES, probeRequestedTasks, type ProbeGuidance, type ProbeShape } from "./fixtures/delegation-probe-extension.ts";
 
-export const PROBE_GATE_ENV = "CSHENG_SUBAGENTS_DELEGATION_PROBE";
+export const PROBE_GATE_ENV = "PI_EXTENSIONS_AGENTS_DELEGATION_PROBE";
 export const PROBE_FIXTURE_RELATIVE_PATH = "scripts/fixtures/delegation-probe-extension.ts";
 export const MAX_STDOUT_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_TIMEOUT_SECONDS = 600;
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const probeFixturePath = join(repositoryRoot, PROBE_FIXTURE_RELATIVE_PATH);
-const subagentTools = new Set<string>(PROBE_TOOL_NAMES);
+const agentTools = new Set<string>(PROBE_TOOL_NAMES);
 
 export type ProbePromptKind = "target" | "control";
 export interface ProbePrompt { id: string; kind: ProbePromptKind; text: string }
@@ -32,7 +32,7 @@ export interface ProbePrompt { id: string; kind: ProbePromptKind; text: string }
 /**
  * Frozen prompt set. Every cell uses these exact texts so results stay
  * comparable across dates; the recorded fingerprint fails in
- * tests/subagents-delegation-probe.test.ts until it is updated in the same
+ * tests/agents-delegation-probe.test.ts until it is updated in the same
  * change as a deliberate prompt edit.
  */
 export const PROBE_PROMPTS: readonly ProbePrompt[] = [
@@ -106,7 +106,7 @@ export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
 		if (type === "turn_start") counts.turns += 1;
 		else if (type === "tool_execution_start") {
 			const name = String(event["toolName"] ?? "");
-			if (subagentTools.has(name)) {
+			if (agentTools.has(name)) {
 				counts.callCount += 1;
 				counts.called = true;
 				const args = event["args"] as Record<string, unknown> | undefined;
@@ -123,7 +123,7 @@ export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
 				}
 			} else counts.otherToolCalls += 1;
 		} else if (type === "tool_execution_end") {
-			if (subagentTools.has(String(event["toolName"] ?? "")) && event["isError"] === true) counts.argErrors += 1;
+			if (agentTools.has(String(event["toolName"] ?? "")) && event["isError"] === true) counts.argErrors += 1;
 		} else if (type === "message_end") {
 			const message = (event["message"] ?? {}) as Record<string, unknown>;
 			if (message["role"] === "assistant" && typeof message["stopReason"] === "string") counts.stopReason = message["stopReason"];

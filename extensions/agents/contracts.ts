@@ -1,10 +1,17 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-export const SUBAGENT_STATUS_COMMAND = "agents";
-export const CHILD_CAPABILITY_ENV = "CSHENG_SUBAGENT_CAPABILITY";
-export const CHILD_MARKER_ENV = "CSHENG_SUBAGENT_CHILD";
-export const CHILD_CAPABILITY_FAILURE_EVENT = "csheng-subagent-capability-failure";
+/**
+ * `{ type: "string", enum }` for providers without anyOf/const support, typed for TypeBox `Static`.
+ * Pi's own `StringEnum` returns a pi-schema type since Pi 1.5, which TypeBox objects cannot infer.
+ */
+export function StringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+}
+
+export const AGENT_STATUS_COMMAND = "agents";
+export const CHILD_CAPABILITY_ENV = "PI_EXTENSIONS_AGENT_CAPABILITY";
+export const CHILD_MARKER_ENV = "PI_EXTENSIONS_AGENT_CHILD";
+export const CHILD_CAPABILITY_FAILURE_EVENT = "agents.capability-failure";
 export const TELEMETRY_SCHEMA_VERSION_V2 = 2 as const;
 export const TELEMETRY_SCHEMA_VERSION_V3 = 3 as const;
 export const TELEMETRY_SCHEMA_VERSION = 4 as const;
@@ -125,14 +132,18 @@ export interface ChildActivity {
 }
 
 const RoleSchema = StringEnum(ROLE_NAMES);
-const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES);
-const ThinkingProfileSchema = StringEnum(THINKING_PROFILES);
+const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES, {
+	description: "Optional route preference: fast favors quick turnaround, balanced weighs cost and quality, deep favors complex work. Selects configured model/thinking candidates; omit for the role default.",
+});
+const ThinkingProfileSchema = StringEnum(THINKING_PROFILES, {
+	description: "Optional independent thinking effort: light favors low overhead, standard routine reasoning, deep more deliberation. A configured mapping overrides candidate thinking; omit when executionProfile and its defaults suffice. Pi model metadata maps the chosen level to provider effort.",
+});
 const ThinkingLevelSchema = Object.assign(StringEnum(THINKING_LEVELS), {
 	description: "Exact ephemeral Pi thinking level supplied only for an explicit user choice; it overrides thinking-profile and route defaults.",
 });
 const BoundedStringArray = Type.Array(Type.String(), { maxItems: 32 });
 
-export const SubagentTaskSchema = Type.Object(
+export const AgentTaskSchema = Type.Object(
 	{
 		id: Type.String({ minLength: 1, maxLength: 64, pattern: "\\S", description: "Readable task label, unique within this call. Dependencies refer to labels, not to a persistent identity or path." }),
 		role: RoleSchema,
@@ -166,7 +177,7 @@ export const SubagentTaskSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export interface SubagentTask {
+export interface AgentTask {
 	id: string;
 	role: RoleName;
 	objective: string;
@@ -181,8 +192,8 @@ export interface SubagentTask {
 	thinking?: ThinkingLevel;
 }
 
-export interface SubagentToolInput {
-	tasks: SubagentTask[];
+export interface AgentToolInput {
+	tasks: AgentTask[];
 }
 
 export interface UsageTotals {
@@ -343,7 +354,7 @@ export interface RunTelemetry extends Omit<RunTelemetryV4,
 	effectiveRoleConcurrency?: Partial<Record<RoleName, number>>;
 }
 
-export interface SubagentRunResult {
+export interface AgentRunResult {
 	status: RunStatus;
 	tasks: TaskResult[];
 	usage: UsageTotals;

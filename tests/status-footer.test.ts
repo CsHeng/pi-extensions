@@ -179,8 +179,8 @@ test("formats token counts with k and M compact units", () => {
 });
 
 test("abbreviates a home-relative original workdir", () => {
-	assert.equal(formatWorkdir("/home/csheng/workspace/pi-extensions", "/home/csheng"), "~/workspace/pi-extensions");
-	assert.equal(formatWorkdir("/workspace/project", "/home/csheng"), "/workspace/project");
+	assert.equal(formatWorkdir("/home/user/workspace/pi-extensions", "/home/user"), "~/workspace/pi-extensions");
+	assert.equal(formatWorkdir("/workspace/project", "/home/user"), "/workspace/project");
 });
 
 test("the session lane shows the prompt-weighted mean CH and no separate latest-prompt rate", () => {

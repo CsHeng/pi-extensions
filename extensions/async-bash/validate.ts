@@ -2,7 +2,7 @@
 
 const CONTROL = new Set(["inspect", "wait", "renew", "cancel"]);
 
-export interface ShellCallParams {
+export interface BashCallParams {
 	command?: string;
 	timeout?: number;
 	action?: string;
@@ -17,7 +17,7 @@ function positiveFinite(value: number | undefined): boolean {
 	return value === undefined || (typeof value === "number" && Number.isFinite(value) && value > 0);
 }
 
-export function validateShellCall(params: ShellCallParams): { ok: true } | { ok: false; message: string } {
+export function validateBashCall(params: BashCallParams): { ok: true } | { ok: false; message: string } {
 	const action = params.action;
 	const suppliedId = params.executionId !== undefined && params.executionId !== null;
 	const validId = typeof params.executionId === "string" && params.executionId.length > 0;

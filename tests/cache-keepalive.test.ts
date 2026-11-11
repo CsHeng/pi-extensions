@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
 	CACHE_KEEPALIVE_ENTRY_TYPE,
 	createCacheKeepalive,
+	formatWarmedCost,
 	refreshDelayMs,
 	refreshEconomics,
 	type KeepaliveClock,
@@ -162,6 +163,7 @@ test("an idle session replays the last payload with one output token on Pi's sch
 
 	const options = h.calls[0]!.options;
 	assert.equal(options.maxRetries, 0);
+	assert.equal(options.disableContinuation, true, "the session's Anthropic message thread stays untouched");
 	assert.equal(options.sessionId, "session-1");
 	assert.deepEqual(options.onPayload({ unrelated: true }), { ...original, max_tokens: 1 });
 	assert.deepEqual(body, original, "the captured payload is not mutated");
@@ -183,20 +185,14 @@ test("warming ends 30 minutes after the last real request", async () => {
 	assert.equal(h.clock.pending, 0);
 });
 
-test("the extension stands down unless cacheWarming is streaming", async () => {
-	for (const mode of ["idle", "off"]) {
+test("the extension acts only for an explicit streaming cacheWarming", async () => {
+	for (const settings of [{ cacheWarming: "idle" }, { cacheWarming: "off" }, {}, { cacheWarming: "unknown" }]) {
 		const h = harness();
-		h.pi.settings = { cacheWarming: mode };
+		h.pi.settings = settings;
 		await settleAfterRequest(h);
 		await h.clock.advanceTo(600_000);
-		assert.equal(h.calls.length, 0, mode);
+		assert.equal(h.calls.length, 0, `${JSON.stringify(settings)}: absent or unknown means Pi's default "idle"`);
 	}
-	const unset = harness();
-	unset.pi.settings = {};
-	await settleAfterRequest(unset);
-	await unset.clock.advanceTo(270_000);
-	assert.equal(unset.calls.length, 1, "Pi's default is streaming");
-
 	const switched = harness();
 	await settleAfterRequest(switched);
 	switched.pi.settings = { cacheWarming: "idle" };
@@ -275,7 +271,7 @@ test("input during an in-flight refresh aborts it without recording", async () =
 	assert.equal(h.clock.pending, 0);
 });
 
-test("notices follow Pi's showCacheMissNotices setting", async () => {
+test("notices follow Pi's showCacheMissNotices setting and accumulate per idle period", async () => {
 	const quiet = harness();
 	await settleAfterRequest(quiet);
 	await quiet.clock.advanceTo(270_000);
@@ -284,7 +280,20 @@ test("notices follow Pi's showCacheMissNotices setting", async () => {
 	const loud = harness();
 	loud.pi.settings = { cacheWarming: "streaming", showCacheMissNotices: true };
 	await settleAfterRequest(loud);
-	await loud.clock.advanceTo(270_000);
-	assert.equal(loud.notices.length, 1);
-	assert.match(loud.notices[0]!, /^Cache kept warm: \$/);
+	await loud.clock.advanceTo(540_000);
+	assert.deepEqual(loud.notices, ["Cache kept warm: $0.100", "Cache kept warm: $0.200"], "one cumulative amount, as Pi's Cache warmed line");
+
+	loud.notices.length = 0;
+	loud.emit("agent_start");
+	loud.emit("before_provider_request", { payload: payload() });
+	loud.clock.time = 600_000;
+	loud.emit("agent_settled", { aborted: false });
+	await loud.clock.advanceTo(870_000);
+	assert.deepEqual(loud.notices, ["Cache kept warm: $0.100"], "a new idle period starts a new total");
+});
+
+test("warmed cost uses Pi's notice precision", () => {
+	assert.equal(formatWarmedCost(0.1), "0.100");
+	assert.equal(formatWarmedCost(0.0551234), "0.055123");
+	assert.equal(formatWarmedCost(0.01525), "0.01525");
 });

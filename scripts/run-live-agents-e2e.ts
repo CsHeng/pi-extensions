@@ -106,9 +106,8 @@ function eventDetails(event: JsonEvent): SessionActionResult | undefined {
 }
 
 function collectResults(events: readonly JsonEvent[]): SessionActionResult[] {
-	if (events.some((event) => eventToolName(event) === "csheng_subagents")) fail("retired_subagent_tool");
 	const starts = events.filter((event) => event.type === "tool_execution_start" && event.toolName === SESSION_TOOL);
-	if (starts.length < 1) fail("unexpected_subagent_tool_call_count");
+	if (starts.length < 1) fail("unexpected_agent_tool_call_count");
 	const seen = new Set<string>();
 	const results: SessionActionResult[] = [];
 	for (const event of events) {
@@ -120,12 +119,12 @@ function collectResults(events: readonly JsonEvent[]): SessionActionResult[] {
 		seen.add(invocationId);
 		results.push(details);
 	}
-	if (results.length === 0) fail("subagent_result_missing");
+	if (results.length === 0) fail("agent_result_missing");
 	return results;
 }
 
 function asSessions(value: SessionActionResult): SessionView[] {
-	if (!Array.isArray(value.sessions)) fail("subagent_sessions_missing");
+	if (!Array.isArray(value.sessions)) fail("agent_sessions_missing");
 	return value.sessions;
 }
 
@@ -165,15 +164,15 @@ export function validateLiveRun(
 ): LiveE2eSummary {
 	const results = collectResults(parseEvents(stdout));
 	const freshCreates = results.filter((details) => details.action === "create" && details.requestTelemetry?.replayedEpisodes === 0);
-	if (freshCreates.length !== 1) fail("subagent_graph_not_succeeded");
+	if (freshCreates.length !== 1) fail("agent_graph_not_succeeded");
 	const created = freshCreates[0]!;
-	if (created.schemaVersion !== 2 || created.status !== "succeeded") fail("subagent_graph_not_succeeded");
+	if (created.schemaVersion !== 2 || created.status !== "succeeded") fail("agent_graph_not_succeeded");
 	const telemetry = created.requestTelemetry;
 	if (telemetry?.requestedTasks !== 3 || telemetry.admittedTasks !== 3 || telemetry.launchedChildren !== 3) {
-		fail("subagent_graph_not_succeeded");
+		fail("agent_graph_not_succeeded");
 	}
 	const sessions = asSessions(created);
-	if (sessions.length !== 3) fail("subagent_graph_not_succeeded");
+	if (sessions.length !== 3) fail("agent_graph_not_succeeded");
 	const expected = [
 		{ role: "explorer" as const, outputToken: expectedTokens.explore },
 		{ role: "reviewer" as const, outputToken: expectedTokens.review },
@@ -233,7 +232,7 @@ export function validateLiveRun(
 async function writeObserver(observerPath: string, packageRoot: string): Promise<void> {
 	const commands = JSON.stringify(REQUIRED_COMMANDS);
 	const ownedRoot = JSON.stringify(packageRoot);
-	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (event.toolName !== "${SESSION_TOOL}") return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === "${SESSION_TOOL}");\n\t\tconst retired = pi.getAllTools().some((candidate) => candidate.name === "csheng_subagents");\n\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes("${SESSION_TOOL}") || retired) {\n\t\t\tmissing.push(retired ? "tool:csheng_subagents" : "tool:${SESSION_TOOL}");\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
+	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (event.toolName !== "${SESSION_TOOL}") return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === "${SESSION_TOOL}");\n\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes("${SESSION_TOOL}")) {\n\t\t\tmissing.push("tool:${SESSION_TOOL}");\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
 }
 
 function terminateProcess(child: ReturnType<typeof spawn>): NodeJS.Timeout | undefined {
@@ -311,17 +310,17 @@ async function runPi(arguments_: readonly string[], cwd: string): Promise<{ stdo
 }
 
 async function main(): Promise<void> {
-	if (process.env.CSHENG_SUBAGENTS_LIVE_E2E !== "1") fail("live_e2e_requires_CSHENG_SUBAGENTS_LIVE_E2E_1");
+	if (process.env.PI_EXTENSIONS_AGENTS_LIVE_E2E !== "1") fail("live_e2e_requires_PI_EXTENSIONS_AGENTS_LIVE_E2E_1");
 	const args = process.argv.slice(2);
 	if (args.some((argument) => argument !== "--installed") || args.filter((argument) => argument === "--installed").length > 1) {
-		fail("usage_run_live_subagents_e2e_optional_installed");
+		fail("usage_run_live_agents_e2e_optional_installed");
 	}
 	const source = args.includes("--installed") ? "installed" as const : "temporary" as const;
 	const scriptPath = fileURLToPath(import.meta.url);
 	const packageRoot = resolve(dirname(scriptPath), "..");
 	const tempParent = join(homedir(), "tmp");
 	await mkdir(tempParent, { recursive: true });
-	const harnessRoot = await mkdtemp(join(tempParent, "csheng-subagents-e2e-"));
+	const harnessRoot = await mkdtemp(join(tempParent, "pi-extensions-agents-e2e-"));
 	const repositoryRoot = join(harnessRoot, "repo");
 	const observerPath = join(harnessRoot, "package-observer.ts");
 	const resultPath = join(repositoryRoot, "result.txt");

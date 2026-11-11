@@ -33,7 +33,7 @@ if (lane === "ui-required") {
 	}
 }
 const args = ["test", "--timeout", "120000", ...names.map(name => `./tests/${name}`)];
-if (lane === "ui-required") args.push("./tests/subagents-ui-tui.e2e.ts");
+if (lane === "ui-required") args.push("./tests/agents-ui-tui.e2e.ts");
 const result = spawnSync(process.execPath, args, { cwd: root, env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
 process.stdout.write(result.stdout ?? "");
 process.stderr.write(result.stderr ?? "");

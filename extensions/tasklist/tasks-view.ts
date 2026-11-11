@@ -1,16 +1,16 @@
 /** Owner-scoped read-only Tasks snapshot. Queries never mutate, remind, wake, or enter model context. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TasklistState, TasklistTask } from "./goal-contracts.ts";
-import type { TasklistStore } from "./goal-store.ts";
+import type { TasklistState, TasklistTask } from "./contracts.ts";
+import type { TasklistStore } from "./store.ts";
 
 /** Bumped because the published state shape lost list-level control fields. */
 export const TASKS_VIEW_VERSION = 2;
-export const TASKS_VIEW_REQUEST_EVENT = "csheng.workflow.tasks-view.request";
-export const TASKS_VIEW_EVENT = "csheng.workflow.tasks-view";
+export const TASKS_VIEW_REQUEST_EVENT = "tasklist.tasks-view.request";
+export const TASKS_VIEW_EVENT = "tasklist.tasks-view";
 /** Invalidation only; contains no task payload and prompts an open consumer to requery. */
-export const TASKS_VIEW_CHANGED_EVENT = "csheng.workflow.tasks-view.changed";
+export const TASKS_VIEW_CHANGED_EVENT = "tasklist.tasks-view.changed";
 /** Owner reset or shutdown. Consumers drop cached snapshots and requery after a new bind. */
-export const TASKS_VIEW_RESET_EVENT = "csheng.workflow.tasks-view.reset";
+export const TASKS_VIEW_RESET_EVENT = "tasklist.tasks-view.reset";
 
 const TASK_STATUSES = ["todo", "doing", "blocked", "done", "cancelled"] as const;
 const REASONS = ["untrusted", "unsupported"] as const;
