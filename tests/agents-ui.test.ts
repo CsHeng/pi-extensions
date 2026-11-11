@@ -371,7 +371,7 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
 	const lines = overlay.render(80, 40);
 	assert.ok(lines.length <= 40, `panel fits 80x40, got ${lines.length}`);
-	assert.match(lines[0] ?? "", /Agents · session parent…/);
+	assert.match(lines[1] ?? "", /Agents · session parent…/, "the title row follows the top border");
 	const text = lines.join("\n");
 	assert.equal((text.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "all ten identified live rows stay visible");
 	assert.match(text, /running · 10 agents/);
@@ -530,11 +530,12 @@ test("tiny terminals keep live rows reachable through explicit live-only overflo
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({ tasks: liveTasks, requestedTasks: 6, admittedTasks: 6, launchedChildren: 6, activeChildren: 6 })),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	const lines = overlay.render(80, 10).join("\n");
+	// Ten body rows plus the two frame rows.
+	const lines = overlay.render(80, 12).join("\n");
 	assert.match(lines, /live \d+–\d+\/6 · ↑↓ live/, "live overflow is explicit");
-	const before = overlay.render(80, 10);
+	const before = overlay.render(80, 12);
 	overlay.handleInput("down");
-	const after = overlay.render(80, 10);
+	const after = overlay.render(80, 12);
 	assert.notDeepEqual(after, before, "arrows scroll the live window");
 	assert.match(after.join("\n"), /live 2–\d+\/6 · ↑↓ live/);
 });
@@ -868,7 +869,7 @@ test("narrow terminals wrap session rows and keep the close chip hit-testable", 
 	const lines = overlay.render(40, 30);
 	assert.ok(lines.length > 0);
 	assert.ok(lines.every(line => visibleWidth(line) <= 40));
-	const range = overlay.handleMouse({ type: "click", button: "left", x: lines[0]!.length - 3, y: 0 });
+	const range = overlay.handleMouse({ type: "click", button: "left", x: lines[1]!.indexOf("×"), y: 1 });
 	assert.deepEqual(range, { handled: true }, "the close chip stays clickable");
 	const text = lines.join("\n");
 	assert.match(text, /off-branch/);
@@ -893,18 +894,19 @@ test("live observations widen an open panel without filling the terminal", async
 	void narrow;
 });
 
-test("themable rows keep hierarchy colors across the session layout", () => {
+test("themable rows keep hierarchy colors inside the shared transparent frame", () => {
 	const theme = {
 		fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
-		bg: (color: string, text: string) => `{${color}}${text}{/${color}}`,
 	};
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot()),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
 	const lines = overlay.render(80, 24);
-	assert.ok(lines.length > 0);
-	assert.match(lines[0] ?? "", /<accent>Agents/);
-	assert.ok(lines.every(line => line.startsWith("{selectedBg}")), "panel rows keep the selected background");
+	assert.ok(lines.length > 2 && lines.length <= 24);
+	assert.match(lines[0] ?? "", /^<border>╭─+╮<\/border>$/u);
+	assert.match(lines.at(-1) ?? "", /^<border>╰─+╯<\/border>$/u);
+	assert.match(lines[1] ?? "", /^<border>│<\/border> <accent>Agents/);
+	assert.ok(lines.slice(1, -1).every(line => line.startsWith("<border>│</border>") && line.endsWith("<border>│</border>")), "rows sit inside the frame without a background fill");
 });
 
 test("list command and shortcut open the overlay without closing on stray keys", async () => {

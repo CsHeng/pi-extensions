@@ -176,7 +176,7 @@ test("installed Pi fullscreen: clicking the observer close marker dismisses the 
 	await f.waitFor(() => f.output.includes("1 live (t"), "live fixture row did not appear");
 	await f.waitFor(() => f.output.includes("review fixture"), "live detail did not appear");
 	await delay(300);
-	const markerIndex = f.output.lastIndexOf("\u2715");
+	const markerIndex = f.output.lastIndexOf("\u00d7");
 	const lineStart = markerIndex < 0 ? undefined : [...f.output.slice(0, markerIndex).matchAll(/\u001b\[(\d+);(\d+)H/g)].at(-1);
 	assert.ok(lineStart?.index !== undefined, "close marker present in a terminal frame");
 	const row = Number(lineStart[1]);

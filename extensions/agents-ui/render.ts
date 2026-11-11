@@ -13,9 +13,11 @@ export const OBSERVER_STALE_MISSED_HEARTBEATS = 3;
 export const OBSERVER_STALE_MS = OBSERVER_HEARTBEAT_MS * OBSERVER_STALE_MISSED_HEARTBEATS;
 export const EMPTY_OBSERVER_MESSAGE = "No observed Agent work.";
 export const OVERLAY_TITLE = "Agents";
-export const OVERLAY_CLOSE_CHIP = "[ ✕ ]";
+export const OVERLAY_CLOSE_CHIP = "×";
 export const OVERLAY_HORIZONTAL_MARGIN = 1;
 export const PANEL_PADDING_X = 1;
+/** Border column on each side and border row above and below, as in the shared list overlay. */
+export const PANEL_FRAME = 1;
 /** Previous default overlay width, kept as the floor so short content does not shrink the panel. */
 export const PANEL_MIN_WIDTH = 80;
 /** Space kept between the close chip and the panel's right edge. */
@@ -64,7 +66,7 @@ export function overlayPanelWidth(rows: readonly OverlayRow[], terminalColumns: 
 	const titleContent = title
 		? visibleWidth(title.text) + PANEL_PADDING_X + 1 + visibleWidth(OVERLAY_CLOSE_CHIP) + CLOSE_CHIP_TRAILING_PAD
 		: 0;
-	const desired = Math.max(content, titleContent);
+	const desired = Math.max(content, titleContent) + PANEL_FRAME * 2;
 	return Math.max(Math.min(PANEL_MIN_WIDTH, available), Math.min(desired, available));
 }
 

@@ -21,6 +21,7 @@ import {
 	overlayPanelWidth,
 	panelTextWidth,
 	panelTitleRow,
+	PANEL_FRAME,
 	sessionCountMetaRows,
 	sessionCounts,
 	sessionHelpText,
@@ -49,8 +50,7 @@ export interface OverlaySnapshot {
 
 /** Theme subset used to paint the panel; callers may omit it for plain text. */
 export interface OverlayTheme {
-	fg(color: "accent" | "borderMuted" | "dim" | "text", text: string): string;
-	bg(color: "selectedBg", text: string): string;
+	fg(color: "accent" | "border" | "borderMuted" | "dim" | "text", text: string): string;
 }
 
 /** Subset of the fullscreen mouse event consumed by the close marker. */
@@ -120,7 +120,7 @@ export class AgentsOverlay {
 	/** Fullscreen-only close affordance; regular mode never captures pointer input. */
 	handleMouse(event: OverlayPointerEvent): { handled: true } | undefined {
 		const range = this.closeRange;
-		if (!range || event.y !== 0 || event.x < range.start || event.x >= range.end) return undefined;
+		if (!range || event.y !== PANEL_FRAME || event.x < range.start || event.x >= range.end) return undefined;
 		if (event.button !== "left") return undefined;
 		// Arm the press gesture so the host synthesizes the matching click.
 		if (event.type === "press") return { handled: true };
@@ -366,8 +366,20 @@ export class AgentsOverlay {
 
 	render(width: number, height?: number): string[] {
 		if (width <= 0) return [];
+		if (width <= PANEL_FRAME * 2) return this.renderBody(width, Math.max(1, height ?? this.tui.terminal?.rows ?? 30));
+		const inner = Math.max(1, width - PANEL_FRAME * 2);
+		const viewport = Math.max(1, (height ?? this.tui.terminal?.rows ?? 30) - PANEL_FRAME * 2);
+		const body = this.renderBody(inner, viewport);
+		// Same hit area as the shared list overlay: the title row's last four columns around the mark.
+		if (this.closeRange) this.closeRange = { start: Math.max(0, width - 4), end: width };
+		// Transparent rounded frame shared with the Tasks and Jobs list overlays.
+		const border = (text: string) => this.theme?.fg("border", text) ?? text;
+		const rule = "─".repeat(inner);
+		return [border("╭" + rule + "╮"), ...body.map(line => border("│") + line + border("│")), border("╰" + rule + "╯")];
+	}
+
+	private renderBody(width: number, viewport: number): string[] {
 		const textWidth = panelTextWidth(width);
-		const viewport = Math.max(1, height ?? this.tui.terminal?.rows ?? 30);
 		const reserve = (this.historyOpen ? 4 : 2) + 1;
 		// Identity pinning outranks chrome: reflow with a compact header, then a minimal reserve.
 		let layout = this.layoutSession(width, textWidth, viewport, reserve, false);
@@ -410,6 +422,6 @@ export class AgentsOverlay {
 			lines.push(compact({ kind: "help", text: sessionHelpText({ liveOverflow: this.lastLiveOverflow, historyOpen: this.historyOpen, historyOverflow: this.lastHistoryOverflow }) }));
 		}
 		this.closeRange = header.length > 0 ? closeMarkerColumns(width) : undefined;
-		return this.theme ? lines.map(line => this.theme!.bg("selectedBg", line)) : lines;
+		return lines;
 	}
 }
