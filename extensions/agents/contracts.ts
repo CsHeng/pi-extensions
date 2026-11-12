@@ -117,6 +117,8 @@ export interface ChildToolCall {
 export interface ChildActivity {
 	phase: ChildActivityPhase;
 	assistantTurns: number;
+	/** Usage lane of this episode's requests so far; absent on activity recorded before it existed. */
+	usage?: import("../shared/usage-metrics.ts").UsageLane;
 	activeTools: string[];
 	/** Bounded live calls. Missing means this snapshot has no call detail, not that no call ran. */
 	calls?: ChildToolCall[];

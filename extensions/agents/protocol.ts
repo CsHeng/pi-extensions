@@ -1,3 +1,4 @@
+import { addRequest, emptyLaneTotals, requestFact, stepRebill, usageLaneOf, type RebillBaseline } from "../shared/usage-metrics.ts";
 import { HARD_LIMITS, emptyUsage, truncateUtf8, type ChildActivity, type ChildToolCall, type ChildToolCallStatus, type UsageTotals } from "./contracts.ts";
 
 const KNOWN_EVENT_TYPES = new Set([
@@ -16,13 +17,15 @@ interface AssistantPart {
 
 interface AssistantMessage {
 	role?: string;
+	provider?: string;
+	model?: string;
 	content?: AssistantPart[];
 	usage?: {
 		input?: number;
 		output?: number;
 		cacheRead?: number;
 		cacheWrite?: number;
-		cost?: { total?: number };
+		cost?: { input?: number; cacheRead?: number; cacheWrite?: number; total?: number };
 	};
 	stopReason?: string;
 	errorMessage?: string;
@@ -53,6 +56,9 @@ export class JsonlProtocolParser {
 	private protocolInvalid = false;
 	private finalOutput = "";
 	private readonly totals = emptyUsage();
+	/** Human-facing usage lane with Pi's re-bill rule; turns stay in `totals` for records. */
+	private readonly lane = emptyLaneTotals();
+	private rebillBaseline: RebillBaseline | undefined;
 	private stopReason: string | undefined;
 	private errorMessage: string | undefined;
 	private messageCount = 0;
@@ -122,6 +128,7 @@ export class JsonlProtocolParser {
 		return Object.freeze({
 			phase: this.phase,
 			assistantTurns: this.messageCount,
+			usage: usageLaneOf(this.lane),
 			activeTools: Object.freeze(activeTools) as unknown as string[],
 			calls: Object.freeze(projected.calls.map((call) => Object.freeze({ ...call }))) as unknown as ChildToolCall[],
 			callsTruncated: projected.callsTruncated,
@@ -189,6 +196,8 @@ export class JsonlProtocolParser {
 			if ((event.errorMessage !== undefined && typeof event.errorMessage !== "string") || (!this.compactionOpen && !failed) || typeof event.reason !== "string" || !["manual", "threshold", "overflow"].includes(event.reason) || typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean" || (!failed && !resultValid)) this.protocolInvalid = true;
 			this.compactionOpen = false;
 			this.agentSettledObserved = false;
+			// A compacted context is new content for the next prompt, not a re-bill.
+			if (!failed) this.rebillBaseline = undefined;
 			// Quiet native history maintenance does not replace a completed answer.
 			// Failed maintenance or a promised retry cannot reuse that answer.
 			if (failed || event.willRetry) { this.finalOutput = ""; this.stopReason = undefined; }
@@ -263,6 +272,9 @@ export class JsonlProtocolParser {
 		this.totals.cacheRead += finiteNumber(message.usage?.cacheRead);
 		this.totals.cacheWrite += finiteNumber(message.usage?.cacheWrite);
 		this.totals.cost += finiteNumber(message.usage?.cost?.total);
+		const step = stepRebill(this.rebillBaseline, message);
+		this.rebillBaseline = step.next;
+		addRequest(this.lane, requestFact(message, step.rebill, undefined));
 		this.finalOutput = message.content?.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n\n") ?? "";
 		this.stopReason = typeof message.stopReason === "string" && KNOWN_STOP_REASONS.has(message.stopReason) ? message.stopReason : undefined;
 		this.errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;

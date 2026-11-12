@@ -173,7 +173,7 @@ test("installed Pi fullscreen: three bottom sections expand independently withou
 test("installed Pi fullscreen: clicking the observer close marker dismisses the overlay", { timeout: 40_000 }, async t => {
 	const f = await host(t, false);
 	if (!f) return;
-	await f.waitFor(() => f.output.includes("1 live (t"), "live fixture row did not appear");
+	await f.waitFor(() => f.output.includes("1 live"), "live fixture row did not appear");
 	await f.waitFor(() => f.output.includes("review fixture"), "live detail did not appear");
 	await delay(300);
 	const markerIndex = f.output.lastIndexOf("\u00d7");

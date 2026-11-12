@@ -1,3 +1,4 @@
+import { emptyUsageLane } from "../shared/usage-metrics.ts";
 import { THINKING_LEVELS, type ThinkingLevel, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import type { CurrentOwner } from "./session-contracts.ts";
 import {
@@ -60,7 +61,7 @@ export class ManagedObserver {
 		this.nextRevision = nextRevision ?? (() => ++this.revision);
 		this.rows = input.map((row, index) => ({ id: row.id, ordinal: index + 1, role: row.role,
 			episode: row.episode, route: displayRoute(row.route),
-			status: "pending", executionPhase: "queued", assistantTurns: 0, elapsedMs: null, replayed: row.replayed,
+			status: "pending", executionPhase: "queued", assistantTurns: 0, usage: emptyUsageLane(), elapsedMs: null, replayed: row.replayed,
 			headline: observerHeadline(row.objective ?? ""), activeTools: [], calls: [], callsTruncated: false }));
 	}
 	begin(): void {
@@ -99,6 +100,8 @@ export class ManagedObserver {
 			return { ...row, status: result.status,
 				executionPhase: terminal ? "settled" : (this.active.has(row.id) ? "child-execution" : this.started.has(row.id) ? "convergence-critical" : result.status === "running" ? "workspace-preparation" : row.executionPhase),
 				assistantTurns: result.activity?.assistantTurns ?? result.usage.turns,
+				// Replayed rows keep their placeholder: a cached result is evidence, not this run's usage.
+				usage: row.replayed ? row.usage : result.activity?.usage ?? row.usage,
 				elapsedMs: row.replayed ? null : this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs,
 				activeTools: live ? (result.activity ? observerTools(result.activity.activeTools) : row.activeTools) : [],
 				...projectedCalls(live, result) };

@@ -111,7 +111,7 @@ The cutover is forward-only; there is no compatibility normalization for older e
 
 - `work-timing` gains one responsibility: the per-request timing entry. It still owns the working row and the completion entry, and it judges neither completion nor billing.
 - `status-footer` still persists nothing and still owns only the footer.
-- `agents-ui` per-agent rows keep their current latest-prompt `CH`. Applying the lane model to that observer is a separate follow-up decision.
+- `agents-ui` applies the same lane model to each agent: one row per agent is its lane, so `CH` is the prompt-token-weighted mean over that agent's requests and `RB` follows the same scan over its native history. Request turns stay in records and model-facing results; human rows do not show them.
 - The footer's dollar total still excludes Pi `cache_warm` usage and `cache-keepalive` refreshes; including them is a separate decision.
 - No provider-side metrics, percentiles, or exclusion of short completions are added.
 

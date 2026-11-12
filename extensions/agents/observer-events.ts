@@ -1,3 +1,4 @@
+import { USAGE_LANE_KEYS, usageLaneOf, type UsageLane } from "../shared/usage-metrics.ts";
 import {
 	CHILD_TOOL_CALL_STATUSES,
 	HARD_LIMITS,
@@ -14,8 +15,8 @@ import {
 
 import { isProductId } from "./identity.ts";
 
-export const OBSERVER_EVENT = "agents.observer.v4";
-export const OBSERVER_VERSION = 4 as const;
+export const OBSERVER_EVENT = "agents.observer.v5";
+export const OBSERVER_VERSION = 5 as const;
 export const OBSERVER_PHASES = ["accepted", "running", "settling", "settled"] as const;
 export const MAX_HEADLINE_BYTES = 240;
 export const MAX_ACTIVE_TOOLS = 16;
@@ -29,7 +30,7 @@ const SNAPSHOT_KEYS = [
 ] as const;
 const TASK_KEYS = [
 	"id", "ordinal", "role", "episode", "status", "executionPhase", "route",
-	"assistantTurns", "elapsedMs", "replayed", "headline", "activeTools", "calls", "callsTruncated",
+	"assistantTurns", "usage", "elapsedMs", "replayed", "headline", "activeTools", "calls", "callsTruncated",
 ] as const;
 const CALL_KEYS = ["id", "parentId", "tool", "summary", "startedMs", "updatedMs", "outputMs", "status", "deadlineMs", "tail", "truncated"] as const;
 const ROUTE_KEYS = ["provider", "model", "thinking"] as const;
@@ -59,6 +60,8 @@ export interface ObserverTask {
 	executionPhase: TaskExecutionPhase;
 	route: { provider: string; model: string; thinking: ThinkingLevel } | null;
 	assistantTurns: number;
+	/** Usage lane of this episode's requests so far, shown as `↑ ↓ R W CH $ RB`. */
+	usage: UsageLane;
 	elapsedMs: number | null;
 	replayed: boolean;
 	headline: string;
@@ -306,6 +309,14 @@ export function observerTools(tools: readonly string[] | undefined): string[] {
 
 function productId(value: unknown): value is string { return typeof value === "string" && isProductId(value); }
 
+/** Numeric usage only; its field names are metric names, not sensitive content. */
+function parseUsageLane(value: unknown): UsageLane | undefined {
+	if (!isRecord(value) || !keysExact(value, USAGE_LANE_KEYS, true)) return undefined;
+	if (USAGE_LANE_KEYS.some((key) => typeof value[key] !== "number" || !Number.isFinite(value[key]) || (value[key] as number) < 0)) return undefined;
+	if (!nonNegativeInt(value.rebillCount)) return undefined;
+	return usageLaneOf(value as unknown as UsageLane);
+}
+
 function parseTask(value: unknown): ObserverTask | undefined {
 	if (!isRecord(value) || !keysExact(value, TASK_KEYS)) return undefined;
 	if (!productId(value.id) || !nonNegativeInt(value.ordinal) || value.ordinal < 1 || value.ordinal > HARD_LIMITS.maxTasks) {
@@ -318,6 +329,8 @@ function parseTask(value: unknown): ObserverTask | undefined {
 		return undefined;
 	}
 	if (typeof value.replayed !== "boolean") return undefined;
+	const usage = parseUsageLane(value.usage);
+	if (usage === undefined) return undefined;
 	const route = parseObserverRoute(value.route);
 	if (route === undefined) return undefined;
 	const headline = parseHeadline(value.headline);
@@ -333,6 +346,7 @@ function parseTask(value: unknown): ObserverTask | undefined {
 		executionPhase: value.executionPhase as TaskExecutionPhase,
 		route,
 		assistantTurns: value.assistantTurns,
+		usage,
 		elapsedMs: value.elapsedMs,
 		replayed: value.replayed,
 		headline,

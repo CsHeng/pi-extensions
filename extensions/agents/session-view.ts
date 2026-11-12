@@ -88,7 +88,8 @@ const REQUEST_KEYS = ["version", "requestId", "page"];
 const SUMMARY_KEYS = ["agents", "acceptedEpisodes", "states", "liveAgents"];
 const ROW_KEYS = ["handle", "role", "state", "episode", "latestOutcome", "acceptedEpisodes", "onCurrentBranch", "legacy", "reportComplete", "retained", "recordedUsage"];
 const ROW_OPTIONAL = ["route", "roots", "release"];
-const USAGE_KEYS = ["status", "usage", "assistantTurns", "metrics", "turnsCoverage", "episodes", "conflicts", "reason"];
+const USAGE_KEYS = ["status", "usage", "lane", "assistantTurns", "metrics", "turnsCoverage", "episodes", "conflicts", "reason"];
+const LANE_KEYS = ["promptTokens", "promptCacheRead", "rebillCount", "rebillTokens", "rebillCost"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -131,11 +132,13 @@ function parseUsageFields(value: unknown): ObservedUsage | undefined {
 }
 
 export function parseRecordedUsageProjection(value: unknown): RecordedUsageProjection | undefined {
-	if (!isRecord(value) || !keysExact(value, USAGE_KEYS.slice(0, 7), ["reason", "cacheHitPercent"])) return undefined;
+	if (!isRecord(value) || !keysExact(value, USAGE_KEYS.slice(0, 8), ["reason"])) return undefined;
 	if (!COVERAGES.includes(value.status as RecordedCoverage) || !COVERAGES.includes(value.turnsCoverage as RecordedCoverage)) return undefined;
 	if (!nonNegativeInt(value.conflicts)) return undefined;
-	if (value.cacheHitPercent !== undefined && (typeof value.cacheHitPercent !== "number" || !Number.isFinite(value.cacheHitPercent)
-		|| value.cacheHitPercent < 0 || value.cacheHitPercent > 100 || value.status === "unavailable")) return undefined;
+	const lane = value.lane;
+	if (!isRecord(lane) || !keysExact(lane, LANE_KEYS) || !nonNegativeInt(lane.rebillCount)
+		|| LANE_KEYS.some((field) => typeof lane[field] !== "number" || !Number.isFinite(lane[field]) || (lane[field] as number) < 0)
+		|| (lane.promptCacheRead as number) > (lane.promptTokens as number)) return undefined;
 	const usage = parseUsageFields(value.usage);
 	if (usage === undefined || !intOrNull(value.assistantTurns)) return undefined;
 	const metrics = value.metrics;
@@ -152,7 +155,8 @@ export function parseRecordedUsageProjection(value: unknown): RecordedUsageProje
 	}
 	if (value.reason !== undefined && value.status !== "unavailable") return undefined;
 	return { status: value.status as RecordedCoverage, usage,
-		...(value.cacheHitPercent === undefined ? {} : { cacheHitPercent: value.cacheHitPercent as number }), assistantTurns: value.assistantTurns as number | null,
+		lane: { promptTokens: lane.promptTokens as number, promptCacheRead: lane.promptCacheRead as number, rebillCount: lane.rebillCount, rebillTokens: lane.rebillTokens as number, rebillCost: lane.rebillCost as number },
+		assistantTurns: value.assistantTurns as number | null,
 		metrics: metrics as Record<RecordedUsageMetric, RecordedCoverage>, turnsCoverage: value.turnsCoverage as RecordedCoverage,
 		episodes: { recorded: value.episodes.recorded, missing: value.episodes.missing, orphaned: value.episodes.orphaned, unprovable: value.episodes.unprovable },
 		conflicts: value.conflicts, ...(value.reason === undefined ? {} : { reason: value.reason as RecordedUsageFailure }) };

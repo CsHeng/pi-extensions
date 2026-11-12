@@ -8,6 +8,7 @@ import { truncateUtf8, utf8Bytes, type ChildActivity, type TaskResult, type Effe
 import { isNativeObservation, type ObservedUsage } from "./observability.ts";
 import type { SessionActionResult, SessionView } from "./session-contracts.ts";
 import { yieldNote } from "../shared/main-loop-yield.ts";
+import { formatUsageLane } from "../shared/usage-metrics.ts";
 
 const SUMMARY_SCALAR_CHARS = 300;
 /** Control acknowledgements name the durable outcome; the prior report stays recoverable through explicit inspect(handle). */
@@ -42,6 +43,11 @@ function routeSummary(task: TaskResult): string {
 	return ` route=${singleLine(`${task.route.provider}/${task.route.model}`)}:${singleLine(task.route.thinking)}`;
 }
 
+function activityUsage(activity: ChildActivity): string {
+	const text = activity.usage ? formatUsageLane(activity.usage) : "";
+	return text ? ` ${text}` : "";
+}
+
 function activityCalls(activity: ChildActivity): string {
 	if (!activity.calls || activity.calls.length === 0) {
 		return activity.activeTools.length > 0 ? ` tool=${singleLine(activity.activeTools.join(","))}` : "";
@@ -72,14 +78,14 @@ export function boundToolContent(content: string): string {
 export function formatProgress(results: readonly TaskResult[], elapsedMs: number | null = null): string {
 	const running = results.filter((result) => result.status === "running").length;
 	const finished = results.filter((result) => result.status !== "pending" && result.status !== "running").length;
-	const turns = results.reduce((total, result) => total + (result.activity?.assistantTurns ?? result.usage.turns), 0);
-	const lines = [`Agents ${running}/${results.length} running, ${finished} finished · ${turns} turns · ${elapsedMs === null ? "unknown" : formatClock(elapsedMs)}`];
+	// Human progress row: usage replaces request turns, which stay in records and inspect results.
+	const lines = [`Agents ${running}/${results.length} running, ${finished} finished · ${elapsedMs === null ? "unknown" : formatClock(elapsedMs)}`];
 	for (const result of results) {
 		if (result.status === "pending") continue;
 		if (result.status === "running" && result.activity) {
 			const tools = activityCalls(result.activity);
 			const errors = result.activity.errorCount > 0 ? ` errs=${result.activity.errorCount}` : "";
-			lines.push(`[${singleLine(result.label ?? result.id)}] ${result.role} ${result.activity.phase}${routeSummary(result)} elapsed=${formatDuration(result.activity.elapsedMs)} turns=${result.activity.assistantTurns}${tools}${errors} inactive=${formatDuration(result.activity.inactiveForMs)}`);
+			lines.push(`[${singleLine(result.label ?? result.id)}] ${result.role} ${result.activity.phase}${routeSummary(result)} elapsed=${formatDuration(result.activity.elapsedMs)}${activityUsage(result.activity)}${tools}${errors} inactive=${formatDuration(result.activity.inactiveForMs)}`);
 			continue;
 		}
 		const elapsed = result.status === "running" && result.durationMs === 0

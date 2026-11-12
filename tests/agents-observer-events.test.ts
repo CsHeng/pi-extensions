@@ -20,6 +20,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
 		executionPhase: "child-execution",
 		route: { provider: "openai", model: "gpt-4.1", thinking: "off" },
 		assistantTurns: 3,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 },
 		elapsedMs: 1400,
 		replayed: false,
 		headline: "scan the bounded facts",
@@ -52,8 +53,8 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 test("observer event name and version are exact", () => {
-	assert.equal(OBSERVER_EVENT, "agents.observer.v4");
-	assert.equal(OBSERVER_VERSION, 4);
+	assert.equal(OBSERVER_EVENT, "agents.observer.v5");
+	assert.equal(OBSERVER_VERSION, 5);
 });
 
 test("snapshots keep native parent punctuation and a real run id, while an aggregate has no run", () => {
@@ -61,7 +62,7 @@ test("snapshots keep native parent punctuation and a real run id, while an aggre
 	assert.equal(parsed.ok, true);
 	if (!parsed.ok) return;
 	const value: ObserverSnapshot = parsed.value;
-	assert.equal(value.version, 4);
+	assert.equal(value.version, 5);
 	assert.equal(value.runId, "Run1");
 	const aggregate = parseObserverSnapshot(snapshot({ runId: null }));
 	assert.equal(aggregate.ok, true);
@@ -178,6 +179,7 @@ test("count inequalities and row uniqueness stay closed", () => {
 		status: "pending",
 		executionPhase: "queued",
 		assistantTurns: 0,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 },
 		elapsedMs: null,
 	}));
 	assert.equal(parseObserverSnapshot(snapshot({
@@ -194,6 +196,7 @@ test("count inequalities and row uniqueness stay closed", () => {
 		status: "pending",
 		executionPhase: "queued",
 		assistantTurns: 0,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 },
 		elapsedMs: null,
 		replayed: true,
 	}));

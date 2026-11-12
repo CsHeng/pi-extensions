@@ -3,6 +3,7 @@ import { mintProductId } from "../agents/identity.ts";
 import { Key, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
 import {
 	OBSERVER_EVENT,
+	OBSERVER_VERSION,
 	parseObserverSnapshot,
 	type ObserverSnapshot,
 } from "../agents/observer-events.ts";
@@ -163,7 +164,7 @@ export function createAgentsUiExtension(
 			const reply = sessionView.reply;
 			if (reply && (!snapshot || viewObservedAt > receivedAt)) {
 				const tasks = reply.live;
-				snapshot = { version: 4, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
+				snapshot = { version: OBSERVER_VERSION, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
 					runId: null, revision: reply.revision, phase: tasks.length ? "running" : "settled", tasks,
 					requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(t => t.elapsedMs !== null).length,
 					activeChildren: tasks.filter(t => t.status === "running").length, settledTasks: 0,

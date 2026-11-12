@@ -456,19 +456,39 @@ const row = (ownerSessionId: string, entryId: string, usage: Partial<ObservedUsa
 const syntheticObservation = (ownerSessionId: string, entries: NativeUsageRow[]): NativeObservation =>
 	({ available: true, ownerSessionId, entries, commands: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, contextWindow: null, toolNames: null, capabilityKey: null });
 
-test("single-agent cache hit matches the footer's latest assistant prompt, not cumulative traffic", () => {
+test("recorded cache hit is the footer's token-weighted mean over assistant prompts, with re-bills summed", () => {
 	const observation = syntheticObservation("native", [
-		row("native", "old", { input: 100, cacheRead: 900, cacheWrite: 0 }),
-		row("native", "latest", { input: 80, cacheRead: 20, cacheWrite: 0 }),
+		{ ...row("native", "old", { input: 100, cacheRead: 900, cacheWrite: 0 }) },
+		{ ...row("native", "latest", { input: 80, cacheRead: 20, cacheWrite: 0 }), rebill: { tokens: 1_500, cost: 0.02 } },
 		row("native", "summary", { input: 1000, cacheRead: 0, cacheWrite: 0 }, "compaction"),
+		row("native", "unknown", { input: 5, cacheRead: null, cacheWrite: 0 }),
 	]);
 	const handle = recordedHandle("agent", 1, [{ episode: 1, observation }]);
 	const value = projectRecordedUsage([handle]);
-	assert.equal(value.cacheHitPercent, 20);
-	assert.equal(value.usage.input, 1180, "traffic still includes all recorded usage");
-	assert.equal(value.usage.cacheRead, 920);
-	assert.equal(projectRecordedUsage([handle, { ...handle, handle: "other" }]).cacheHitPercent, undefined, "cross-agent totals have no shared latest prompt");
-	assert.equal(projectRecordedUsage([{ ...handle, expectedEpisodes: 2 }]).cacheHitPercent, undefined, "missing latest episode cannot reuse older CH");
+	assert.deepEqual(value.lane, { promptTokens: 1100, promptCacheRead: 920, rebillCount: 1, rebillTokens: 1_500, rebillCost: 0.02 },
+		"compaction traffic and rows with an unknown prompt field carry no CH weight");
+	assert.equal(value.usage.input, 1185, "traffic still includes all recorded usage");
+	const cross = projectRecordedUsage([handle, { ...handle, handle: "other" }]);
+	assert.deepEqual(cross.lane, value.lane, "a shared native row is counted once across handles");
+	assert.deepEqual(projectRecordedUsage([{ ...handle, handle: "x", episodes: [] }]).lane, { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 });
+});
+
+test("native observation attributes Pi's re-bill per assistant row against the whole native history", () => {
+	const assistant = (id: string, parentId: string, input: number, cacheRead: number) => JSON.stringify({ type: "message", id, parentId,
+		message: { role: "assistant", provider: "p", model: "m", content: [], usage: { input, output: 1, cacheRead, cacheWrite: 0, totalTokens: input + cacheRead + 1, cost: { input: input * 1e-6, cacheRead: cacheRead * 1e-7, cacheWrite: 0, total: 0 } } } });
+	const text = [
+		JSON.stringify({ type: "session", version: 3, id: "native" }),
+		assistant("a1", "", 10_000, 0).replace('"parentId":""', '"parentId":null'),
+		assistant("a2", "a1", 100, 10_000),
+		assistant("a3", "a2", 10_100, 0),
+	].join("\n") + "\n";
+	const episode = collectNativeObservation(text, { startLeaf: "a2", endLeaf: "a3", launched: true });
+	assert.equal(episode.available, true);
+	assert.deepEqual(episode.entries.map(entry => entry.entryId), ["a3"]);
+	assert.equal(episode.entries[0]!.rebill?.tokens, 10_100, "the first row of a later episode is compared with its predecessor");
+	assert.ok((episode.entries[0]!.rebill?.cost ?? 0) > 0);
+	const whole = collectNativeObservation(text, { startLeaf: null, endLeaf: "a3", launched: true });
+	assert.deepEqual(whole.entries.map(entry => entry.rebill === undefined), [true, true, false]);
 });
 
 test("recorded usage overflow cannot be labeled as a complete metric", () => {

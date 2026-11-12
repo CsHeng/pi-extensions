@@ -4,6 +4,7 @@ import type { SessionViewHistoryRow, SessionViewReply } from "../agents/session-
 import type { RecordedUsageProjection } from "../agents/observability.ts";
 import { panelHeading, panelTheme, type PanelHeadingContent, type PanelTheme, type PanelTone } from "../shared/panel-heading.ts";
 import { formatPanelDuration as formatDuration, panelRows, type PanelRowSpec } from "../shared/panel-rows.ts";
+import { formatUsageLane } from "../shared/usage-metrics.ts";
 
 export const AGENTS_UI_STATUS_KEY = "agents.status";
 export const AGENTS_UI_PANEL_KEY = "agents.panel";
@@ -179,7 +180,6 @@ function taskGlyph(task: ObserverTask): string {
 export interface CountParts {
 	liveLabel: string;
 	finished: number;
-	turns: number;
 	elapsedText: string;
 	frozen: boolean;
 }
@@ -198,7 +198,6 @@ export function countParts(snapshot: ObserverSnapshot, freshness: ObserverFreshn
 	return {
 		liveLabel: labels.join(" · "),
 		finished,
-		turns: snapshot.aggregateAssistantTurns,
 		elapsedText: formatDuration(headerElapsed),
 		frozen: freshness === "stale" || freshness === "terminal",
 	};
@@ -206,28 +205,26 @@ export function countParts(snapshot: ObserverSnapshot, freshness: ObserverFreshn
 
 export function formatCountsText(parts: CountParts): string {
 	const head = parts.liveLabel ? `${parts.liveLabel} · ` : "";
-	return `${head}${parts.finished} finished · ${parts.turns} turns · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
+	return `${head}${parts.finished} finished · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
 }
 
 export function countsSegments(parts: CountParts): RowSegment[] {
-	const rest = `${parts.finished} finished · ${parts.turns} turns · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
+	const rest = `${parts.finished} finished · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
 	if (!parts.liveLabel) return [{ text: rest, color: "dim" }];
 	return [{ text: parts.liveLabel, color: "accent" }, { text: ` · ${rest}`, color: "dim" }];
 }
 
 export interface TaskColumns {
 	role: number;
-	turns: number;
 	status: number;
 	elapsed: number;
 }
 
 /** Shared column widths so live and settled rows scan vertically. */
 export function taskColumns(tasks: readonly ObserverTask[], freshness: ObserverFreshness): TaskColumns {
-	const columns: TaskColumns = { role: 0, turns: 0, status: 0, elapsed: 0 };
+	const columns: TaskColumns = { role: 0, status: 0, elapsed: 0 };
 	for (const task of tasks) {
 		columns.role = Math.max(columns.role, task.role.length);
-		columns.turns = Math.max(columns.turns, `t${task.assistantTurns}`.length);
 		columns.status = Math.max(columns.status, (isLiveTask(task) ? liveStatusLabel(task, freshness) : settledStatusLabel(task)).length);
 		columns.elapsed = Math.max(columns.elapsed, visibleWidth(formatDuration(task.elapsedMs)));
 	}
@@ -237,17 +234,20 @@ export function taskColumns(tasks: readonly ObserverTask[], freshness: ObserverF
 export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, columns: TaskColumns, label?: string): OverlayRow {
 	const status = liveStatusLabel(task, freshness);
 	const statusColor = liveStatusColor(task, freshness);
-	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} t${String(task.assistantTurns).padEnd(columns.turns)} `;
+	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} `;
 	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
 	const route = formatRoute(task);
-	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}  ${route}`;
+	// Usage precedes the long route so truncation keeps the cost signal.
+	const usage = formatUsageLane(task.usage);
+	const tail = usage ? `${usage}  ${route}` : route;
+	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}  ${tail}`;
 	const secondary = liveSecondaryLine(task);
 	const segments: RowSegment[] = [
 		{ text: `${taskGlyph(task)} `, color: "accent" },
 		{ text: head, color: "text" },
 		{ text: status.padEnd(columns.status), color: statusColor },
 		{ text: ` ${elapsed}  `, color: "text" },
-		{ text: route, color: "dim" },
+		{ text: tail, color: "dim" },
 	];
 	if (secondary) segments.push({ text: secondary, color: "dim" });
 	return { kind: "live", text: primary + (secondary ?? ""), segments };
@@ -267,7 +267,6 @@ export function formatRunningNav(agentCount: number): OverlayRow {
 export interface SettledSummary {
 	count: number;
 	rangeText: string;
-	turns: number;
 }
 
 export function settledSummary(tasks: readonly ObserverTask[]): SettledSummary {
@@ -278,11 +277,11 @@ export function settledSummary(tasks: readonly ObserverTask[]): SettledSummary {
 		: elapsed.length === 1
 			? formatDuration(elapsed[0] ?? null)
 			: `${formatDuration(Math.min(...elapsed))} – ${formatDuration(Math.max(...elapsed))}`;
-	return { count: settled.length, rangeText, turns: settled.reduce((sum, task) => sum + task.assistantTurns, 0) };
+	return { count: settled.length, rangeText };
 }
 
 export function formatGroupRow(summary: SettledSummary, expanded: boolean): string {
-	return `${expanded ? "▾" : "▸"} ${summary.count} finished · ${summary.rangeText} · ${summary.turns} turns`;
+	return `${expanded ? "▾" : "▸"} ${summary.count} finished · ${summary.rangeText}`;
 }
 
 export function formatStatus(snapshot: ObserverSnapshot): string {
@@ -290,8 +289,6 @@ export function formatStatus(snapshot: ObserverSnapshot): string {
 	const live = parts.liveLabel ? `●${parts.liveLabel} · ` : "";
 	return `SA ${live}${parts.finished} finished · ${parts.elapsedText}`;
 }
-
-import { formatTokens } from "../shared/usage-format.ts";
 
 export interface AgentsSummaryCounts {
 	running: number | "unknown";
@@ -355,15 +352,24 @@ function taskStatusLabel(task: ObserverTask): string {
 	return task.status === "pending" ? "queued" : task.status;
 }
 
+/**
+ * Recorded usage in the footer's `↑ ↓ R W CH $ RB` grammar, with `CH` as the token-weighted mean.
+ * Unknown metrics are left out and the coverage tag says the total is partial.
+ */
 export function formatAgentUsage(usage: RecordedUsageProjection | null | undefined): string {
-	if (!usage || usage.status === "unavailable") return "↑? ↓? R? CH? $? (unavailable)";
-	const count = (value: number | null) => value === null ? "?" : formatTokens(value);
-	const parts = [`↑${count(usage.usage.input)}`, `↓${count(usage.usage.output)}`, `R${count(usage.usage.cacheRead)}`];
-	if (usage.usage.cacheWrite === null || usage.usage.cacheWrite > 0) parts.push(`W${count(usage.usage.cacheWrite)}`);
-	parts.push(usage.cacheHitPercent === undefined ? "CH?" : `CH${usage.cacheHitPercent.toFixed(1)}%`);
-	parts.push(usage.usage.cost === null ? "$?" : `$${usage.usage.cost.toFixed(3)}`);
+	if (!usage || usage.status === "unavailable") return "usage unavailable";
+	const text = formatUsageLane({
+		input: usage.usage.input ?? 0, output: usage.usage.output ?? 0, cacheRead: usage.usage.cacheRead ?? 0,
+		cacheWrite: usage.usage.cacheWrite ?? 0, cost: usage.usage.cost ?? 0, ...usage.lane,
+	}) || "no usage";
 	const coverage = usageCoverageTag(usage);
-	return parts.join(" ") + (coverage ? ` (${coverage})` : "");
+	return text + (coverage ? ` (${coverage})` : "");
+}
+
+/** Live usage of the current episode; nothing until the first request settles. */
+function liveUsageFields(task: ObserverTask): string[] {
+	const text = formatUsageLane(task.usage);
+	return text ? [text] : [];
 }
 
 function inlineRoute(route: ObserverTask["route"] | undefined): string {
@@ -413,7 +419,7 @@ function inlineAgentSpecs(model: AgentsInlineModel): PanelRowSpec[] {
 				glyphTone: state.tone,
 				primary: name(task.role, task.id, task.episode ?? "?"),
 				primaryTone: "text" as const,
-				fields: [taskStatusLabel(task), inlineRoute(task.route), `t${task.assistantTurns}`],
+				fields: [taskStatusLabel(task), inlineRoute(task.route), ...liveUsageFields(task)],
 			};
 		}),
 		...history.map(({ row }) => {
@@ -509,17 +515,15 @@ function usageCoverageTag(usage: RecordedUsageProjection): string {
 	return usage.status === "complete" ? "" : usage.status === "incomplete" ? "partial" : "unknown";
 }
 
-/** Cumulative recorded usage line; live current-episode turns stay on the live rows. */
+/** Cumulative recorded usage line; live current-episode usage stays on the live rows. */
 export function formatSessionUsage(usage: RecordedUsageProjection | null): OverlayRow | undefined {
 	if (!usage) return undefined;
-	const turns = usage.assistantTurns === null ? "?" : String(usage.assistantTurns);
-	const text = `recorded Σ${turns} turns · ${formatAgentUsage(usage)}`;
+	const text = `recorded ${formatAgentUsage(usage)}`;
 	return { kind: "summary", text, segments: [{ text, color: "dim" }] };
 }
 
 export interface SessionCounts {
 	live: number;
-	liveTurns: number;
 	known: boolean;
 	agents: string;
 	episodes: string;
@@ -546,7 +550,6 @@ export function sessionCounts(
 	else if (reply && !reply.inventory.complete) historyLabel = "history partial";
 	return {
 		live: live.length,
-		liveTurns: live.reduce((sum, task) => sum + task.assistantTurns, 0),
 		known: summary !== undefined && summary !== null,
 		agents: summary ? String(summary.agents) : "?",
 		episodes: !summary ? "?" : summary.acceptedEpisodes === null ? "?" : String(summary.acceptedEpisodes),
@@ -560,7 +563,7 @@ export function sessionCounts(
 
 /** Session summary as stacked rows so live count stays visually primary. */
 export function formatSessionCountRows(counts: SessionCounts): OverlayRow[] {
-	const head = counts.live > 0 ? `${counts.live} live (t${counts.liveTurns})` : "0 live";
+	const head = `${counts.live} live`;
 	const body = `${counts.agents} agents · ${counts.episodes} episodes · ${counts.idle} idle · ${counts.interrupted} int · ${counts.closed} closed`;
 	const rows: OverlayRow[] = [
 		{ kind: "counts", text: head, segments: [{ text: head, color: "accent" }] },

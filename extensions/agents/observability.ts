@@ -1,4 +1,4 @@
-import { promptCacheHit } from "../shared/usage-format.ts";
+import { stepRebill, type AssistantMessageLike, type RebillBaseline } from "../shared/usage-metrics.ts";
 import { commandCorrelationKey } from "./command-correlation.ts";
 import { CHILD_CAPABILITY_FAILURE_EVENT } from "./contracts.ts";
 import { createHash } from "node:crypto";
@@ -20,6 +20,8 @@ export interface NativeUsageRow {
 	kind: "assistant" | "compaction" | "branch-summary";
 	modelKey: string | null;
 	usage: ObservedUsage;
+	/** Pi's per-request re-bill against the preceding native history; absent when none was detected. */
+	rebill?: { tokens: number; cost: number };
 }
 
 export interface NativeCommandRow {
@@ -60,7 +62,7 @@ const OBSERVATION_KEYS = new Set([
 	"available", "ownerSessionId", "entries", "commands", "usage", "contextWindow",
 	"toolNames", "capabilityKey", "timing", "commandCoverage", "commandCorrelationVersion",
 ]);
-const USAGE_ROW_KEYS = new Set(["ownerSessionId", "entryId", "kind", "modelKey", "usage"]);
+const USAGE_ROW_KEYS = new Set(["ownerSessionId", "entryId", "kind", "modelKey", "usage", "rebill"]);
 const COMMAND_ROW_KEYS = new Set([
 	"ownerSessionId", "entryId", "startMs", "endMs", "exitCode", "status",
 	"sourceBeforeKey", "sourceAfterKey", "environmentBeforeKey", "environmentAfterKey", "toolCallId",
@@ -84,6 +86,7 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 	const ownerSessionId = parsed.ownerSessionId;
 	const selected = selectRange(parsed.body, selection.startLeaf, selection.endLeaf);
 	if (selected === undefined) return unavailable();
+	const rebills = nativeRebills(parsed.body);
 	const entries: NativeUsageRow[] = [];
 	const commands: NativeCommandRow[] = [];
 	let contextWindow: number | null = null;
@@ -97,10 +100,12 @@ export function collectNativeObservation(text: string, selection: { startLeaf: s
 		if (entry.type === "message") {
 			const message = isRecord(entry.message) ? entry.message : undefined;
 			if (message?.role === "assistant") {
+				const rebill = rebills.get(id);
 				entries.push({
 					ownerSessionId, entryId: id, kind: "assistant",
 					modelKey: modelKey(message.provider, message.model),
 					usage: parseUsage(message.usage),
+					...(rebill ? { rebill } : {}),
 				});
 				if (!Array.isArray(message.content)) commandCoverage = false;
 				else for (const part of message.content) {
@@ -176,12 +181,20 @@ export interface RecordedUsageHandleInput {
 	episodes: readonly RecordedUsageEpisodes[];
 }
 
+/** Prompt and re-bill parts of a usage lane over recorded rows; `CH` is their token-weighted mean. */
+export interface RecordedLane {
+	promptTokens: number;
+	promptCacheRead: number;
+	rebillCount: number;
+	rebillTokens: number;
+	rebillCost: number;
+}
+
 export interface RecordedUsageProjection {
-	/** Latest recorded assistant prompt, only for a provable single-handle projection; never a cumulative ratio. */
-	cacheHitPercent?: number;
 	status: RecordedCoverage;
 	/** Null-aware deduplicated totals over recorded rows; unknown fields stay null, never zero. */
 	usage: ObservedUsage;
+	lane: RecordedLane;
 	/** Distinct recorded assistant entries; null when unprovable. */
 	assistantTurns: number | null;
 	metrics: Readonly<Record<RecordedUsageMetric, RecordedCoverage>>;
@@ -247,22 +260,8 @@ export function projectRecordedUsage(handles: readonly RecordedUsageHandleInput[
 	const coverages: RecordedCoverage[] = [...USAGE_METRICS.map((field) => metrics[field]), turnsCoverage];
 	const status: RecordedCoverage = coverages.every((value) => value === "complete") ? "complete"
 		: coverages.every((value) => value === "unavailable") ? "unavailable" : "incomplete";
-	// A cross-agent total has no single latest prompt. For one handle, use the latest
-	// accepted episode's final assistant row only when all available copies agree.
-	let cacheHitPercent: number | undefined;
-	if (parsed.size === 1 && !gaps) {
-		const item = [...parsed.values()][0]!;
-		const latest = item.expected === null ? [] : (item.observations.get(item.expected) ?? []);
-		const rows = latest.filter(observation => observation.available)
-			.map(observation => observation.entries.findLast(row => row.kind === "assistant"));
-		const last = rows[0];
-		if (last && rows.every(row => row?.entryId === last.entryId && row.ownerSessionId === last.ownerSessionId)) {
-			const { input, cacheRead, cacheWrite } = last.usage;
-			if (input !== null && cacheRead !== null && cacheWrite !== null) cacheHitPercent = promptCacheHit(input, cacheRead, cacheWrite);
-		}
-	}
-	return { status, ...(cacheHitPercent === undefined ? {} : { cacheHitPercent }),
-		usage, assistantTurns: turnsCoverage === "unavailable" ? null : assistantTurns, metrics, turnsCoverage,
+	const lane = recordedLane(unique);
+	return { status, usage, lane, assistantTurns: turnsCoverage === "unavailable" ? null : assistantTurns, metrics, turnsCoverage,
 		episodes: { recorded, missing, orphaned, unprovable }, conflicts };
 }
 
@@ -289,7 +288,7 @@ function parseRecordedInputs(handles: readonly RecordedUsageHandleInput[]): Map<
 }
 
 function unavailableProjection(reason: RecordedUsageFailure, conflicts = 0): RecordedUsageProjection {
-	return { status: "unavailable", usage: nullUsage(), assistantTurns: null,
+	return { status: "unavailable", usage: nullUsage(), lane: emptyRecordedLane(), assistantTurns: null,
 		metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" },
 		turnsCoverage: "unavailable", episodes: { recorded: 0, missing: 0, orphaned: 0, unprovable: false }, conflicts, reason };
 }
@@ -385,6 +384,7 @@ function parseNativeSession(text: string): ParsedNative | undefined {
 
 function isUsageRow(row: unknown, ownerSessionId: string | null): row is NativeUsageRow {
 	return isRecord(row) && Object.keys(row).every((key) => USAGE_ROW_KEYS.has(key))
+		&& (row.rebill === undefined || (isRecord(row.rebill) && Object.keys(row.rebill).length === 2 && metric(row.rebill.tokens) !== null && metric(row.rebill.cost) !== null))
 		&& row.ownerSessionId === ownerSessionId && typeof row.entryId === "string" && OPAQUE_ID.test(row.entryId)
 		&& typeof row.kind === "string" && ["assistant", "compaction", "branch-summary"].includes(row.kind)
 		&& (row.modelKey === null || sha256Key(row.modelKey) !== null) && validUsage(row.usage);
@@ -523,7 +523,45 @@ function sameRow(left: NativeUsageRow, right: NativeUsageRow): boolean {
 }
 
 function copyRow(row: NativeUsageRow): NativeUsageRow {
-	return { ownerSessionId: row.ownerSessionId, entryId: row.entryId, kind: row.kind, modelKey: row.modelKey, usage: { ...row.usage } };
+	return { ownerSessionId: row.ownerSessionId, entryId: row.entryId, kind: row.kind, modelKey: row.modelKey, usage: { ...row.usage },
+		...(row.rebill ? { rebill: { ...row.rebill } } : {}) };
+}
+
+/** Re-bills by assistant entry over the whole native file, so an episode's first request sees its predecessor. */
+function nativeRebills(body: ReadonlyArray<{ id: string; entry: Record<string, unknown> }>): Map<string, { tokens: number; cost: number }> {
+	const rebills = new Map<string, { tokens: number; cost: number }>();
+	let baseline: RebillBaseline | undefined;
+	for (const { id, entry } of body) {
+		if (entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant") {
+			const step = stepRebill(baseline, entry.message as AssistantMessageLike);
+			baseline = step.next;
+			if (step.rebill) rebills.set(id, { tokens: step.rebill.tokens, cost: step.rebill.cost });
+		} else if (entry.type === "compaction" || entry.type === "branch_summary") baseline = undefined;
+	}
+	return rebills;
+}
+
+function emptyRecordedLane(): RecordedLane {
+	return { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 };
+}
+
+/** Prompt weights count only assistant rows whose prompt fields are all known. */
+function recordedLane(rows: readonly NativeUsageRow[]): RecordedLane {
+	const lane = emptyRecordedLane();
+	for (const row of rows) {
+		if (row.kind !== "assistant") continue;
+		const { input, cacheRead, cacheWrite } = row.usage;
+		if (input !== null && cacheRead !== null && cacheWrite !== null) {
+			lane.promptTokens += input + cacheRead + cacheWrite;
+			lane.promptCacheRead += cacheRead;
+		}
+		if (row.rebill) {
+			lane.rebillCount += 1;
+			lane.rebillTokens += row.rebill.tokens;
+			lane.rebillCost += row.rebill.cost;
+		}
+	}
+	return lane;
 }
 
 function emptyObservation(ownerSessionId: string | null): NativeObservation {

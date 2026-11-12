@@ -70,6 +70,31 @@ export interface LaneTotals {
 	speedMs: number;
 }
 
+/** The usage half of a lane: what `usageMetricFields` renders, without timing. */
+export type UsageLane = Pick<LaneTotals,
+	"input" | "output" | "cacheRead" | "cacheWrite" | "cost"
+	| "promptTokens" | "promptCacheRead" | "rebillCount" | "rebillTokens" | "rebillCost">;
+
+export const USAGE_LANE_KEYS = [
+	"input", "output", "cacheRead", "cacheWrite", "cost",
+	"promptTokens", "promptCacheRead", "rebillCount", "rebillTokens", "rebillCost",
+] as const satisfies ReadonlyArray<keyof UsageLane>;
+
+export function emptyUsageLane(): UsageLane {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 };
+}
+
+export function usageLaneOf(totals: UsageLane): UsageLane {
+	const lane = emptyUsageLane();
+	for (const key of USAGE_LANE_KEYS) lane[key] = totals[key];
+	return lane;
+}
+
+/** The same `↑ ↓ R W CH $ RB` text the footer shows, for any usage lane. */
+export function formatUsageLane(totals: UsageLane): string {
+	return usageMetricFields(totals).map(field => field.text).join(" ");
+}
+
 export function emptyLaneTotals(): LaneTotals {
 	return {
 		input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
@@ -419,7 +444,7 @@ export function formatRebill(count: number, tokens: number, cost: number): strin
 }
 
 /** `↑ ↓ R W CH $ RB`, each present only when it has something to say. */
-export function usageMetricFields(totals: LaneTotals): MetricField[] {
+export function usageMetricFields(totals: UsageLane): MetricField[] {
 	const fields: MetricField[] = [];
 	if (totals.input > 0) fields.push({ key: "input", text: `↑${formatTokens(totals.input)}` });
 	if (totals.output > 0) fields.push({ key: "output", text: `↓${formatTokens(totals.output)}` });

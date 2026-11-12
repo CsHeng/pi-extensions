@@ -255,3 +255,22 @@ test("malformed lines are bounded diagnostics and valid unknown objects refresh 
 	assert.equal(parser.snapshot().inactiveForMs, 0);
 	assert.equal(parser.finish().malformedLines, 1);
 });
+
+test("live activity carries the footer usage lane: mean CH over prompts and Pi's re-bill, reset by compaction", () => {
+	const request = (input: number, cacheRead: number) => line({ type: "message_end", message: { role: "assistant", provider: "p", model: "m", content: [{ type: "text", text: "x" }], stopReason: "stop",
+		usage: { input, output: 10, cacheRead, cacheWrite: 0, cost: { input: input * 1e-6, cacheRead: cacheRead * 1e-7, cacheWrite: 0, total: input * 1e-6 + cacheRead * 1e-7 } } } });
+	const parser = new JsonlProtocolParser();
+	parser.push(request(10_000, 0));
+	parser.push(request(100, 10_000));
+	parser.push(request(10_100, 0));
+	const usage = parser.snapshot().usage!;
+	assert.equal(usage.promptTokens, 30_200);
+	assert.equal(usage.promptCacheRead, 10_000);
+	assert.equal(usage.rebillCount, 1, "the third request missed the cached prefix");
+	assert.equal(usage.rebillTokens, 10_100);
+	assert.equal(parser.snapshot().assistantTurns, 3, "turns stay in the activity record");
+	parser.push(line({ type: "compaction_start", reason: "threshold" }));
+	parser.push(line({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false, result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 } }));
+	parser.push(request(5_000, 0));
+	assert.equal(parser.snapshot().usage!.rebillCount, 1, "a compacted context is new content, not a re-bill");
+});

@@ -323,7 +323,7 @@ test("child activity reaches host progress before settlement without leaking dia
 	const { state } = await registered(t, {
 		runChild: async (options) => {
 			options.onChildStarted?.();
-			options.onActivity?.({ phase: "running", assistantTurns: 1, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 5, inactiveForMs: 0 });
+			options.onActivity?.({ phase: "running", assistantTurns: 1, usage: { input: 1_200, output: 30, cacheRead: 0, cacheWrite: 0, cost: 0.01, promptTokens: 1_200, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, activeTools: ["read"], latestEventType: "tool_execution_start", errorObserved: false, errorCount: 0, agentEndObserved: false, agentSettledObserved: false, elapsedMs: 5, inactiveForMs: 0 });
 			options.onChildSettled?.();
 			return { ...successful(options.task), route: options.route };
 		},
@@ -331,7 +331,7 @@ test("child activity reaches host progress before settlement without leaking dia
 	const updates: string[] = [];
 	const result = await state.tool.execute("call", createInput("progress", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]), undefined, (update: any) => updates.push(update.content[0].text), context());
 	assert.equal(detailsOf(result).status, "succeeded");
-	assert.ok(updates.some((message) => /turns=1 tool=read/.test(message)));
+	assert.ok(updates.some((message) => /↑1\.2k ↓30 CH0\.0% \$0\.010 tool=read/.test(message)));
 	assert.ok(updates.every((message) => !/agent-sessions|private|jsonl/.test(message)));
 	assert.doesNotMatch(result.content[0].text, /agent-sessions|private|jsonl/);
 });

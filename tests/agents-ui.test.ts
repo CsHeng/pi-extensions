@@ -87,6 +87,7 @@ function task(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): Obser
 		executionPhase: "child-execution",
 		route: { provider: "openai", model: "gpt-4.1", thinking: "off" },
 		assistantTurns: 2,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 },
 		elapsedMs: 4_000,
 		replayed: false,
 		headline: "scan the bounded facts",
@@ -205,6 +206,7 @@ function captureCtx(target: { overlay?: AgentsOverlay }): ExtensionContext {
 const usageProjection = (overrides: Partial<RecordedUsageProjection> = {}): RecordedUsageProjection => ({
 	status: "complete",
 	usage: { input: 12_345, output: 2_001, cacheRead: 0, cacheWrite: 0, totalTokens: 14_346, cost: 1.25 },
+	lane: { promptTokens: 12_345, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 },
 	assistantTurns: 537,
 	metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" },
 	turnsCoverage: "complete",
@@ -330,22 +332,25 @@ test("physical layout stays bounded with wrapped counts, long history and all te
 	assert.equal(seen.size, 20, "every wrapped historical identity is reachable while live rows stay pinned");
 });
 
-test("session-scoped title, counts and recorded usage stay distinct from live turns", () => {
+test("session-scoped title, counts and recorded usage use the footer usage grammar without turns", () => {
 	assert.equal(formatSessionTitle(undefined), "Agents · session");
 	assert.equal(formatSessionTitle("parent_session-1"), "Agents · session parent…");
 	const counts = sessionCounts(snapshot(), sessionReply(), "ready", undefined, false);
 	const countRows = formatSessionCountRows(counts);
-	assert.equal(countRows[0]?.text, "1 live (t2)");
+	assert.equal(countRows[0]?.text, "1 live");
 	assert.match(countRows[1]?.text ?? "", /^1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
-	assert.match(formatSessionCounts(counts).text, /1 live \(t2\)/);
+	assert.match(formatSessionCounts(counts).text, /^1 live · /);
 	assert.equal(counts.limitedLive, false);
 	const awaitingHistory = sessionCounts(snapshot(), undefined, "ready", undefined, false);
 	assert.equal(awaitingHistory.limitedLive, true);
 	assert.match(formatSessionCounts(awaitingHistory).text, /limited live observation/);
 	const usage = formatSessionUsage(usageProjection());
-	assert.match(usage?.text ?? "", /^recorded Σ537 turns · ↑12k ↓2\.0k R0 CH\? \$1\.250$/);
+	assert.equal(usage?.text, "recorded ↑12k ↓2.0k CH0.0% $1.250");
+	const cached = formatSessionUsage(usageProjection({ usage: { input: 1_000, output: 200, cacheRead: 9_000, cacheWrite: 0, totalTokens: 10_200, cost: 0.5 },
+		lane: { promptTokens: 10_000, promptCacheRead: 9_000, rebillCount: 2, rebillTokens: 4_000, rebillCost: 0.01 } }));
+	assert.equal(cached?.text, "recorded ↑1.0k ↓200 R9.0k CH90.0% $0.500 RB2 4.0k $0.010", "CH is the token-weighted mean and RB follows the footer");
 	assert.match(formatSessionUsage(usageProjection({ status: "incomplete", usage: { input: 100, output: null, cacheRead: 0, cacheWrite: 0, totalTokens: null, cost: null }, assistantTurns: 12 }))?.text ?? "", /partial/);
-	assert.match(formatSessionUsage(usageProjection({ status: "unavailable", usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null }, assistantTurns: null, metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" }, turnsCoverage: "unavailable" }))?.text ?? "", /\$/);
+	assert.equal(formatSessionUsage(usageProjection({ status: "unavailable", usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null }, assistantTurns: null, metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" }, turnsCoverage: "unavailable" }))?.text, "recorded usage unavailable");
 	assert.equal(compactCount(null), "?");
 	assert.equal(sessionHelpText({ liveOverflow: false, historyOpen: false, historyOverflow: false }), "enter history · ctrl+alt+f close");
 	assert.equal(sessionHelpText({ liveOverflow: true, historyOpen: true, historyOverflow: true }), "↑↓ live · ↑↓ rows · enter collapse · pgup/pgdn page · ctrl+alt+f close");
@@ -522,7 +527,7 @@ test("history reaches every retained handle across pages with enter, pageUp and 
 	assert.deepEqual(pages, [1, 0]);
 	const seen = [page(0).history.rows, page(1).history.rows].flat().map(row => row.handle);
 	assert.equal(new Set(seen).size, 37, "both pages cover every retained handle exactly once");
-	assert.match(second, /recorded Σ49 turns/);
+	assert.match(second, /recorded ↑49k/);
 });
 
 test("tiny terminals keep live rows reachable through explicit live-only overflow", () => {
@@ -735,7 +740,7 @@ test("live transitions move a handle between live and history without double cou
 	observer.childStarted("LiveHandle1");
 	answer(pi, sessionReply({ requestId: request.requestId }));
 	const liveText = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(liveText, /1 live \(t0\)/);
+	assert.match(liveText, /│ 1 live\s+│/);
 	assert.match(liveText, /● \S+ ep\d+ explorer/);
 	// The live handle leaves the history section; settled work returns to it.
 	observer.childStopped("LiveHandle1");

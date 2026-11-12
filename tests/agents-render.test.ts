@@ -112,10 +112,11 @@ test("progress includes bounded activity without diagnostic paths or payloads", 
 		},
 	}];
 	const progress = formatProgress(results, 12_000);
-	assert.match(progress, /Agents 1\/2 running, 1 finished · 3 turns · 12s/);
-	assert.match(formatProgress(results), /3 turns · unknown/);
+	assert.match(progress, /Agents 1\/2 running, 1 finished · 12s/);
+	assert.match(formatProgress(results), /finished · unknown/);
+	assert.doesNotMatch(progress, /turns/, "request turns are not a human progress metric");
 	assert.match(progress, /task-0.*succeeded.*route=synthetic\/model-.*:high.*elapsed=1\.5s/);
-	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s turns=3 tool=read errs=2 inactive=2\.0s/);
+	assert.match(progress, /task-1.*settled-awaiting-exit route=synthetic\/model-.*:high elapsed=5\.0s tool=read errs=2 inactive=2\.0s/);
 	assert.doesNotMatch(progress, /agent-sessions|private|jsonl/);
 	const withCall = formatProgress([{
 		...task(1, ""),

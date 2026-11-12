@@ -94,6 +94,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 			executionPhase: "child-execution",
 			route: { provider: "openai", model: "gpt-4.1", thinking: "medium" },
 			assistantTurns: 1,
+			usage: { input: 2_000, output: 500, cacheRead: 18_000, cacheWrite: 0, cost: 0.04, promptTokens: 20_000, promptCacheRead: 18_000, rebillCount: 1, rebillTokens: 1_500, rebillCost: 0.002 },
 			elapsedMs: 1000,
 			replayed: false,
 			headline: "scan the bounded facts",
@@ -120,17 +121,18 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 		inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 1 }, liveAgents: 1 },
 		live: snapshot.tasks,
-		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [{ handle: "session_22222222-2222-4222-8222-222222222222", role: "reviewer", state: "closed", episode: 1, latestOutcome: "succeeded", acceptedEpisodes: 1, onCurrentBranch: true, legacy: false, reportComplete: true, retained: true, recordedUsage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 } }] },
-		usage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 },
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [{ handle: "session_22222222-2222-4222-8222-222222222222", role: "reviewer", state: "closed", episode: 1, latestOutcome: "succeeded", acceptedEpisodes: 1, onCurrentBranch: true, legacy: false, reportComplete: true, retained: true, recordedUsage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, lane: { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 } }] },
+		usage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, lane: { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 },
 	};
 	events.emit(SESSION_VIEW_EVENT, reply);
 	const text = overlay?.render(80).join("\n") ?? "";
-	assert.match(text, /running\s+1s\s+openai gpt-4\.1 thinking:medium/, "the route shares the primary row with status and elapsed");
+	const wide = overlay?.render(160).join("\n") ?? "";
+	assert.match(wide, /running\s+1s\s+.*openai gpt-4\.1 thinking:medium/, "the route shares the primary row with status and elapsed");
 	assert.match(text, /Agents · session parent…/, "the title identifies the session, never a batch or run");
-	assert.match(text, /1 live \(t1\)/);
+	assert.match(text, /1 live\n|1 live\s+│/);
 	assert.match(text, /2 agents · 2 episodes · 0 idle · 0 int · 1 closed/);
-	assert.match(text, /recorded Σ1 turns/);
-	assert.match(text, /● scan ep0 explorer t1\s+running\s+1s/);
+	assert.match(text, /recorded ↑10 ↓3 \$0\.200/);
+	assert.match(wide, /● scan ep0 explorer running\s+1s  ↑2\.0k ↓500 R18k CH90\.0% \$0\.040 RB1 1\.5k \$0\.002  openai/, "live usage precedes the route; no turns column");
 	assert.match(text, /scan the bounded facts · read/);
 	overlay?.handleInput("enter");
 	const history = overlay?.render(80).join("\n") ?? "";
