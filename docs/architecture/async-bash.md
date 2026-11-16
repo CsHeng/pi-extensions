@@ -1,6 +1,6 @@
 # Async Bash
 
-`extensions/async-bash/index.ts` is the TUI/RPC background job path for Pi's builtin `bash` tool. It does not replace the host agent loop and does not schedule model wakes. A terminal that the tool call itself does not return is published for [loop notifications](notices.md).
+`extensions/async-bash/index.ts` is the TUI/RPC background job path for Pi's builtin `bash` tool. It does not replace the host agent loop and does not schedule model wakes. A terminal that the tool call itself does not return is published for [Notices](notices.md).
 
 ## Owner
 
@@ -28,7 +28,7 @@ Async Bash publishes running and terminal facts. It does not call Pi's send API.
 
 [Notices](notices.md) delivers an unobserved terminal once, including while another execution remains running, and an unobserved checkpoint once as its own notice. A terminal supersedes an undelivered checkpoint of the same execution. Print/JSON and an unclaimed bash owner do not wake. The execution record remains inspectable if delivery fails.
 
-The event `version` is 1. Fields are `executionId`, `owner` (`pi-bash`), `sessionId`, `branchAnchor`, `toolCallId`, `phase`, `status`, `exitCode`, `deadlineAt` (the checkpoint), `timeoutAt`, `overdue`, `checkpoint` (reached-checkpoint count), `truncated`, `outputTail`, and `notification`. Terminal and `checkpoint` notifications are `idle-wake-or-next-request`. `started` and `renewed` are `not-a-completion`. `unavailable` uses `wake-unavailable` and means this process did not claim bash. Live output remains on `inspect`; the event is not sent per output line.
+The event `version` is 1. Fields are `executionId`, `owner` (`pi-bash`), `sessionId`, `branchAnchor`, `toolCallId`, `phase`, `status`, `exitCode`, `deadlineAt` (the checkpoint), `timeoutAt`, `overdue`, `checkpoint` (reached-checkpoint count), `truncated`, `outputTail`, `notice`, `label`, `terminalAt`, and `lastOutputAt`. Terminal and `checkpoint` events use `notice: "idle-wake-or-next-request"`; `started` and `renewed` use `"not-a-completion"`. `unavailable` uses `"wake-unavailable"` and means this process did not claim bash. The label is the executable basename; terminal and last-output timestamps remain null until observed. Live output remains on `inspect`; the event is not sent per output line.
 
 ## Human view
 

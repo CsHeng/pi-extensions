@@ -61,8 +61,8 @@ export default function tasklist(pi: ExtensionAPI): void {
 		bound = true;
 		sessionId = ctx.sessionManager.getSessionId();
 		branchAnchor = ctx.sessionManager.getLeafId();
-		// A restored branch is immediately usable data: known older snapshots are normalized in
-		// memory and written in the current form only by the next explicit model edit.
+		// Restore current-version data without rewriting history; unsupported snapshots stay diagnostic.
+		// Only an explicit model edit appends a new snapshot.
 		store.replay(ctx.sessionManager.getBranch());
 		appendSnapshot();
 		tasksView.bind(ctx);

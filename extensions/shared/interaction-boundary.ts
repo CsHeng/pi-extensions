@@ -354,7 +354,7 @@ export function createInteractionBoundary<T>(options: InteractionBoundaryOptions
 				close(current, at, "interrupted");
 				return "closed";
 			}
-			// A main-run error stops automatic continuation; owned jobs cannot resume the loop.
+			// A main-run error closes this measured span; Notices independently delivers pending results.
 			if (latestAssistantFailed(ctx)) {
 				close(current, at, "failed");
 				return "closed";
