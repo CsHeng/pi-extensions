@@ -92,8 +92,10 @@ class FakeScheduler {
 	callback: (() => void) | undefined;
 	intervalMs: number | undefined;
 	clearCount = 0;
+	startCount = 0;
 
 	setInterval(callback: () => void, intervalMs: number): object {
+		this.startCount += 1;
 		this.callback = callback;
 		this.intervalMs = intervalMs;
 		return this;
@@ -293,7 +295,119 @@ async function endRequest(pi: FakePi, ctx: ExtensionContext, setNow: (at: number
 	if (script.persist !== false) pi.session.push({ type: "message", message });
 }
 
-test("the request lane counts TTFT live, shows in-flight estimates, then settles at message_end", async () => {
+test("coalesces stream, request, tool and prompt events into one complete sample per second", async () => {
+	let now = 0;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	installProducer(pi, { facts: [bashFacts([])], delivery: deliveryFacts() });
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+	const writes: Array<{ at: number; text: string | undefined }> = [];
+	ctx.ui.setWorkingMessage = (text) => { workingMessages.push(text); writes.push({ at: now, text }); };
+	const setNow = (at: number) => { now = at; };
+
+	await beginInteraction(pi, ctx);
+	now = 50;
+	await invoke(pi, "before_agent_start", { messageType: "custom" }, ctx);
+	assert.equal(scheduler.startCount, 1, "repeated run hooks retain one publishing clock");
+	assert.equal(scheduler.intervalMs, 1_000);
+	now = 100;
+	await invoke(pi, "turn_start", {}, ctx);
+	await invoke(pi, "before_provider_request", {}, ctx);
+	await invoke(pi, "message_start", { message: { role: "assistant" } }, ctx);
+	now = 200;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, ctx);
+	for (let index = 1; index <= 100; index += 1) {
+		now = 200 + index * 7;
+		await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "x".repeat(40) } }, ctx);
+	}
+	assert.deepEqual(writes, [{ at: 0, text: "Working... 0s" }], "100 stream events publish no intermediate labels");
+	now = 1_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 1s • ↓1.0k • ✻ <1s • TTFT 0.1s • 1,111 tok/s", "all fields use the 1s sample and every delta is counted");
+
+	now = 1_100;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
+	await endRequest(pi, ctx, setNow, { start: 100, end: 1_200, timestamp: 1, usage: { input: 100, output: 900 } });
+	assert.deepEqual(pi.timings, [{ version: 1, messageTimestamp: 1, ttftMs: 100, thinkingMs: 900 }], "timing facts persist at their exact event boundary");
+	now = 1_250;
+	await invoke(pi, "tool_execution_start", { toolCallId: "quick", toolName: "read" }, ctx);
+	now = 1_300;
+	await invoke(pi, "ui_prompt_start", {}, ctx);
+	now = 1_350;
+	await invoke(pi, "ui_prompt_end", {}, ctx);
+	now = 1_400;
+	await invoke(pi, "tool_execution_end", { toolCallId: "quick", toolName: "read" }, ctx);
+	await invoke(pi, "turn_end", {}, ctx);
+	await invoke(pi, "turn_start", {}, ctx);
+	now = 1_450;
+	await invoke(pi, "before_provider_request", {}, ctx);
+	now = 1_500;
+	await invoke(pi, "before_provider_request", {}, ctx);
+	now = 1_600;
+	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(40) } }, ctx);
+	publish(pi);
+	assert.equal(writes.length, 2, "settlement, tools, prompt boundaries, retry and producer facts wait for the same clock");
+	now = 2_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 1s • ↓10 • TTFT 0.1s • 20 tok/s", "only the latest request is sampled, with human wait excluded");
+	await endRequest(pi, ctx, setNow, { start: 1_500, end: 2_100, timestamp: 2, usage: { input: 200, output: 20 } });
+	await invoke(pi, "turn_end", {}, ctx);
+	now = 3_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 2s • ↑200 ↓20 CH0.0% • TTFT 0.1s • 33 tok/s");
+	assert.deepEqual(writes.map(write => write.at), [0, 1_000, 2_000, 3_000]);
+
+	now = 3_200;
+	const stoppedTick = scheduler.callback;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+	assert.equal(writes.at(-1)?.text, undefined, "clear immediately rather than waiting for the next tick");
+	assert.equal(scheduler.callback, undefined);
+	assert.equal(entryData(pi).humanWaitMs, 50);
+	assert.equal(entryData(pi).totalMs, 3_150);
+	assert.equal(entryData(pi).metrics.output, 920, "settled provider usage replaces estimates even for requests between ticks");
+	assert.equal(entryData(pi).metrics.thinkingMs, 900);
+	const count = writes.length;
+	stoppedTick?.();
+	assert.equal(writes.length, count, "a stopped clock cannot resurrect the cleared row");
+});
+
+test("short interactions settle exactly and unchanged samples are not reposted", async () => {
+	let now = 0;
+	const scheduler = new FakeScheduler();
+	const pi = new FakePi();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
+	const workingMessages: Array<string | undefined> = [];
+	const ctx = context(workingMessages);
+	await beginInteraction(pi, ctx);
+	await runRequest(pi, ctx, (at) => { now = at; }, { start: 10, firstOutputAt: 30, end: 90, timestamp: 1, usage: { input: 10, output: 20 } });
+	now = 100;
+	await invoke(pi, "agent_settled", { aborted: false }, ctx);
+	assert.deepEqual(workingMessages, ["Working... 0s", undefined]);
+	assert.equal(entryData(pi).totalMs, 100);
+	assert.equal(entryData(pi).metrics.output, 20);
+	assert.equal(entryData(pi).metrics.ttftMs, 20);
+
+	now = 200;
+	await beginInteraction(pi, ctx);
+	await invoke(pi, "ui_prompt_start", {}, ctx);
+	const count = workingMessages.length;
+	for (now = 1_200; now <= 3_200; now += 1_000) scheduler.callback?.();
+	assert.equal(workingMessages.length, count, "human wait freezes the elapsed-only row, so identical ticks do not write");
+	await invoke(pi, "session_shutdown", {}, ctx);
+	assert.equal(scheduler.callback, undefined);
+});
+
+test("the request lane samples live estimates and settled facts on the publishing clock", async () => {
 	let now = 0;
 	const scheduler = new FakeScheduler();
 	const pi = new FakePi();
@@ -318,7 +432,9 @@ test("the request lane counts TTFT live, shows in-flight estimates, then settles
 
 	now = 4_200;
 	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 4s • TTFT 3.2s", "the first output fixes the counter");
+	assert.equal(workingMessages.at(-1), "Working... 3s • TTFT 2.0s…", "the first output records TTFT without publishing");
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 4s • TTFT 3.2s", "the next tick publishes the fixed counter");
 	now = 6_200;
 	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
 	now = 7_000;
@@ -336,6 +452,8 @@ test("the request lane counts TTFT live, shows in-flight estimates, then settles
 	};
 	await endRequest(pi, ctx, (at) => { now = at; }, script);
 	assert.deepEqual(pi.timings, [{ version: 1, messageTimestamp: 77, ttftMs: 3_200, thinkingMs: 2_000 }]);
+	assert.equal(workingMessages.at(-1), "Working... 7s • ↓420 • ✻ 2s • TTFT 3.2s • 70 tok/s", "settlement persists facts without an extra UI write");
+	scheduler.callback?.();
 	assert.equal(
 		workingMessages.at(-1),
 		"Working... 14s • ↑75k ↓241 CH0.0% $0.759 RB1 71k $0.710 • ✻ 2s • TTFT 3.2s • 18 tok/s",
@@ -367,7 +485,9 @@ test("the request lane counts TTFT live, shows in-flight estimates, then settles
 		"the settled values stay until the next request starts",
 	);
 	await invoke(pi, "before_provider_request", {}, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 20s • TTFT 0.0s…", "the next request start replaces them");
+	now = 21_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 21s • TTFT 1.0s…", "the next tick samples the new request");
 });
 
 test("without a provider-request stage the stream start replaces the settled values and no live counter runs", async () => {
@@ -389,6 +509,7 @@ test("without a provider-request stage the stream start replaces the settled val
 	now = 1_500;
 	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(40) } }, ctx);
 	await endRequest(pi, ctx, setNow, { start: 1_000, end: 3_000, timestamp: 1, usage: { input: 100, output: 40 } });
+	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 3s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s", "settled TTFT and tok/s come from durationMs");
 	await invoke(pi, "turn_end", {}, ctx);
 	now = 4_000;
@@ -399,9 +520,10 @@ test("without a provider-request stage the stream start replaces the settled val
 	await invoke(pi, "message_start", { message: { role: "user" } }, ctx);
 	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s", "only an assistant stream starts the request");
 	await invoke(pi, "message_start", { message: { role: "assistant" } }, ctx);
-	assert.equal(workingMessages.at(-1), "Working... 6s");
+	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 ↓40 CH0.0% • TTFT 0.5s • 20 tok/s", "request start waits for the publishing clock");
 	now = 7_000;
 	await invoke(pi, "message_update", { assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400) } }, ctx);
+	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 7s • ↓100", "no live TTFT counter or live tok/s without the request start");
 });
 
@@ -434,13 +556,19 @@ test("a provider retry restarts the live TTFT counter and the settled TTFT ancho
 	// Pi's durationMs belongs to the attempt that produced the message: 3.5s to 6s.
 	await endRequest(pi, ctx, (at) => { now = at; }, { start: 3_500, end: 6_000, timestamp: 9, usage: { input: 10, output: 50 } });
 	assert.deepEqual(pi.timings, [{ version: 1, messageTimestamp: 9, ttftMs: 1_500, thinkingMs: 0 }]);
+	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 6s • ↑10 ↓50 CH0.0% • TTFT 1.5s • 20 tok/s");
 });
 
 test("an unobserved first output, error or abort settles usage without timing fields", async () => {
 	let now = 0;
 	const pi = new FakePi();
-	createWorkTimingExtension({ now: () => now, setInterval: () => ({}), clearInterval: () => {} })(pi as unknown as ExtensionAPI);
+	const scheduler = new FakeScheduler();
+	createWorkTimingExtension({
+		now: () => now,
+		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
+		clearInterval: (handle) => scheduler.clearInterval(handle),
+	})(pi as unknown as ExtensionAPI);
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
 	const setNow = (at: number) => { now = at; };
@@ -452,6 +580,7 @@ test("an unobserved first output, error or abort settles usage without timing fi
 	await invoke(pi, "turn_start", {}, ctx);
 	await invoke(pi, "before_provider_request", {}, ctx);
 	await endRequest(pi, ctx, setNow, { start: 5_000, end: 6_000, timestamp: 3, stopReason: "aborted", usage: { input: 100, output: 0 } });
+	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 6s • ↑100 CH0.0%");
 	now = 7_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
@@ -577,6 +706,8 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	now = 5_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
 	assert.equal(pi.entries.length, 0, "a settled run does not end an interaction whose owned job still runs");
+	assert.equal(scheduler.callback, undefined, "the publishing clock pauses between native runs");
+	assert.equal(workingMessages.at(-1), undefined);
 
 	// The job is terminal, but its result has not been delivered yet: still no summary.
 	now = 40_000;
@@ -589,6 +720,8 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	// The delivery wake starts a native run that is part of the same interaction.
 	now = 50_000;
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
+	assert.equal(scheduler.startCount, 2, "the result wake restarts exactly one publishing clock");
+	assert.equal(workingMessages.at(-1), "Working... 50s", "resume samples immediately without reopening the interaction");
 	await runRequest(pi, ctx, setNow, {
 		start: 52_000, firstOutputAt: 52_500, thinkingEnd: 53_000, end: 54_000, timestamp: 2, usage: { input: 600, output: 300 },
 	});
@@ -967,6 +1100,7 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
 	now = 20_000;
 	await invoke(pi, "ui_prompt_end", {}, ctx);
+	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 20s • ⚙ 8s", "the tool clock froze but the prompt was autonomous");
 
 	now = 25_000;
@@ -1172,6 +1306,7 @@ test("session replacement and branch changes release state without writing old s
 		now = 2_000;
 		await invoke(pi, eventName, { reason: "reload" }, ctx);
 		assert.equal(scheduler.callback, undefined, `${eventName} stops the timer`);
+		assert.equal(workingMessages.at(-1), undefined, `${eventName} clears the working row immediately`);
 		assert.equal(pi.events.count(EXECUTION_FACTS_EVENT), 0, `${eventName} releases the quiescence observer`);
 		assert.deepEqual(pi.entries, [], `${eventName} writes nothing into the next scope`);
 	}
@@ -1262,12 +1397,23 @@ test("compacts the working label on narrow terminals and on resize", async () =>
 	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k");
 
+	// A pending request transition and extra elapsed time must not leak through resize.
+	now = 3_500;
+	await invoke(pi, "before_provider_request", {}, ctx);
 	width = 120;
 	resizeListener?.();
-	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k • TTFT 1.0s • 1,750 tok/s");
+	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k • TTFT 1.0s • 1,750 tok/s", "resize reflows the complete previous sample, including fields hidden at the old width");
+	now = 4_000;
+	scheduler.callback?.();
+	assert.equal(workingMessages.at(-1), "Working... 4s • TTFT 0.5s…");
 
+	const lateResize = resizeListener;
 	await invoke(pi, "session_shutdown", { reason: "reload" }, ctx);
 	assert.equal(resizeListener, undefined);
+	assert.equal(workingMessages.at(-1), undefined);
+	const count = workingMessages.length;
+	lateResize?.();
+	assert.equal(workingMessages.length, count, "resize cannot republish after teardown");
 });
 
 test("folds the settled entry at field boundaries and word-wraps lone over-wide fields", () => {

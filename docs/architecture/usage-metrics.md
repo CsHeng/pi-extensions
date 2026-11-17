@@ -7,13 +7,14 @@ The working row is the request lane, `Worked for` is the interaction lane, and t
 These user preferences and their rationale govern the three surfaces.
 
 - I-1 Scope by location, not by marker. The lane determines scope. Do not add per-field markers such as `x̄` or `Σ` to distinguish scopes inside one lane; a lane shows one scope only.
-- I-2 One update moment per metric category across lanes. A settled metric appears or changes when its underlying fact is settled, and every live lane showing that category changes at that moment. A footer metric that changes mid-request, or a lane that updates on a different event than another for the same category, is a defect. Two exceptions are deliberate: the working row may show in-flight estimates that settlement replaces, and the `Worked for` entry is a one-time summary written when the interaction ends.
+- I-2 One settlement boundary per metric category across lanes. Usage and timing facts settle together at the request boundary, and every lane derives settled metrics from those same facts. The footer reflects persisted facts; the working row publishes its latest complete state on the next one-second tick, replacing any in-flight estimates, and `Worked for` is a one-time summary written when the interaction ends. Display sampling leaves measurement and persistence immediate.
 - I-3 Industry definitions. Latency and throughput follow OpenRouter's documented definitions and are cross-checked against Artificial Analysis. Labels follow common industry display: `TTFT` and `tok/s`.
 - I-4 Averages, not latest values, outside the request lane. Interaction and session lanes aggregate. The request lane is the only place for a single request's value.
 - I-5 `RB` is identical everywhere: count, re-billed tokens and extra dollars, absent when there is none. It reproduces Pi's `/session` "Cache Re-billed" calculation so that users can cross-check it.
 - I-6 Compact display. Prefer a recognizable single-cell glyph over a word when one exists; avoid emoji and East-Asian-ambiguous-width glyphs, which render two cells in some terminals.
 - I-7 Forward-only. New code does not carry compatibility branches for older persisted formats. Historical entries may render incompletely or with older semantics; only new sessions need accurate values.
 - I-8 Purpose over decoration. A field earns its place by supporting cache/cost attribution or provider speed comparison.
+- I-9 Stable working text. Publish the whole working row at 1Hz from one sample so token, rate, clock and request/tool transitions stay readable rather than flashing intermediate event states. Events retain their exact measurements; initial display, immediate cleanup and resize-only reflow are the display exceptions. Pi owns spinner animation independently.
 
 ## Field Matrix
 
@@ -69,13 +70,15 @@ References for the documented definitions:
 
 | Category | Fields | Moment | Lanes |
 | --- | --- | --- | --- |
-| Settled request metrics | `↑ ↓ R W CH $ RB ✻ TTFT tok/s` | When Pi persists the request's assistant message; for the footer, also when a usage-bearing tool result, compaction or branch-summary entry is appended | Working row switches to that request's final values; the footer recomputes the session from persisted entries |
-| In-flight estimates | Live `TTFT…` counter, live `✻`, estimated `↓`, live `tok/s` | Stream events and the one-second clock | Working row only; replaced by settled values at settlement |
-| Wall clocks | `Working…` elapsed, `⚙` tool timer | One-second clock | Working row only |
+| Settled request metrics | `↑ ↓ R W CH $ RB ✻ TTFT tok/s` | Facts settle at the assistant-message boundary; the working row samples on its next one-second tick, and the footer reflects persistence, also including usage-bearing tool results, compaction and branch-summary entries | Working row samples the latest request state; footer recomputes the session from persisted entries |
+| In-flight estimates | Live `TTFT…` counter, live `✻`, estimated `↓`, live `tok/s` | Events record facts immediately; the one-second publishing clock samples every displayed field together | Working row only; a settled request's final values replace its estimates on the next sample |
+| Wall clocks | `Working…` elapsed, `⚙` tool timer | The same one-second publishing clock | Working row only; request and tool transitions share this cadence |
 | Interaction summary | All fields of the interaction lane | Once, when the interaction ends | `Worked for` entry; never changes afterwards |
 | Current state | Model, thinking level, ⚡, subscription, branch, MCP, context fill | Their own events; context fill follows Pi's `getContextUsage()`, which also estimates messages appended after the last response | Footer; these describe the present, not settled measurements |
 
-The working row keeps the last settled request's values while tools run and until the next request starts: the main agent's `before_provider_request`, or the first assistant stream event on transports without that stage. `turn_start` alone does not clear them, because Pi may still process queued messages and prepare the request after it.
+The request state retains the last settled request's values while tools run and until the next request starts: the main agent's `before_provider_request`, or the first assistant stream event on transports without that stage. `turn_start` alone keeps them, because Pi may still process queued messages and prepare the request after it. The working row publishes the latest state at the next tick; a short request or tool that starts and ends between ticks may never appear live, while its timing facts and final accounting remain complete.
+
+Initial display samples immediately when a native run starts or resumes. During that run, one clock samples the complete row once per second and writes only a changed label. Request, stream, tool and prompt events update state without publishing. Resize reflows the last complete sample, including fields hidden at the previous width, without taking a fresh metric sample. Settlement, interruption and teardown clear the row immediately; the clock stops between native runs. Spinner frames and unrelated TUI redraws keep Pi's own cadence.
 
 The footer achieves this cadence by construction: its metric fields are a pure function of persisted entries, and a request enters the aggregate only through its persisted assistant message. A timing entry whose assistant message is not yet persisted contributes nothing, so a render between the two appends shows the previous settled state. A request in flight therefore never moves a footer metric.
 

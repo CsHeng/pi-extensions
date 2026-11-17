@@ -11,25 +11,28 @@ const cc = join(homedir(), ".pi/agent/npm/node_modules/pi-cc-extensions/extensio
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-test("installed Pi and CC: one working writer preserves fast tokens and slow durations", { timeout: 40_000 }, async t => {
+test("installed Pi and CC: one working writer publishes complete one-second samples", { timeout: 40_000 }, async t => {
 	try { await access(cc); await access("/usr/bin/script"); } catch {
 		t.skip("requires installed CC and util-linux script; no installation performed"); return;
 	}
-	if (spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 5_000 }).status !== 0) {
+	const installedPath = (process.env.PATH ?? "").split(":").filter(entry => !entry.includes("node_modules/.bin")).join(":");
+	if (spawnSync("pi", ["--version"], { env: { PATH: installedPath }, encoding: "utf8", timeout: 5_000 }).status !== 0) {
 		t.skip("requires installed Pi"); return;
 	}
 	const base = await mkdtemp(join(tmpdir(), "work-timing-tui-"));
 	const agent = join(base, "agent"); await mkdir(agent);
 	await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], compaction: { enabled: false } }));
 	// CC's optional working-message writer must not co-own this row.
-	await writeFile(join(agent, "claude-code-style.json"), JSON.stringify({ enableWorkingMessage: false, showStartupHeader: false,
+	await writeFile(join(agent, "pi-cc-extensions.json"), JSON.stringify({ enableWorkingMessage: false, showStartupHeader: false,
 		enableSessionReference: false, enableAgentAutocomplete: false, enableAgentSummary: false }));
+	// The same regression can exercise the published snapshot without copying user settings.
+	const packageRoot = process.env.PI_EXTENSIONS_UI_PACKAGE_ROOT ?? root;
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
-		"-e", join(root, "extensions/work-timing/index.ts"), "-e", cc, "-e", join(root, "tests/fixtures/work-timing-tui.ts"),
+		"-e", join(packageRoot, "extensions/work-timing/index.ts"), "-e", cc, "-e", join(root, "tests/fixtures/work-timing-tui.ts"),
 		"--model", "working-fixture/fixture", "--thinking", "off", "--tui-mode", "fullscreen", "--", "working fixture"];
 	const child = spawn("script", ["-q", "-e", "-f", "-c", `stty cols 160 rows 40; exec ${args.map(quote).join(" ")}`, "/dev/null"], {
 		cwd: base, detached: true,
-		env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color" },
+		env: { PATH: installedPath, HOME: base, TMPDIR: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color" },
 	});
 	let output = "";
 	const capture = (data: Buffer) => {
@@ -57,23 +60,25 @@ test("installed Pi and CC: one working writer preserves fast tokens and slow dur
 	const writes = JSON.parse(await readFile(join(agent, "working-writes.json"), "utf8")) as Array<{ at: number; text?: string }>;
 	assert.equal(writes.at(-1)?.text, undefined, "settlement restores the host default");
 	const lines = writes.filter((item): item is { at: number; text: string } => typeof item.text === "string");
-	assert.ok(lines.length > 10, "stream refreshes must not be limited to 1 Hz");
-	const durations = (text: string) => [/^Working\.\.\. (\S+)/.exec(text)?.[1], /✻ ([^•]+?)(?: •|$)/.exec(text)?.[1]].join("|");
-	for (const line of lines) assert.match(line.text, /^Working\.\.\. \S+( • .+)?$/, "every writer uses the one formatter");
-	assert.ok(lines.some((line, index) => {
+	assert.ok(lines.length >= 5, "the publishing clock must keep advancing through streaming and tools");
+	for (const [index, line] of lines.entries()) {
+		assert.match(line.text, /^Working\.\.\. \S+( • .+)?$/, "every writer uses the one formatter");
 		const previous = lines[index - 1];
-		if (!previous || line.at - previous.at >= 900) return false;
-		return durations(previous.text) === durations(line.text) && previous.text !== line.text;
-	}), "fast output estimates refresh between slow clock samples without replacing the template");
-	assert.ok(lines.some(line => /✻ [12]s/.test(line.text)), "slow thinking clock must also advance");
+		// Permit native timer jitter, but reject event-driven writes between one-second samples.
+		if (previous) assert.ok(line.at - previous.at >= 950, `working row republished after ${line.at - previous.at}ms`);
+	}
+	assert.ok(lines.some(line => /✻ [12]s/.test(line.text)), "thinking is sampled while the stream is active");
+	const plain = output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+	const frames = new Set([...plain.matchAll(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Working\.\.\./g)].map(match => match[1]));
+	assert.ok(frames.size > 1, "the native working spinner still animates independently of text publishing");
 	assert.ok(lines.some(line => / • ↑100 ↓48 CH0\.0% • ✻ [23]s • \d+ tok\/s$/.test(line.text)), "the settled request lane replaces the estimates; this fixture's immediate first output leaves no positive TTFT");
 	// The real bash tool runs `sleep 7`, so the live tool field must appear past its threshold and then vanish.
 	const toolLines = lines.filter(line => line.text.includes("⚙ "));
 	assert.ok(toolLines.length > 0, "the live tool timer must reach the real terminal while bash runs");
 	assert.ok(toolLines.some(line => line.text.includes("⚙ 2s ")), "the tool field appears on its two-second threshold");
 	assert.ok(!toolLines.some(line => line.text.includes("⚙ 1s ")), "the tool field never appears below the threshold");
-	const lastToolLine = lines.findLastIndex(line => line.text.includes("⚙ "));
-	assert.ok(lines.slice(lastToolLine + 1).some(line => !line.text.includes("⚙ ")), "the tool field disappears when the tool ends");
+	const lastToolLine = writes.findLastIndex(line => line.text?.includes("⚙ "));
+	assert.ok(writes.slice(lastToolLine + 1).some(line => !line.text?.includes("⚙ ")), "the tool field leaves on the next sample or immediate settlement cleanup");
 });
 
 for (const mode of ["timing-first", "notifications-first", "no-notifications"] as const) test(`installed Pi ${mode}: one interaction spans real Bash and Agent lifetimes and idle result handoffs`, { timeout: 40_000 }, async t => {
@@ -218,8 +223,9 @@ test("installed Pi: request timing lands before the assistant message and footer
 	assert.equal(metricsOf(starts[1]!.footer), metricsOf(turnEnds[0]!.footer), "the next request start shows the previous settled values");
 	assert.equal(metricsOf(ends[1]!.footer), metricsOf(turnEnds[0]!.footer), "the footer ignores the in-window timing entry");
 	assert.notEqual(metricsOf(turnEnds[1]!.footer), metricsOf(ends[1]!.footer), "persistence settles the request into the footer");
-	// The working row already shows the request's settled values from its message_end handling.
-	assert.match(ends[0]!.working ?? "", / • ↑1\.0k ↓30 CH0\.0% • ✻ \S+ • TTFT \d\.\ds • \d+ tok\/s$/);
+	// Settlement persists the timing fact immediately; the working row waits for its publishing clock.
+	// The one-second tool keeps this request settled long enough for the next sample to reach the row.
+	assert.match(turnEnds[0]!.working ?? "", / • ↑1\.0k ↓30 CH0\.0% • ✻ \S+ • TTFT \d\.\ds • \d+ tok\/s$/);
 
 	// Offline recomputation: footer and completion entry equal the shared aggregation of the persisted entries.
 	const session = collectLaneTotals(proof.entries);

@@ -27,8 +27,8 @@ export { formatDuration, REQUEST_TIMING_ENTRY_TYPE };
 export const WORK_TIMING_ENTRY_TYPE = "work-timing";
 const WORK_TIMING_VERSION = 5;
 /**
- * Clock cadence. Time fields are re-sampled on this tick, so every duration on the
- * label advances in the same frame; the label is only reposted when it changed.
+ * Whole-row publishing cadence. Events record facts immediately; this tick samples
+ * every displayed field together and publishes only a changed label.
  */
 const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
@@ -149,7 +149,7 @@ interface WorkTimingDependencies {
 interface RequestTiming {
 	/**
 	 * The request has started: `before_provider_request`, or the first assistant stream event on
-	 * transports that never expose it. Until then the row keeps the previous request's settled values.
+	 * transports that never expose it. Until then samples keep the previous request's settled values.
 	 */
 	begun: boolean;
 	/** Main-agent `before_provider_request`; restarts on a provider retry. Drives the live counters. */
@@ -174,7 +174,7 @@ interface ActiveTool {
 	promptMs: number;
 }
 
-/** The slow-lane sample of every duration on the row. */
+/** Every duration is sampled at the same instant as the request counters and rate. */
 interface ClockSample {
 	totalMs: number;
 	toolMs: number;
@@ -196,7 +196,8 @@ interface TimingData {
 	settled: LaneTotals | undefined;
 	/** Tools executing right now, in start order. */
 	tools: ActiveTool[];
-	clock: ClockSample | undefined;
+	/** Last complete sample, before width compaction; resize reflows this without sampling. */
+	sampledStatus: string | undefined;
 	lastStatus: string | undefined;
 }
 
@@ -330,7 +331,7 @@ export function createWorkTimingExtension(
 			request: undefined,
 			settled: undefined,
 			tools: [],
-			clock: undefined,
+			sampledStatus: undefined,
 			lastStatus: undefined,
 		});
 
@@ -372,6 +373,8 @@ export function createWorkTimingExtension(
 				tools: previous.tools,
 				request: previous.request,
 				settled: previous.settled,
+				sampledStatus: previous.sampledStatus,
+				lastStatus: previous.lastStatus,
 			}),
 			onStart: (span) => {
 				// The population starts at the external input that opened the interaction, so work Pi does
@@ -430,16 +433,24 @@ export function createWorkTimingExtension(
 			return { totals, ttftLive };
 		};
 
-		// The slow lane samples durations; the stream lane refreshes output and rate.
-		// Both publish through the same formatter and working-message writer.
-		const paint = (at: number, resampleClock: boolean): void => {
+		/** Resize changes layout only; events between ticks cannot leak into the published sample. */
+		const paint = (): void => {
 			const current = boundary.current;
-			if (!current) return;
-			if (resampleClock || !current.data.clock) current.data.clock = clockAt(current, at);
-			const durations = current.data.clock;
+			if (!current?.runActive || current.data.sampledStatus === undefined) return;
+			const label = compactStatusLabel(current.data.sampledStatus, Math.max(1, columns() - WORKING_ROW_CHROME));
+			if (label === current.data.lastStatus) return;
+			current.data.lastStatus = label;
+			current.ctx.ui.setWorkingMessage(label);
+		};
+
+		/** Initial display and the single clock are the only metric-publishing paths. */
+		const sampleStatus = (at: number): void => {
+			const current = boundary.current;
+			if (!current?.runActive) return;
+			boundary.samplePrompt(at);
+			const durations = clockAt(current, at);
 			const toolCount = current.data.tools.length;
-			// Live tool timing: only a long-running tool is worth surfacing, and it
-			// vanishes the moment the tool ends.
+			// Quick tools stay quiet; a completed tool leaves the next sample.
 			const fields = [`Working... ${formatDuration(durations.totalMs)}`];
 			if (durations.toolMs >= TOOL_ELAPSED_MIN_MS && toolCount > 0) {
 				fields.push(`${TOOL_FIELD_PREFIX}${formatDuration(durations.toolMs)}${toolCount > 1 ? ` +${toolCount - 1}` : ""}`);
@@ -451,20 +462,15 @@ export function createWorkTimingExtension(
 			} else if (current.data.settled) {
 				fields.push(...metricBlock(current.data.settled));
 			}
-			// Compact to the host's single-line working row; fields that cannot fit are omitted.
-			const label = compactStatusLabel(fields.join(" • "), Math.max(1, columns() - WORKING_ROW_CHROME));
-			if (label === current.data.lastStatus) return;
-			current.data.lastStatus = label;
-			current.ctx.ui.setWorkingMessage(label);
+			current.data.sampledStatus = fields.join(" • ");
+			paint();
 		};
 
 		const startInterval = (): void => {
 			if (intervalHandle !== undefined) return;
+			sampleStatus(now());
 			intervalHandle = schedule(() => {
-				if (!boundary.current) return;
-				const at = now();
-				boundary.samplePrompt(at);
-				paint(at, true);
+				if (intervalHandle !== undefined) sampleStatus(now());
 			}, STATUS_UPDATE_INTERVAL_MS);
 		};
 
@@ -480,6 +486,7 @@ export function createWorkTimingExtension(
 			unsubscribeResize?.();
 			unsubscribeResize = undefined;
 			pendingEntryStart = undefined;
+			if (boundary.current?.data.lastStatus !== undefined) boundary.current.ctx.ui.setWorkingMessage();
 			boundary.reset();
 		};
 
@@ -531,12 +538,11 @@ export function createWorkTimingExtension(
 		pi.on("before_agent_start", (event, ctx) => {
 			if (ctx.mode !== "tui") return;
 			if (!unsubscribeResize) {
-				// Display-only refresh: realigns the fold with the new width immediately.
-				unsubscribeResize = onResize(() => paint(now(), false));
+				// Reflow the last published sample immediately, retaining its measurement instant.
+				unsubscribeResize = onResize(paint);
 			}
 			const at = now();
 			boundary.beforeAgentStart(event.messageType, ctx, at);
-			paint(at, true);
 			startInterval();
 		});
 
@@ -548,10 +554,9 @@ export function createWorkTimingExtension(
 			// Pi may still process queued messages and prepare the request; the previous request's
 			// settled values stay until the next request actually starts.
 			current.data.request = newRequest(undefined);
-			paint(at, true);
 		});
 
-		/** The next request started: the previous request's settled values leave the row. */
+		/** The next request started: its state replaces the settled values at the next sample. */
 		const beginRequest = (current: TimingSpan): void => {
 			const request = current.data.request;
 			if (!request || request.begun) return;
@@ -565,7 +570,6 @@ export function createWorkTimingExtension(
 			if ((event as { message?: { role?: unknown } }).message?.role !== "assistant") return;
 			// Transports without a provider-request stage: the stream start marks the request, with no live counters.
 			beginRequest(current);
-			paint(now(), true);
 		});
 
 		pi.on("before_provider_request", (_event, ctx) => {
@@ -575,7 +579,6 @@ export function createWorkTimingExtension(
 			const at = now();
 			current.data.request = newRequest(at);
 			current.data.settled = undefined;
-			paint(at, true);
 			// Observation only: never replaces the provider payload.
 			return undefined;
 		});
@@ -607,8 +610,7 @@ export function createWorkTimingExtension(
 				usageOutputTokens(event.message),
 				usageOutputTokens((assistantEvent as { partial?: unknown }).partial),
 			);
-			// The first output fixes the TTFT counter in the same frame.
-			paint(at, firstOutput);
+			// The next clock sample publishes these facts together with every other field.
 		});
 
 		pi.on("message_end", (event, ctx) => {
@@ -622,7 +624,6 @@ export function createWorkTimingExtension(
 			if (timing) pi.appendEntry<RequestTimingData>(REQUEST_TIMING_ENTRY_TYPE, timing);
 			current.data.settled = requestLaneTotals(sessionEntries(ctx), message, ctx.modelRegistry);
 			current.data.request = undefined;
-			paint(at, true);
 		});
 
 		const toolNameOf = (event: { toolName?: unknown }): string =>
@@ -649,7 +650,6 @@ export function createWorkTimingExtension(
 				startedAt: at,
 				promptMs: 0,
 			});
-			paint(at, true);
 		});
 
 		pi.on("tool_execution_end", (event, ctx) => {
@@ -658,7 +658,6 @@ export function createWorkTimingExtension(
 			const at = now();
 			boundary.toolEnd((event as { result?: unknown }).result, at);
 			removeActiveTool(current, event);
-			paint(at, true);
 		});
 
 		pi.on("ui_prompt_start", (_event, ctx) => {
@@ -674,7 +673,6 @@ export function createWorkTimingExtension(
 			const waitedMs = boundary.promptEnd(at);
 			if (waitedMs === undefined) return;
 			for (const tool of current.data.tools) tool.promptMs += waitedMs;
-			paint(at, true);
 		});
 
 		pi.on("turn_end", (_event, ctx) => {
@@ -682,7 +680,6 @@ export function createWorkTimingExtension(
 			if (ctx.mode !== "tui" || !current) return;
 			const at = now();
 			finishTurn(current, at);
-			paint(at, true);
 		});
 
 		pi.on("agent_settled", (event, ctx) => {
@@ -691,7 +688,7 @@ export function createWorkTimingExtension(
 			const settledAt = now();
 			finishTurn(current, settledAt);
 			current.data.settled = undefined;
-			current.data.clock = undefined;
+			current.data.sampledStatus = undefined;
 			current.data.lastStatus = undefined;
 			// One summary only after the main loop and all work this interaction owns are quiet,
 			// or when the interaction was cut or failed.
