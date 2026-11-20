@@ -165,7 +165,8 @@ export class ContinuationService {
 		this.observers.clear();
 	}
 	private async owner(ctx: ExtensionContext): Promise<CurrentOwner> {
-		return { repo: await findCanonicalGitRoot(ctx.cwd, this.dependencies.repositoryHost), parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) };
+		const parentSessionFile = ctx.sessionManager.getSessionFile?.();
+		return { parentCwd: ctx.cwd, repo: await findCanonicalGitRoot(ctx.cwd, this.dependencies.repositoryHost), parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id), ...(parentSessionFile ? { parentSessionFile } : {}) };
 	}
 	async contextIndex(ctx: ExtensionContext): Promise<SessionView[]> {
 		if (!ctx.isProjectTrusted()) return [];
@@ -332,7 +333,7 @@ export class ContinuationService {
 						if (record.state !== "idle") throw new ManagedError("session_not_idle");
 						await this.constrainNestedAccess([record.task]);
 						if (request.action === "apply") await applyCandidate(store, record, request.candidateId!);
-						else { await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
+						else { store.nativePath(record); await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
 					} else {
 						if (record.state === "closed" && record.retained === false && request.disposition !== "discard") throw new ManagedError("close_disposition_conflict");
 						if (request.disposition === "discard") await releaseManagedResources(store, record);
@@ -369,7 +370,7 @@ export class ContinuationService {
 			} else {
 				const replayed = await Promise.all(request.episodes!.map(async episode => {
 					const record = await store.load(episode.handle, owner);
-					if (record.version !== MANAGED_SESSION_VERSION) throw new ManagedError("unsupported_contract");
+					store.nativePath(record);
 					const prior = record.requests.find(operation => operation.id === episodeIdentity(episode.handle));
 					if (!prior) return undefined;
 					if (prior.fingerprint !== fingerprint([episode.expectedEpisode, episode.message])) throw new ManagedError("request_id_conflict");
@@ -463,7 +464,7 @@ export class ContinuationService {
 						if (record.episode >= MANAGED_LIMITS.maxEpisodes) throw new ManagedError("episode_limit");
 						await validateReadRoots(record);
 						if (record.candidate && ["applying", "partial", "unknown"].includes(record.candidate.status)) throw new ManagedError("candidate_recovery_required");
-						if ((await store.nativeRevision(record.handle)).leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
+						if ((await store.nativeRevision(record)).leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 					}
 					this.bindings.set(identity.runId, { owner, toolCallId, records: records.map(record => replays.has(record.handle) ? { ...record, episode: replays.get(record.handle)!.episode } : record), foreground, views: new Map(replays), replayed: new Set(replays.keys()) });
 					admissionRunId = identity.runId;
@@ -477,7 +478,7 @@ export class ContinuationService {
 						await store.withSession(record.handle, owner, async current => {
 							if (current.state !== "idle" || current.episode !== record.episode) throw new ManagedError("session_not_idle");
 							if (current.candidate && ["applying", "partial", "unknown"].includes(current.candidate.status)) throw new ManagedError("candidate_recovery_required");
-							if ((await store.nativeRevision(current.handle)).leaf !== current.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
+							if ((await store.nativeRevision(current)).leaf !== current.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 							// The rollback snapshot must be the record observed under this lock: a same-episode refresh
 							// or apply accepted between the outer load and here is state this admission builds on.
 							progress.before = structuredClone(current);
@@ -748,11 +749,10 @@ export class ContinuationService {
 				const writes = managedWriteRoots(record);
 				const sourceRoot = writes[0]?.source ?? record.roots[0]?.source ?? owner.repo;
 				const parentSkills = sourceRoot === owner.repo ? this.dependencies.getParentSkills?.(sourceRoot) : undefined;
-				const cwd = writes.length === 1 && writes[0]?.inputs?.gitWorkspace ? writes[0].inputs.gitWorkspace.path : join(store.path(handle), "roots");
+				const cwd = store.nativeCwd(record);
 				const scratch = join(store.path(handle), "scratch");
 				await mkdir(cwd, { recursive: true });
 				await mkdir(scratch, { recursive: true });
-				const native = join(store.path(handle), "native.jsonl");
 				const parsed = validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] });
 				if (!parsed.ok) throw new ManagedError(parsed.error.code);
 				const preparedBySource = new Map(record.roots.flatMap(root => root.inputs?.gitWorkspace ? [[root.source, root.inputs.gitWorkspace.path] as const] : []));
@@ -806,18 +806,21 @@ export class ContinuationService {
 				}
 				const preparedGuidance = guidanceParts.length ? mergeChildGuidance(guidanceParts) : undefined;
 				const capability: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: record.task.role, cwd, grants, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission })) };
+				const native = store.nativePath(record);
+				const revision = await store.nativeRevision(record);
+				if (revision.leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 				const result = await this.dependencies.runChild({ task: { ...parsed.tasks[0]!, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission, git: root.git, paths: root.paths })) }, role: getManagedRole(record.task.role, writes.length > 0), route: record.route!, cwd, sourceRoot, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), ...(preparedGuidance ? { preparedGuidance } : {}), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL("./worker-tools.ts", import.meta.url)),
 					managedWorkerScratch: scratch, ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
 					capability,
-					diagnosticSession: { path: native, ref: `managed/${handle}/native`, async removeUnused() {} },
+					diagnosticSession: { path: native, ref: `managed/${handle}/native`, ownerSessionId: revision.sessionId, async removeUnused() {} },
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
 				}).finally(() => observer?.childStopped(handle));
 				result.id = record.handle; result.label = record.task.id;
 				result.executionStatus = result.telemetry?.childStarted === true ? result.status : result.telemetry?.childStarted === false ? "not-started" : "unavailable";
 				childResult = result;
 				if (result.telemetry) result.telemetry.workspaceMs = workspaceMs;
-				record.result = result; record.nativeLeaf = (await store.nativeRevision(handle)).leaf;
+				record.result = result; record.nativeLeaf = (await store.nativeRevision(record)).leaf;
 				const requiresToolSettlement = writes.length > 0;
 				record.state = requiresToolSettlement && result.workerToolsSettled !== true ? "interrupted" : "idle";
 				if (record.state === "interrupted" && result.status === "succeeded") record.result = { ...result, status: "failed", finalization: { status: "failed", stage: "candidate-freeze", code: "worker_tools_unsettled" }, error: { code: "worker_tools_unsettled", message: "Worker tools did not settle." } };

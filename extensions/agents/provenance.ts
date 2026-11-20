@@ -6,8 +6,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ConfigSourceSnapshot } from "./config.ts";
 import { COLLABORATION_CONTRACT_VERSION, type ProvenanceTelemetry } from "./contracts.ts";
 import { isProductId, mintProductId } from "./identity.ts";
+import { privateDirectory } from "./private-directory.ts";
 
-export const PROVENANCE_DIR = "agent-provenance";
+export const PROVENANCE_DIR = join("managed-agents", "_provenance");
 export const PROVENANCE_MANIFEST = `current-v${COLLABORATION_CONTRACT_VERSION}.json`;
 export const PROVENANCE_LOCK = ".provenance-lock";
 const MANIFEST_VERSION = 1 as const;
@@ -131,9 +132,12 @@ export function createProvenance(dependencies: ProvenanceDependencies = {}): Pro
 	let cachedConfiguration: { fingerprint: string; epoch: string } | undefined;
 
 	async function root(): Promise<string | undefined> {
-		const directory = join(agentDir(), PROVENANCE_DIR);
-		await mkdir(directory, { recursive: true, mode: 0o700 });
-		return await privateDir(directory) ? directory : undefined;
+		const base = agentDir();
+		await privateDirectory(base, false, 0o022);
+		await privateDirectory(join(base, "managed-agents"), true);
+		const directory = join(base, PROVENANCE_DIR);
+		await privateDirectory(directory, true);
+		return directory;
 	}
 
 	async function cleanupStale(directory: string): Promise<void> {

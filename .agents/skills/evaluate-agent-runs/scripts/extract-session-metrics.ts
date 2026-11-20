@@ -208,7 +208,10 @@ async function walkSessionFiles(root: string, files: string[], depth: number, st
 		const path = join(root, entry.name);
 		const info = await lstat(path);
 		if (info.isSymbolicLink()) throw new Error("symlink_rejected");
-		if (info.isDirectory()) await walkSessionFiles(path, files, depth + 1, stats);
+		if (info.isDirectory()) {
+			// Dispatch envelopes belong to parent sessions. Native child archives and one-time usage imports are accounting inputs.
+			if (entry.name !== "agents" || !/^--.*--$/.test(basename(root))) await walkSessionFiles(path, files, depth + 1, stats);
+		}
 		else if (info.isFile() && entry.name.endsWith(".jsonl")) {
 			if (info.size > MAX_SESSION_BYTES) throw new Error("session_too_large");
 			files.push(path);

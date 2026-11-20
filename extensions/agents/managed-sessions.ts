@@ -2,8 +2,11 @@ import { nativeLines } from "./native-lines.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isTaskLabel, mintProductId } from "./identity.ts";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, rm, type FileHandle } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, open, readdir, rename, rm, type FileHandle } from "node:fs/promises";
+import { privateDirectory, syncDirectory } from "./private-directory.ts";
+import { archiveBucket, archiveFilename, nativeArchiveDirectory, projectBucket } from "./native-archive.ts";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { NormalizedTask } from "./graph.ts";
 import { AgentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import { Check } from "typebox/value";
@@ -67,6 +70,8 @@ export interface ManagedRecord {
 	state: ManagedState;
 	episode: number;
 	nativeLeaf: string | null;
+	/** Absent on pre-cutover records; these cannot resume native execution. */
+	native?: { bucket: string; filename: string };
 	route?: EffectiveRoute;
 	inheritSkills?: boolean;
 	projectSkills?: CapturedProjectSkill[];
@@ -204,6 +209,7 @@ const recordSchema = Type.Object({
 	task: AgentTaskSchema, roots: Type.Array(rootSchema, { maxItems: 32 }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
 	dispatch: Type.Optional(Type.Object({ runId: productId, generation: hostId, toolCallId: Type.String({ maxLength: 256 }), taskId: productId }, { additionalProperties: false })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([hostId, Type.Null()]),
+	native: Type.Optional(Type.Object({ bucket: Type.String({ maxLength: 255, pattern: archiveBucket.source }), filename: Type.String({ pattern: archiveFilename.source }) }, { additionalProperties: false })),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
 	projectSkills: Type.Optional(Type.Array(Type.Object({ path: Type.String({ maxLength: 4096 }), name: Type.String({ maxLength: 128 }) }, { additionalProperties: false }), { maxItems: 1024 })),
 	result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()),
@@ -223,15 +229,6 @@ function shallowVersion(value: unknown): number | undefined {
 }
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === "ENOENT";
 
-async function privateDirectory(directory: string, create: boolean): Promise<void> {
-	if (create) {
-		try { await mkdir(directory, { mode: 0o700 }); }
-		catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-	}
-	const info = await lstat(directory);
-	if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid()) || await realpath(directory) !== directory) throw new ManagedError("managed_storage_invalid");
-}
-
 async function readJson<T>(file: string): Promise<T> {
 	const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
 	try {
@@ -246,8 +243,36 @@ async function readJson<T>(file: string): Promise<T> {
 const rootWriters = new Map<string, Promise<void>>();
 export class ManagedSessionStore {
 	readonly root: string;
-	constructor(agentDirectory: string) { this.root = join(agentDirectory, "managed-agents"); }
-	private async ensure(create: boolean): Promise<void> { await privateDirectory(this.root, create); }
+	private readonly sessions: string;
+	constructor(agentDirectory: string) {
+		this.root = join(agentDirectory, "managed-agents");
+		this.sessions = join(agentDirectory, "sessions");
+	}
+	private archiveBucket(owner: CurrentOwner): string {
+		if (owner.parentSessionFile && isAbsolute(owner.parentSessionFile)) {
+			const parts = relative(this.sessions, owner.parentSessionFile).split(sep);
+			if (archiveBucket.test(parts[0]!) && (parts.length === 2 || (parts.length === 3 && parts[1] === "agents"))) return parts[0]!;
+		}
+		const cwd = owner.parentCwd ?? owner.repo;
+		const underManaged = relative(this.root, cwd);
+		if (!isAbsolute(cwd) || resolve(cwd) !== cwd || (!isAbsolute(underManaged) && underManaged !== ".." && !underManaged.startsWith(`..${sep}`))) throw new ManagedError("managed_native_project_unavailable");
+		return projectBucket(cwd);
+	}
+	nativePath(record: ManagedRecord): string {
+		if (!record.native) throw new ManagedError("managed_native_binding_missing");
+		const { bucket, filename } = record.native;
+		if (!archiveBucket.test(bucket) || !archiveFilename.test(filename)) throw new ManagedError("managed_native_invalid", undefined, "binding");
+		return join(this.sessions, bucket, "agents", filename);
+	}
+	nativeCwd(record: ManagedRecord): string {
+		const writes = managedWriteRoots(record);
+		const roots = join(this.path(record.handle), "roots");
+		return writes.length === 1 ? join(roots, writes[0]!.id) : roots;
+	}
+	private async ensure(create: boolean): Promise<void> {
+		if (create) await privateDirectory(dirname(this.root), false, 0o022);
+		await privateDirectory(this.root, create);
+	}
 	path(handle: string): string {
 		if (!safeHandle(handle)) throw new ManagedError("invalid_handle");
 		return join(this.root, handle);
@@ -260,8 +285,7 @@ export class ManagedSessionStore {
 		try {
 			await handle.writeFile(bytes); await handle.sync(); await handle.close();
 			await rename(temporary, file);
-			const directory = await open(dirname(file), "r");
-			try { await directory.sync(); } finally { await directory.close(); }
+			await syncDirectory(dirname(file));
 		} finally { await handle.close(); await rm(temporary, { force: true }); }
 	}
 	private async lock<T>(directory: string, action: () => Promise<T>): Promise<T> {
@@ -448,6 +472,7 @@ export class ManagedSessionStore {
 		if (!Check(batchSchema, batch)) throw new ManagedError("managed_registry_invalid");
 		if (!batch.complete) throw new ManagedError("request_outcome_unknown");
 		const records = await Promise.all(batch.handles.map((handle) => this.load(handle, owner)));
+		for (const record of records) this.nativePath(record);
 		if (fingerprint(records.map((record) => record.task)) !== batch.fingerprint) throw new ManagedError("managed_registry_invalid");
 		if (batch.response && (batch.response.sessions.length !== records.length || batch.response.sessions.some((view, index) => view.handle !== records[index]!.handle || view.role !== records[index]!.task.role || view.episode > records[index]!.episode))) throw new ManagedError("managed_registry_invalid");
 		return batch;
@@ -486,7 +511,11 @@ export class ManagedSessionStore {
 				&& record.result === undefined && record.dispatch === undefined && record.candidate === undefined
 				&& record.retained === undefined && record.release === undefined);
 			if (!pristine) return false;
-			for (const record of records) await rm(this.path(record.handle), { recursive: true, force: false });
+			for (const record of records) if ((await this.nativeRevision(record)).leaf !== null) return false;
+			for (const record of records) {
+				await rm(this.nativePath(record));
+				await rm(this.path(record.handle), { recursive: true, force: false });
+			}
 			await rm(path, { force: false });
 			return true;
 		});
@@ -507,6 +536,7 @@ export class ManagedSessionStore {
 				if (prior.fingerprint !== digest) throw new ManagedError("request_id_conflict");
 				if (!prior.complete) throw new ManagedError("request_outcome_unknown");
 				const records = await Promise.all(prior.handles.map((handle) => this.load(handle, owner)));
+				for (const record of records) this.nativePath(record);
 				if (fingerprint(records.map((record) => record.task)) !== digest) throw new ManagedError("managed_registry_invalid");
 				return { records, fresh: false };
 			}
@@ -527,39 +557,62 @@ export class ManagedSessionStore {
 				try { await lstat(this.path(handle)); throw new ManagedError("agent_id_conflict"); }
 				catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof ManagedError)) throw error; if (error instanceof ManagedError) throw error; }
 			}
+			const bucket = this.archiveBucket(owner);
+			const archive = await nativeArchiveDirectory(this.sessions, bucket, true);
 			await this.write(requestPath, { version: MANAGED_SESSION_VERSION, fingerprint: digest, handles, complete: false, ...(requestFingerprint ? { requestFingerprint } : {}) } satisfies BatchRecord);
 			const records: ManagedRecord[] = [];
-			for (const [index, task] of tasks.entries()) {
-				const handle = handles[index]!;
-				const directory = this.path(handle);
-				await privateDirectory(directory, true);
-				await privateDirectory(join(directory, "scratch"), true);
-				const native = await open(join(directory, "native.jsonl"), "wx", 0o600); await native.close();
-				const { roots, grants: _grants, ...persistedTask } = task;
-				const record: ManagedRecord = {
-					version: MANAGED_SESSION_VERSION, handle, owner: { repo: owner.repo, parentSessionId: owner.parentSessionId, anchor: owner.anchor },
-					task: persistedTask, roots: roots ?? [], state: "idle", episode: 0, nativeLeaf: null, requests: [],
-				};
-				await this.save(record); records.push(record);
+			const createdDirectories: string[] = [];
+			const createdFiles: string[] = [];
+			try {
+				for (const [index, task] of tasks.entries()) {
+					const handle = handles[index]!;
+					const directory = this.path(handle);
+					await mkdir(directory, { mode: 0o700 }); createdDirectories.push(directory);
+					await privateDirectory(join(directory, "scratch"), true);
+					const { roots, grants: _grants, ...persistedTask } = task;
+					const record: ManagedRecord = {
+						version: MANAGED_SESSION_VERSION, handle, owner: { repo: owner.repo, parentSessionId: owner.parentSessionId, anchor: owner.anchor },
+						task: persistedTask, roots: roots ?? [], state: "idle", episode: 0, nativeLeaf: null, requests: [],
+					};
+					const session = SessionManager.create(this.nativeCwd(record), archive, owner.parentSessionFile ? { parentSession: owner.parentSessionFile } : undefined);
+					record.native = { bucket, filename: basename(session.getSessionFile()!) };
+					const path = this.nativePath(record);
+					const native = await open(path, "wx", 0o600); createdFiles.push(path);
+					try { await native.writeFile(`${JSON.stringify(session.getHeader())}\n`); await native.sync(); }
+					finally { await native.close(); }
+					await syncDirectory(archive); // Persist the new filename before its private registry binding.
+					await this.save(record); records.push(record);
+				}
+			} catch (error) {
+				try {
+					if (createdFiles.length) await nativeArchiveDirectory(this.sessions, bucket, false);
+					for (const path of createdFiles) await rm(path);
+					for (const directory of createdDirectories) await rm(directory, { recursive: true });
+					await rm(requestPath);
+				} catch { throw new ManagedError("admission_cleanup_incomplete"); }
+				throw error;
 			}
 			await this.write(requestPath, { version: MANAGED_SESSION_VERSION, fingerprint: digest, handles, complete: true, ...(requestFingerprint ? { requestFingerprint } : {}) } satisfies BatchRecord);
 			return { records, fresh: true };
 		});
 	}
-	async nativeRevision(handle: string): Promise<{ sessionId: string | null; leaf: string | null }> {
-		await this.ensure(false); await privateDirectory(this.path(handle), false);
-		const file = await open(join(this.path(handle), "native.jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
+	async nativeRevision(record: ManagedRecord): Promise<{ sessionId: string; leaf: string | null }> {
+		const path = this.nativePath(record);
+		await this.ensure(false);
+		await privateDirectory(this.path(record.handle), false);
+		await nativeArchiveDirectory(this.sessions, record.native!.bucket, false);
+		const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		try {
 			const info = await file.stat();
-			if (!info.isFile() || (info.mode & 0o077) !== 0) throw new ManagedError("managed_native_invalid", undefined, "attributes");
+			if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) throw new ManagedError("managed_native_invalid", undefined, "attributes");
 			let index = 0;
 			let sessionId: string | null = null;
 			let leaf: string | null = null;
 			const identifiers = new Set<string>();
 			for await (const entry of nativeLines(file)) {
 				if (index++ === 0) {
-					if (entry.type !== "session" || entry.version !== 3 || typeof entry.id !== "string" || !safeForeignId(entry.id)) throw new ManagedError("managed_native_invalid", undefined, "header");
-					if (typeof entry.cwd === "string" && entry.cwd !== this.path(handle) && !entry.cwd.startsWith(`${this.path(handle)}/`)) throw new ManagedError("managed_native_invalid", undefined, "cwd");
+					if (entry.type !== "session" || entry.version !== CURRENT_SESSION_VERSION || typeof entry.id !== "string" || typeof entry.timestamp !== "string" || `${entry.timestamp.replace(/[:.]/g, "-")}_${entry.id}.jsonl` !== basename(path)) throw new ManagedError("managed_native_invalid", undefined, "header");
+					if (entry.cwd !== this.nativeCwd(record)) throw new ManagedError("managed_native_invalid", undefined, "cwd");
 					sessionId = entry.id;
 				} else {
 					if (typeof entry.type !== "string" || !entry.type || entry.type === "session" || typeof entry.id !== "string" || !safeForeignId(entry.id) || entry.id === sessionId || identifiers.has(entry.id) || (entry.parentId !== null && (typeof entry.parentId !== "string" || !identifiers.has(entry.parentId)))) throw new ManagedError("managed_native_invalid", undefined, "lineage");
@@ -567,8 +620,9 @@ export class ManagedSessionStore {
 					identifiers.add(entry.id); leaf = entry.id;
 				}
 			}
-			const after = await file.stat();
-			if (after.size !== info.size || after.mtimeMs !== info.mtimeMs) throw new ManagedError("managed_native_invalid", undefined, "changed");
+			if (sessionId === null) throw new ManagedError("managed_native_invalid", undefined, "header");
+			const after = await lstat(path);
+			if (after.dev !== info.dev || after.ino !== info.ino || after.size !== info.size || after.ctimeMs !== info.ctimeMs) throw new ManagedError("managed_native_invalid", undefined, "changed");
 			return { sessionId, leaf };
 		} catch (error) {
 			if (error instanceof SyntaxError) throw new ManagedError("managed_native_invalid", undefined, "parse");

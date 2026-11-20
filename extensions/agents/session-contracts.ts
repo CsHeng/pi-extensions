@@ -116,7 +116,13 @@ export interface SessionOwner {
 	/** Native parent entry on the creating branch; null represents its root. */
 	anchor: string | null;
 }
-export interface CurrentOwner extends SessionOwner { branch: readonly string[] }
+export interface CurrentOwner extends SessionOwner {
+	branch: readonly string[];
+	/** Native session path from the trusted current Pi session manager, not a tool argument. */
+	parentSessionFile?: string;
+	/** Fallback project bucket for an in-memory parent or a custom parent session location. */
+	parentCwd?: string;
+}
 export type ManagedState = "idle" | "queued" | "running" | "interrupted" | "closed";
 export type ApplyStatus = "not-applied" | "applying" | "applied" | "partial" | "conflict" | "unknown";
 export interface CandidateRootStatus {

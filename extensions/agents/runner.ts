@@ -23,6 +23,8 @@ import {
 export interface DiagnosticTaskSession {
 	path: string;
 	ref: string;
+	/** Validated by the managed store. A linked child owns its header-only starting point. */
+	ownerSessionId?: string;
 	removeUnused(): Promise<void>;
 }
 import type { NormalizedTask } from "./graph.ts";
@@ -322,7 +324,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const observationEnd = observationAfter === undefined ? undefined : nativeLeaf(observationAfter);
 		const observation = observationStart === undefined || observationEnd === undefined || observationAfter === undefined
 			? unavailableObservation()
-			: boundNativeObservation(collectNativeObservation(observationAfter, { startLeaf: observationStart, endLeaf: observationEnd, launched: childDidStart }));
+			: boundNativeObservation(collectNativeObservation(observationAfter, { startLeaf: observationStart, endLeaf: observationEnd, launched: childDidStart }, options.diagnosticSession.ownerSessionId));
 		// Timing is optional evidence. A readable owned range can retain usage,
 		// commands and capabilities without a terminal timing marker.
 		const base: TaskResult = {

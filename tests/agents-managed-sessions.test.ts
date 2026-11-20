@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -59,7 +59,7 @@ test("required source above the previous root byte cap is admitted without delet
 test("above-threshold storage warns without blocking allocation or deleting any evidence", async (t) => {
 	const { store, owner, tasks } = await setup(t);
 	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
-	const native = join(store.path(record.handle), "native.jsonl"); const registry = join(store.path(record.handle), "registry.json");
+	const native = store.nativePath(record); const initialNative = await readFile(native); const registry = join(store.path(record.handle), "registry.json");
 	const original = await readFile(registry);
 	const padding = join(store.root, "required-padding"); await writeFile(padding, "");
 	await truncate(padding, MANAGED_LIMITS.maxWorkspaceBytes + 1); // Sparse file; no 8 GiB allocation.
@@ -71,7 +71,7 @@ test("above-threshold storage warns without blocking allocation or deleting any 
 	await store.completeBatch(owner, "request", { schemaVersion: 4, action: "create", status: "succeeded", sessions: [store.view(record)] });
 	assert.deepEqual(await readFile(observation), observed);
 	assert.deepEqual(await readFile(registry), original);
-	assert.equal((await readFile(native)).length, 0);
+	assert.deepEqual(await readFile(native), initialNative);
 	assert.equal((await lstat(padding)).size, MANAGED_LIMITS.maxWorkspaceBytes + 1);
 });
 
@@ -97,8 +97,8 @@ test("concurrent writes and subtree removal do not turn advisory scans into erro
 test("native validation classifies malformed history without exposing its contents", async (t) => {
  const { store, owner, tasks } = await setup(t);
  const record = (await store.allocate(owner, "invalidnative", tasks)).records[0]!;
- await writeFile(join(store.path(record.handle), "native.jsonl"), "{invalid secret payload}\n");
- await assert.rejects(store.nativeRevision(record.handle), (error: unknown) => error instanceof Error && "code" in error && error.code === "managed_native_invalid" && "detail" in error && error.detail === "parse" && !error.message.includes("secret"));
+ await writeFile(store.nativePath(record), "{invalid secret payload}\n");
+ await assert.rejects(store.nativeRevision(record), (error: unknown) => error instanceof Error && "code" in error && error.code === "managed_native_invalid" && "detail" in error && error.detail === "parse" && !error.message.includes("secret"));
 });
 
 test("managed allocation is idempotent and rejects request or parent-branch drift", async (t) => {
@@ -112,7 +112,63 @@ test("managed allocation is idempotent and rejects request or parent-branch drif
 	await assert.rejects(store.load(handle, { ...owner, parentSessionId: "fork" }), /owner_mismatch/);
 	await assert.rejects(store.load(handle, { ...owner, anchor: "other", branch: ["other"] }), /owner_mismatch/);
 	assert.equal((await store.list(owner)).length, 1);
-	assert.deepEqual(await store.nativeRevision(handle), { sessionId: null, leaf: null });
+	const native = store.nativePath(first.records[0]!);
+	assert.deepEqual(await store.nativeRevision(first.records[0]!), { sessionId: basename(native, ".jsonl").split("_")[1], leaf: null });
+});
+
+test("native archive guards scope and binds each owner to its physical session", async (t) => {
+	const { base, store, owner, tasks } = await setup(t);
+	const sessions = join(base, "sessions");
+	const project = join(sessions, `--${base.slice(1).split("/").join("-")}--`);
+	const archive = join(project, "agents");
+	const outside = join(base, "outside"); await mkdir(outside, { mode: 0o700 });
+	for (const directory of [sessions, project, archive]) {
+		await symlink(outside, directory);
+		await assert.rejects(store.allocate(owner, "guard", tasks), /managed_storage_invalid/);
+		assert.deepEqual(await readdir(outside), []);
+		await rm(directory); await mkdir(directory, { mode: directory === archive ? 0o700 : 0o755 });
+	}
+	await chmod(archive, 0o755);
+	await assert.rejects(store.allocate(owner, "guard", tasks), /managed_storage_invalid/);
+	await chmod(archive, 0o700);
+	// Native 0775 directories are safe behind an owned 0700 home, but not when exposed to other accounts.
+	await chmod(base, 0o755); await chmod(sessions, 0o775); await chmod(project, 0o775);
+	await assert.rejects(store.allocate(owner, "exposed-sessions", tasks), /managed_storage_invalid/);
+	await chmod(sessions, 0o755);
+	await assert.rejects(store.allocate(owner, "exposed-project", tasks), /managed_storage_invalid/);
+	await chmod(base, 0o700); await chmod(sessions, 0o775);
+	const record = (await store.allocate(owner, "guard", tasks)).records[0]!;
+	assert.equal((await lstat(sessions)).mode & 0o777, 0o775);
+	assert.equal((await lstat(project)).mode & 0o777, 0o775);
+	const peer = (await store.allocate(owner, "peer", tasks)).records[0]!;
+	const file = store.nativePath(record);
+	assert.equal(dirname(file), archive);
+	await assert.rejects(store.nativeRevision({ ...record, native: peer.native! }), /managed_native_invalid/);
+	assert.throws(() => store.nativePath({ ...record, native: { ...record.native!, bucket: "../outside" } }), /managed_native_invalid/);
+	await chmod(file, 0o644);
+	await assert.rejects(store.nativeRevision(record), /managed_native_invalid/);
+	await chmod(file, 0o600);
+	const outsideFile = join(outside, "copy");
+	await link(file, outsideFile);
+	await assert.rejects(store.nativeRevision(record), /managed_native_invalid/);
+	await rm(outsideFile);
+	await rename(file, outsideFile); await symlink(outsideFile, file);
+	await assert.rejects(store.nativeRevision(record), { code: "ELOOP" });
+	assert.equal((await lstat(outsideFile)).nlink, 1);
+});
+
+test("failed provisional allocation removes only its new native archives and records", async (t) => {
+	const { store, owner, tasks } = await setup(t);
+	const previous = (await store.allocate(owner, "previous", tasks)).records[0]!;
+	const earlier = store.nativePath(previous);
+	const save = store.save.bind(store);
+	store.save = async record => { await save(record); if (record.task.id === "second") throw new Error("fixture allocation failure"); };
+	const batch = [tasks[0]!, { ...tasks[0]!, id: "second" }];
+	await assert.rejects(store.allocate(owner, "temporary", batch), /fixture allocation failure/);
+	assert.deepEqual(await readdir(dirname(earlier)), [basename(earlier)]);
+	assert.deepEqual((await store.list(owner)).map(view => view.handle), [previous.handle]);
+	store.save = save;
+	assert.equal((await store.allocate(owner, "temporary", batch)).fresh, true);
 });
 
 test("dotted task result ids stay readable and falsy replay files never create duplicate sessions", async (t) => {
@@ -171,22 +227,23 @@ test("closing frees a logical slot without deleting retained native evidence", a
 	assert.equal((await store.allocate(owner, "new", tasks)).fresh, true);
 	assert.equal((await store.list(owner)).length, MANAGED_LIMITS.maxSessions);
 	assert.equal((await store.load(record.handle, owner)).state, "closed");
-	assert.deepEqual(await store.nativeRevision(record.handle), { sessionId: null, leaf: null });
+	assert.equal((await store.nativeRevision(record)).leaf, null);
 });
 
 test("native inspection is bounded read-only parsing and does not repair a partial tail", async (t) => {
 	const { store, owner, tasks } = await setup(t);
-	const handle = (await store.allocate(owner, "request", tasks)).records[0]!.handle;
-	const file = join(store.path(handle), "native.jsonl");
-	const valid = `${JSON.stringify({ type: "session", version: 3, id: "native" })}\n${JSON.stringify({ type: "message", id: "leaf", parentId: null, message: { role: "user", content: "input" } })}\n`;
+	const record = (await store.allocate(owner, "request", tasks)).records[0]!;
+	const file = store.nativePath(record);
+	const header = await readFile(file, "utf8");
+	const valid = `${header}${JSON.stringify({ type: "message", id: "leaf", parentId: null, message: { role: "user", content: "input" } })}\n`;
 	await writeFile(file, valid);
-	assert.deepEqual(await store.nativeRevision(handle), { sessionId: "native", leaf: "leaf" });
+	assert.deepEqual(await store.nativeRevision(record), { sessionId: JSON.parse(header).id, leaf: "leaf" });
 	for (const entry of [{ type: "message", message: { role: "user" } }, { type: "message", id: "next", parentId: "missing", message: { role: "user" } }]) {
 		await writeFile(file, `${valid}${JSON.stringify(entry)}\n`);
-		await assert.rejects(store.nativeRevision(handle), /native_invalid/);
+		await assert.rejects(store.nativeRevision(record), /native_invalid/);
 	}
 	await writeFile(file, `${valid}{`);
-	await assert.rejects(store.nativeRevision(handle), /incomplete/);
+	await assert.rejects(store.nativeRevision(record), /incomplete/);
 	assert.equal(await readFile(file, "utf8"), `${valid}{`);
 });
 
@@ -366,6 +423,7 @@ test("a released admission reservation leaves no handle behind and can be retrie
 	assert.equal(first.fresh, true);
 	assert.equal((await store.list(owner)).length, 1);
 	assert.equal(await store.releaseReservation(owner, "call-identity"), true, "an untouched reservation is released");
+	await assert.rejects(lstat(store.nativePath(first.records[0]!)), { code: "ENOENT" });
 	assert.deepEqual(await store.list(owner), [], "no unusable handle stays reserved");
 	await assert.rejects(store.load(first.records[0]!.handle, owner));
 	// The same call identity now admits fresh work instead of reporting an unknown outcome.

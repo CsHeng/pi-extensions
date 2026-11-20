@@ -75,14 +75,14 @@ type ParsedNative = {
 	body: Array<{ id: string; entry: Record<string, unknown> }>;
 };
 
-export function collectNativeObservation(text: string, selection: { startLeaf: string | null; endLeaf: string | null; launched: boolean }): NativeObservation {
+export function collectNativeObservation(text: string, selection: { startLeaf: string | null; endLeaf: string | null; launched: boolean }, managedOwnerId?: string): NativeObservation {
 	if (typeof text !== "string" || !isSelection(selection)) return unavailable();
-	if (text.length === 0) return selection.launched || selection.startLeaf !== null || selection.endLeaf !== null ? unavailable() : emptyObservation(null);
+	if (text.length === 0) return managedOwnerId !== undefined || selection.launched || selection.startLeaf !== null || selection.endLeaf !== null ? unavailable() : emptyObservation(null);
 	const parsed = parseNativeSession(text);
-	if (parsed === undefined) return unavailable();
-	// A copied fork prefix has no intrinsic billing owner. Callers must select
-	// their newly appended range rather than attributing that prefix to the fork.
-	if (parsed.fork && selection.startLeaf === null) return unavailable();
+	if (parsed === undefined || (managedOwnerId !== undefined && parsed.ownerSessionId !== managedOwnerId)) return unavailable();
+	// A parent link normally signals a copied fork prefix. A validated managed
+	// session starts with only its own header, so the initial root range is owned too.
+	if (parsed.fork && selection.startLeaf === null && managedOwnerId === undefined) return unavailable();
 	const ownerSessionId = parsed.ownerSessionId;
 	const selected = selectRange(parsed.body, selection.startLeaf, selection.endLeaf);
 	if (selected === undefined) return unavailable();

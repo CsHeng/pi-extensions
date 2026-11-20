@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseConfigSources, readConfigSources } from "../extensions/agents/config.ts";
 import { createProvenance, fingerprintConfig, fingerprintSources, PROVENANCE_DIR, PROVENANCE_MANIFEST } from "../extensions/agents/provenance.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 
 test("identical source and configuration fingerprints reuse opaque epochs", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "agent-provenance-"));
@@ -72,7 +73,7 @@ test("reloaded content transitions mint epochs while disk edits cannot relabel a
 test("current epoch IDs are alphanumeric and do not reuse or rewrite the retired cache", async t => {
 	const root = await mkdtemp(join(tmpdir(), "agent-provenance-cut-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
-	const directory = join(root, PROVENANCE_DIR); await mkdir(directory, { mode: 0o700 });
+	const directory = join(root, PROVENANCE_DIR); await mkdir(directory, { recursive: true, mode: 0o700 });
 	const old = join(directory, "current.json"); const bytes = '{"legacy":"not current evidence"}';
 	await writeFile(old, bytes, { mode: 0o600 });
 	const core = createProvenance({ agentDir: root, listSourceFiles: async () => [{ name: "a.ts", bytes: Buffer.from("current") }] });
@@ -85,6 +86,53 @@ test("current epoch IDs are alphanumeric and do not reuse or rewrite the retired
 	assert.equal(configuration.extensionEpoch, source.extensionEpoch);
 	assert.equal(await readFile(old, "utf8"), bytes);
 	assert.equal(JSON.parse(await readFile(join(directory, PROVENANCE_MANIFEST), "utf8")).configurationEpoch, configuration.configurationEpoch);
+});
+
+test("nested provenance leaves the old location untouched and shares epochs under concurrent writers", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "agent-provenance-nested-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const old = join(root, "agent-provenance");
+	await mkdir(old, { mode: 0o700 });
+	await writeFile(join(old, PROVENANCE_MANIFEST), "old evidence", { mode: 0o600 });
+	const make = () => createProvenance({ agentDir: root, listSourceFiles: async () => [{ name: "a.ts", bytes: Buffer.from("same") }] });
+	const results = await Promise.all(Array.from({ length: 5 }, () => make().observeExtension()));
+	const available = results.filter(result => result.available);
+	assert.ok(available.length > 0);
+	assert.equal(new Set(available.map(result => result.extensionEpoch)).size, 1);
+	const after = await make().observeExtension();
+	assert.ok(after.available);
+	assert.equal(after.extensionEpoch, available[0]?.extensionEpoch);
+	assert.equal(await readFile(join(old, PROVENANCE_MANIFEST), "utf8"), "old evidence");
+	assert.deepEqual(await readdir(old), [PROVENANCE_MANIFEST]);
+	const nested = join(root, "managed-agents", "_provenance");
+	assert.equal(PROVENANCE_DIR, join("managed-agents", "_provenance"));
+	assert.equal((await lstat(nested)).mode & 0o077, 0);
+	assert.equal(JSON.parse(await readFile(join(nested, PROVENANCE_MANIFEST), "utf8")).extensionEpoch, after.extensionEpoch);
+	const store = new ManagedSessionStore(root);
+	const owner = { repo: root, parentSessionId: "parent", anchor: "branch", branch: ["branch"] };
+	assert.throws(() => store.path("_provenance"), /invalid_handle/);
+	assert.deepEqual(await store.list(owner), []);
+	const inventory = await store.inventory(owner);
+	assert.ok(inventory.available);
+	assert.equal(inventory.complete, true);
+	assert.deepEqual(inventory.entries, []);
+});
+
+test("managed root symlinks are rejected before creating nested provenance", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "agent-provenance-symlink-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const target = join(root, "target");
+	await mkdir(target, { mode: 0o700 });
+	await symlink(target, join(root, "managed-agents"));
+	const core = createProvenance({ agentDir: root, listSourceFiles: async () => [{ name: "a.ts", bytes: Buffer.from("a") }] });
+	assert.deepEqual(await core.observeExtension(), { available: false });
+	assert.deepEqual(await readdir(target), []);
+	await assert.rejects(lstat(join(root, "agent-provenance")), { code: "ENOENT" });
+	const alias = join(root, "agent-dir-alias");
+	await symlink(target, alias);
+	const aliased = createProvenance({ agentDir: alias, listSourceFiles: async () => [] });
+	assert.deepEqual(await aliased.observeExtension(), { available: false });
+	assert.deepEqual(await readdir(target), [], "no private root may be created through a symlinked Pi directory");
 });
 
 test("config source snapshots keep parse bytes identical to the fingerprint input", async (t) => {

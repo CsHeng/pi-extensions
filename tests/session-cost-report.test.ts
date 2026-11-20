@@ -253,6 +253,25 @@ test("scan attaches ledgers, honors the window, and never prints absolute paths"
 	}
 });
 
+test("archived child spend is discovered once under its parent project, including explicit native IDs", () => {
+	const root = fixtureAgentDir();
+	try {
+		const id = "00000000-0000-4000-8000-000000000002";
+		const project = join(root, "sessions", "--project--", "agents");
+		mkdirSync(project);
+		const file = join(project, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
+		writeFileSync(file, assistantMessage(stamp, 40, 0));
+		const old = join(root, "managed-agents", `session_${id}`);
+		mkdirSync(old, { recursive: true }); writeFileSync(join(old, "native.jsonl"), assistantMessage(stamp, 40, 0));
+		const opts = { agentDir: root, now: new Date(stamp), windowHours: 24, calibration: 1.3, missMinTokens: 1000 };
+		const report = buildReport(opts);
+		assert.equal(report.sessions.length, 2);
+		for (const session of [report.sessions.find(s => s.sessionId === id), ...[id, file].map(key => buildReport({ ...opts, selectors: [key] }).sessions[0])]) {
+			assert.equal(session?.kind, "child"); assert.equal(session?.sessionId, id); assert.equal(session?.input, 40);
+		}
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("an explicit session selector bypasses the window and the CLI refuses to overwrite output", () => {
 	const root = fixtureAgentDir();
 	try {

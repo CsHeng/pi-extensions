@@ -92,6 +92,9 @@ test("current-epoch mode selects managed provenance by epoch", async (t) => {
 	const old = managedRow(4, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "old", extensionEpoch: "ext-old" }) }));
 	const current = managedRow(4, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "current", startedAtMs: 200 }) }));
 	await writeFile(join(sessions, "a_session.jsonl"), physicalSession([old, current]));
+	const children = join(sessions, "--project--", "agents");
+	await mkdir(children, { recursive: true });
+	await writeFile(join(children, "usage-or-native.jsonl"), physicalSession([current]));
 	const metrics = await extractCurrentEpochMetrics(sessions, manifest);
 	assert.equal(metrics.source.selectionMode, "current-epoch");
 	assert.equal(metrics.source.scannedSessions, 1);

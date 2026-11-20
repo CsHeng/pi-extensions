@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
@@ -452,93 +452,44 @@ function sessionIdOf(filePath: string): string {
 	return parts[parts.length - 1] ?? name;
 }
 
-/** Scan the agent directory for parent and managed-child session logs inside the window. */
+/** The standard Pi sessions tree is the only discovery root; Agents live below each project's agents/ directory. */
+function* sessionFiles(directory: string): Generator<string> {
+	let entries: Dirent[];
+	try { entries = readdirSync(directory, { withFileTypes: true }); } catch { return; }
+	for (const entry of entries) {
+		const path = join(directory, entry.name);
+		if (entry.isDirectory() && entry.name !== "sol-pi") yield* sessionFiles(path);
+		else if (entry.isFile() && entry.name.endsWith(".jsonl") && entry.name !== "ledger.jsonl") yield path;
+	}
+}
+
+function readSource(file: string, ledgers: Map<string, string>): SessionSource {
+	const sessionId = sessionIdOf(file);
+	const ledger = ledgers.get(sessionId);
+	return { sessionId, kind: basename(dirname(file)) === "agents" ? "child" : "parent",
+		sessionText: readFileSync(file, "utf8"), ledgerText: ledger ? readFileSync(ledger, "utf8") : undefined };
+}
+
 export function scanAgentDir(options: ScanOptions): SessionSource[] {
-	const sessionsRoot = join(options.agentDir, "sessions");
-	const ledgerBySession = ledgerDirectories(options.agentDir);
+	const root = join(options.agentDir, "sessions");
+	const ledgers = ledgerDirectories(root);
 	const sources: SessionSource[] = [];
 	const from = options.now.getTime() - options.windowHours * 3_600_000;
-	const push = (filePath: string, kind: "parent" | "child", explicitId?: string) => {
-		const sessionId = explicitId ?? sessionIdOf(filePath);
-		let sessionText: string;
-		try {
-			sessionText = readFileSync(filePath, "utf8");
-		} catch {
-			return;
-		}
-		const calls = parseSessionText(sessionText);
-		const started = Date.parse(calls[0]?.timestamp ?? "");
-		if (!Number.isFinite(started) || started < from || started > options.now.getTime() + 60_000) return;
-		const ledgerPath = ledgerBySession.get(sessionId);
-		sources.push({ sessionId, kind, sessionText, ledgerText: ledgerPath ? readFileSync(ledgerPath, "utf8") : undefined });
-	};
-	const walkSessions = (directory: string): void => {
-		let entries: string[];
-		try {
-			entries = readdirSync(directory);
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			const child = join(directory, entry);
-			try {
-				if (statSync(child).isDirectory()) {
-					walkSessions(child);
-					continue;
-				}
-			} catch {
-				continue;
-			}
-			if (!entry.endsWith(".jsonl") || entry === "ledger.jsonl" || child.includes(`${sep}sol-pi${sep}`)) continue;
-			push(child, "parent");
-		}
-	};
-	walkSessions(sessionsRoot);
-	const managedRoot = join(options.agentDir, "managed-agents");
-	let managed: string[];
-	try {
-		managed = readdirSync(managedRoot).filter((entry) => entry.startsWith("session_"));
-	} catch {
-		managed = [];
+	for (const file of sessionFiles(root)) {
+		let source: SessionSource;
+		try { source = readSource(file, ledgers); } catch { continue; }
+		const started = Date.parse(parseSessionText(source.sessionText)[0]?.timestamp ?? "");
+		if (started >= from && started <= options.now.getTime() + 60_000) sources.push(source);
 	}
-	for (const entry of managed) push(join(managedRoot, entry, "native.jsonl"), "child", entry.replace(/^session_/, ""));
 	return sources.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
 }
 
 /** Resolve one explicit session id or file path, ignoring the window. */
 export function resolveSessionSource(agentDir: string, selector: string): SessionSource | undefined {
-	const candidates: Array<{ filePath: string; kind: "parent" | "child" }> = [];
-	if (selector.endsWith(".jsonl") && existsSync(selector)) candidates.push({ filePath: resolve(selector), kind: "parent" });
-	const ledgerBySession = ledgerDirectories(agentDir);
-	const walk = (directory: string, kind: "parent" | "child") => {
-		let entries: string[];
-		try {
-			entries = readdirSync(directory);
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			const child = join(directory, entry);
-			try {
-				if (statSync(child).isDirectory()) {
-					if (child.includes(`${sep}sol-pi${sep}`) || entry === "scratch") continue;
-					walk(child, kind);
-					continue;
-				}
-			} catch {
-				continue;
-			}
-			const candidateId = kind === "child" ? basename(join(child, "..")).replace(/^session_/, "") : sessionIdOf(child);
-			if (entry.endsWith(".jsonl") && entry !== "ledger.jsonl" && candidateId === selector) candidates.push({ filePath: child, kind });
-		}
-	};
-	walk(join(agentDir, "sessions"), "parent");
-	walk(join(agentDir, "managed-agents"), "child");
-	const chosen = candidates[0];
-	if (!chosen) return undefined;
-	const sessionText = readFileSync(chosen.filePath, "utf8");
-	const ledgerPath = ledgerBySession.get(selector);
-	return { sessionId: selector, kind: chosen.kind, sessionText, ledgerText: ledgerPath ? readFileSync(ledgerPath, "utf8") : undefined };
+	const root = join(agentDir, "sessions");
+	const file = selector.endsWith(".jsonl") && existsSync(selector) ? resolve(selector)
+		: [...sessionFiles(root)].find(candidate => sessionIdOf(candidate) === selector);
+	return file ? readSource(file, ledgerDirectories(root)) : undefined;
 }
 
 export interface BuildReportOptions {

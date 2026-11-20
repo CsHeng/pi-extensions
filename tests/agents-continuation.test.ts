@@ -8,13 +8,13 @@ import { ContinuationService, defaultEnclosingCapability } from "../extensions/a
 import { formatManagedContent } from "../extensions/agents/render.ts";
 import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 import { defaultConfig } from "../extensions/agents/config.ts";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { runChild } from "../extensions/agents/runner.ts";
 import { authorizePath } from "../extensions/agents/path-policy.ts";
-import { loadSkills } from "@earendil-works/pi-coding-agent";
+import { loadSkills, SessionManager } from "@earendil-works/pi-coding-agent";
 import { getRole } from "../extensions/agents/roles.ts";
 import { prepareChildGuidance } from "../extensions/agents/guidance-resources.ts";
 import { validateGraphStructure } from "../extensions/agents/graph.ts";
@@ -81,7 +81,11 @@ async function serviceFixture(t: test.TestContext) {
 	t.after(() => rm(base, { recursive: true, force: true }));
 	const repo = join(base, "repo"); await mkdir(repo);
 	await promisify(execFile)("git", ["init", "-q", repo]);
-	const store = new ManagedSessionStore(base);
+	const agentDirectory = join(base, "agent"); await mkdir(agentDirectory);
+	const store = new ManagedSessionStore(agentDirectory);
+	const owner = { repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
+	const loadRecord = (handle: string) => store.load(handle, owner);
+	const nativePath = async (handle: string) => store.nativePath(await loadRecord(handle));
 	const model = { provider: "agent-fixture", id: "fixture", reasoning: false };
 	const ctx = { cwd: repo, isProjectTrusted: () => true, model, thinkingLevel: "off", scopedModels: [], modelRegistry: { getAll: () => [model], getAvailable: () => [model] }, sessionManager: { getSessionId: () => "parent", getLeafId: () => "anchor", getBranch: () => [{ id: "anchor" }] } } as unknown as ExtensionContext;
 	let launches = 0;
@@ -110,7 +114,7 @@ async function serviceFixture(t: test.TestContext) {
 			env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: join(base, "agent"), PI_OFFLINE: "1", ...options.env },
 		});
 	} };
-	return { base, repo, store, ctx, dependencies, runs, service: new ContinuationService(dependencies), launches: () => launches,
+	return { base, repo, agentDirectory, store, ctx, dependencies, runs, loadRecord, nativePath, service: new ContinuationService(dependencies), launches: () => launches,
 		cancelOnBash: (controller: AbortController) => { cancellation = { controller, tool: "bash", pidFile: "descendant.pid" }; },
 		cancelOnSearch: (controller: AbortController) => { cancellation = { controller, tool: "find", pidFile: "search.pid" }; },
 	};
@@ -138,7 +142,7 @@ test("one native child writes two repositories and applies one bundle", async (t
 	assert.equal(f.launches(), 1);
 	assert.equal(await readFile(join(f.repo, "api.cjs"), "utf8"), 'module.exports = () => "primary-old";\n');
 	await assert.rejects(checkPrimary(), "the primary roots stay unchanged before apply");
-	const native = await readFile(join(f.store.path(view.handle), "native.jsonl"), "utf8");
+	const native = await readFile(await f.nativePath(view.handle), "utf8");
 	const checkedInChild = native.split("\n").filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.message?.role === "toolResult" && !entry.message.isError && entry.message.content?.some((part: { text?: string }) => part.text?.includes("dependency-verified")));
 	assert.equal(checkedInChild, true, "the real child ran the consumer command against its prepared API root");
 	const applied = await f.service.execute({ action: "apply", handle: view.handle, expectedEpisode: 1, candidateId: view.candidate!.id }, f.ctx);
@@ -272,7 +276,7 @@ test("explicit close releases a slot and retained-history warnings do not block 
 	assert.equal((await f.store.allocate(owner, "newslot", [{ ...graph.tasks[0]!, id: "scannew" }])).fresh, true);
 	assert.equal((await f.service.execute({ ...close, disposition: "discard" }, f.ctx)).status, "succeeded");
 	Object.defineProperty(f.store, "storageWarning", { get() { throw new Error("global scan forbidden"); } });
-	const native = join(f.store.path(records[1]!.handle), "native.jsonl");
+	const native = await f.nativePath(records[1]!.handle);
 	await writeFile(native, "retained-required-evidence");
 	assert.equal((await f.service.execute({ ...close, handle: records[1]!.handle, disposition: "discard" }, f.ctx)).status, "succeeded");
 	assert.equal(await readFile(native, "utf8"), "retained-required-evidence");
@@ -285,16 +289,59 @@ test("explicit close releases a slot and retained-history warnings do not block 
 
 const createWorker = (repo: string) => ({ action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: repo }] }] });
 
-test("normal and replay actions avoid global inventory while close still releases owned work", async (t) => {
+test("an in-memory parent launched in a subdirectory keeps its Pi project separate from its Git owner", async t => {
+	const f = await serviceFixture(t);
+	const cwd = join(f.repo, "subproject"); await mkdir(cwd);
+	const ctx = { ...f.ctx, cwd };
+	const result = await f.service.execute(createWorker(f.repo), ctx);
+	assert.equal(result.status, "succeeded");
+	const handle = result.sessions[0]!.handle;
+	const record = await f.loadRecord(handle);
+	assert.equal(record.owner.repo, f.repo);
+	assert.equal(dirname(f.store.nativePath(record)), join(f.agentDirectory, "sessions", `--${cwd.slice(1).split("/").join("-")}--`, "agents"));
+	assert.equal((await f.service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "discard" }, ctx)).status, "succeeded");
+});
+
+test("managed create and continue share one private archive in the initiating Pi project, and replay is inert", async (t) => {
 	const f = await serviceFixture(t);
 	Object.defineProperty(f.store, "storageWarning", { get() { throw new Error("global scan forbidden"); } });
-	const first = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "createworker");
-	assert.equal(first.status, "succeeded"); assert.equal(first.warnings, undefined);
+	const cwd = join(f.repo, "nested-project"); await mkdir(cwd);
+	const sessions = join(f.agentDirectory, "sessions");
+	const bucket = `--${cwd.slice(1).split("/").join("-")}--`;
+	const parent = SessionManager.create(cwd, join(sessions, bucket), { id: "parent" });
+	const parentSessionFile = parent.getSessionFile()!;
+	await writeFile(parentSessionFile, `${JSON.stringify(parent.getHeader())}\n`);
+	const ctx = { ...f.ctx, cwd, sessionManager: { ...f.ctx.sessionManager, getSessionFile: () => parentSessionFile } };
+	const first = await f.service.execute(createWorker(f.repo), ctx, undefined, undefined, "createworker");
+	assert.equal(first.status, "succeeded", JSON.stringify(first.error ?? first.sessions[0]?.result?.error)); assert.equal(first.warnings, undefined);
 	const handle = first.sessions[0]!.handle;
-	const replay = await new ContinuationService(f.dependencies).execute(createWorker(f.repo), f.ctx, undefined, undefined, "createworker");
+	const native = await f.nativePath(handle);
+	const directory = join(sessions, bucket, "agents");
+	assert.equal(dirname(native), directory);
+	const original = await readFile(native, "utf8");
+	const header = JSON.parse(original.split("\n")[0]!);
+	assert.match(header.id, /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/);
+	assert.equal(basename(native), `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`);
+	assert.equal(header.cwd, await preparedSource(f.store, handle, f.repo));
+	assert.equal(header.parentSession, parentSessionFile);
+	assert.equal(first.sessions[0]!.result?.observation?.ownerSessionId, header.id);
+	const initialFile = await lstat(native);
+	assert.equal(initialFile.mode & 0o777, 0o600);
+	assert.equal(initialFile.nlink, 1);
+	assert.equal((await lstat(directory)).mode & 0o777, 0o700);
+	const replay = await new ContinuationService(f.dependencies).execute(createWorker(f.repo), ctx, undefined, undefined, "createworker");
 	assertReplay(replay, first); assert.equal(f.launches(), 1);
-	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] }, f.ctx);
+	assert.equal(await readFile(native, "utf8"), original);
+	const continued = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] }, ctx);
 	assert.equal(continued.status, "succeeded"); assert.equal(continued.warnings, undefined);
+	assert.equal(await f.nativePath(handle), native);
+	assert.equal((await lstat(native)).ino, initialFile.ino);
+	assert.ok((await readFile(native, "utf8")).startsWith(original));
+	assert.equal(continued.sessions[0]!.result?.observation?.ownerSessionId, header.id);
+	assert.deepEqual(await readdir(sessions), [bucket]);
+	assert.deepEqual((await readdir(dirname(parentSessionFile))).sort(), [basename(parentSessionFile), "agents"].sort());
+	assert.deepEqual(await readdir(directory), [basename(native)]);
+	await assert.rejects(lstat(join(f.store.path(handle), "native.jsonl")), { code: "ENOENT" });
 	const applied = await f.service.execute({ action: "apply", handle, expectedEpisode: 2, candidateId: continued.sessions[0]!.candidate!.id }, f.ctx);
 	assert.equal(applied.status, "succeeded");
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
@@ -302,6 +349,31 @@ test("normal and replay actions avoid global inventory while close still release
 	assert.equal(closed.status, "succeeded");
 	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-2");
 	assert.equal((await f.service.execute({ action: "inspect", handle }, f.ctx)).status, "succeeded");
+});
+
+test("a pre-cutover handle cannot resume or replay but its owned Git candidate can be applied and released", async (t) => {
+	const f = await serviceFixture(t);
+	const created = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "legacy-create");
+	assert.equal(created.status, "succeeded");
+	const handle = created.sessions[0]!.handle;
+	const record = await f.loadRecord(handle);
+	const legacy = join(f.store.path(handle), "native.jsonl");
+	await rename(f.store.nativePath(record), legacy);
+	const history = await readFile(legacy, "utf8");
+	const source = await preparedSource(f.store, handle, f.repo);
+	delete record.native;
+	await f.store.save(record);
+	const service = new ContinuationService(f.dependencies);
+	const replay = await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "legacy-create");
+	assert.equal(replay.error?.code, "managed_native_binding_missing");
+	const continued = await service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "try legacy" }] }, f.ctx);
+	assert.equal(continued.sessions[0]?.requestError?.code, "managed_native_binding_missing");
+	assert.equal(f.launches(), 1);
+	assert.equal((await service.execute({ action: "apply", handle, expectedEpisode: 1, candidateId: created.sessions[0]!.candidate!.id }, f.ctx)).status, "succeeded");
+	assert.equal(await readFile(join(f.repo, "candidate.txt"), "utf8"), "candidate-1");
+	assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "discard" }, f.ctx)).status, "succeeded");
+	await assert.rejects(lstat(source), { code: "ENOENT" });
+	assert.equal(await readFile(legacy, "utf8"), history);
 });
 
 function errnoError(code: string, message: string): NodeJS.ErrnoException {
@@ -341,14 +413,14 @@ test("managed service keeps fixed inputs, replays inertly, restores history and 
 	const second = await f.service.execute(next, f.ctx, undefined, undefined, "fixednext");
 	assert.equal(second.status, "succeeded", JSON.stringify(second));
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
-	const before = await readFile(join(f.store.path(handle), "native.jsonl"), "utf8");
+	const before = await readFile(await f.nativePath(handle), "utf8");
 	assertReplay(await f.service.execute(next, f.ctx, undefined, undefined, "fixednext"), second);
 	const beforeReplay = f.runs.length;
 	assertReplay(await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "fixedcreate"), first);
 	assert.equal(f.runs.length, beforeReplay, "cached create is not a new execution wave");
 	assert.equal(f.runs[0]!.telemetry.timing?.children[0]?.taskId, first.sessions[0]!.result!.observation!.ownerSessionId);
 	assertReplay(await f.service.execute({ ...createWorker(f.repo), tasks: createWorker(f.repo).tasks.map((task) => ({ access: task.access, objective: task.objective, inputs: [], role: task.role, id: task.id })) }, f.ctx, undefined, undefined, "fixedcreate"), first);
-	assert.equal(await readFile(join(f.store.path(handle), "native.jsonl"), "utf8"), before);
+	assert.equal(await readFile(await f.nativePath(handle), "utf8"), before);
 	assert.equal(f.launches(), 2);
 	const apply = { action: "apply", handle, expectedEpisode: 2, candidateId: second.sessions[0]!.candidate!.id };
 	assert.equal((await f.service.execute(apply, f.ctx)).status, "succeeded");
@@ -401,7 +473,7 @@ test("native workers prepare their own dependencies and preserve Git ownership d
 	}
 	const source = await preparedSource(f.store, first.handle, f.repo);
 	assert.equal((await promisify(execFile)("git", ["-C", source, "show", ":candidate.txt"])).stdout, "local-dependency");
-	const firstEntries = (await readFile(join(f.store.path(first.handle), "native.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+	const firstEntries = (await readFile(await f.nativePath(first.handle), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 	const bash = firstEntries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "bash");
 	assert.equal(bash.length, 1); assert.equal(bash[0].message.isError, false);
 	assert.equal(await readFile(join(await preparedSource(f.store, first.handle, f.repo), "candidate.txt"), "utf8"), "local-dependency");
@@ -418,7 +490,7 @@ test("native workers prepare their own dependencies and preserve Git ownership d
 test("managed finalization succeeds beyond the former native-history byte budget", async (t) => {
  const f = await serviceFixture(t);
  const service = new ContinuationService({ ...f.dependencies, runChild: async options => {
-  const header = { type: "session", version: 3, id: "large-history", cwd: options.cwd, timestamp: new Date().toISOString() };
+  const header = JSON.parse(await readFile(options.diagnosticSession.path, "utf8"));
   const lines = [JSON.stringify(header)];
   for (let index = 0; index < 40; index++) lines.push(JSON.stringify({ type: "custom", customType: "synthetic-history", id: `bulk-${index}`, parentId: index ? `bulk-${index - 1}` : null, timestamp: header.timestamp, data: "x".repeat(900_000) }));
   await writeFile(options.diagnosticSession.path, lines.join("\n") + "\n");
@@ -429,9 +501,9 @@ test("managed finalization succeeds beyond the former native-history byte budget
  assert.equal(result.sessions[0]!.result!.workerToolsSettled, true);
  assert.ok(result.sessions[0]!.candidate, "large auxiliary history cannot invalidate a completed source candidate");
  assert.equal(result.sessions[0]!.result!.observation?.available, false, "bounded optional observation may remain unavailable");
- const file = join(f.store.path(result.sessions[0]!.handle), "native.jsonl");
+ const file = await f.nativePath(result.sessions[0]!.handle);
  assert.ok((await lstat(file)).size > 32 * 1024 * 1024);
- assert.equal((await f.store.nativeRevision(result.sessions[0]!.handle)).sessionId, "large-history");
+ assert.equal((await f.store.nativeRevision(await f.loadRecord(result.sessions[0]!.handle))).sessionId, basename(file, ".jsonl").split("_")[1]);
 });
 
 test("managed cancellation drains an actual bash process group before returning", async (t) => {
@@ -670,7 +742,7 @@ for (const installed of [false, true]) test(`managed ${installed ? "installed" :
 	const initial = await service.execute({ ...createWorker(f.repo), tasks: createWorker(f.repo).tasks.map((task) => ({ ...task, objective: `${task.objective} private-continuity-fixture` })) }, f.ctx);
 	assert.equal(initial.status, "succeeded", JSON.stringify(initial));
 	const handle = initial.sessions[0]!.handle;
-	const native = join(f.store.path(handle), "native.jsonl");
+	const native = await f.nativePath(handle);
 	const compacted = (await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 	assert.equal(compacted.filter((entry) => entry.type === "compaction").length, 1);
 	const observed = initial.sessions[0]!.result!.observation!;
@@ -701,7 +773,7 @@ test("cold running state, revoked trust and a changed native leaf never replay o
 	const handle = initial.sessions[0]!.handle;
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	const record = await f.store.load(handle, owner);
-	const native = join(f.store.path(handle), "native.jsonl");
+	const native = f.store.nativePath(record);
 	const request = { action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-worker-fixture" }] };
 	const restored = new ContinuationService(f.dependencies);
 	record.state = "running"; await f.store.save(record);
@@ -853,7 +925,7 @@ test("native explorer create/continue reads an explicit external Git file withou
 	assert.ok(first.sessions[0]!.result!.observation!.toolNames?.includes("git_read"));
 	assert.equal(first.sessions[0]!.result!.observation!.toolNames?.includes("edit"), false);
 	const handle = first.sessions[0]!.handle;
-	const native = join(f.store.path(handle), "native.jsonl");
+	const native = await f.nativePath(handle);
 	assert.equal((await readFile(native, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.message?.role === "user").length, 1);
 	const next = await f.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: 1, message: "host-explorer-fixture" }] }, f.ctx);
 	assert.equal(next.status, "succeeded", JSON.stringify(next));
@@ -877,7 +949,7 @@ test("same-create report-only DAG hides unapplied worker candidates from a depen
 	assert.ok(worker.candidate);
 	assert.equal(await readFile(join(await preparedSource(f.store, worker.handle, f.repo), "candidate.txt"), "utf8"), "candidate-1");
 	await assert.rejects(readFile(join(f.repo, "candidate.txt")), { code: "ENOENT" });
-	assert.match(await readFile(join(f.store.path(review.handle), "native.jsonl"), "utf8"), /Predecessor worker \(succeeded\)/);
+	assert.match(await readFile(await f.nativePath(review.handle), "utf8"), /Predecessor worker \(succeeded\)/);
 	assert.doesNotMatch(review.result!.output, /candidate-1/);
 	const apply = await f.service.execute({ action: "apply", handle: worker.handle, expectedEpisode: 1, candidateId: worker.candidate!.id }, f.ctx);
 	assert.equal(apply.status, "succeeded");

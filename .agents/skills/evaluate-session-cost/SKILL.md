@@ -37,7 +37,7 @@ bun \
 
 Useful options: `--agent-dir <dir>` (default `$PI_CODING_AGENT_DIR` or `~/.pi/agent`), `--now <iso>` to freeze a window for a reproducible report, `--format json`, `--output <new-file>` (refuses to overwrite), `--calibration <n>`, `--min-miss-tokens <n>`.
 
-`--window-hours` scans both `sessions/**` parent sessions and `managed-agents/session_*/native.jsonl` child sessions. Child spend is real spend and belongs in the total; child ledgers are matched by session id.
+`--window-hours` scans the Pi `sessions/` tree once. Files in a project's `agents/` directory contribute child usage, and other native sessions contribute parent usage. Ledgers are matched by native session ID. Use historical usage-only exports for recorded accounting totals. Their rows do not preserve the prompt, tool or context-change history needed to explain re-bills. Missing-model subtotals belong to the offline export receipt.
 
 ## Interpret
 

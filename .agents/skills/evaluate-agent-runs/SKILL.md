@@ -42,7 +42,7 @@ Options:
 - `--session <path-or-id>`: exact-session input. A path (or anything containing a separator or ending in `.jsonl`) is resolved directly; a bare id is resolved under `--sessions-root` (default `~/.pi/agent/sessions`) and must match exactly one JSONL file.
 - `--sessions-root <dir>`: alternate sessions root for `--session` resolution, or the required root for `--epoch current`. Use a bounded fixture or explicitly selected root.
 - `--epoch current`: managed current-epoch mode; requires `--sessions-root` and `--manifest`. Selects matching managed invocations by their explicit epoch pair and activation cutoff. Native `observations` stay unavailable in this mode; select an exact session to inspect them.
-- `--manifest <file>`: version-one epoch manifest `{version:1, extensionEpoch, configurationEpoch, extensionActivatedAtMs, configurationActivatedAtMs}`.
+- `--manifest <file>`: the version-one epoch manifest at `<agent-dir>/managed-agents/_provenance/current-v4.json`; epoch scans use parent sessions and skip the project's `agents/` accounting directory. Manifest shape: `{version:1, extensionEpoch, configurationEpoch, extensionActivatedAtMs, configurationActivatedAtMs}`.
 - `--disposition <json-file>`: exact-session only. One bounded parent-acceptance declaration; see the schema for the strict shape, owner/entry-range association, explicit-null handling, and 4 KiB limit.
 - `--output <new-file>`: create a report. The extractor refuses to overwrite an existing path.
 - `--help`: print usage.
