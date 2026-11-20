@@ -29,7 +29,7 @@ export interface JobsViewReset { version: typeof JOBS_VIEW_VERSION; generation: 
 export interface JobsViewRecord {
 	executionId: string;
 	label: string;
-	/** Human-only bounded first command line; not persisted in Async Bash events. */
+	/** Human-only bounded single-line command preview; not persisted in Async Bash events. */
 	commandPreview?: string;
 	status: BashStatus;
 	/** Running past its checkpoint until the model renews it. Absent means false. */

@@ -153,13 +153,15 @@ export function commandLabel(command: string): string {
 	return base.length > LABEL_LIMIT ? base.slice(0, LABEL_LIMIT) : base;
 }
 
-/** Bounded first command line for the session-local human view, never telemetry or output. */
+/** Single-line preview of the command (including inline scripts) for the session-local human view. */
 export function commandPreview(command: string): string {
-	const first = stripTerminalSequences(command.trimStart().split(/\r?\n/, 1)[0] ?? "")
+	const line = stripTerminalSequences(command).replace(/\\\r?\n/gu, "")
 		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
-	// Keep command structure, not assignment values or common credential-bearing options.
-	const safe = first.replace(/\b([A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s;]+)/gu, "$1=…")
-		.replace(/((?:--(?:token|password|secret|api-key|authorization|header|user)|-[Hu])(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/giu, "$1…");
+	// Consume each value in one pass: an assignment inside a quoted header is part of that header.
+	const safe = line.replace(
+		/(\b[A-Za-z_]\w*(?:\s*=\s*(?=["'])|=)|(?:--(?:token|password|secret|api-key|authorization|header|user)|-[Hu])(?:=|\s+))(?:"(?:\\.|[^"\\])*"?|'[^']*'?|[^\s;]+)/giu,
+		"$1…",
+	);
 	return safe.slice(0, 512) || "Bash";
 }
 

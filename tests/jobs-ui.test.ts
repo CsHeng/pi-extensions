@@ -351,13 +351,34 @@ test("Bash jobs excludes foreground completions and keeps background work while 
 	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 30_000 }, 30_000), true);
 	assert.equal(isVisibleBackgroundJob({ ...detached, terminalAt: 100, exitCode: 1 }), true);
 	assert.equal(formatJobDuration(230), "230ms");
-	assert.equal(commandPreview("mise exec -- python3 - <<'PY'\nprint('private body')"), "mise exec -- python3 - <<'PY'");
-	assert.equal(commandPreview("TOKEN=private curl --password hidden https://example.test"), "TOKEN=… curl --password … https://example.test");
 	const rendered = jobRows({ records: [record({ executionId: "exec_hidden-id", status: "exited", commandPreview: "mise exec -- " + "command ".repeat(30) })] }, 80, 4, 10_000).join("\n");
 	assert.match(rendered, /✓ mise exec/);
 	// The preview clips before the duration column, which stays visible.
 	assert.match(rendered.replace(/\u001b\[[0-9;]*m/g, ""), /… +\d+s$/);
 	assert.doesNotMatch(rendered, /hidden-id/);
+});
+
+test("Jobs inline and central lists show the beginning of a multiline command on one row", async () => {
+	const command = "\r\npython3 - <<'PY'\r\n\tfrom pathlib import Path\n\nprint(Path.cwd())\nPY";
+	const preview = commandPreview(command);
+	assert.equal(preview, "python3 - <<'PY' from pathlib import Path print(Path.cwd()) PY");
+	const records = [record({ executionId: "exec_script", commandPreview: preview, status: "timeout" })];
+	const h = harness();
+	await openJobsInspection(h.ctx, () => ({ items: jobItems({ records }, 6000) }));
+	for (const rows of [jobFrame({ records }, 80, 4, 6000, undefined).lines, h.selects[0]!]) {
+		assert.ok(rows.some(row => row.includes(preview) && row.includes("timeout · 5s")));
+		assert.ok(rows.every(row => !/[\r\n]/u.test(row)));
+	}
+});
+
+test("multiline command previews redact and strip controls before the 512-character limit", () => {
+	assert.equal(commandPreview("TOKEN=private curl --password hidden https://example.test"), "TOKEN=… curl --password … https://example.test");
+	assert.equal(commandPreview("curl --header \\\r\n  'Authorization: hidden value'\r\necho \x1b[31mok\x1b[0m"), "curl --header … echo ok");
+	const long = commandPreview("python3 - <<'PY'\nkey = '" + "hidden ".repeat(600) + "'\nprint(42)\n" + "x".repeat(700));
+	assert.equal(long.length, 512);
+	assert.ok(long.startsWith("python3 - <<'PY' key = … print(42) "));
+	assert.equal(commandPreview("curl\n-H 'Authorization: Basic x=y more private text' /path"), "curl -H … /path");
+	assert.equal(commandPreview(" \r\n\t "), "Bash");
 });
 
 test("jobs query returns the current branch snapshot and does not control or wake execution", async (t) => {
