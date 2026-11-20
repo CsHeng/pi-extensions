@@ -133,6 +133,7 @@ function historyItem(row: SessionViewHistoryRow, name: string): InspectionItem {
 	return { key: agentItemKey(row.handle, row.episode), ...stateGlyph(outcome), name, activity: outcome, meta: routeText(row.route), tail,
 		detail: () => [`Agent ${row.handle} ep${row.episode}`, name, `State: ${row.state}${unconfirmed ? "?" : ""} · outcome: ${row.latestOutcome}${!row.onCurrentBranch ? " · off-branch" : ""}${row.legacy ? " · legacy" : ""}`,
 			`Elapsed: ${formatDuration(row.elapsedMs ?? null)}`, `Route: ${routeText(row.route, true)}`, `Usage: ${formatAgentUsage(row.recordedUsage)} (agent history)`,
+			...(unconfirmed && row.onCurrentBranch ? ["Activity unconfirmed. Ask the main agent to reconcile this handle and episode."] : []),
 			`Accepted episodes: ${row.acceptedEpisodes ?? "unknown"} · report ${row.reportComplete ? "complete" : "incomplete"} · retained ${row.retained ? "yes" : "no"}`,
 			`Candidate roots: ${row.roots?.length ?? "unavailable"}`, ...(row.roots ?? []).map(root => `${root.id.slice(0, 8)} ${root.status}${root.recovery === "required" ? "!" : ""}/${root.release} ${root.destination}`),
 			...(row.release ? [`cleanup=${row.release.status}${row.release.remaining ? ` remaining=${row.release.remaining}` : ""}`] : [])] };

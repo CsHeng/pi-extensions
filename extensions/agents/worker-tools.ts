@@ -240,7 +240,8 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 	// evidence only ever describe these; an opaque configured implementation is not
 	// certified as drained merely because the toolkit lifecycle settled.
 	let ownedTools: string[] = [];
-	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("agents.worker-lifecycle", { phase, ok, owned: [...ownedTools] });
+	let recoverySafe = true; // Only in-process, toolkit-owned file operations can attest crash recovery.
+	const marker = (phase: "ready" | "stopped", ok: boolean) => pi.appendEntry("agents.worker-lifecycle", { phase, ok, owned: [...ownedTools], recoverySafe });
 	// CLI extensions run session_start before configured extensions, so ownership cannot
 	// be decided there. before_agent_start runs only after every session_start handler,
 	// including configured same-name registrations. The kit then claims only builtin names.
@@ -275,6 +276,7 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 		if (loaded.manifest.guidance) event.systemPromptOptions.contextFiles = loaded.manifest.guidance.contextFiles;
 	});
 	pi.on("tool_call", async (event) => {
+		if (!ownedTools.includes(event.toolName) || !["read", "write", "edit", "ls"].includes(event.toolName)) recoverySafe = false;
 		if (fatal || !loaded.manifest) return { block: true, terminate: true, reason: "Managed worker state is unavailable." };
 		if (isNativeBashTool(event.toolName)) return;
 		// The typed Git tool authorizes its repository selector and every requested path

@@ -12,7 +12,7 @@ import { formatUsageLane } from "../shared/usage-metrics.ts";
 
 const SUMMARY_SCALAR_CHARS = 300;
 /** Control acknowledgements name the durable outcome; the prior report stays recoverable through explicit inspect(handle). */
-const COMPACT_ACTIONS: ReadonlySet<NonNullable<SessionActionResult["action"]>> = new Set(["apply", "refresh", "close"]);
+const COMPACT_ACTIONS: ReadonlySet<NonNullable<SessionActionResult["action"]>> = new Set(["apply", "refresh", "close", "reconcile"]);
 
 function singleLine(value: string): string {
 	return truncateLine(value.replace(/\s+/g, " ").trim(), SUMMARY_SCALAR_CHARS).text;
@@ -206,6 +206,11 @@ function managedEnvelope(details: SessionActionResult, reportBudget: number | nu
 		sessions: details.sessions.map((session) => sessionPayload(session, reportBudget, omitReport)),
 	};
 	if (details.wait) payload.wait = details.wait.status === "yielded" ? { ...details.wait, note: yieldNote(details.wait.reason) } : details.wait;
+	if (details.recoveryWorkspaces) {
+		const roots = details.recoveryWorkspaces;
+		payload.recoveryWorkspaces = utf8Bytes(JSON.stringify(roots)) <= DEFAULT_MAX_BYTES / 2 ? roots : roots.map(root =>
+			"unavailable" in root ? root : { rootId: root.rootId, changedCount: root.changedCount, inputBase: root.inputBase, pathsOmitted: true });
+	}
 	if (details.warnings?.length) payload.warnings = details.warnings;
 	if (details.error) payload.error = {
 		code: boundScalar(details.error.code), ...(details.error.detail ? { detail: boundScalar(details.error.detail) } : {}),
@@ -261,6 +266,7 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 		`Managed session ${details.action ?? "request"}: ${details.status}${details.runId ? ` run=${boundScalar(details.runId)}` : ""}${details.kind === "submission" ? " (receipt, not completion)" : ""}`,
 	];
 	if (details.wait) lines.push(details.wait.status === "yielded" ? yieldNote(details.wait.reason)! : `Observation budget expired after ${details.wait.waitSeconds}s; execution continues. In TUI/RPC, leave work unfinished and resume on the completion notice rather than polling.`);
+	for (const root of details.recoveryWorkspaces ?? []) lines.push(`Recovery root ${boundScalar(root.rootId)}: ${"unavailable" in root ? "changes unavailable" : `${root.changedCount} changed paths · inspect against ${root.inputBase}`}`);
 	for (const warning of details.warnings ?? []) lines.push(`Warning: ${warning.message}`);
 	if (details.error) lines.push(`request error=${boundScalar(details.error.code)}${details.error.detail ? ` cause=${boundScalar(details.error.detail)}` : ""}${details.error.missingFields?.length ? ` missing=${details.error.missingFields.join(",")}` : ""}${details.error.unexpectedFields?.length ? ` unexpected=${details.error.unexpectedFields.join(",")}` : ""}${details.error.invalidFields?.length ? ` invalid=${details.error.invalidFields.join(",")}` : ""}`);
 	for (const session of details.sessions) {

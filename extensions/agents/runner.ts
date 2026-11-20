@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { nativeLines } from "./native-lines.ts";
-import { chmod, lstat, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { workerToolsSettled, prepareChildReceipt, saveChildReceipt, type ChildProofBinding } from "./child-proof.ts";
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
@@ -53,6 +53,8 @@ export interface PiInvocation {
 type StopCause = "aborted" | "child_exit_stalled";
 
 export interface ChildRunOptions {
+	/** Optional durable launch proof, supplied only under the managed writer lock. */
+	childProof?: ChildProofBinding;
 	managedWorkerScratch?: string;
 	managedWorkerInputs?: WorkerInputState;
 	/** Original project root, distinct from the isolated child source cwd. */
@@ -205,6 +207,8 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 		const observationBefore = await readObservationNative(options.diagnosticSession.path);
 		const observationStart = observationBefore === undefined ? undefined : nativeLeaf(observationBefore);
 		const nativeStartBytes = options.managedWorkerScratch ? (await lstat(options.diagnosticSession.path)).size : 0;
+		const proof = options.childProof && options.managedWorkerScratch && process.platform === "linux"
+			? await prepareChildReceipt(options.childProof, options.diagnosticSession.path, nativeStartBytes).catch(() => undefined) : undefined;
 		const completePrompt = buildChildPrompt(options.task, options.prompt, options.capability.grants.some((grant) => grant.permission === "write"));
 		if (Buffer.byteLength(completePrompt, "utf8") > HARD_LIMITS.maxPromptBytes) {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
@@ -248,6 +252,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			let closed = false;
 			let stopping = false;
 			let childStartedAt: number | undefined;
+			let receipt: Promise<void> | undefined;
 			let killTimer: NodeJS.Timeout | undefined;
 			let settledTimer: NodeJS.Timeout | undefined;
 
@@ -286,6 +291,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 
 			child.once("spawn", () => {
 				childDidStart = true;
+				if (proof && managedGroup && child.pid) receipt = saveChildReceipt(proof, child.pid).catch(() => {});
 				childStartedAt = now();
 				options.onChildStarted?.();
 				activitySink(parser.snapshot(childStartedAt));
@@ -298,7 +304,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				stderr = truncateUtf8(stderr + chunk.toString(), HARD_LIMITS.maxStderrBytes).text;
 			});
 			child.once("error", (error) => { spawnError = error; });
-			child.once("close", (code, signal) => {
+			child.once("close", async (code, signal) => {
 				closed = true;
 				if (childStartedAt !== undefined) {
 					childDurationMs = Math.max(0, now() - childStartedAt);
@@ -307,6 +313,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				if (killTimer) clearTimeout(killTimer);
 				if (settledTimer) clearTimeout(settledTimer);
 				options.signal?.removeEventListener("abort", abort);
+				await receipt;
 				resolveExit({ code, signal });
 			});
 		});
@@ -365,35 +372,6 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 	}
 }
 
-async function workerToolsSettled(path: string, start: number): Promise<boolean> {
-	try {
-		const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-		try {
-			const info = await file.stat();
-			if (!info.isFile() || info.size < start) return false;
-			let ready = false;
-			let stopped = false;
-			// The toolkit lifecycle only certifies operations it owns. A configured same-name
-			// native override keeps its own implementation, so ready/stopped must declare the
-			// exact owned set and never imply that an opaque implementation's processes settled.
-			let owned: readonly string[] | undefined;
-			for await (const entry of nativeLines(file, start)) {
-				if (entry.type !== "custom" || entry.customType !== "agents.worker-lifecycle") continue;
-				const data = entry.data as { ok?: unknown; phase?: unknown; owned?: unknown } | undefined;
-				if (data?.ok !== true) return false;
-				if (!Array.isArray(data.owned) || data.owned.length > 64 || data.owned.some(name => typeof name !== "string" || name.length === 0 || name.length > 64)) return false;
-				const declared = [...data.owned].sort();
-				if (owned === undefined) owned = declared;
-				else if (owned.length !== declared.length || owned.some((name, index) => name !== declared[index])) return false;
-				if (data.phase === "ready") ready = true;
-				else if (data.phase === "stopped" && ready) stopped = true;
-				else return false;
-			}
-			const after = await file.stat();
-			return ready && stopped && info.size === after.size && info.mtimeMs === after.mtimeMs;
-		} finally { await file.close(); }
-	} catch { return false; }
-}
 
 function failure(options: ChildRunOptions, started: number, now: () => number, code: string, message: string): TaskResult {
 	return {

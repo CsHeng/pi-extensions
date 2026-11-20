@@ -26,8 +26,8 @@ test("registration adds no context projection and keeps only operational event h
 	} as unknown as ExtensionAPI;
 	registerContinuationTool(pi, {});
 	assert.equal(handlers.has("context"), false, "no automatic session index is projected into the model context");
-	assert.equal(handlers.has("before_agent_start"), false, "no per-turn index refresh bookkeeping remains");
-	assert.deepEqual([...handlers.keys()].sort(), ["agent_end", "agent_start", "context_with_system", "input", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_result", "turn_start"]);
+	assert.equal(handlers.has("before_agent_start"), true, "bounded user-directed recovery is separate from a per-turn index");
+	assert.deepEqual([...handlers.keys()].sort(), ["agent_end", "agent_start", "before_agent_start", "context_with_system", "input", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_result", "turn_start"]);
 });
 
 test("the current storage contract is unchanged so supported old records stay readable", () => {

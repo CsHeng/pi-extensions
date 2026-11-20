@@ -158,6 +158,8 @@ test("apply conflict receipts preserve partial outcomes and expose bounded scope
  assert.ok(receipt.sessions[0].candidate.roots.some((root: { status: string; applied: number }) => root.status === "applied" && root.applied === 1));
  const refreshed = await service.execute({ action: "refresh", handle: f.record.handle, expectedEpisode: 1 }, ctx);
  assert.equal(refreshed.error!.code, "candidate_recovery_required", "partial apply still requires adjudication before refresh");
+ const discarded = await service.execute({ action: "close", handle: f.record.handle, expectedEpisode: 1, disposition: "discard" }, ctx);
+ assert.equal(discarded.error?.code, "candidate_recovery_required", "preserve uncertain root and destination evidence");
  assert.doesNotMatch(formatManagedContent(applied) + formatManagedContent(refreshed), /private-(?:base|parent|worker)-content|<<<<<<<|>>>>>>>/);
  const record = await f.store.load(f.record.handle, f.owner);
  assert.equal(record.roots.find(root => root.inputs?.gitWorkspace?.path === f.workspaceB.path)!.inputs!.gitWorkspace!.inputBase, f.workspaceB.inputBase);

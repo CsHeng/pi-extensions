@@ -12,6 +12,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { runChild } from "../extensions/agents/runner.ts";
+import { childProofSettled } from "../extensions/agents/child-proof.ts";
+import { newWriterMarker } from "../extensions/agents/writer-recovery.ts";
 import { getManagedRole, getRole } from "../extensions/agents/roles.ts";
 import type { EffectiveRoute } from "../extensions/agents/contracts.ts";
 import { syntheticSubprocessEnv } from "./fixtures/synthetic-subprocess-env.ts";
@@ -50,7 +52,11 @@ test("native append selection merges with child roles and survives session conti
 			};
 			// A second episode restores the same native history without duplicating instructions.
 			for (let episode = 0; episode < (selection === "project" ? 2 : 1); episode++) {
-				const result = await runChild(options);
+				const marker = worker && episode === 1 ? await newWriterMarker() : undefined;
+				const proof = marker ? { marker: { ...marker, phase: "launch-intent" as const }, path: join(scratch, "receipt"), episode: episode + 1 } : undefined;
+				const previousLeaf = proof ? JSON.parse((await readFile(session, "utf8")).trimEnd().split("\n").at(-1)!).id : undefined;
+				const result = await runChild({ ...options, ...(proof ? { childProof: proof } : {}) });
+				if (proof) assert.equal(await childProofSettled(proof, session, async () => true, previousLeaf), true, "native Pi emitted an episode-bound settled receipt");
 				assert.equal(result.status, "succeeded", `${selection}/${roleName}: ${result.error?.code} ${result.stderr}`);
 				assert.deepEqual(JSON.parse(result.output), { counts: [Number(selection === "global"), Number(selection === "project"), 0, 1, 1], native: true });
 			}
@@ -224,6 +230,7 @@ test("configured same-name native write override keeps ownership in a managed wo
 	// Toolkit lifecycle evidence names only the tools this kit owns; `write` is opaque here.
 	const lifecycle = (await readFile(session, "utf8")).trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.customType === "agents.worker-lifecycle");
 	assert.ok(lifecycle.length >= 2, JSON.stringify(lifecycle));
+	assert.ok(lifecycle.some(entry => entry.data.phase === "stopped" && entry.data.recoverySafe === false), "opaque write cannot certify crash recovery");
 	assert.ok(lifecycle.every(entry => Array.isArray(entry.data.owned) && !entry.data.owned.includes("write")), JSON.stringify(lifecycle));
 	// The toolkit still owns every native name the configured catalog left to the builtins.
 	for (const name of ["read", "grep", "find", "ls", "edit", "bash", "git_read"]) assert.ok(lifecycle[0]!.data.owned.includes(name), `${name} missing from owned: ${JSON.stringify(lifecycle[0]!.data.owned)}`);

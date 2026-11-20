@@ -10,6 +10,7 @@ import { validateGraphStructure } from "../extensions/agents/graph.ts";
 import { emptyUsage } from "../extensions/agents/contracts.ts";
 import { collectNativeObservation } from "../extensions/agents/observability.ts";
 import { MANAGED_LIMITS } from "../extensions/agents/session-contracts.ts";
+import { newWriterMarker } from "../extensions/agents/writer-recovery.ts";
 
 async function setup(t: test.TestContext) {
 	const base = await mkdtemp(join(tmpdir(), "managed-session-"));
@@ -20,6 +21,60 @@ async function setup(t: test.TestContext) {
 	const store = new ManagedSessionStore(base);
 	return { base, owner, tasks: graph.tasks, store };
 }
+
+test("reconciliation fences active, legacy and unsettled writers, then preserves interrupted state", async t => {
+ const { store, owner, tasks } = await setup(t);
+ const record = (await store.allocate(owner, "recover", tasks)).records[0]!;
+ record.state = "running"; await store.save(record);
+ const path = join(store.path(record.handle), ".writer-lock");
+ const marker = await newWriterMarker();
+ if (!marker) { t.skip("Linux process identity unavailable"); return; }
+ const put = async (value: unknown) => writeFile(path, JSON.stringify(value), { mode: 0o600 });
+ await put(marker);
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode), /managed_writer_active/);
+ await assert.rejects(store.reconcile(record.handle, { ...owner, parentSessionId: "other" }, record.episode), /managed_owner_mismatch/);
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode + 1), /stale_episode/);
+ await put({ ...marker, start: "0", phase: "launch-intent" });
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode), /managed_writer_settlement_unknown/);
+ await writeFile(path, "legacy");
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode), /managed_recovery_legacy_or_invalid_writer/);
+ await put({ ...marker, start: "0", phase: "settled" });
+ const recovered = await store.reconcile(record.handle, owner, record.episode);
+ assert.equal(recovered.state, "interrupted");
+ assert.equal((await store.reconcile(record.handle, owner, record.episode)).state, "interrupted");
+ await assert.rejects(lstat(path), /ENOENT/);
+});
+
+test("resume after a killed pre-launch owner recovers the same episode exactly once", async t => {
+	if (!await newWriterMarker()) { t.skip("Linux process identity unavailable"); return; }
+	const { store, base, owner, tasks } = await setup(t);
+	const record = (await store.allocate(owner, "crash", tasks)).records[0]!;
+	record.episode = 1; record.state = "queued";
+	record.requests.push({ id: "crash", fingerprint: fingerprint(["crash"]), episode: 1, state: "running" });
+	await store.save(record);
+	const module = new URL("../extensions/agents/managed-sessions.ts", import.meta.url).href;
+	const killBeforeLaunch = `import {ManagedSessionStore} from ${JSON.stringify(module)};
+		const store = new ManagedSessionStore(${JSON.stringify(base)});
+		await store.withSession(${JSON.stringify(record.handle)}, ${JSON.stringify(owner)}, async r => {
+			await store.writerPhase(r.handle, "not-started");
+			process.kill(process.pid, "SIGKILL");
+		})`;
+	await assert.rejects(promisify(execFile)("bun", ["-e", killBeforeLaunch], { timeout: 15_000 }), { signal: "SIGKILL" });
+	const attempts = await Promise.allSettled([store.reconcile(record.handle, owner, 1), store.reconcile(record.handle, owner, 1)]);
+	assert.ok(attempts.some(attempt => attempt.status === "fulfilled"));
+	const recovered = await store.load(record.handle, owner);
+	assert.equal(recovered.state, "interrupted"); assert.equal(recovered.requests[0]!.state, "unknown"); assert.equal(recovered.result, undefined);
+	await assert.rejects(lstat(join(store.path(record.handle), ".writer-lock")), { code: "ENOENT" });
+});
+
+test("reconciliation fails closed without a writer or with a pending finalization", async t => {
+ const { store, owner, tasks } = await setup(t);
+ const record = (await store.allocate(owner, "recovermissing", tasks)).records[0]!;
+ record.state = "queued"; await store.save(record);
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode), /managed_recovery_no_writer_evidence/);
+ await store.beginFinalization(record.handle, record.episode);
+ await assert.rejects(store.reconcile(record.handle, owner, record.episode), /managed_recovery_uncertain_finalization/);
+});
 
 test("task labels survive admission and storage while the persistent handle stays separate", async t => {
  const { store, owner } = await setup(t);

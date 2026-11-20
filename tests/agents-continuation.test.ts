@@ -185,6 +185,7 @@ test("typed subdelegation cannot widen enclosing grants while a contained task s
 	const requests = [
 		{ action: "continue", episodes: [{ handle: child.handle, expectedEpisode: child.episode, message: "continue" }] },
 		{ action: "refresh", handle: child.handle, expectedEpisode: child.episode },
+		{ action: "reconcile", handle: child.handle, expectedEpisode: child.episode },
 		{ action: "apply", handle: child.handle, expectedEpisode: child.episode, candidateId: "Candidate" },
 	];
 	for (const request of requests) assert.equal((await service.execute(request, f.ctx)).error?.code, "nested_access_denied");
@@ -674,10 +675,12 @@ test("post-rename save error leaves a durable fence against the actual worker ca
  const apply = await service.execute({ action: "apply", handle, expectedEpisode: 1, candidateId }, f.ctx);
  assert.notEqual(apply.status, "succeeded");
  assert.notEqual((await service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "freezefailure")).status, "succeeded"); assert.equal(calls, 1);
- assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "retain" }, f.ctx)).status, "succeeded");
- assert.equal((await service.execute({ action: "inspect", handle }, f.ctx)).sessions[0]?.state, "closed");
- assert.equal((await service.execute({ action: "close", handle, expectedEpisode: 1, disposition: "discard" }, f.ctx)).status, "succeeded");
- assert.equal((await f.store.list({ repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] })).some(view => view.handle === handle), false);
+ for (const disposition of ["retain", "discard"] as const) {
+  const close = await service.execute({ action: "close", handle, expectedEpisode: 1, disposition }, f.ctx);
+  assert.equal(close.error?.code, "result_persistence_unknown");
+ }
+ assert.equal(await f.store.finalizationPending(handle, 1), true);
+ assert.equal((await service.execute({ action: "inspect", handle }, f.ctx)).sessions[0]?.state, "interrupted");
 });
 
 test("required result-save failure retains child facts and replays failed without a second child", async (t) => {

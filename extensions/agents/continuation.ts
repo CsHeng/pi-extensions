@@ -17,10 +17,10 @@ import { resolvePiInvocation, runChild, type ChildRunOptions } from "./runner.ts
 import { mergeChildGuidance, prepareChildGuidance, selectedProjectSkills } from "./guidance-resources.ts";
 import { runScheduledTasks, type ChildLifecycle, type SchedulerControl } from "./scheduler.ts";
 import { ManagedSessionStore, fingerprint, managedWriteRoots, type ManagedRecord } from "./managed-sessions.ts";
-import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
+import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, reviewRecoveryWorkspaces, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitInput, retainGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, uncertainApply, AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
 import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
 import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
@@ -32,6 +32,7 @@ import { SESSION_VIEW_EVENT, SESSION_VIEW_REQUEST_EVENT, SESSION_VIEW_CHANGED_EV
 import { AGENT_EXECUTION_EVENT, type AgentExecutionEvent } from "../shared/agent-execution.ts";
 import { emptyProducerFacts, EXECUTION_FACTS_EVENT, NOTICE_ACK, EXECUTION_FACTS_REQUEST, type ExecutionFact, type ProducerFacts, type NoticeAck, type ProducerFactsRequest } from "../shared/execution-facts.ts";
 import { createMainLoopYield, type MainLoopYield, type YieldReason } from "../shared/main-loop-yield.ts";
+import { registerRecoveryDiscovery } from "./recovery-discovery.ts";
 import { AgentInactivityCheckpoints, type ScheduleCheckpoint } from "./inactivity.ts";
 
 export interface ContinuationDependencies {
@@ -76,6 +77,9 @@ export async function defaultEnclosingCapability(): Promise<ChildCapabilityManif
 	if (!loaded.manifest) throw new ManagedError("enclosing_capability_unavailable");
 	return loaded.manifest;
 }
+const unsettledWriter = (record: ManagedRecord) => record.state === "interrupted" && record.reconciledEpisode !== record.episode
+	&& !!record.execution && managedWriteRoots(record).length > 0
+	&& record.result?.executionStatus !== "not-started" && record.result?.workerToolsSettled !== true;
 const activeState = (record: ManagedRecord) => record.state === "queued" || record.state === "running";
 
 /** Bound the carried closing excerpt independently for every task in a combined notice. */
@@ -167,6 +171,16 @@ export class ContinuationService {
 	private async owner(ctx: ExtensionContext): Promise<CurrentOwner> {
 		const parentSessionFile = ctx.sessionManager.getSessionFile?.();
 		return { parentCwd: ctx.cwd, repo: await findCanonicalGitRoot(ctx.cwd, this.dependencies.repositoryHost), parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id), ...(parentSessionFile ? { parentSessionFile } : {}) };
+	}
+	async resolveRecoveryHandles(ctx: ExtensionContext, handles: readonly string[]): Promise<SessionView[]> {
+		if (!ctx.isProjectTrusted()) return [];
+		const owner = await this.owner(ctx), store = this.dependencies.store;
+		const views: SessionView[] = [];
+		for (const handle of handles) {
+			try { views.push(store.view(await store.load(handle, owner))); }
+			catch { /* Foreign or unavailable handles remain unresolved. */ }
+		}
+		return views;
 	}
 	async contextIndex(ctx: ExtensionContext): Promise<SessionView[]> {
 		if (!ctx.isProjectTrusted()) return [];
@@ -279,7 +293,7 @@ export class ContinuationService {
 		const callIdentity = fingerprint(["agent-call", toolCallId ?? `direct-${mintProductId()}`]);
 		const dispatchCallId = toolCallId ?? callIdentity;
 		const rawAction = raw && typeof raw === "object" ? (raw as { action?: unknown }).action : undefined;
-		let action: SessionActionResult["action"] = typeof rawAction === "string" && ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"].includes(rawAction) ? rawAction as SessionRequest["action"] : null;
+		let action: SessionActionResult["action"] = typeof rawAction === "string" && ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel", "reconcile"].includes(rawAction) ? rawAction as SessionRequest["action"] : null;
 		let request: SessionRequest | undefined;
 		const telemetry: ManagedRequestTelemetry = { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), invocationId: mintProductId(), startedAtMs: Date.now(), durationMs: null, extensionEpoch: null, configurationEpoch: null, requestedTasks: null, admittedTasks: null, launchedChildren: 0, replayedEpisodes: 0 };
 		try {
@@ -310,6 +324,31 @@ export class ContinuationService {
 			if (request.runId) return this.runResult(request.runId, request.action, owner);
 			return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: "succeeded", sessions: request.handle ? [store.view(await store.load(request.handle, owner))] : await store.list(owner) };
 		}
+		if (request.action === "reconcile") {
+			const handle = request.handle!, expectedEpisode = request.expectedEpisode!;
+			const record = await store.load(handle, owner);
+			if (record.episode !== expectedEpisode) throw new ManagedError("stale_episode");
+			await this.constrainNestedAccess([record.task]);
+			const run = record.dispatch && this.supervisor?.inspect(record.dispatch.runId)[0];
+			if (run && record.dispatch?.generation === run.generation && activeState(record)
+				&& ["preparing", "queued", "running"].includes(run.phase)) {
+				const binding = this.binding(run.runId, owner);
+				if (!binding.records.some(bound => bound.handle === handle && bound.episode === expectedEpisode && bound.dispatch?.taskId === record.dispatch?.taskId)) throw new ManagedError("run_owner_mismatch");
+				return { schemaVersion: MANAGED_SESSION_VERSION, action: "reconcile", status: "accepted", kind: "submission",
+					runId: run.runId, generation: run.generation, sessions: [store.view(record)] };
+			}
+			try {
+				if (activeState(record) || record.state === "interrupted") await store.reconcile(handle, owner, expectedEpisode);
+				return await store.withSession(handle, owner, async current => {
+					if (current.episode !== expectedEpisode) throw new ManagedError("stale_episode");
+					if (activeState(current)) throw new ManagedError("managed_writer_busy_or_unknown");
+					if (await store.finalizationPending(handle, expectedEpisode)) throw new ManagedError("result_persistence_unknown");
+					if (unsettledWriter(current)) throw new ManagedError("managed_writer_settlement_unknown", undefined, "Use scoped offline recovery after all writers have stopped.");
+					const recoveryWorkspaces = current.state !== "closed" && !current.candidate ? await reviewRecoveryWorkspaces(store, current) : [];
+					return { schemaVersion: MANAGED_SESSION_VERSION, action: "reconcile", status: "succeeded", sessions: [store.view(current)], recoveryWorkspaces };
+				});
+			} finally { this.invalidateSessionView(); }
+		}
 		if (request.action === "join" || request.action === "cancel") {
 			const binding = this.binding(request.runId!, owner);
 			if (request.action === "join") {
@@ -335,6 +374,9 @@ export class ContinuationService {
 						if (request.action === "apply") await applyCandidate(store, record, request.candidateId!);
 						else { store.nativePath(record); await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
 					} else {
+						if (unsettledWriter(record)) throw new ManagedError("managed_writer_settlement_unknown", undefined, "Use scoped offline recovery after all writers have stopped.");
+						if (await store.finalizationPending(record.handle, record.episode)) throw new ManagedError("result_persistence_unknown");
+						if (uncertainApply(record.candidate)) throw new ManagedError("candidate_recovery_required");
 						if (record.state === "closed" && record.retained === false && request.disposition !== "discard") throw new ManagedError("close_disposition_conflict");
 						if (request.disposition === "discard") await releaseManagedResources(store, record);
 						record.state = "closed"; record.retained = request.disposition !== "discard" || record.release?.status === "partial"; await store.save(record);
@@ -463,7 +505,7 @@ export class ContinuationService {
 						if (record.state !== "idle" || record.episode !== expected) throw new ManagedError(record.episode !== expected ? "stale_episode" : "session_not_idle");
 						if (record.episode >= MANAGED_LIMITS.maxEpisodes) throw new ManagedError("episode_limit");
 						await validateReadRoots(record);
-						if (record.candidate && ["applying", "partial", "unknown"].includes(record.candidate.status)) throw new ManagedError("candidate_recovery_required");
+						if (uncertainApply(record.candidate)) throw new ManagedError("candidate_recovery_required");
 						if ((await store.nativeRevision(record)).leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 					}
 					this.bindings.set(identity.runId, { owner, toolCallId, records: records.map(record => replays.has(record.handle) ? { ...record, episode: replays.get(record.handle)!.episode } : record), foreground, views: new Map(replays), replayed: new Set(replays.keys()) });
@@ -477,7 +519,7 @@ export class ContinuationService {
 						admissionProgress.push(progress);
 						await store.withSession(record.handle, owner, async current => {
 							if (current.state !== "idle" || current.episode !== record.episode) throw new ManagedError("session_not_idle");
-							if (current.candidate && ["applying", "partial", "unknown"].includes(current.candidate.status)) throw new ManagedError("candidate_recovery_required");
+							if (uncertainApply(current.candidate)) throw new ManagedError("candidate_recovery_required");
 							if ((await store.nativeRevision(current)).leaf !== current.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 							// The rollback snapshot must be the record observed under this lock: a same-episode refresh
 							// or apply accepted between the outer load and here is state this admission builds on.
@@ -743,6 +785,7 @@ export class ContinuationService {
 				const preparationStarted = this.dependencies.now();
 				await prepareManagedWorkspace(store, record);
 				const workspaceMs = Math.max(0, this.dependencies.now() - preparationStarted);
+				await store.writerPhase(handle, "not-started");
 				record.state = "running";
 				record.execution = { startedAtMs: Date.now(), ...(record.inheritSkills === undefined ? {} : { inheritSkills: record.inheritSkills }), provenance: telemetry.extensionEpoch && telemetry.configurationEpoch ? { available: true, extensionEpoch: telemetry.extensionEpoch, configurationEpoch: telemetry.configurationEpoch } : { available: false } };
 				operation.execution = record.execution; await store.save(record);
@@ -809,9 +852,11 @@ export class ContinuationService {
 				const native = store.nativePath(record);
 				const revision = await store.nativeRevision(record);
 				if (revision.leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
+				await store.writerPhase(handle, "launch-intent");
+				const childProof = store.childProofBinding(handle, record.episode);
 				const result = await this.dependencies.runChild({ task: { ...parsed.tasks[0]!, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission, git: root.git, paths: root.paths })) }, role: getManagedRole(record.task.role, writes.length > 0), route: record.route!, cwd, sourceRoot, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), ...(preparedGuidance ? { preparedGuidance } : {}), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL("./worker-tools.ts", import.meta.url)),
-					managedWorkerScratch: scratch, ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
+					managedWorkerScratch: scratch, ...(childProof ? { childProof } : {}), ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
 					capability,
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, ownerSessionId: revision.sessionId, async removeUnused() {} },
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: () => { observer?.childStopped(handle); lifecycle.childSettled(); }, onActivity: lifecycle.activity,
@@ -824,6 +869,8 @@ export class ContinuationService {
 				const requiresToolSettlement = writes.length > 0;
 				record.state = requiresToolSettlement && result.workerToolsSettled !== true ? "interrupted" : "idle";
 				if (record.state === "interrupted" && result.status === "succeeded") record.result = { ...result, status: "failed", finalization: { status: "failed", stage: "candidate-freeze", code: "worker_tools_unsettled" }, error: { code: "worker_tools_unsettled", message: "Worker tools did not settle." } };
+				// A dead parent may have left candidate Git writers behind. Fence before the first convergence write.
+				await store.beginFinalization(handle, record.episode); finalizationPending = true;
 				if (writes.length > 0 && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
 					if (!enterConvergence()) record.result = { ...result, status: "aborted", executionStatus: result.status, finalization: { status: "failed", stage: "candidate-freeze", code: "aborted" }, error: { code: "aborted", message: "aborted" } };
 					else { finalizationStage = "candidate-freeze"; await freezeCandidate(store, record); result.changedPaths = record.candidate?.changedPaths ?? []; }
@@ -831,7 +878,7 @@ export class ContinuationService {
 				operation.state = "complete"; operation.result = record.result;
 				if (record.candidate) operation.candidate = structuredClone(record.candidate);
 				finalizationStage = "result-save";
-				await store.beginFinalization(handle, record.episode); finalizationPending = true;
+				if (result.workerToolsSettled === true) await store.writerPhase(handle, "settled");
 				await store.save(record);
 				await store.endFinalization(handle, record.episode); finalizationPending = false;
 				if (record.result.observation) record.result.observation = await store.saveObservation(handle, record.episode, record.result.observation);
@@ -877,6 +924,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 			await dependencies.onWake?.(events);
 		},
 	});
+	registerRecoveryDiscovery(pi, service);
 	pi.events.on(EXECUTION_FACTS_REQUEST, (raw) => {
 		const accept = (raw as Partial<ProducerFactsRequest> | undefined)?.accept;
 		if (typeof accept !== "function") return;

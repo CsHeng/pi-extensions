@@ -61,6 +61,44 @@ test("foreground and join budget expiry release observation, preserve one execut
  await new Promise(resolve => setTimeout(resolve, 10)); assert.ok(f.wakes.some(event => event.runId === first.runId && !event.foreground));
 });
 
+test("foreground abort keeps the live run identifiable and its unfinished work reviewable on resume", async t => {
+	const started = gate(), stop = new AbortController();
+	let launches = 0;
+	const f = await fixture(t, async () => {}, 1, undefined, { dependencies: { runChild: async options => {
+		launches++; options.onChildStarted?.();
+		await writeFile(join(options.cwd, "partial.txt"), "review before release\n");
+		started.release();
+		if (!options.signal?.aborted) await new Promise<void>(resolve => options.signal!.addEventListener("abort", () => resolve(), { once: true }));
+		options.onChildSettled?.();
+		return { id: options.task.id, role: "worker", status: "aborted", reportComplete: false, workerToolsSettled: true,
+			output: "", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applied" };
+	} } });
+	const foreground = f.service.execute({ action: "create", tasks: [task("interrupted-work")], mode: "foreground" }, f.ctx, stop.signal);
+	await started.promise;
+	const item = (await f.service.execute({ action: "inspect" }, f.ctx)).sessions[0]!;
+	const check = { action: "reconcile", handle: item.handle, expectedEpisode: item.episode };
+	try {
+		const live = await f.service.execute(check, f.ctx);
+		assert.equal(live.kind, "submission"); assert.ok(live.runId); assert.equal(live.recoveryWorkspaces, undefined);
+	} finally { stop.abort(); }
+	await foreground;
+	const resumed = new ContinuationService({ store: f.store });
+	t.after(() => resumed.shutdown());
+	assert.equal((await resumed.execute({ ...check, expectedEpisode: 0 }, f.ctx)).error?.code, "stale_episode");
+	const reviewed = await resumed.execute(check, f.ctx);
+	assert.equal(reviewed.status, "succeeded", JSON.stringify(reviewed.error));
+	assert.equal(reviewed.sessions[0]?.result?.status, "aborted");
+	assert.equal(reviewed.sessions[0]?.candidate, undefined);
+	const workspace = reviewed.recoveryWorkspaces?.[0];
+	assert.ok(workspace && !("unavailable" in workspace));
+	assert.deepEqual(workspace.changedPaths, ["partial.txt"]);
+	assert.equal(await readFile(join(workspace.worktree, "partial.txt"), "utf8"), "review before release\n");
+	assert.equal(launches, 1); await assert.rejects(readFile(join(f.repo, "partial.txt")), { code: "ENOENT" });
+	const closed = await resumed.execute({ ...check, action: "close", disposition: "discard" }, f.ctx);
+	assert.equal(closed.sessions[0]?.release?.status, "complete");
+	await assert.rejects(readFile(join(workspace.worktree, "partial.txt")), { code: "ENOENT" });
+});
+
 test("wake filtering fences observed episodes, late run aggregates, new episodes and owner identity without accepting work", async t => {
  const f = await fixture(t, async () => {});
  const first = await f.service.execute({ action: "create", mode: "foreground", tasks: [task("one")] }, f.ctx);

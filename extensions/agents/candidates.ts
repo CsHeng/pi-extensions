@@ -1,11 +1,11 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { destinationKey, withDestinationLocks } from "./destination-lock.ts";
-import { captureGitInput, createGitTaskWorkspace, discardGitInput, discardGitWorkspace, freezeGitCandidate, planGitApply, reconcileGitAttempt, applyGitAttempt, refreshGitInputs, retainGitInput, inspectGitInput, validateGitCandidate, applicableGitAttempt } from "./git-workspace.ts";
+import { inspectGitWorkspace, runReadGit, captureGitInput, createGitTaskWorkspace, discardGitInput, discardGitWorkspace, freezeGitCandidate, planGitApply, reconcileGitAttempt, applyGitAttempt, refreshGitInputs, retainGitInput, inspectGitInput, validateGitCandidate, applicableGitAttempt } from "./git-workspace.ts";
 import { mintProductId } from "./identity.ts";
 import { managedWriteRoots, type ManagedRecord, type ManagedRootState, type ManagedSessionStore } from "./managed-sessions.ts";
 import { validateRepositoryTarget } from "./repository-policy.ts";
-import { ManagedError, type ApplyStatus, type CandidateRef, type CandidateRootStatus } from "./session-contracts.ts";
+import { ManagedError, uncertainApply, type ApplyStatus, type CandidateRef, type CandidateRootStatus, type RecoveryWorkspace } from "./session-contracts.ts";
 import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs } from "./worker-inputs.ts";
 
 const rootPath = (store: ManagedSessionStore, record: ManagedRecord, root: ManagedRootState) => join(store.path(record.handle), "roots", root.id);
@@ -77,15 +77,43 @@ export async function prepareManagedWorkspace(store: ManagedSessionStore, record
 // Report only the candidate's bounded relative-path scope, never raw Git conflict output.
 // This is not a list of exact conflicting files: Git may report directory/rename conflicts.
 export function conflictScope(rootId: string, changedPaths: readonly string[]) {
+	return { rootId, ...scopeSummary(changedPaths) };
+}
+function scopeSummary(changedPaths: readonly string[]) {
 	const paths = changedPaths.slice(0, 8).map(path => path.slice(0, 256));
-	return { rootId, changedPaths: paths, changedCount: changedPaths.length,
+	return { changedCount: changedPaths.length, changedPaths: paths,
 		pathsTruncated: changedPaths.length > paths.length || paths.some((path, index) => path !== changedPaths[index]) };
+}
+
+/** Read only the pinned writable inputs on explicit recovery. A dirty worktree is evidence, not an accepted candidate. */
+export async function reviewRecoveryWorkspaces(store: ManagedSessionStore, record: ManagedRecord): Promise<RecoveryWorkspace[]> {
+	const result: RecoveryWorkspace[] = [];
+	for (const root of managedWriteRoots(record)) {
+		if (root.workspaceReleased || root.released) continue;
+		const workspace = root.inputs?.gitWorkspace;
+		try {
+			if (!workspace || workspace.path !== rootPath(store, record, root) || workspace.repo !== root.source
+				|| !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(workspace.inputBase)) throw new ManagedError("managed_workspace_missing");
+			await validateRepositoryTarget(root.target);
+			await inspectGitWorkspace(workspace);
+			const query = async (args: string[]) => (await runReadGit(workspace.path, [...args, "--", ...root.paths])).stdout.toString("utf8").split("\0").filter(Boolean);
+			const names = new Set<string>();
+			for (const args of [
+				["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", workspace.inputBase],
+				["diff", "--cached", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", workspace.inputBase],
+				["ls-files", "--others", "--exclude-standard", "-z"],
+			]) for (const name of await query(args)) names.add(name);
+			result.push({ rootId: root.id, worktree: workspace.path, destination: root.source, inputBase: workspace.inputBase,
+				...scopeSummary([...names]) });
+		} catch { result.push({ rootId: root.id, unavailable: true }); }
+	}
+	return result;
 }
 
 export async function syncManagedInputs(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
 	writable(record);
 	if (record.state !== "idle") throw new ManagedError("session_not_idle");
-	if (record.candidate && ["applying", "partial", "unknown"].includes(record.candidate.status)) throw new ManagedError("candidate_recovery_required");
+	if (uncertainApply(record.candidate)) throw new ManagedError("candidate_recovery_required");
 	for (const root of managedWriteRoots(record)) {
 		await validateRepositoryTarget(root.target);
 		const workspace = root.inputs?.gitWorkspace;

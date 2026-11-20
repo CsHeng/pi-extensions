@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { isTaskLabel, mintProductId } from "./identity.ts";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm, type FileHandle } from "node:fs/promises";
+import { childProofSettled, type ChildProofBinding } from "./child-proof.ts";
+import { newWriterMarker, parseWriterMarker, writerRecoveryEvidence, type WriterMarker } from "./writer-recovery.ts";
 import { privateDirectory, syncDirectory } from "./private-directory.ts";
 import { archiveBucket, archiveFilename, nativeArchiveDirectory, projectBucket } from "./native-archive.ts";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -16,7 +18,7 @@ import { boundNativeObservation, unavailableObservation, type NativeObservation,
 import type { WorkerInputState } from "./worker-inputs.ts";
 import { observerHeadline, parseObserverRoute, type ObserverTask } from "./observer-events.ts";
 import type { CapturedProjectSkill } from "./guidance-resources.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type OwnedRootOutcome, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, uncertainApply, type CandidateRef, type CurrentOwner, type ManagedState, type OwnedRootOutcome, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
 function withoutObservation(result: TaskResult): TaskResult {
 	const copy = { ...result }; delete copy.observation; return copy;
@@ -78,6 +80,8 @@ export interface ManagedRecord {
 	result?: TaskResult;
 	candidate?: CandidateRef;
 	retained?: boolean;
+	/** A scoped recovery proved quiescence for this episode; never an execution result. */
+	reconciledEpisode?: number;
 	release?: { status: "pending" | "partial" | "complete"; remaining: string[] };
 	dispatch?: { runId: string; generation: string; toolCallId: string; taskId: string };
 	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution; error?: { code: string; detail?: string }; runId?: string; generation?: string }>;
@@ -214,7 +218,7 @@ const recordSchema = Type.Object({
 	native: Type.Optional(Type.Object({ bucket: Type.String({ maxLength: 255, pattern: archiveBucket.source }), filename: Type.String({ pattern: archiveFilename.source }) }, { additionalProperties: false })),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
 	projectSkills: Type.Optional(Type.Array(Type.Object({ path: Type.String({ maxLength: 4096 }), name: Type.String({ maxLength: 128 }) }, { additionalProperties: false }), { maxItems: 1024 })),
-	result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()),
+	result: Type.Optional(resultSchema), retained: Type.Optional(Type.Boolean()), reconciledEpisode: Type.Optional(Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes })),
 	release: Type.Optional(Type.Object({ status: Type.Union([Type.Literal("pending"), Type.Literal("partial"), Type.Literal("complete")]), remaining: Type.Array(Type.String(), { maxItems: 32 }) }, { additionalProperties: false })),
 	candidate: Type.Optional(candidateSchema),
 	requests: Type.Array(Type.Object({ id: productId, fingerprint: digestSchema, episode: Type.Integer({ minimum: 1, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(running|complete|unknown)$" }), error: Type.Optional(Type.Object({ code: hostId, detail: Type.Optional(causeSchema) }, { additionalProperties: false })), runId: Type.Optional(productId), generation: Type.Optional(hostId), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), execution: Type.Optional(executionSchema) }, { additionalProperties: false }), { maxItems: MANAGED_LIMITS.maxEpisodes }),
@@ -241,8 +245,18 @@ async function readJson<T>(file: string): Promise<T> {
 }
 
 
+async function readWriterMarker(file: string): Promise<string> {
+	const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const info = await handle.stat();
+		if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid()) || info.size > 4096) throw new ManagedError("managed_storage_invalid");
+		return await handle.readFile("utf8");
+	} finally { await handle.close(); }
+}
+
 // Serialize only known in-process root mutations. Disk locks still reject foreign/unknown writers.
 const rootWriters = new Map<string, Promise<void>>();
+const activeMarkers = new Map<string, { handle: FileHandle; marker: WriterMarker }>();
 export class ManagedSessionStore {
 	readonly root: string;
 	private readonly sessions: string;
@@ -305,9 +319,62 @@ export class ManagedSessionStore {
 		try { handle = await open(marker, "wx", 0o600); }
 		catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new ManagedError("managed_writer_busy_or_unknown"); throw error; }
 		try {
-			await handle.writeFile(randomUUID()); await handle.sync();
+			if (directory !== this.root) {
+				try { await lstat(join(directory, ".recovery-claim")); throw new ManagedError("managed_recovery_busy_or_unknown"); }
+				catch (error) { if (!missing(error)) throw error; }
+			}
+			const evidence = directory === this.root ? undefined : await newWriterMarker();
+			await handle.writeFile(evidence ? JSON.stringify(evidence) : randomUUID()); await handle.sync();
+			if (evidence) activeMarkers.set(directory, { handle, marker: evidence });
 			return await action();
-		} finally { await handle.close(); await rm(marker); }
+		} finally { activeMarkers.delete(directory); await handle.close(); await rm(marker); }
+	}
+	private receiptPath(handle: string, episode: number): string { return join(this.path(handle), `child_${episode}.receipt`); }
+	childProofBinding(handle: string, episode: number): ChildProofBinding | undefined {
+		const marker = activeMarkers.get(this.path(handle))?.marker;
+		return marker?.phase === "launch-intent" ? { path: this.receiptPath(handle, episode), episode, marker: { ...marker } } : undefined;
+	}
+	/** Called under withSession: persist launch intent before spawning, and settlement only after all writers settle. */
+	async writerPhase(handle: string, phase: WriterMarker["phase"]): Promise<void> {
+		const active = activeMarkers.get(this.path(handle));
+		if (!active) return; // Unsupported host identity: preserve normal execution and require offline recovery.
+		const prior = active.marker.phase;
+		if (!((prior === "unknown" && phase === "not-started") || (prior === "not-started" && phase === "launch-intent") || (prior === "launch-intent" && phase === "settled"))) throw new ManagedError("managed_writer_phase_invalid");
+		active.marker.phase = phase;
+		const bytes = Buffer.from(JSON.stringify(active.marker));
+		await active.handle.truncate(0); await active.handle.write(bytes, 0, bytes.length, 0); await active.handle.sync();
+	}
+	/** Recover only with affirmative owner and writer settlement evidence; ambiguous claims require offline remediation. */
+	async reconcile(handle: string, owner: CurrentOwner, expectedEpisode: number): Promise<ManagedRecord> {
+		const initial = await this.load(handle, owner);
+		if (initial.episode !== expectedEpisode) throw new ManagedError("stale_episode");
+		const directory = this.path(handle), claim = join(directory, ".recovery-claim"), marker = join(directory, ".writer-lock");
+		let claimHandle: FileHandle;
+		try { claimHandle = await open(claim, "wx", 0o600); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new ManagedError("managed_recovery_busy_or_unknown", undefined, "Offline coordinated scoped remediation required if the claim is abandoned."); throw error; }
+		try {
+			const record = await this.load(handle, owner);
+			if (record.episode !== expectedEpisode) throw new ManagedError("stale_episode");
+			if (await this.finalizationPending(handle, record.episode) || uncertainApply(record.candidate)) throw new ManagedError("managed_recovery_uncertain_finalization");
+			let raw: string;
+			try { raw = await readWriterMarker(marker); }
+			catch (error) { if (missing(error)) { if (record.state === "interrupted") return record; throw new ManagedError("managed_recovery_no_writer_evidence", undefined, "Offline coordinated scoped remediation required."); } throw error; }
+			const evidence = parseWriterMarker(raw);
+			if (!evidence) throw new ManagedError("managed_recovery_legacy_or_invalid_writer", undefined, "Offline coordinated scoped remediation required.");
+			const status = await writerRecoveryEvidence(evidence, () => childProofSettled(
+				{ marker: evidence, path: this.receiptPath(handle, expectedEpisode), episode: expectedEpisode }, this.nativePath(record),
+				async () => (await this.nativeRevision(record)).leaf !== null, record.nativeLeaf,
+			));
+			if (status !== "gone") throw new ManagedError(status === "active" ? "managed_writer_active" : "managed_writer_settlement_unknown", undefined, "Wait for settlement or use offline coordinated scoped remediation.");
+			if (await readWriterMarker(marker) !== raw) throw new ManagedError("managed_writer_changed");
+			if (record.state !== "running" && record.state !== "queued" && record.state !== "interrupted") throw new ManagedError("managed_recovery_state_changed");
+			record.state = "interrupted"; record.reconciledEpisode = expectedEpisode;
+			const operation = record.requests.find(request => request.episode === record.episode && request.state === "running");
+			if (operation) operation.state = "unknown";
+			await this.save(record);
+			await rm(marker); await syncDirectory(directory);
+			return record;
+		} finally { await claimHandle.close(); await rm(claim); }
 	}
 	private matches(record: ManagedRecord, owner: CurrentOwner): boolean {
 		return record.owner.repo === owner.repo && record.owner.parentSessionId === owner.parentSessionId &&

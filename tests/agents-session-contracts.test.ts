@@ -22,6 +22,8 @@ test("field diagnostics distinguish missing, unexpected and invalid fields witho
 	for (const [request, kind, fields] of [
 		[{}, "missingFields", ["action"]],
 		[{ action: "join" }, "missingFields", ["runId"]],
+		[{ action: "reconcile", handle: "h" }, "missingFields", ["expectedEpisode"]],
+		[{ action: "reconcile", handle: "h", expectedEpisode: 1, disposition: "discard" }, "unexpectedFields", ["disposition"]],
 		[{ action: "apply", handle: "h", expectedEpisode: 1 }, "missingFields", ["candidateId"]],
 		[{ action: "join", runId: "run", taskId: "worker" }, "unexpectedFields", ["taskId"]],
 		[{ action: "inspect", runId: "run", waitSeconds: 1 }, "unexpectedFields", ["waitSeconds"]],
@@ -91,7 +93,7 @@ test("the agent schema survives the real OpenAI request serializers and rejects 
 	assert.equal(tool.parameters.type, "object");
 	assert.equal(tool.parameters.additionalProperties, false);
 	assert.equal(tool.parameters.properties.action.type, "string");
-	assert.deepEqual(tool.parameters.properties.action.enum, ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"]);
+	assert.deepEqual(tool.parameters.properties.action.enum, ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel", "reconcile"]);
 	assert.equal(tool.parameters.properties.requestId, undefined, "no caller-invented replay identity");
 	assert.equal(tool.parameters.properties.tasks.items.properties.requestId, undefined);
 	assert.deepEqual(tool.parameters.properties.tasks.items.required, ["id", "role", "objective", "access"]);
@@ -126,6 +128,7 @@ test("the agent schema survives the real OpenAI request serializers and rejects 
 		{ action: "continue", episodes: [{ handle: "abc", expectedEpisode: 1, message: "go" }] },
 		{ action: "join", runId: "abc", waitSeconds: 5 },
 		{ action: "cancel", runId: "abc", taskId: "fix-parser-tests" },
+		{ action: "reconcile", handle: "abc", expectedEpisode: 1 },
 		{ action: "apply", handle: "abc", expectedEpisode: 1, candidateId: "def" },
 	]) params(args);
 
