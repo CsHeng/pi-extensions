@@ -10,7 +10,7 @@ export function captureListOverlay(capture: (lines: string[]) => void): Extensio
 		assert.equal(layout?.anchor, "center");
 		const theme = { fg: (_color: string, text: string) => text, strikethrough: (text: string) => `~${text}~` } as Theme;
 		const component = await factory({ terminal: { rows: 120, columns: 160 }, requestRender() {} } as TUI, theme, {} as KeybindingsManager, () => {});
-		capture(component.render(160));
+		capture([...component.render(160)]);
 		return undefined as never;
 	};
 }

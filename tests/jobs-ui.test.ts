@@ -209,7 +209,7 @@ test("inline detail resolves on close and lifecycle changes revoke old owned fac
 	Object.assign(h.ctx.sessionManager, { getLeafId: () => leaf });
 	let focused = "";
 	const composer: AboveEditorComposer = { attach() {}, set(_slot, value) { contribution = value; return true; }, focus: slot => { focused = slot; return true; }, invalidate: () => true, slots: () => [] };
-	let view: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+	let view: { render(width: number): readonly string[]; handleInput(data: string): void } | undefined;
 	let redraws = 0;
 	h.ctx.ui.custom = async factory => new Promise(resolve => {
 		view = factory({ terminal: { rows: 30 }, requestRender() { redraws++; } } as never, { fg: (_c: string, s: string) => s } as never, {} as never, () => resolve(undefined as never)) as typeof view;
@@ -763,7 +763,7 @@ test("jobs list pages through every background job without dropping later rows",
 	const h = harness();
 	const records = Array.from({ length: 1001 }, (_, index) => record({ executionId: `exec_${index}`, status: "running", commandPreview: index === 1000 ? "last-background-job" : `command-${index}` }));
 	let firstPage = "";
-	let overlayRows: string[] = [];
+	let overlayRows: readonly string[] = [];
 	h.ctx.ui.custom = async factory => {
 		const component = await factory({ terminal: { rows: 120, columns: 160 }, requestRender() {} } as never, { fg: (_color: string, text: string) => text } as never, {} as never, () => {});
 		firstPage = component.render(160).join("\n");
