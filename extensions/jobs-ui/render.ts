@@ -77,8 +77,9 @@ export function jobItems(view: JobsUiView, now = Date.now()): InspectionItem[] {
 				`Started: ${instant(record.startedAt)}`,
 				...(record.terminalAt === null ? [] : [`Finished: ${instant(record.terminalAt)}`]),
 				`Elapsed: ${elapsed(record, now)}`,
-				...(record.status === "running" ? [`Output: ${runningDetail(record, now)}`] : []),
 				`Last output: ${record.lastOutputAt === null ? "none" : instant(record.lastOutputAt)}`,
+				...(record.output ? [record.output.truncated ? "Output (earlier output truncated):" : "Output:",
+					record.output.text.replace(/\t/g, "    ") || (record.lastOutputAt !== null ? "(no printable output)" : record.status === "running" ? "(no output yet)" : "(no output)")] : ["Output unavailable"]),
 			],
 		};
 	});

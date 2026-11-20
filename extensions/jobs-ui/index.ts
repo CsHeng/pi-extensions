@@ -36,7 +36,7 @@ type Display =
 	| { kind: "unavailable"; reason: string }
 	| { kind: "ready"; anchor: string | null; records: JobsViewRecord[] };
 
-interface PendingQuery { requestId: string; sessionId: string; anchor: string | null }
+interface PendingQuery { detailExecutionId?: string; requestId: string; sessionId: string; anchor: string | null }
 
 function defaultSetTimer(callback: () => void, ms: number): unknown {
 	const handle = setTimeout(callback, ms);
@@ -76,6 +76,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 		let pending: PendingQuery | undefined;
 		let timer: unknown;
 		let tick: unknown;
+		let detailDirty = false;
 		let stops: Array<() => void> = [];
 		const inspections = new Set<JobsInspectionHandle>();
 		const closeInspections = () => { for (const inspection of inspections) inspection.close(); inspections.clear(); };
@@ -86,7 +87,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 				mounted = handle;
 				if (handle) inspections.add(handle);
 				armTick();
-			});
+			}, query);
 		};
 		const tui = () => ctx?.mode === "tui" && ctx.hasUI === true;
 		const clearTimer = () => { if (timer !== undefined) { cancelTimer(timer); timer = undefined; } };
@@ -105,9 +106,9 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 		};
 		const needsTick = () => (visible || inspections.size > 0) && tui() && display.kind === "ready" && display.records.some((record) => record.status === "running");
 		const armTick = () => {
-			if (!needsTick()) { clearTick(); return; }
+			if (!needsTick() && !detailDirty) { clearTick(); return; }
 			if (tick !== undefined) return;
-			tick = schedule(() => { tick = undefined; publish(); }, TICK_MS);
+			tick = schedule(() => { tick = undefined; if (detailDirty) query(); else publish(); }, TICK_MS);
 		};
 		const publish = () => {
 			if (!currentScope()) closeInspections();
@@ -130,14 +131,17 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			armTick();
 		};
 		const query = () => {
+			detailDirty = false;
 			if (!tui() || !ctx) return;
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionId) { display = { kind: "unavailable", reason: "unreachable" }; publish(); return; }
 			if (!ctx.isProjectTrusted()) { closeInspections(); display = { kind: "unavailable", reason: "untrusted" }; pending = undefined; clearTimer(); publish(); return; }
 			const requestId = randomUUID();
-			pending = { requestId, sessionId, anchor: leafId(ctx) };
+			const detailExecutionId = [...inspections].at(-1)?.detailKey();
+			const detail = detailExecutionId === undefined ? {} : { detailExecutionId };
+			pending = { requestId, sessionId, anchor: leafId(ctx), ...detail };
 			if (display.kind !== "ready") display = { kind: "waiting" };
-			pi.events.emit(JOBS_VIEW_REQUEST_EVENT, { version: JOBS_VIEW_VERSION, requestId });
+			pi.events.emit(JOBS_VIEW_REQUEST_EVENT, { version: JOBS_VIEW_VERSION, requestId, ...detail });
 			if (pending?.requestId === requestId) {
 				clearTimer();
 				timer = schedule(() => {
@@ -171,6 +175,8 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 					rejectPending(reply.ownerSessionId !== sessionId ? "foreign" : "stale");
 					return;
 				}
+				const { detailExecutionId } = pending;
+				if (reply.records?.some(record => record.output && record.executionId !== detailExecutionId)) { rejectPending("stale"); return; }
 				pending = undefined;
 				clearTimer();
 				pinned = reply.generation;
@@ -185,7 +191,9 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 				if (!tui()) return;
 				const changed = parseJobsViewChanged(data);
 				if (!changed || (pinned !== undefined && changed.generation !== pinned)) return;
-				query();
+				// A noisy job may emit many chunks per frame. Read its full tail at most once per live tick.
+				if (tick !== undefined && currentScope() && [...inspections].at(-1)?.detailKey()) detailDirty = true;
+				else query();
 			} catch { /* Display-only consumer. */ }
 		};
 		const onReset = (data: unknown) => {
@@ -213,6 +221,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			];
 		};
 		const bind = (next: ExtensionContext) => {
+			detailDirty = false;
 			closeInspections();
 			ctx = next;
 			failed = false;
@@ -227,6 +236,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			query();
 		};
 		const shutdown = () => {
+			detailDirty = false;
 			closeInspections();
 			clearTimer();
 			clearTick();

@@ -1,5 +1,6 @@
 /** Owner-scoped read-only Jobs snapshot. Queries never start, cancel, renew, wake, or enter model context. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { OUTPUT_MAX_BYTES } from "./policy.ts";
 import type { BashExecutionView, BashScope, BashStatus } from "./execution.ts";
 
 export const JOBS_VIEW_VERSION = 1;
@@ -23,7 +24,7 @@ const RECORD_KEYS = ["executionId", "label", "status", "exitCode", "startedAt", 
 
 export type JobsClaim = "ready" | "other-owner" | "inactive";
 export type JobsViewReason = (typeof REASONS)[number];
-export interface JobsViewRequest { version: typeof JOBS_VIEW_VERSION; requestId: string }
+export interface JobsViewRequest { version: typeof JOBS_VIEW_VERSION; requestId: string; detailExecutionId?: string }
 export interface JobsViewChanged { version: typeof JOBS_VIEW_VERSION; generation: string }
 export interface JobsViewReset { version: typeof JOBS_VIEW_VERSION; generation: string; ownerSessionId?: string; anchor?: string | null }
 export interface JobsViewRecord {
@@ -31,6 +32,8 @@ export interface JobsViewRecord {
 	label: string;
 	/** Human-only bounded single-line command preview; not persisted in Async Bash events. */
 	commandPreview?: string;
+	/** Present only for the requested detail. Empty text is a known empty display tail. */
+	output?: { text: string; truncated: boolean };
 	status: BashStatus;
 	/** Running past its checkpoint until the model renews it. Absent means false. */
 	overdue?: boolean;
@@ -51,7 +54,7 @@ export interface JobsViewReply {
 	records?: JobsViewRecord[];
 }
 export interface JobsViewSource {
-	list(scope: BashScope): BashExecutionView[];
+	list(scope: BashScope, detailExecutionId?: string): BashExecutionView[];
 	subscribeDisplay(listener: () => void): () => void;
 }
 
@@ -84,9 +87,10 @@ function scopeOf(ctx: ExtensionContext): BashScope {
 }
 
 export function parseJobsViewRequest(value: unknown): JobsViewRequest | undefined {
-	if (!isRecord(value) || !keysExact(value, REQUEST_KEYS)) return undefined;
+	if (!isRecord(value) || !keysExact(value, REQUEST_KEYS, ["detailExecutionId"])) return undefined;
 	if (value.version !== JOBS_VIEW_VERSION || !boundedText(value.requestId, 128)) return undefined;
-	return { version: JOBS_VIEW_VERSION, requestId: value.requestId };
+	if (value.detailExecutionId !== undefined && !boundedText(value.detailExecutionId, 64)) return undefined;
+	return { version: JOBS_VIEW_VERSION, requestId: value.requestId, ...(value.detailExecutionId === undefined ? {} : { detailExecutionId: value.detailExecutionId }) };
 }
 export function parseJobsViewChanged(value: unknown): JobsViewChanged | undefined {
 	if (!isRecord(value) || !keysExact(value, CHANGED_KEYS)) return undefined;
@@ -117,10 +121,14 @@ function parseRecords(value: unknown): JobsViewRecord[] | undefined {
 	return records;
 }
 function parseRecord(value: unknown): JobsViewRecord | undefined {
-	if (!isRecord(value) || !keysExact(value, RECORD_KEYS, ["commandPreview", "overdue"])) return undefined;
+	if (!isRecord(value) || !keysExact(value, RECORD_KEYS, ["commandPreview", "overdue", "output"])) return undefined;
 	if (value.overdue !== undefined && (typeof value.overdue !== "boolean" || (value.overdue && value.status !== "running"))) return undefined;
 	if (!boundedText(value.executionId, 64) || !boundedText(value.label, 32)) return undefined;
 	if (value.commandPreview !== undefined && !boundedText(value.commandPreview, 512)) return undefined;
+	const output = value.output;
+	if (output !== undefined && (!isRecord(output) || !keysExact(output, ["text", "truncated"])
+		|| typeof output.text !== "string" || output.text.length > OUTPUT_MAX_BYTES || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(output.text)
+		|| typeof output.truncated !== "boolean")) return undefined;
 	if (typeof value.status !== "string" || !STATUSES.includes(value.status as BashStatus)) return undefined;
 	if (!exitCode(value.exitCode) || !instant(value.startedAt)) return undefined;
 	if (value.terminalAt !== null && !instant(value.terminalAt)) return undefined;
@@ -131,6 +139,7 @@ function parseRecord(value: unknown): JobsViewRecord | undefined {
 		label: value.label,
 		...(value.commandPreview === undefined ? {} : { commandPreview: value.commandPreview as string }),
 		status: value.status as BashStatus,
+		...(output === undefined ? {} : { output: { text: output.text as string, truncated: output.truncated as boolean } }),
 		...(value.overdue === true ? { overdue: true } : {}),
 		exitCode: value.exitCode,
 		startedAt: value.startedAt,
@@ -173,12 +182,13 @@ export function compareJobsViewRecords(left: JobsViewRecord, right: JobsViewReco
 	return statusRank(left.status) - statusRank(right.status) || left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId);
 }
 
-function project(view: BashExecutionView): JobsViewRecord {
+function project(view: BashExecutionView, detailExecutionId?: string): JobsViewRecord {
 	const running = view.status === "running";
 	return {
 		executionId: view.executionId,
 		label: view.label,
 		commandPreview: view.commandPreview,
+		...(view.executionId === detailExecutionId ? { output: { text: view.output, truncated: view.truncated } } : {}),
 		status: view.status,
 		...(running && view.overdue ? { overdue: true } : {}),
 		exitCode: running ? null : view.exitCode,
@@ -210,10 +220,10 @@ export function registerJobsView(pi: ExtensionAPI, source: JobsViewSource, claim
 		const trusted = ctx.isProjectTrusted();
 		const mode = claim();
 		const reason: JobsViewReason | undefined = !trusted ? "untrusted" : mode === "other-owner" ? "other-owner" : mode === "inactive" ? "unreachable" : undefined;
-		const listed = reason ? undefined : source.list(scopeOf(ctx));
+		const listed = reason ? undefined : source.list(scopeOf(ctx), request.detailExecutionId);
 		const reply: JobsViewReply = reason
 			? { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "unavailable", reason }
-			: { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "ready", records: listed?.filter((view) => isVisibleBackgroundJob(view)).map(project).sort(compareJobsViewRecords) ?? [] };
+			: { version: JOBS_VIEW_VERSION, requestId: request.requestId, ownerSessionId, anchor, generation: generationId(), availability: "ready", records: listed?.filter((view) => isVisibleBackgroundJob(view)).map(view => project(view, request.detailExecutionId)).sort(compareJobsViewRecords) ?? [] };
 		const parsed = parseJobsViewReply(reply);
 		if (parsed.ok) emit(JOBS_VIEW_EVENT, parsed.value);
 	};

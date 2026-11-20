@@ -4,17 +4,18 @@ import { inspectionRow, ItemDetailPage, type InspectionItem } from "../shared/in
 
 export const JOBS_LIST_PAGE_SIZE = 20;
 
-export interface JobsInspectionHandle { close(): void; refresh(): void }
+export interface JobsInspectionHandle { close(): void; refresh(): void; detailKey(): string | undefined }
 export interface JobsInspectionView { items: InspectionItem[]; unavailable?: string }
 
 /** The source is re-read on every render and key, so revoked records cannot stay visible. */
-export async function openJobsInspection(ctx: ExtensionContext, source: () => JobsInspectionView, initial?: string, mounted?: (handle: JobsInspectionHandle | undefined) => void): Promise<void> {
+export async function openJobsInspection(ctx: ExtensionContext, source: () => JobsInspectionView, initial?: string, mounted?: (handle: JobsInspectionHandle | undefined) => void, requestDetail?: () => void): Promise<void> {
 	try { await ctx.ui.custom<void>((tui, theme, _keys, done) => {
 		let closed = false;
 		const close = () => { if (!closed) { closed = true; done(); } };
-		mounted?.({ close, refresh: () => tui.requestRender() });
 		let selected = initial;
 		let detail = initial !== undefined;
+		mounted?.({ close, refresh: () => tui.requestRender(), detailKey: () => !closed && detail ? selected : undefined });
+		if (detail) requestDetail?.();
 		let page = new ItemDetailPage();
 		let width = 0, capacity = 1;
 		let hits: string[] = [];
@@ -61,7 +62,7 @@ export async function openJobsInspection(ctx: ExtensionContext, source: () => Jo
 				const current = source().items;
 				if (matchesKey(data, "escape")) { if (detail && initial === undefined) detail = false; else close(); }
 				else if (detail) page.handleInput(data);
-				else if (matchesKey(data, "enter") && selected && current.some(item => item.key === selected)) { detail = true; page = new ItemDetailPage(); }
+				else if (matchesKey(data, "enter") && selected && current.some(item => item.key === selected)) { detail = true; page = new ItemDetailPage(); requestDetail?.(); }
 				else if (matchesKey(data, "up") || matchesKey(data, "down") || data === "pageUp" || data === "pageDown" || matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
 					const at = Math.max(0, current.findIndex(item => item.key === selected));
 					const delta = data === "pageUp" || matchesKey(data, "pageUp") ? -capacity : data === "pageDown" || matchesKey(data, "pageDown") ? capacity : matchesKey(data, "up") ? -1 : 1;

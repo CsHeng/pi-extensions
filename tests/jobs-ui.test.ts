@@ -88,6 +88,7 @@ function harness(mode = "tui", trusted = true) {
 		pi, ctx, commands, tools, events, wakes, timers, get widget() { return widget; }, get selects() { return selects; },
 		setTimer(cb: () => void, ms: number) { const handle = { ms, cb }; timers.push(handle); return handle; },
 		clearTimer(handle: unknown) { const index = timers.indexOf(handle as { ms: number; cb: () => void }); if (index >= 0) timers.splice(index, 1); },
+		fireTick() { const index = timers.findIndex(timer => timer.ms === 1000); assert.notEqual(index, -1); timers.splice(index, 1)[0]!.cb(); },
 		fire(name: string, next = ctx) { for (const fn of handlers.get(name) ?? []) fn({}, next); },
 	};
 }
@@ -226,7 +227,7 @@ test("inline detail resolves on close and lifecycle changes revoke old owned fac
 	let finished = false; void opened.then(() => { finished = true; });
 	await Promise.resolve(); assert.equal(finished, false);
 	const beforeRedraw = redraws;
-	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" }); reply();
+	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" }); h.fireTick(); reply();
 	assert.ok(redraws > beforeRedraw);
 	h.events.emit(JOBS_VIEW_RESET_EVENT, { version: 1, generation: "2", ownerSessionId: "session-a" });
 	await opened; assert.equal(finished, true);
@@ -437,6 +438,53 @@ test("jobs query returns the current branch snapshot and does not control or wak
 	executions.get("sleep 5")!.emit("more");
 	assert.equal(changed.length >= 1, true);
 	assert.equal(JSON.stringify(changed).includes("later"), false);
+});
+
+test("Job detail reads only the selected job's live output and retains the final tail", async t => {
+	const h = harness();
+	const { operations, executions } = fakeBashOperations({ onAbort: child => child.close(null) });
+	const owner = createBashExecutionOwner({ operations, maxOutputBytes: 64 });
+	const jobs = registerJobsView(h.pi, owner, () => "ready");
+	jobs.bind(h.ctx);
+	t.after(async () => { h.fire("session_shutdown"); jobs.dispose(); await owner.shutdown(); });
+	createJobsUi({ composer: createAboveEditor(), setTimer: h.setTimer, clearTimer: h.clearTimer })(h.pi);
+	h.fire("session_start");
+	const start = (command: string) => owner.start({ command, ...scope, cwd: h.ctx.cwd, env: {}, toolCallId: null, foregroundWindowMs: 0, deadlineMs: 60_000 });
+	await start("first");
+	const other = executions.get("first")!;
+	other.emit("unselected output"); other.close(0);
+	await start("second");
+	const child = executions.get("second")!;
+	let latest: JobsViewReply | undefined;
+	h.events.on(JOBS_VIEW_EVENT, raw => { latest = raw as JobsViewReply; });
+	h.ctx.ui.custom = async factory => {
+		const view = await factory({ terminal: { rows: 36 }, requestRender() {} } as never, { fg: (_c: string, s: string) => s } as never, {} as never, () => {});
+		const screen = () => view.render(90).join("\n");
+		assert.doesNotMatch(screen(), /unselected output/);
+		view.handleInput!("\r"); // Running "second" sorts before the finished job.
+		assert.match(screen(), /Command: second/);
+		assert.match(screen(), /\(no output yet\)/);
+		const beforeOutput = latest;
+		child.emit("progress\n");
+		child.emit("\x1b[?25l\x1b[31mstep one\x1b[0m\r\n  step two");
+		assert.equal(latest, beforeOutput, "multiple chunks coalesce until the live tick"); h.fireTick();
+		assert.match(screen(), /│ step one +│\n│   step two /);
+		assert.doesNotMatch(screen(), /unselected output|\x1b|\[31m/);
+		assert.equal(latest!.records!.filter(row => row.output).length, 1);
+		child.emit("x".repeat(70) + "\nfinal error");
+		child.close(7); await Promise.resolve(); h.fireTick();
+		assert.match(screen(), /exit 7/);
+		assert.match(screen(), /Output \(earlier output truncated\):/);
+		assert.match(screen(), /final error/);
+		assert.doesNotMatch(screen(), /step one/);
+		view.handleInput!("\u001b");
+		assert.doesNotMatch(screen(), /final error/);
+		h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" });
+		assert.ok(latest!.records!.every(row => !row.output));
+		return undefined as never;
+	};
+	await h.commands.get("jobs-ui")!("list", h.ctx);
+	assert.deepEqual(h.wakes, []);
 });
 
 test("jobs view sorts running jobs before stopped jobs and keeps start time ascending", () => {

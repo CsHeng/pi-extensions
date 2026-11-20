@@ -2,6 +2,7 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
+import { stripVTControlCharacters } from "node:util";
 import { randomBytes } from "node:crypto";
 
 import { scheduleDelay, requireDurationMs, timestampAfter, type CancellableDelay } from "../shared/duration-timer.ts";
@@ -126,7 +127,7 @@ export interface BashExecutionOwner {
 	start(input: StartBashInput): Promise<BashExecutionView>;
 	inspect(executionId: string, scope: BashScope): BashExecutionView | undefined;
 	/** Read-only in-scope snapshot. It does not start, wait, renew, cancel, or trim. */
-	list(scope: BashScope): BashExecutionView[];
+	list(scope: BashScope, detailExecutionId?: string): BashExecutionView[];
 	/** Display-fact invalidation only. The listener receives no output and cannot affect execution. */
 	subscribeDisplay(listener: () => void): () => void;
 	/** Ends at terminal, checkpoint, waitMs, abort or yield. Only terminal changes the execution. */
@@ -219,7 +220,7 @@ export function createBashExecutionOwner(options: {
 		} catch { /* An observer failure must not strand or fail the execution. */ }
 	};
 
-	const viewOf = (record: ExecutionRecord): BashExecutionView => ({
+	const viewOf = (record: ExecutionRecord, forDisplay = false): BashExecutionView => ({
 		executionId: record.executionId,
 		owner: BASH_OWNER,
 		status: record.status,
@@ -229,7 +230,7 @@ export function createBashExecutionOwner(options: {
 		overdue: record.overdue,
 		checkpoint: record.checkpoint,
 		exitCode: record.exitCode,
-		output: record.output.text(),
+		output: record.output.text(forDisplay),
 		truncated: record.output.truncated,
 		toolCallId: record.toolCallId,
 		sessionId: record.sessionId,
@@ -401,11 +402,11 @@ export function createBashExecutionOwner(options: {
 			if (!record || !sameScope(record, scope)) return undefined;
 			return viewOf(record);
 		},
-		list(scope) {
+		list(scope, detailExecutionId) {
 			return [...records.values()]
 				.filter((record) => sameScope(record, scope))
 				.sort((left, right) => left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId))
-				.map(viewOf);
+				.map(record => viewOf(record, record.executionId === detailExecutionId));
 		},
 		subscribeDisplay(listener) {
 			displayListeners.add(listener);
@@ -552,8 +553,10 @@ class BoundedOutput {
 		}
 	}
 
-	text(): string {
-		return sanitize(Buffer.concat(this.chunks).toString("utf8"));
+	text(forDisplay = false): string {
+		const text = Buffer.concat(this.chunks).toString("utf8");
+		// Strip whole escape sequences before the ordinary tool sanitizer removes their introducers.
+		return sanitize(forDisplay ? stripVTControlCharacters(text).replace(/\r\n?/g, "\n").replace(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, "") : text);
 	}
 }
 
