@@ -28,7 +28,9 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 		pi.events.emit(JOBS_VIEW_EVENT, {
 			version: 1, requestId: (data as { requestId: string }).requestId, ...owner(), generation, availability: "ready",
 			records: [{ executionId: "exec_panel", label: "Job inline detail", status: "exited", exitCode: 0,
-				startedAt: 1_000, terminalAt: 2_000, lastOutputAt: 1_500 }],
+				startedAt: 1_000, terminalAt: 2_000, lastOutputAt: 1_500 },
+				{ executionId: "exec_width", label: "wide-job", commandPreview: `wide-job ${"field-".repeat(21)}WIDE-END`,
+					status: "exited", exitCode: 7, startedAt: 3_000, terminalAt: 5_000, lastOutputAt: 4_500 }],
 		} satisfies JobsViewReply);
 	});
 	const replySession = (requestId: string) => {
@@ -36,7 +38,7 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 		pi.events.emit(SESSION_VIEW_EVENT, {
 			version: 4, requestId, ...owner(), generation, revision,
 			inventory: { state: "ready", complete: true, unreadableRecords: 0 },
-			summary: { agents: 1, acceptedEpisodes: 1, liveAgents: 1, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 0 } },
+			summary: { agents: 2, acceptedEpisodes: 2, liveAgents: 2, states: { idle: 0, queued: 0, running: 2, interrupted: 0, closed: 0 } },
 			live: snapshot.tasks, usage: projectRecordedUsage([]),
 			history: { state: "ready", pageSize: 20, page: 0, totalRows: 0, totalPages: 0, rows: [] },
 		} satisfies SessionViewReply);
@@ -54,13 +56,17 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 		snapshot = {
 			version: 5, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(),
 			generation, runId: "PanelRun", revision, phase: "running",
-			tasks: [{ id: "AgentInline", ordinal: 1, role: "worker", episode: 1, status: "running",
+			tasks: [{ id: "AgentInline", label: "Fix focus", ordinal: 1, role: "worker", episode: 1, status: "running",
 				executionPhase: "child-execution", route: { provider: "fixture", model: "offline", thinking: "off" },
-				assistantTurns: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, elapsedMs: 1_000, replayed: false, headline: "Agent inline detail",
-				activeTools: [], calls: [], callsTruncated: false }],
-			requestedTasks: 1, admittedTasks: 1, launchedChildren: 1, activeChildren: 1, settledTasks: 0,
-			aggregateAssistantTurns: 1, elapsedMs: 1_000,
+				assistantTurns: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, elapsedMs: 1_000, replayed: false, headline: "Restore focus when the inspector closes",
+				activeTools: ["bash"], calls: [{ id: "call_wide", parentId: null, tool: "bash", summary: `bun test ${"audit-".repeat(15)}AGENT-WIDE-END`, status: "running",
+					startedMs: 900, updatedMs: 950, outputMs: null, deadlineMs: null, tail: "", truncated: false }], callsTruncated: false }],
+			requestedTasks: 2, admittedTasks: 2, launchedChildren: 2, activeChildren: 2, settledTasks: 0,
+			aggregateAssistantTurns: 2, elapsedMs: 1_000,
 		};
+		snapshot.tasks.push({ ...snapshot.tasks[0]!, id: "SecondAgent", label: "Second fixture", ordinal: 2, role: "reviewer", headline: "Review second fixture",
+			activeTools: ["read"], calls: [{ id: "call_fixture", parentId: null, tool: "read", summary: "Read fixture target", status: "running",
+				startedMs: 900, updatedMs: 950, outputMs: 950, deadlineMs: null, tail: "Second fixture evidence", truncated: false }] });
 		pi.events.emit(OBSERVER_EVENT, snapshot);
 		if (pendingSessionRequest) replySession(pendingSessionRequest);
 		pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});

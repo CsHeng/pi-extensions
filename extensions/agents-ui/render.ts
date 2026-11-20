@@ -2,693 +2,237 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ObserverSnapshot, ObserverTask, ObserverToolCall } from "../agents/observer-events.ts";
 import type { SessionViewHistoryRow, SessionViewReply } from "../agents/session-view.ts";
 import type { RecordedUsageProjection } from "../agents/observability.ts";
-import { panelHeading, panelTheme, type PanelHeadingContent, type PanelTheme, type PanelTone } from "../shared/panel-heading.ts";
-import { formatPanelDuration as formatDuration, panelRows, type PanelRowSpec } from "../shared/panel-rows.ts";
+import { panelHeading, panelTheme, type PanelHeadingContent, type PanelTone } from "../shared/panel-heading.ts";
+import { formatPanelDuration as formatDuration } from "../shared/panel-rows.ts";
 import { formatUsageLane } from "../shared/usage-metrics.ts";
+import { inspectionFrame, type InspectionFrame, type InspectionItem } from "../shared/inspection-rows.ts";
 
 export const AGENTS_UI_STATUS_KEY = "agents.status";
 export const AGENTS_UI_PANEL_KEY = "agents.panel";
 export const AGENTS_UI_COMMAND = "agents-ui";
-export const OBSERVER_HEARTBEAT_MS = 5_000;
-export const OBSERVER_STALE_MISSED_HEARTBEATS = 3;
-export const OBSERVER_STALE_MS = OBSERVER_HEARTBEAT_MS * OBSERVER_STALE_MISSED_HEARTBEATS;
+export const OBSERVER_STALE_MS = 3 * 5_000;
 export const EMPTY_OBSERVER_MESSAGE = "No observed Agent work.";
-export const OVERLAY_TITLE = "Agents";
-export const OVERLAY_CLOSE_CHIP = "×";
 export const OVERLAY_HORIZONTAL_MARGIN = 1;
-export const PANEL_PADDING_X = 1;
-/** Border column on each side and border row above and below, as in the shared list overlay. */
 export const PANEL_FRAME = 1;
-/** Previous default overlay width, kept as the floor so short content does not shrink the panel. */
-export const PANEL_MIN_WIDTH = 80;
-/** Space kept between the close chip and the panel's right edge. */
-const CLOSE_CHIP_TRAILING_PAD = 1;
-/** Indent of a live task's demoted objective line, inside the glyph column. */
-const LIVE_DETAIL_INDENT = 4;
-
-export type OverlayRowKind =
-	| "title" | "rule" | "counts" | "liveHeader" | "live" | "gap"
-	| "group" | "settled" | "summary" | "more" | "help";
-
-export type RowColor = "accent" | "borderMuted" | "dim" | "text";
-
-export interface RowSegment {
-	text: string;
-	color?: RowColor;
-}
+const PANEL_PADDING_X = 1;
+const OVERLAY_CLOSE_CHIP = "×";
 
 export interface OverlayRow {
-	kind: OverlayRowKind;
+	kind: "title" | "rule" | "counts" | "liveHeader" | "live" | "group" | "settled" | "summary" | "more" | "help";
 	text: string;
-	segments?: RowSegment[];
+	item?: InspectionItem;
 }
 
-export type ObserverFreshness = "empty" | "live" | "stale" | "terminal";
+export function panelTextWidth(width: number): number { return Math.max(1, width - PANEL_PADDING_X * 2); }
 
-/** Text area of one panel row, after the horizontal inset. */
-export function panelTextWidth(width: number): number {
-	return Math.max(1, width - PANEL_PADDING_X * 2);
-}
-
-/** Column span of the close chip on the title row, used for both drawing and hit testing. */
 export function closeMarkerColumns(width: number): { start: number; end: number } {
-	const chipWidth = visibleWidth(OVERLAY_CLOSE_CHIP);
-	if (width <= chipWidth) return { start: 0, end: Math.max(0, width) };
-	const start = Math.max(PANEL_PADDING_X, width - chipWidth - CLOSE_CHIP_TRAILING_PAD);
-	return { start, end: Math.min(width, start + chipWidth) };
+	if (width <= 1) return { start: 0, end: Math.max(0, width) };
+	const start = Math.max(PANEL_PADDING_X, width - 2);
+	return { start, end: Math.min(width, start + 1) };
 }
 
-/** Panel width that fits the widest row without exceeding the terminal. */
 export function overlayPanelWidth(rows: readonly OverlayRow[], terminalColumns: number): number {
 	const available = Math.max(1, terminalColumns - OVERLAY_HORIZONTAL_MARGIN * 2);
-	const content = rows.reduce((max, row) => Math.max(max, visibleWidth(row.text)), 0)
-		+ PANEL_PADDING_X * 2;
-	const title = rows.find(row => row.kind === "title");
-	const titleContent = title
-		? visibleWidth(title.text) + PANEL_PADDING_X + 1 + visibleWidth(OVERLAY_CLOSE_CHIP) + CLOSE_CHIP_TRAILING_PAD
-		: 0;
-	const desired = Math.max(content, titleContent) + PANEL_FRAME * 2;
-	return Math.max(Math.min(PANEL_MIN_WIDTH, available), Math.min(desired, available));
+	const content = rows.reduce((max, row) => Math.max(max, visibleWidth(row.text) + (row.kind === "title" || row.item ? 2 : 0)), 0);
+	return Math.min(available, Math.max(80, content + 2 * (PANEL_PADDING_X + PANEL_FRAME)));
 }
 
-/** Inset one panel row and fill it to the panel width. */
 export function fillPanelRow(line: string, width: number): string {
 	if (width <= 0) return "";
-	const body = truncateToWidth(line, Math.max(0, width - PANEL_PADDING_X));
-	const padded = " ".repeat(Math.min(PANEL_PADDING_X, width)) + body;
+	const padded = " ".repeat(Math.min(PANEL_PADDING_X, width)) + truncateToWidth(line, Math.max(0, width - PANEL_PADDING_X));
 	return padded + " ".repeat(Math.max(0, width - visibleWidth(padded)));
 }
 
-/** Inset the title row and right-align the close chip, keeping it off the panel edge. */
 export function panelTitleRow(title: string, width: number): string {
-	const chipWidth = visibleWidth(OVERLAY_CLOSE_CHIP);
-	if (width <= 0) return "";
-	if (width <= chipWidth) return truncateToWidth(OVERLAY_CLOSE_CHIP, width);
-	const chipLeft = Math.max(PANEL_PADDING_X, width - chipWidth - CLOSE_CHIP_TRAILING_PAD);
-	const head = truncateToWidth(title, Math.max(0, chipLeft - PANEL_PADDING_X - 1));
-	const left = " ".repeat(Math.min(PANEL_PADDING_X, chipLeft)) + head;
-	const row = left + " ".repeat(Math.max(0, chipLeft - visibleWidth(left))) + OVERLAY_CLOSE_CHIP;
-	return row + " ".repeat(Math.max(0, width - visibleWidth(row)));
+	if (width <= 1) return width > 0 ? OVERLAY_CLOSE_CHIP : "";
+	const { start } = closeMarkerColumns(width);
+	const left = " ".repeat(PANEL_PADDING_X) + truncateToWidth(title, Math.max(0, start - PANEL_PADDING_X - 1));
+	return left + " ".repeat(Math.max(0, start - visibleWidth(left))) + OVERLAY_CLOSE_CHIP + " ".repeat(width - start - 1);
 }
 
-export function observerFreshness(
-	phase: ObserverSnapshot["phase"] | undefined,
-	receivedAt: number,
-	now: number,
-	staleMs: number = OBSERVER_STALE_MS,
-): ObserverFreshness {
-	if (phase === undefined) return "empty";
-	if (phase === "settled") return "terminal";
-	if (now - receivedAt > staleMs) return "stale";
-	return "live";
+export const isLiveTask = (task: ObserverTask): boolean => task.status === "pending" || task.status === "running";
+
+/** Only a fresh running child has an advancing clock. Stale rows keep the last measured duration. */
+export function observationAt(snapshot: ObserverSnapshot | undefined, receivedAt: number, now: number, staleMs = OBSERVER_STALE_MS) {
+	const age = Math.max(0, now - receivedAt);
+	const stale = snapshot !== undefined && snapshot.phase !== "settled" && age >= staleMs;
+	const tasks = snapshot?.tasks.map(task => !stale && snapshot.phase !== "settled" && task.status === "running" && task.executionPhase === "child-execution" && task.elapsedMs !== null
+		? { ...task, elapsedMs: task.elapsedMs + age } : task) ?? [];
+	return { tasks, stale };
 }
 
-export function displayElapsed(
-	observed: number | null,
-	receivedAt: number,
-	now: number,
-	freshness: ObserverFreshness,
-): number | null {
-	if (observed === null) return null;
-	if (freshness === "live") return observed + Math.max(0, now - receivedAt);
-	return observed;
+export function agentItemKey(handle: string, episode: number | null): string { return JSON.stringify([handle, episode]); }
+
+export function shortLabel(handle: string, others: readonly string[] = []): string {
+	const bare = (id: string) => id.startsWith("session_") ? id.slice(8) : id;
+	for (const length of [8, 12, 36]) {
+		const prefix = bare(handle).slice(0, length);
+		if (!others.some(other => other !== handle && bare(other).slice(0, length) === prefix)) return prefix;
+	}
+	return handle;
 }
 
-export function formatRoute(task: ObserverTask): string {
-	if (!task.route) return "route unavailable";
-	return `${task.route.provider} ${task.route.model} thinking:${task.route.thinking}`;
-}
-
-function isLiveTask(task: ObserverTask): boolean {
-	return task.status === "pending" || task.status === "running";
-}
-
-function liveStatusLabel(task: ObserverTask, freshness: ObserverFreshness): string {
-	if (freshness === "stale") return "unknown";
-	return task.status === "pending" ? "queued" : task.status;
-}
-
-function liveStatusColor(task: ObserverTask, freshness: ObserverFreshness): RowColor {
-	if (freshness === "stale") return "borderMuted";
-	return task.status === "pending" ? "dim" : "accent";
-}
-
-function historyLabelWarning(label: string): boolean {
-	return label.startsWith("history unavailable") || label === "history partial";
-}
-
-const DETAIL_INVISIBLE = /[\u200B-\u200D\uFEFF\u00AD]/g;
-
-/** Headlines may carry zero-width separators; show real word spaces in the detail row. */
-export function displayDetailText(text: string): string {
-	return text.replace(DETAIL_INVISIBLE, " ");
-}
+const displayText = (text: string) => text.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, " ");
+const roleTitle = (role: string, label?: string) => `${role[0]!.toUpperCase()}${role.slice(1)}: ${label ? displayText(label) : "untitled task"}`;
+const routeText = (route: ObserverTask["route"] | undefined, full = false) => route
+	? `${full ? `${route.provider} ` : ""}${route.model} ${route.thinking}` : full ? "route unavailable" : "—";
 
 function callText(call: ObserverToolCall): string {
-	const parent = call.parentId ? ` parent ${call.parentId}` : "";
-	const summary = call.summary ? ` ${call.summary}` : "";
-	return `${call.tool} ${call.id}${parent} ${call.status}${summary}`;
+	return `${call.tool} ${call.id}${call.parentId ? ` parent ${call.parentId}` : ""} ${call.status}${call.summary ? ` ${call.summary}` : ""}`;
 }
 
-function liveSecondaryLine(task: ObserverTask): string | undefined {
-	const parts: string[] = [];
-	if (task.headline) parts.push(displayDetailText(task.headline));
-	if (task.calls.length > 0) {
-		parts.push(task.calls.map(callText).join("; "));
-		if (task.callsTruncated) parts.push("more");
-	} else if (task.activeTools.length > 0) parts.push(task.activeTools.join(", "));
-	if (parts.length === 0) return undefined;
-	return "\n" + " ".repeat(LIVE_DETAIL_INDENT) + parts.join(" · ");
+/** Only started, still-running calls describe current work. Tails, proposed and completed calls are detail. */
+function currentAction(task: ObserverTask): string {
+	if (task.status !== "running") return task.status === "pending" ? "queued" : task.status;
+	if (task.executionPhase === "workspace-preparation") return "preparing workspace";
+	if (task.executionPhase === "convergence-critical") return "finalizing";
+	const active = task.calls.filter(call => call.status === "running" && call.startedMs !== null);
+	const call = active.at(-1);
+	if (call) return `${call.tool}${call.summary ? ` · ${call.summary}` : ""}${active.length > 1 ? ` (+${active.length - 1})` : ""}`;
+	return task.responding ? "generating reply" : "running";
 }
 
-/** Live rows truncate each line instead of wrapping so one agent never eats the viewport. */
-export function liveRowLines(text: string, width: number): string[] {
-	return text.split("\n").map(part => truncateToWidth(part, Math.max(0, width)));
-}
-
-function settledStatusLabel(task: ObserverTask): string {
-	return task.status;
-}
-
-function taskGlyph(task: ObserverTask): string {
-	if (isLiveTask(task)) return "●";
-	if (task.status === "succeeded") return "✓";
-	if (task.status === "failed") return "✗";
-	return "";
-}
-
-export interface CountParts {
-	liveLabel: string;
-	finished: number;
-	elapsedText: string;
-	frozen: boolean;
-}
-
-export function countParts(snapshot: ObserverSnapshot, freshness: ObserverFreshness, headerElapsed: number | null): CountParts {
-	const live = snapshot.tasks.filter(isLiveTask);
-	const running = live.filter(task => task.status === "running").length;
-	const queued = live.length - running;
-	const labels: string[] = [];
-	if (freshness === "stale" && live.length > 0) labels.push(`${live.length} unknown`);
-	else {
-		if (running > 0) labels.push(`${running} running`);
-		if (queued > 0) labels.push(`${queued} queued`);
+function stateGlyph(state: string): Pick<InspectionItem, "glyph" | "tone"> {
+	switch (state) {
+		case "running": return { glyph: "◐", tone: "accent" };
+		case "pending": return { glyph: "○", tone: "dim" };
+		case "succeeded": return { glyph: "✓", tone: "success" };
+		case "failed": return { glyph: "✗", tone: "error" };
+		case "blocked": return { glyph: "!", tone: "warning" };
+		case "interrupted": case "aborted": return { glyph: "⊘", tone: "warning" };
+		default: return { glyph: "?", tone: "warning" };
 	}
-	const finished = snapshot.tasks.length - live.length;
-	return {
-		liveLabel: labels.join(" · "),
-		finished,
-		elapsedText: formatDuration(headerElapsed),
-		frozen: freshness === "stale" || freshness === "terminal",
-	};
 }
 
-export function formatCountsText(parts: CountParts): string {
-	const head = parts.liveLabel ? `${parts.liveLabel} · ` : "";
-	return `${head}${parts.finished} finished · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
+export function formatAgentUsage(usage: RecordedUsageProjection | null | undefined): string {
+	if (!usage || usage.status === "unavailable") return "usage unavailable";
+	const text = formatUsageLane({ input: usage.usage.input ?? 0, output: usage.usage.output ?? 0, cacheRead: usage.usage.cacheRead ?? 0,
+		cacheWrite: usage.usage.cacheWrite ?? 0, cost: usage.usage.cost ?? 0, ...usage.lane }) || "no usage";
+	return text + (usage.status === "incomplete" ? " (partial)" : "");
 }
 
-export function countsSegments(parts: CountParts): RowSegment[] {
-	const rest = `${parts.finished} finished · ${parts.elapsedText}${parts.frozen ? " frozen" : ""}`;
-	if (!parts.liveLabel) return [{ text: rest, color: "dim" }];
-	return [{ text: parts.liveLabel, color: "accent" }, { text: ` · ${rest}`, color: "dim" }];
+function observedItem(task: ObserverTask, name: string, stale: boolean): InspectionItem {
+	const lost = stale && isLiveTask(task);
+	return { key: agentItemKey(task.id, task.episode), ...stateGlyph(lost ? "unknown" : task.status), name,
+		activity: lost ? "observation stale" : currentAction(task), meta: routeText(task.route), tail: task.elapsedMs === null ? "" : formatDuration(task.elapsedMs),
+		detail: () => lost ? [`Agent ${task.id} ep${task.episode ?? "?"}`, "Live observation stale · record unavailable"]
+			: [`Agent ${task.id} ep${task.episode ?? "?"}`, `${name} · ${currentAction(task)} · ${formatDuration(task.elapsedMs)}`,
+			`Assignment: ${displayText(task.headline) || "unavailable"}`, `Route: ${routeText(task.route, true)}`,
+			`Usage: ${formatUsageLane(task.usage) || "unavailable"}`, ...task.calls.flatMap(call => [callText(call),
+				`Timing: started ${call.startedMs ?? "?"} · updated ${call.updatedMs ?? "?"} · output ${call.outputMs ?? "?"} · deadline ${call.deadlineMs ?? "?"}`,
+				...(call.tail ? [`Output tail${call.truncated ? " (truncated)" : ""}: ${call.tail}`] : [])]),
+			...(task.callsTruncated ? ["Additional calls omitted"] : [])] };
 }
 
-export interface TaskColumns {
-	role: number;
-	status: number;
-	elapsed: number;
+const unconfirmedState = (row: SessionViewHistoryRow) => row.state === "running" || row.state === "queued";
+
+function historyItem(row: SessionViewHistoryRow, name: string): InspectionItem {
+	const unconfirmed = unconfirmedState(row);
+	const outcome = unconfirmed ? "unconfirmed" : row.latestOutcome === "unknown" && row.state === "interrupted" ? "interrupted" : row.latestOutcome;
+	const tail = [!row.onCurrentBranch && "off-branch", row.legacy && "legacy", row.elapsedMs !== undefined && formatDuration(row.elapsedMs)].filter(Boolean).join(" · ");
+	return { key: agentItemKey(row.handle, row.episode), ...stateGlyph(outcome), name, activity: outcome, meta: routeText(row.route), tail,
+		detail: () => [`Agent ${row.handle} ep${row.episode}`, name, `State: ${row.state}${unconfirmed ? "?" : ""} · outcome: ${row.latestOutcome}${!row.onCurrentBranch ? " · off-branch" : ""}${row.legacy ? " · legacy" : ""}`,
+			`Elapsed: ${formatDuration(row.elapsedMs ?? null)}`, `Route: ${routeText(row.route, true)}`, `Usage: ${formatAgentUsage(row.recordedUsage)} (agent history)`,
+			`Accepted episodes: ${row.acceptedEpisodes ?? "unknown"} · report ${row.reportComplete ? "complete" : "incomplete"} · retained ${row.retained ? "yes" : "no"}`,
+			`Candidate roots: ${row.roots?.length ?? "unavailable"}`, ...(row.roots ?? []).map(root => `${root.id.slice(0, 8)} ${root.status}${root.recovery === "required" ? "!" : ""}/${root.release} ${root.destination}`),
+			...(row.release ? [`cleanup=${row.release.status}${row.release.remaining ? ` remaining=${row.release.remaining}` : ""}`] : [])] };
 }
 
-/** Shared column widths so live and settled rows scan vertically. */
-export function taskColumns(tasks: readonly ObserverTask[], freshness: ObserverFreshness): TaskColumns {
-	const columns: TaskColumns = { role: 0, status: 0, elapsed: 0 };
-	for (const task of tasks) {
-		columns.role = Math.max(columns.role, task.role.length);
-		columns.status = Math.max(columns.status, (isLiveTask(task) ? liveStatusLabel(task, freshness) : settledStatusLabel(task)).length);
-		columns.elapsed = Math.max(columns.elapsed, visibleWidth(formatDuration(task.elapsedMs)));
+/** Both list surfaces use the same row and detail. Their callers own ordering and the visible history page. */
+export function agentListSections(tasks: readonly ObserverTask[], history: readonly SessionViewHistoryRow[], stale = false) {
+	const observed = tasks.filter(task => !history.some(row => row.handle === task.id && (task.episode === null || row.episode > task.episode
+		|| (row.episode === task.episode && !unconfirmedState(row) && (stale || !isLiveTask(task))))));
+	const retained = history.filter(row => !observed.some(task => task.id === row.handle)).map(row => {
+		const last = tasks.find(task => task.id === row.handle && task.episode === row.episode);
+		if (!last || last.status === "running" || last.status === "pending") return row;
+		// A terminal observer can fill a gap in this exact episode, never a different episode's duration or result.
+		return { ...row, ...(!row.label && last.label ? { label: last.label } : {}), route: row.route ?? last.route,
+			...(row.elapsedMs === undefined && last.elapsedMs !== null ? { elapsedMs: last.elapsedMs } : {}),
+			latestOutcome: row.latestOutcome === "unknown" ? last.status : row.latestOutcome };
+	});
+	const titles = new Map<string, string[]>();
+	for (const agent of [...observed, ...retained]) {
+		const title = roleTitle(agent.role, agent.label);
+		const group = titles.get(title) ?? [];
+		group.push("handle" in agent ? agent.handle : agent.id);
+		titles.set(title, group);
 	}
-	return columns;
-}
-
-export function formatLiveRow(task: ObserverTask, freshness: ObserverFreshness, columns: TaskColumns, label?: string): OverlayRow {
-	const status = liveStatusLabel(task, freshness);
-	const statusColor = liveStatusColor(task, freshness);
-	const head = `${label ? `${label} ep${task.episode} ` : ""}${task.role.padEnd(columns.role)} `;
-	const elapsed = formatDuration(task.elapsedMs).padStart(columns.elapsed);
-	const route = formatRoute(task);
-	// Usage precedes the long route so truncation keeps the cost signal.
-	const usage = formatUsageLane(task.usage);
-	const tail = usage ? `${usage}  ${route}` : route;
-	const primary = `${taskGlyph(task)} ${head}${status.padEnd(columns.status)} ${elapsed}  ${tail}`;
-	const secondary = liveSecondaryLine(task);
-	const segments: RowSegment[] = [
-		{ text: `${taskGlyph(task)} `, color: "accent" },
-		{ text: head, color: "text" },
-		{ text: status.padEnd(columns.status), color: statusColor },
-		{ text: ` ${elapsed}  `, color: "text" },
-		{ text: tail, color: "dim" },
-	];
-	if (secondary) segments.push({ text: secondary, color: "dim" });
-	return { kind: "live", text: primary + (secondary ?? ""), segments };
-}
-
-/** Section label for the pinned live block; mirrors the history nav row. */
-export function formatRunningNav(agentCount: number): OverlayRow {
-	const suffix = ` · ${agentCount} agent${agentCount === 1 ? "" : "s"}`;
-	const text = `running${suffix}`;
-	return {
-		kind: "liveHeader",
-		text,
-		segments: [{ text: "running", color: "accent" }, { text: suffix, color: "dim" }],
+	const distinguish = (item: InspectionItem, handle: string) => {
+		const group = titles.get(item.name)!;
+		const compactName = item.name.replace(/^(Worker|Explorer|Reviewer): /, (_, role: string) => role[0] + ": ");
+		return { ...item, compactName, ...(group.length > 1 ? { nameSuffix: `[${shortLabel(handle, group)}]` } : {}) };
 	};
+	const fromTask = (task: ObserverTask) => distinguish(observedItem(task, roleTitle(task.role, task.label), stale), task.id);
+	return { live: observed.filter(isLiveTask).map(fromTask), finished: observed.filter(task => !isLiveTask(task)).map(fromTask),
+		retained: retained.map(row => distinguish(historyItem(row, roleTitle(row.role, row.label)), row.handle)) };
 }
 
-export interface SettledSummary {
-	count: number;
-	rangeText: string;
-}
-
-export function settledSummary(tasks: readonly ObserverTask[]): SettledSummary {
-	const settled = tasks.filter(task => !isLiveTask(task));
-	const elapsed = settled.map(task => task.elapsedMs).filter((value): value is number => value !== null);
-	const rangeText = elapsed.length === 0
-		? "unknown"
-		: elapsed.length === 1
-			? formatDuration(elapsed[0] ?? null)
-			: `${formatDuration(Math.min(...elapsed))} – ${formatDuration(Math.max(...elapsed))}`;
-	return { count: settled.length, rangeText };
-}
-
-export function formatGroupRow(summary: SettledSummary, expanded: boolean): string {
-	return `${expanded ? "▾" : "▸"} ${summary.count} finished · ${summary.rangeText}`;
-}
-
-export function formatStatus(snapshot: ObserverSnapshot): string {
-	const parts = countParts(snapshot, "live", snapshot.elapsedMs);
-	const live = parts.liveLabel ? `●${parts.liveLabel} · ` : "";
-	return `SA ${live}${parts.finished} finished · ${parts.elapsedText}`;
-}
-
-export interface AgentsSummaryCounts {
-	running: number | "unknown";
-	queued: number;
-	agents: number | "unknown";
-}
-
-/** Accepted facts already held by the summary. Omitted tasks or history are not invented. */
+export interface AgentsSummaryCounts { running: number | "unknown"; queued: number; agents: number | "unknown" }
 export interface AgentsInlineModel {
 	counts: AgentsSummaryCounts;
 	tasks?: readonly ObserverTask[];
 	history?: readonly SessionViewHistoryRow[];
 	historyTotal?: number;
+	stale?: boolean;
 }
 
-export interface AgentsInlineOptions {
-	folded?: boolean;
-	theme?: unknown;
-}
-
-/** Unknown counts are the only current condition that warns; settled failures stay on their rows. */
 function summaryHeading(counts: AgentsSummaryCounts): PanelHeadingContent {
-	const alerts: string[] = [];
-	const focus: string[] = [];
+	const alerts: string[] = [], focus: string[] = [];
 	if (counts.running === "unknown") alerts.push("running unknown");
-	else {
-		if (counts.running > 0) focus.push(`${counts.running} running`);
-		if (counts.queued > 0) focus.push(`${counts.queued} queued`);
-	}
+	else if (counts.running > 0) focus.push(`${counts.running} running`);
+	if (counts.queued > 0) focus.push(`${counts.queued} queued`);
 	if (counts.agents === "unknown") alerts.push("agents unknown");
-	// An unknown live count keeps the known total visible.
-	const done = typeof counts.agents !== "number" ? undefined
-		: typeof counts.running === "number" ? `${Math.max(0, counts.agents - counts.running - counts.queued)}/${counts.agents} done` : `?/${counts.agents} done`;
+	const done = typeof counts.agents !== "number" ? undefined : `${typeof counts.running === "number" ? Math.max(0, counts.agents - counts.running - counts.queued) : "?"}/${counts.agents} done`;
 	return { title: "Agents", ...(done ? { progress: done } : {}), focus, alerts };
 }
 
-/**
- * Above-editor row budget. Folded stays one title line; expanded adds a few agent rows
- * and leaves the editor plus the other sections room.
- */
 export function agentsInlineBudget(terminalRows: number): number {
-	const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 36;
-	return Math.max(1, Math.min(6, Math.floor(rows / 4)));
+	return Math.max(1, Math.min(6, Math.floor((Number.isFinite(terminalRows) ? terminalRows : 36) / 4)));
 }
 
-function taskRank(task: ObserverTask): number {
-	if (task.status === "running") return 0;
-	if (task.status === "pending") return 1;
-	if (task.status === "failed" || task.status === "blocked" || task.status === "aborted") return 2;
-	return 3;
+export function agentInspectionItems(model: AgentsInlineModel): InspectionItem[] {
+	const taskRank = (t: ObserverTask) => t.status === "running" ? 0 : t.status === "pending" ? 1 : t.status === "succeeded" ? 3 : 2;
+	const historyRank = (r: SessionViewHistoryRow) => r.state === "interrupted" ? 0 : r.state === "running" || r.state === "queued" ? 1 : r.state === "idle" ? 2 : 3;
+	const items = agentListSections([...(model.tasks ?? [])].sort((a, b) => taskRank(a) - taskRank(b)),
+		[...(model.history ?? [])].sort((a, b) => historyRank(a) - historyRank(b)), model.stale);
+	return [...items.live, ...items.finished, ...items.retained];
 }
 
-function historyRank(row: SessionViewHistoryRow): number {
-	if (row.state === "interrupted") return 0;
-	if (row.state === "running" || row.state === "queued") return 1;
-	if (row.state === "idle") return 2;
-	return 3;
+export function formatAgentsInspection(model: AgentsInlineModel, width: number, maxRows: number, theme: unknown, selected?: string): InspectionFrame {
+	const colors = panelTheme(theme) ?? { fg: (_color: PanelTone, text: string) => text };
+	const heading = panelHeading(summaryHeading(model.counts), width, { folded: false, theme: colors });
+	const hidden = Math.max(0, (model.historyTotal ?? 0) - (model.history?.length ?? 0));
+	return inspectionFrame(heading, agentInspectionItems(model), width, maxRows, colors, { ...(selected === undefined ? {} : { selected }), hidden, hint: `/${AGENTS_UI_COMMAND} list` });
 }
 
-function taskStatusLabel(task: ObserverTask): string {
-	return task.status === "pending" ? "queued" : task.status;
-}
-
-/**
- * Recorded usage in the footer's `↑ ↓ R W CH $ RB` grammar, with `CH` as the token-weighted mean.
- * Unknown metrics are left out and the coverage tag says the total is partial.
- */
-export function formatAgentUsage(usage: RecordedUsageProjection | null | undefined): string {
-	if (!usage || usage.status === "unavailable") return "usage unavailable";
-	const text = formatUsageLane({
-		input: usage.usage.input ?? 0, output: usage.usage.output ?? 0, cacheRead: usage.usage.cacheRead ?? 0,
-		cacheWrite: usage.usage.cacheWrite ?? 0, cost: usage.usage.cost ?? 0, ...usage.lane,
-	}) || "no usage";
-	const coverage = usageCoverageTag(usage);
-	return text + (coverage ? ` (${coverage})` : "");
-}
-
-/** Live usage of the current episode; nothing until the first request settles. */
-function liveUsageFields(task: ObserverTask): string[] {
-	const text = formatUsageLane(task.usage);
-	return text ? [text] : [];
-}
-
-function inlineRoute(route: ObserverTask["route"] | undefined): string {
-	return route ? `${route.provider} ${route.model} ${route.thinking}` : "route unavailable";
-}
-
-function liveGlyph(task: ObserverTask): { glyph: string; tone: PanelTone } {
-	if (task.status === "running") return { glyph: "◐", tone: "accent" };
-	if (task.status === "pending") return { glyph: "○", tone: "dim" };
-	if (task.status === "succeeded") return { glyph: "✓", tone: "success" };
-	if (task.status === "failed") return { glyph: "✗", tone: "error" };
-	return { glyph: task.status === "blocked" ? "!" : "⊘", tone: "warning" };
-}
-
-function historyTone(row: SessionViewHistoryRow): { glyph: string; tone: PanelTone } {
-	const glyph = historyGlyph(row);
-	if (glyph === "?") return { glyph, tone: "warning" };
-	if (row.latestOutcome === "succeeded") return { glyph: "✓", tone: "success" };
-	if (row.latestOutcome === "failed") return { glyph: "✗", tone: "error" };
-	if (row.latestOutcome === "aborted") return { glyph: "⊘", tone: "warning" };
-	return { glyph: "·", tone: "dim" };
-}
-
-/**
- * Inline rows share one short-label map across live and retained agents, so a live handle is
- * shown with the same 8-character prefix as its history row and the central list. Fields run
- * from most to least identifying (state, route, usage) so a narrow terminal clips usage first.
- */
-function inlineAgentSpecs(model: AgentsInlineModel): PanelRowSpec[] {
-	const historyRows = model.history ?? [];
-	// Retained rows carry the episode state/outcome, route and recorded usage. Prefer
-	// them for a settled observer's same episode; fresh live facts still take priority.
-	const taskRows = (model.tasks ?? []).filter(task => !historyRows.some(row => row.handle === task.id
-		&& (task.episode === null || row.episode > task.episode || (row.episode === task.episode && !isLiveTask(task)))));
-	const tasks = taskRows.map((task, index) => ({ task, index }))
-		.sort((a, b) => taskRank(a.task) - taskRank(b.task) || a.index - b.index);
-	const history = historyRows.filter(row => !taskRows.some(task => task.id === row.handle)).map((row, index) => ({ row, index }))
-		.sort((a, b) => historyRank(a.row) - historyRank(b.row) || a.index - b.index);
-	const labels = shortLabelMap([...tasks.map(({ task }) => task.id), ...history.map(({ row }) => row.handle)]);
-	const roleWidth = Math.max(0, ...tasks.map(({ task }) => task.role.length), ...history.map(({ row }) => row.role.length));
-	const name = (role: string, handle: string, episode: number | string) => `${role.padEnd(roleWidth)} ${labels.get(handle) ?? handle} ep${episode}`;
-	return [
-		...tasks.map(({ task }) => {
-			const state = liveGlyph(task);
-			return {
-				glyph: state.glyph,
-				glyphTone: state.tone,
-				primary: name(task.role, task.id, task.episode ?? "?"),
-				primaryTone: "text" as const,
-				fields: [taskStatusLabel(task), inlineRoute(task.route), ...liveUsageFields(task)],
-			};
-		}),
-		...history.map(({ row }) => {
-			const state = historyTone(row);
-			return {
-				glyph: state.glyph,
-				glyphTone: state.tone,
-				primary: name(row.role, row.handle, row.episode),
-				primaryTone: row.state === "closed" ? "dim" as const : "text" as const,
-				fields: [`${historyStateLabel(row)} ${row.latestOutcome}`, inlineRoute(row.route), formatAgentUsage(row.recordedUsage)],
-			};
-		}),
-	];
-}
-
-function shortLabelMap(handles: readonly string[]): Map<string, string> {
-	return new Map(handles.map(handle => [handle, shortLabel(handle, handles)]));
-}
-
-function inlineAgentLines(model: AgentsInlineModel, width: number, room: number, theme: PanelTheme): string[] {
-	if (room <= 0) return [];
-	const unloaded = Math.max(0, (model.historyTotal ?? model.history?.length ?? 0) - (model.history?.length ?? 0));
-	return panelRows(inlineAgentSpecs(model), width, theme, { maxRows: room, hidden: unloaded, primary: "fixed", hint: `/${AGENTS_UI_COMMAND} list` });
-}
-
-/**
- * Folded heading, or the same heading plus bounded agent/status rows.
- * The title stays first. Agent metadata is shared with the central list; long rows clip safely.
- */
-export function formatAgentsInline(
-	model: AgentsInlineModel,
-	width: number,
-	maxRows = 1,
-	options: AgentsInlineOptions = {},
-): string[] {
-	width = Math.max(0, Math.floor(width));
-	maxRows = Math.max(0, Math.floor(maxRows));
-	if (!Number.isFinite(width) || !width || !Number.isFinite(maxRows) || !maxRows) return [];
+export function formatAgentsInline(model: AgentsInlineModel, width: number, maxRows = 1, options: { folded?: boolean; theme?: unknown } = {}): string[] {
+	if (!Number.isFinite(width) || width < 1 || !Number.isFinite(maxRows) || maxRows < 1) return [];
 	const folded = options.folded !== false;
-	const theme = panelTheme(options.theme) ?? { fg: (_color: PanelTone, text: string) => text };
-	const heading = panelHeading(summaryHeading(model.counts), width, { folded, theme });
-	if (folded || maxRows < 2) return [heading];
-	return [heading, ...inlineAgentLines(model, width, maxRows - 1, theme)];
-}
-
-/** One session-inventory line, using the same collapsed grammar as Tasks. */
-export function formatAgentsSummary(counts: AgentsSummaryCounts, width: number): string {
-	return formatAgentsInline({ counts }, width, 1, { folded: true })[0] ?? "";
+	if (folded || maxRows < 2) return [panelHeading(summaryHeading(model.counts), width, { folded, theme: panelTheme(options.theme) })];
+	return formatAgentsInspection(model, width, maxRows, options.theme).lines;
 }
 
 export function agentsSummaryHasState(counts: AgentsSummaryCounts): boolean {
 	return (typeof counts.running === "number" && counts.running > 0) || counts.queued > 0 || (typeof counts.agents === "number" && counts.agents > 0);
 }
 
-export function formatPanel(snapshot: ObserverSnapshot): string[] {
-	const parts = countParts(snapshot, "live", snapshot.elapsedMs);
-	const lines = [formatCountsText(parts)];
-	const columns = taskColumns(snapshot.tasks, "live");
-	for (const task of snapshot.tasks.filter(isLiveTask)) {
-		lines.push(formatLiveRow(task, "live", columns).text);
-	}
-	const summary = settledSummary(snapshot.tasks);
-	if (summary.count > 0) lines.push(formatGroupRow(summary, false));
-	return lines;
-}
-
-// ── Session-scoped overlay formatters (session-view contract consumer) ──────────────────
-
-/** Characters of the host session id shown in the session-scoped title. */
-export const SESSION_SCOPE_CHARS = 6;
-
-/** Session-scoped title; never a batch number or a run prefix. */
 export function formatSessionTitle(sessionId: string | undefined): string {
-	if (!sessionId) return `${OVERLAY_TITLE} · session`;
-	const prefix = sessionId.slice(0, SESSION_SCOPE_CHARS);
-	return `${OVERLAY_TITLE} · session ${prefix}${sessionId.length > SESSION_SCOPE_CHARS ? "…" : ""}`;
+	return sessionId ? `Agents · session ${sessionId.slice(0, 6)}${sessionId.length > 6 ? "…" : ""}` : "Agents · session";
 }
 
-export function compactCount(value: number | null): string {
-	if (value === null) return "?";
-	if (value < 1_000) return String(value);
-	if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
-	return `${(value / 1_000_000).toFixed(1)}M`;
-}
-
-export function compactCost(value: number | null): string {
-	if (value === null) return "?";
-	if (value < 100) return value.toFixed(2);
-	return compactCount(value);
-}
-
-function usageCoverageTag(usage: RecordedUsageProjection): string {
-	return usage.status === "complete" ? "" : usage.status === "incomplete" ? "partial" : "unknown";
-}
-
-/** Cumulative recorded usage line; live current-episode usage stays on the live rows. */
-export function formatSessionUsage(usage: RecordedUsageProjection | null): OverlayRow | undefined {
-	if (!usage) return undefined;
-	const text = `recorded ${formatAgentUsage(usage)}`;
-	return { kind: "summary", text, segments: [{ text, color: "dim" }] };
-}
-
-export interface SessionCounts {
-	live: number;
-	known: boolean;
-	agents: string;
-	episodes: string;
-	idle: string;
-	interrupted: string;
-	closed: string;
-	historyLabel: string;
-	limitedLive: boolean;
-}
-
-export function sessionCounts(
-	snapshot: ObserverSnapshot | undefined,
-	reply: SessionViewReply | undefined,
-	historyState: string,
-	reason: string | undefined,
-	refreshing: boolean,
-): SessionCounts {
-	const live = snapshot?.tasks.filter(isLiveTask) ?? [];
-	const summary = reply?.summary;
-	const states = summary?.states;
-	let historyLabel = "";
-	if (historyState === "loading") historyLabel = refreshing ? "history refreshing" : "history loading";
-	else if (historyState === "unavailable") historyLabel = `history unavailable${reason ? ` (${reason})` : ""}${reply?.history.state === "ready" ? " · cached" : ""}`;
-	else if (reply && !reply.inventory.complete) historyLabel = "history partial";
-	return {
-		live: live.length,
-		known: summary !== undefined && summary !== null,
-		agents: summary ? String(summary.agents) : "?",
-		episodes: !summary ? "?" : summary.acceptedEpisodes === null ? "?" : String(summary.acceptedEpisodes),
-		idle: states ? String(states.idle) : "?",
-		interrupted: states ? String(states.interrupted) : "?",
-		closed: states ? String(states.closed) : "?",
-		historyLabel,
-		limitedLive: snapshot !== undefined && reply === undefined,
-	};
-}
-
-/** Session summary as stacked rows so live count stays visually primary. */
-export function formatSessionCountRows(counts: SessionCounts): OverlayRow[] {
-	const head = `${counts.live} live`;
-	const body = `${counts.agents} agents · ${counts.episodes} episodes · ${counts.idle} idle · ${counts.interrupted} int · ${counts.closed} closed`;
-	const rows: OverlayRow[] = [
-		{ kind: "counts", text: head, segments: [{ text: head, color: "accent" }] },
-		{ kind: "counts", text: body, segments: [{ text: body, color: "dim" }] },
-	];
-	return [...rows, ...sessionCountMetaRows(counts)];
-}
-
-/** Warning/limit rows shown under the counts; compact headers keep these above all else. */
-export function sessionCountMetaRows(counts: SessionCounts): OverlayRow[] {
-	const meta: string[] = [];
-	if (counts.historyLabel) {
-		const warning = historyLabelWarning(counts.historyLabel);
-		meta.push(warning ? `⚠ ${counts.historyLabel}` : counts.historyLabel);
-	}
-	if (counts.limitedLive) meta.push("limited live observation");
-	if (meta.length === 0) return [];
-	const text = meta.join(" · ");
-	const warning = meta.some(part => part.startsWith("⚠"));
-	return [{ kind: "counts", text, segments: [{ text, color: warning ? "borderMuted" : "dim" }] }];
-}
-
-/** Flattened counts line for width estimation and legacy callers. */
-export function formatSessionCounts(counts: SessionCounts): OverlayRow {
-	const rows = formatSessionCountRows(counts);
-	const text = rows.map(row => row.text).join(" · ");
-	return { kind: "counts", text, segments: rows.flatMap(row => row.segments ?? [{ text: row.text }]) };
-}
-
-/** Stable short agent label with collision disambiguation across the visible set. */
-export function shortLabel(handle: string, others: readonly string[] = []): string {
-	const uuid = handle.startsWith("session_") ? handle.slice("session_".length) : handle;
-	for (const length of [8, 12, 36]) {
-		const candidate = uuid.slice(0, length);
-		if (!others.some(other => other !== handle && shortLabelBase(other, length) === candidate)) return candidate;
-	}
-	return handle;
-}
-function shortLabelBase(handle: string, length: number): string {
-	const uuid = handle.startsWith("session_") ? handle.slice("session_".length) : handle;
-	return uuid.slice(0, length);
-}
-
-export interface HistoryColumns { label: number; role: number; episode: number; state: number; outcome: number; }
-
-export function historyColumns(rows: readonly SessionViewHistoryRow[], labels: ReadonlyMap<string, string>): HistoryColumns {
-	const columns: HistoryColumns = { label: 0, role: 0, episode: 0, state: 0, outcome: 0 };
-	for (const row of rows) {
-		columns.label = Math.max(columns.label, (labels.get(row.handle) ?? row.handle).length);
-		columns.role = Math.max(columns.role, row.role.length);
-		columns.episode = Math.max(columns.episode, `ep${row.episode}`.length);
-		columns.state = Math.max(columns.state, historyStateLabel(row).length);
-		columns.outcome = Math.max(columns.outcome, row.latestOutcome.length);
-	}
-	return columns;
-}
-
-/** Durable managed state; running/queued in history is unconfirmed without fresh live evidence. */
-function historyStateLabel(row: SessionViewHistoryRow): string {
-	return row.state === "running" || row.state === "queued" ? `${row.state}?` : row.state;
-}
-
-function historyGlyph(row: SessionViewHistoryRow): string {
-	if (row.state === "running" || row.state === "queued") return "?";
-	if (row.state === "closed") return "■";
-	if (row.latestOutcome === "succeeded") return "✓";
-	if (row.latestOutcome === "failed") return "✗";
-	if (row.latestOutcome === "aborted") return "⊘";
-	return "·";
-}
-
-export function formatHistoryRow(row: SessionViewHistoryRow, label: string, columns: HistoryColumns): OverlayRow {
-	const badges = [row.onCurrentBranch ? "" : "off-branch", row.legacy ? "legacy" : ""].filter(Boolean).join(" ");
-	const usage = formatAgentUsage(row.recordedUsage);
-	const primary = `${historyGlyph(row)} ${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} ${historyStateLabel(row).padEnd(columns.state)} ${row.latestOutcome.padEnd(columns.outcome)}`;
-	const route = row.route ? `\n  ${row.route.provider} ${row.route.model} thinking:${row.route.thinking}` : "";
-	// Bounded per-root outcome line: destination, apply status, recovery need and this root's own release fact.
-	const roots = row.roots?.length
-		? `\n  ${row.roots.map(root => `${root.id.slice(0, 8)} ${root.status}${root.recovery === "required" ? "!" : ""}/${root.release} ${truncateToWidth(root.destination, 40)}`).join(" · ")}`
-		: "";
-	// Aggregate owned-resource cleanup is separate from per-root disposition; a scratch-only failure
-	// must stay visible even when every projected root is already released.
-	const cleanup = row.release ? `\n  cleanup=${row.release.status}${row.release.remaining > 0 ? ` remaining=${row.release.remaining}` : ""}` : "";
-	const text = `${primary} ${usage}` + (badges ? `  ${badges}` : "") + route + roots + cleanup;
-	const segments: RowSegment[] = [
-		{ text: `${historyGlyph(row)} `, color: "text" },
-		{ text: `${label.padEnd(columns.label)} ${row.role.padEnd(columns.role)} ${`ep${row.episode}`.padEnd(columns.episode)} `, color: "text" },
-		{ text: historyStateLabel(row).padEnd(columns.state), color: "text" },
-		{ text: ` ${row.latestOutcome.padEnd(columns.outcome)} `, color: "text" },
-		{ text: usage + (badges ? `  ${badges}` : ""), color: "dim" },
-	];
-	if (route) segments.push({ text: route, color: "dim" });
-	if (roots) segments.push({ text: roots, color: "dim" });
-	if (cleanup) segments.push({ text: cleanup, color: "dim" });
-	return { kind: "settled", text, segments };
-}
-
-/** Honest visible range and page indicator for the expanded history section. */
 export function formatHistoryNav(history: SessionViewReply["history"]): OverlayRow {
 	const from = history.totalRows === 0 ? 0 : history.page * history.pageSize + 1;
 	const to = Math.min(history.totalRows, (history.page + 1) * history.pageSize);
-	const suffix = ` ${from}–${to} of ${history.totalRows} · page ${history.page + 1}/${Math.max(1, history.totalPages)} · pgup/pgdn`;
-	const text = `history${suffix}`;
-	return { kind: "group", text, segments: [{ text: "history", color: "accent" }, { text: suffix, color: "dim" }] };
+	return { kind: "group", text: `history ${from}–${to} of ${history.totalRows} · page ${history.page + 1}/${Math.max(1, history.totalPages)} · pgup/pgdn` };
 }
 
 export function formatHistoryCollapsed(session: { kind: string; reply?: SessionViewReply; reason?: string }): string {
-	if (session.kind === "loading") return session.reply ? "▸ history refreshing · enter" : "▸ history loading · enter";
-	if (session.kind === "unavailable") return `▸ ⚠ history unavailable${session.reason ? ` (${session.reason})` : ""}${session.reply?.history.state === "ready" ? " · cached" : ""} · enter retry`;
-	const count = session.reply?.history.totalRows ?? 0;
-	return `▸ ${count} retained agents · enter`;
+	if (session.kind === "loading") return session.reply ? "▸ history refreshing · H" : "▸ history loading · H";
+	if (session.kind === "unavailable") return `▸ ⚠ history unavailable${session.reason ? ` (${session.reason})` : ""}${session.reply?.history.state === "ready" ? " · cached" : ""} · H retry`;
+	const n = session.reply?.history.totalRows ?? 0;
+	return `▸ ${n} retained agent${n === 1 ? "" : "s"} · H`;
 }
 
-export interface SessionHelpState {
-	liveOverflow: boolean;
-	historyOpen: boolean;
-	historyOverflow: boolean;
-}
-
-export function sessionHelpText(state: SessionHelpState): string {
-	const parts: string[] = [];
-	if (state.liveOverflow) parts.push("↑↓ live");
-	if (state.historyOverflow) parts.push("↑↓ rows");
-	parts.push(state.historyOpen ? "enter collapse" : "enter history");
-	if (state.historyOpen) parts.push("pgup/pgdn page");
-	parts.push("ctrl+alt+f close");
-	return parts.join(" · ");
+export function sessionHelpText(state: { historyOpen: boolean; liveOverflow?: boolean; historyOverflow?: boolean }): string {
+	return `${state.historyOpen ? "H hide PgUp/PgDn" : "H history"} ↑↓ select Enter detail Esc`;
 }

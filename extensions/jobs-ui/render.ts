@@ -1,8 +1,9 @@
 /** Read-only Jobs presentation on the shared panel heading and row grammar. */
-import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { panelHeading, type PanelTheme, type PanelTone } from "../shared/panel-heading.ts";
-import { formatPanelDuration, panelRows, type PanelRowSpec } from "../shared/panel-rows.ts";
+import { formatPanelDuration } from "../shared/panel-rows.ts";
 import type { JobsViewRecord } from "../async-bash/jobs-view.ts";
+import { inspectionFrame, type InspectionFrame, type InspectionItem } from "../shared/inspection-rows.ts";
 
 export interface JobsUiTheme { fg: (color: string, text: string) => string }
 const plainTheme: JobsUiTheme = { fg: (_color, text) => text };
@@ -58,15 +59,34 @@ function jobState(record: JobsViewRecord, now: number): { glyph: string; tone: P
 	}
 }
 
-function jobSpec(record: JobsViewRecord, now: number): PanelRowSpec {
-	const state = jobState(record, now);
-	return {
-		glyph: state.glyph,
-		glyphTone: state.tone,
-		primary: clean(record.commandPreview ?? record.label) || "Bash",
-		primaryTone: record.status === "running" ? "text" : "dim",
-		fields: [elapsed(record, now), state.detail],
-	};
+function instant(value: number): string {
+	const date = new Date(value);
+	return Number.isFinite(date.getTime()) ? date.toISOString() : "unknown";
+}
+
+export function jobItems(view: JobsUiView, now = Date.now()): InspectionItem[] {
+	return (view.records ?? []).map(record => {
+		const state = jobState(record, now);
+		const command = clean(record.commandPreview ?? record.label) || "Bash";
+		return {
+			key: record.executionId, glyph: state.glyph, tone: state.tone, name: "", activity: command,
+			tail: [record.status === "running" ? (record.overdue ? "past checkpoint" : "") : state.detail, elapsed(record, now)].filter(Boolean).join(" · "),
+			detail: () => [
+				`Job: ${clean(record.label)}`, `Command: ${command}`,
+				`Status: ${record.status}${record.status === "exited" && record.exitCode === 0 ? " · exit 0" : state.detail ? ` · ${state.detail}` : ""}`,
+				`Started: ${instant(record.startedAt)}`,
+				...(record.terminalAt === null ? [] : [`Finished: ${instant(record.terminalAt)}`]),
+				`Elapsed: ${elapsed(record, now)}`,
+				...(record.status === "running" ? [`Output: ${runningDetail(record, now)}`] : []),
+				`Last output: ${record.lastOutputAt === null ? "none" : instant(record.lastOutputAt)}`,
+			],
+		};
+	});
+}
+
+export function jobFrame(view: JobsUiView, width: number, maxRows: number, now: number, theme: JobsUiTheme | undefined, selected?: string): InspectionFrame {
+	const heading = jobHeading(view, width, maxRows < 2, theme) ?? "";
+	return inspectionFrame(heading, jobItems(view, now), width, maxRows, theme as PanelTheme | undefined, { ...(selected !== undefined ? { selected } : {}), hint: JOBS_UI_LIST_HINT });
 }
 
 /**
@@ -74,36 +94,30 @@ function jobSpec(record: JobsViewRecord, now: number): PanelRowSpec {
  * job runs past its checkpoint awaiting the model's renew-or-cancel decision.
  * Finished failures stay visible on their rows instead of holding the section in a warning state.
  */
-export function jobRows(view: JobsUiView, width: number, maxRows = 4, now = Date.now(), theme: JobsUiTheme = plainTheme, options?: JobsRowOptions): string[] {
-	width = Math.max(0, Math.floor(width));
-	maxRows = Math.max(0, Math.floor(maxRows));
-	if (!width || !maxRows) return [];
+function jobHeading(view: JobsUiView, width: number, folded: boolean, theme: JobsUiTheme = plainTheme): string | undefined {
+	if (width < 1) return undefined;
 	const panel = theme as PanelTheme;
 	if (view.unavailable !== undefined) {
-		return [panelHeading({ title: "Jobs", alerts: [`unavailable · ${clean(view.unavailable) || "unavailable"}`] }, width, { folded: true, theme: panel })];
+		return panelHeading({ title: "Jobs", alerts: [`unavailable · ${clean(view.unavailable) || "unavailable"}`] }, width, { folded: true, theme: panel });
 	}
 	const records = view.records;
-	if (!records) return [];
+	if (!records) return undefined;
 	const running = records.filter((record) => record.status === "running");
-	const section = options?.folded !== undefined;
-	const folded = options?.folded === true || maxRows < 2 || (!section && width < 36);
 	const overdue = running.filter((record) => record.overdue === true).length;
-	let header = panelHeading({
+	return panelHeading({
 		title: "Jobs",
 		progress: `${records.length - running.length}/${records.length} done`,
 		focus: running.length ? [`${running.length} running`] : [],
 		alerts: overdue ? [`${overdue} past checkpoint`] : [],
 	}, width, { folded, theme: panel });
-	if (folded) {
-		if (!section && !options?.folded && records.length > 0) {
-			const hint = theme.fg("dim", ` · ${JOBS_UI_LIST_HINT}`);
-			if (visibleWidth(header + hint) <= width) header = truncateToWidth(header + hint, width, "…");
-		}
-		return [header];
-	}
-	return [header, ...panelRows(records.map((record) => jobSpec(record, now)), width, panel, {
-		maxRows: maxRows - 1,
-		align: ["right", "left"],
-		hint: JOBS_UI_LIST_HINT,
-	})];
+}
+
+export function jobRows(view: JobsUiView, width: number, maxRows = 4, now = Date.now(), theme: JobsUiTheme = plainTheme, options?: JobsRowOptions): string[] {
+	width = Math.max(0, Math.floor(width)); maxRows = Math.max(0, Math.floor(maxRows));
+	if (!width || !maxRows) return [];
+	const folded = options?.folded === true || maxRows < 2 || (options?.folded === undefined && width < 36);
+	const heading = jobHeading(view, width, folded, theme);
+	if (heading === undefined) return [];
+	if (folded || view.unavailable !== undefined) return [heading];
+	return inspectionFrame(heading, jobItems(view, now), width, maxRows, theme as PanelTheme, { hint: JOBS_UI_LIST_HINT }).lines;
 }

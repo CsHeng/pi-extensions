@@ -20,6 +20,7 @@ interface RowInput {
 	route?: EffectiveRoute;
 	replayed: boolean;
 	objective?: string;
+	label?: string;
 }
 function displayRoute(route: EffectiveRoute | undefined): ObserverTask["route"] {
 	if (!route || !THINKING_LEVELS.includes(route.thinking as ThinkingLevel)
@@ -59,7 +60,7 @@ export class ManagedObserver {
 		this.runId = runId; this.owner = owner; this.generation = generation;
 		this.elapsed = elapsed; this.publish = publish;
 		this.nextRevision = nextRevision ?? (() => ++this.revision);
-		this.rows = input.map((row, index) => ({ id: row.id, ordinal: index + 1, role: row.role,
+		this.rows = input.map((row, index) => ({ id: row.id, ...(row.label === undefined ? {} : { label: observerHeadline(row.label) }), ordinal: index + 1, role: row.role,
 			episode: row.episode, route: displayRoute(row.route),
 			status: "pending", executionPhase: "queued", assistantTurns: 0, usage: emptyUsageLane(), elapsedMs: null, replayed: row.replayed,
 			headline: observerHeadline(row.objective ?? ""), activeTools: [], calls: [], callsTruncated: false }));
@@ -81,6 +82,8 @@ export class ManagedObserver {
 		const row = this.rows.find(row => row.id === id);
 		if (row) {
 			row.elapsedMs = this.taskElapsed(id);
+			row.executionPhase = "convergence-critical";
+			row.responding = false;
 			row.activeTools = [];
 			row.calls = [];
 			row.callsTruncated = false;
@@ -103,6 +106,7 @@ export class ManagedObserver {
 				// Replayed rows keep their placeholder: a cached result is evidence, not this run's usage.
 				usage: row.replayed ? row.usage : result.activity?.usage ?? row.usage,
 				elapsedMs: row.replayed ? null : this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs,
+				responding: live && result.activity?.responding === true,
 				activeTools: live ? (result.activity ? observerTools(result.activity.activeTools) : row.activeTools) : [],
 				...projectedCalls(live, result) };
 		});
@@ -111,7 +115,7 @@ export class ManagedObserver {
 	finish(failed: boolean, aborted: boolean): void {
 		if (this.closed) return;
 		if (this.timer) clearInterval(this.timer); this.timer = undefined;
-		this.rows = this.rows.map(row => ({ ...row, activeTools: [], calls: [], callsTruncated: false,
+		this.rows = this.rows.map(row => ({ ...row, responding: false, activeTools: [], calls: [], callsTruncated: false,
 			elapsedMs: row.replayed ? null : this.started.has(row.id) ? this.active.has(row.id) ? this.taskElapsed(row.id) : row.elapsedMs : null,
 			...(["running", "pending"].includes(row.status) ? { status: aborted ? "aborted" as const : "failed" as const, executionPhase: "settled" as const } : {}),
 		}));

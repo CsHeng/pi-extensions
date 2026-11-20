@@ -6,15 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createAboveEditor } from "../extensions/shared/above-editor.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { createAboveEditor, type AboveEditorComposer, type AboveEditorContribution } from "../extensions/shared/above-editor.ts";
 import { createJobsUi, JOBS_LIST_PAGE_SIZE } from "../extensions/jobs-ui/index.ts";
-import { formatJobDuration, jobRows, jobsRenderBudget } from "../extensions/jobs-ui/render.ts";
+import { formatJobDuration, jobFrame, jobItems, jobRows, jobsRenderBudget } from "../extensions/jobs-ui/render.ts";
+import { openJobsInspection } from "../extensions/jobs-ui/inspection.ts";
 import { commandLabel, commandPreview, createBashExecutionOwner, type BashExecutionView, type BashScope } from "../extensions/async-bash/execution.ts";
 import { bindAsyncBash } from "../extensions/async-bash/index.ts";
 import {
 	JOBS_VIEW_CHANGED_EVENT,
 	JOBS_VIEW_EVENT,
 	JOBS_VIEW_REQUEST_EVENT,
+	JOBS_VIEW_RESET_EVENT,
 	JOBS_VIEW_VERSION,
 	parseJobsViewReply,
 	JOBS_MIN_VISIBLE_SUCCESS_MS,
@@ -103,6 +106,156 @@ function record(patch: Partial<JobsViewRecord> & Pick<JobsViewRecord, "execution
 		...patch,
 	};
 }
+
+test("Jobs inspection selects by identity and returns from detail", async () => {
+	let records = [record({ executionId: "a", status: "running", commandPreview: "first" }), record({ executionId: "b", status: "exited", exitCode: 7, commandPreview: "second" })];
+	let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+	let closed = false;
+	const theme = { fg: (_color: string, text: string) => text };
+	const ctx = { ui: { custom: async (factory: Function) => { component = factory({ terminal: { rows: 20 }, requestRender() {} }, theme, {}, () => { closed = true; }); } } } as unknown as ExtensionContext;
+	await openJobsInspection(ctx, () => ({ items: jobItems({ records }, 7000) }));
+	component!.render(80);
+	component!.handleInput("\u001b[B");
+	records = [records[1]!, records[0]!];
+	component!.handleInput("\r");
+	const detail = () => component!.render(80).join("\n");
+	assert.match(detail(), /Command: second/); assert.match(detail(), /Status: exited · exit 7/);
+	const saved = records[0]!;
+	records = records.slice(1);
+	assert.match(detail(), /Record unavailable/); assert.doesNotMatch(detail(), /first|second/);
+	records.unshift(saved);
+	component!.handleInput("\u001b");
+	assert.match(detail(), /› .*second/);
+	// If this exact record disappears between paint and Enter, do not open the replacement row.
+	records.shift(); component!.handleInput("\r");
+	assert.doesNotMatch(detail(), /Job detail|Command: first/);
+	records.unshift(saved);
+	component!.handleInput("\u001b");
+	assert.equal(closed, true);
+	const frame = jobFrame({ records }, 200, 4, 7000, theme, "b");
+	assert.equal(frame.keys[1], "b");
+	assert.ok(jobFrame({ records }, 20, 4, 7000, theme).lines.every(line => visibleWidth(line) <= 20));
+});
+
+test("central Jobs frame reports its actual window, supports pointer selection and distinguishes unavailable", async () => {
+	const records = Array.from({ length: 35 }, (_, i) => record({ executionId: `key-${i}`, status: "running", commandPreview: `command-${i}` }));
+	let view: { render(width: number): string[]; handleInput(data: string): void; handleMouse(event: unknown): unknown } | undefined;
+	let closed = false, unavailable: string | undefined;
+	const ctx = { ui: { custom: async (factory: Function) => { view = factory({ mode: "fullscreen", terminal: { rows: 20 }, requestRender() {} }, { fg: (_c: string, s: string) => s }, {}, () => { closed = true; }); } } } as unknown as ExtensionContext;
+	await openJobsInspection(ctx, () => ({ items: unavailable ? [] : jobItems({ records }, 7000), ...(unavailable ? { unavailable } : {}) }));
+	let lines = view!.render(100);
+	assert.match(lines[0]!, /^╭/); assert.match(lines[1]!, /Jobs.*×/);
+	assert.doesNotMatch(lines.join("\n"), /Esc chat/);
+	assert.match(lines.join("\n"), /1–13 of 35/);
+	view!.handleInput("pageDown"); lines = view!.render(100);
+	assert.match(lines.join("\n"), /14–26 of 35/);
+	assert.match(lines.join("\n"), /command-13/); assert.doesNotMatch(lines.join("\n"), /command-12/);
+	view!.handleMouse({ type: "click", button: "left", x: 4, y: 3 });
+	view!.handleInput("\r"); assert.match(view!.render(100).join("\n"), /Command: command-14/);
+	view!.handleInput("\u001b"); assert.match(view!.render(100).join("\n"), /› .*command-14/);
+	unavailable = "other-owner"; lines = view!.render(100);
+	assert.match(lines.join("\n"), /Unavailable · other-owner/); assert.doesNotMatch(lines.join("\n"), /0–0/);
+	view!.handleMouse({ type: "click", button: "left", x: 97, y: 1 }); assert.equal(closed, true);
+});
+
+test("hidden inline Jobs continue refreshing a running central inspection", async () => {
+	const h = harness(); let refreshes = 0, close: (() => void) | undefined;
+	h.ctx.ui.custom = async factory => new Promise(resolve => {
+		factory({ terminal: { rows: 20 }, requestRender() { refreshes++; } } as never, { fg: (_c: string, s: string) => s } as never, {} as never, () => resolve(undefined as never));
+		close = () => resolve(undefined as never);
+	});
+	const ids: string[] = [];
+	h.events.on(JOBS_VIEW_REQUEST_EVENT, data => ids.push((data as { requestId: string }).requestId));
+	createJobsUi({ composer: createAboveEditor(), setTimer: h.setTimer, clearTimer: h.clearTimer })(h.pi);
+	h.fire("session_start");
+	h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: "leaf-a", generation: "1", availability: "ready", records: [record({ executionId: "run", status: "running" })] });
+	await h.commands.get("jobs-ui")!("hide", h.ctx);
+	const list = h.commands.get("jobs-ui")!("list", h.ctx);
+	const before = refreshes; const queries = ids.length;
+	const fired = h.timers.find(timer => timer.ms === 1000)!;
+	h.clearTimer(fired); fired.cb();
+	assert.ok(refreshes > before); assert.equal(ids.length, queries);
+	close!(); await list;
+	assert.equal(h.timers.some(timer => timer.ms === 1000), false);
+});
+
+test("Jobs follow ordinary leaf advances but never display a sibling branch's cached snapshot", async () => {
+	const h = harness();
+	let branch = ["leaf-a"];
+	Object.assign(h.ctx.sessionManager, { getLeafId: () => branch.at(-1), getBranch: () => branch.map(id => ({ id })) });
+	const ids: string[] = [];
+	h.events.on(JOBS_VIEW_REQUEST_EVENT, data => ids.push((data as { requestId: string }).requestId));
+	createJobsUi({ setTimer: h.setTimer, clearTimer: h.clearTimer })(h.pi);
+	const answer = (generation: string, command: string) => h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor: branch.at(-1), generation, availability: "ready", records: [record({ executionId: command, status: "exited", commandPreview: command })] });
+	h.fire("session_start"); answer("1", "old job");
+	await h.commands.get("jobs-ui")!("expand", h.ctx);
+	branch.push("tool-call");
+	assert.match(lines(h.widget).join("\n"), /old job/);
+	h.events.emit(JOBS_VIEW_RESET_EVENT, { version: 1, generation: "2", ownerSessionId: "session-a", anchor: "tool-call" });
+	answer("2", "next job");
+	branch.push("tool-result");
+	assert.match(lines(h.widget).join("\n"), /next job/);
+	branch = ["leaf-a", "sibling"];
+	assert.doesNotMatch(lines(h.widget).join("\n"), /old job|next job/);
+	h.fire("session_shutdown");
+});
+
+test("inline detail resolves on close and lifecycle changes revoke old owned facts", async () => {
+	const h = harness();
+	let contribution: AboveEditorContribution | undefined;
+	let trusted = true, leaf = "leaf-a";
+	Object.assign(h.ctx, { isProjectTrusted: () => trusted });
+	Object.assign(h.ctx.sessionManager, { getLeafId: () => leaf });
+	let focused = "";
+	const composer: AboveEditorComposer = { attach() {}, set(_slot, value) { contribution = value; return true; }, focus: slot => { focused = slot; return true; }, invalidate: () => true, slots: () => [] };
+	let view: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+	let redraws = 0;
+	h.ctx.ui.custom = async factory => new Promise(resolve => {
+		view = factory({ terminal: { rows: 30 }, requestRender() { redraws++; } } as never, { fg: (_c: string, s: string) => s } as never, {} as never, () => resolve(undefined as never)) as typeof view;
+	});
+	const ids: string[] = [];
+	h.events.on(JOBS_VIEW_REQUEST_EVENT, data => ids.push((data as { requestId: string }).requestId));
+	createJobsUi({ composer, setTimer: h.setTimer, clearTimer: h.clearTimer, now: () => 5000 })(h.pi);
+	const reply = (anchor = "leaf-a") => h.events.emit(JOBS_VIEW_EVENT, { version: 1, requestId: ids.at(-1), ownerSessionId: "session-a", anchor, generation: "1", availability: "ready", records: [record({ executionId: "owned", status: "running", commandPreview: "safe command" })] });
+	h.fire("session_start"); reply();
+	await h.commands.get("jobs-ui")!("focus", h.ctx);
+	assert.equal(focused, "jobs");
+	const opened = contribution!.openItem!("owned") as Promise<void>;
+	assert.ok(opened instanceof Promise);
+	assert.match(view!.render(100).join("\n"), /Command: safe command/);
+	let finished = false; void opened.then(() => { finished = true; });
+	await Promise.resolve(); assert.equal(finished, false);
+	const beforeRedraw = redraws;
+	h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" }); reply();
+	assert.ok(redraws > beforeRedraw);
+	h.events.emit(JOBS_VIEW_RESET_EVENT, { version: 1, generation: "2", ownerSessionId: "session-a" });
+	await opened; assert.equal(finished, true);
+	// A new bound branch may show only its own reply; rebinding closes its old detail.
+	h.fire("session_start"); reply();
+	const branchDetail = contribution!.openItem!("owned") as Promise<void>;
+	leaf = "leaf-b"; h.fire("session_tree"); await branchDetail;
+	assert.equal(contribution, undefined);
+	reply("leaf-a"); assert.equal(contribution, undefined);
+	h.fire("session_tree"); reply("leaf-b");
+	const trustDetail = contribution!.openItem!("owned") as Promise<void>;
+	trusted = false; h.events.emit(JOBS_VIEW_CHANGED_EVENT, { version: 1, generation: "1" });
+	await trustDetail; assert.equal(contribution, undefined);
+});
+
+test("Jobs rows use wide preview space and reserve exit and elapsed on narrow widths", () => {
+	const command = "build " + "x".repeat(180);
+	const records = [record({ executionId: "wide", status: "exited", exitCode: 9, startedAt: 1000, terminalAt: 6000, commandPreview: command })];
+	const wide = jobFrame({ records }, 220, 4, 7000, undefined).lines.join("\n");
+	assert.match(wide, /x{150}/); assert.match(wide, /exit 9 · 5s/);
+	const running = jobFrame({ records: [record({ executionId: "run", status: "running", commandPreview: "build application", startedAt: 1000, lastOutputAt: 5000 })] }, 40, 4, 7000, undefined).lines.join("\n");
+	assert.match(running, /build application/); assert.match(running, /6s/);
+	assert.match(jobItems({ records: [record({ executionId: "out", status: "running", lastOutputAt: 5000 })] }, 7000)[0]!.detail().join("\n"), /Last output: 1970-01-01T00:00:05.000Z/);
+	const overdue = jobFrame({ records: [record({ executionId: "run", status: "running", overdue: true, commandPreview: "build application", startedAt: 1000 })] }, 40, 4, 7000, undefined).lines.join("\n");
+	assert.match(overdue, /build/); assert.match(overdue, /past checkpoint · 6s/);
+	const narrow = jobFrame({ records }, 35, 4, 7000, undefined).lines.join("\n");
+	assert.match(narrow, /exit 9 · 5s/);
+	assert.ok(jobFrame({ records }, 12, 4, 7000, undefined).lines.every(line => visibleWidth(line) <= 12));
+});
 
 test("owner metadata is a bounded executable label plus actual close and output times", async (t) => {
 	assert.equal(commandLabel("sleep 30 --secret-arg"), "sleep");
@@ -434,14 +587,14 @@ test("collapsed and expanded rows keep exact facts and freeze terminal duration"
 	// Finished failures are row facts; the heading warns only about current conditions.
 	assert.doesNotMatch(folded[0]!, /failed|interrupted|!/);
 	const expanded = jobRows({ records }, 100, 8, now).join("\n");
-	assert.match(expanded, /◐ sleep +12m 3s  output 4s ago/);
+	assert.match(expanded, /◐ sleep 12m 3s/);
 	assert.doesNotMatch(expanded, /◐[^\n]*exit/);
 	assert.match(expanded, /✓ sleep +5s$/m);
 	assert.doesNotMatch(expanded, /accepted|stalled|success/);
-	assert.match(expanded, /✗ sleep +5s  exit 2$/m);
-	assert.match(expanded, /⊘ sleep +2s  interrupted$/m);
+	assert.match(expanded, /✗ sleep exit 2 · 5s$/m);
+	assert.match(expanded, /⊘ sleep interrupted · 2s$/m);
 	const unknownExit = jobRows({ records: [record({ executionId: "exec_eeee4444", status: "exited", exitCode: null, startedAt: 0, terminalAt: 1_000 })] }, 80, 4, now).join("\n");
-	assert.match(unknownExit, /\? sleep +1s  exit unknown/);
+	assert.match(unknownExit, /\? sleep exit unknown · 1s/);
 	assert.doesNotMatch(expanded, /2h/);
 	const knownEmpty = jobRows({ records: [] }, 80, 2, now, undefined, { folded: true });
 	assert.match(knownEmpty[0]!, /Jobs \(0\/0 done\)$/);
@@ -707,8 +860,8 @@ test("a job past its checkpoint is a current alert; a timeout kill is a row fact
 	const folded = jobRows({ records }, 100, 4, now, undefined, { folded: true });
 	assert.match(folded[0]!, /^▸ ! Jobs \(1\/2 done\) 1 running · 1 past checkpoint$/);
 	const expanded = jobRows({ records }, 100, 4, now).join("\n");
-	assert.match(expanded, /◐ sleep +11m 40s  past checkpoint · output 30s ago/);
-	assert.match(expanded, /⊘ sleep +9s  timeout$/m);
+	assert.match(expanded, /◐ sleep past checkpoint · 11m 40s/);
+	assert.match(expanded, /⊘ sleep timeout · 9s$/m);
 	const after = jobRows({ records: [records[1]!] }, 100, 4, now, undefined, { folded: true });
 	assert.doesNotMatch(after[0]!, /!/);
 });

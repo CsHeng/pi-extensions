@@ -664,7 +664,7 @@ export class ContinuationService {
 		const binding = this.bindings.get(execution.runId)!;
 		// Readable labels stay batch-local; scheduler and result ids use the persistent handle.
 		const labelFor = new Map(records.map(record => [record.handle, record.task.id] as const));
-		const observer = ["tui", "rpc"].includes(ctx.mode) ? new ManagedObserver(execution.runId, owner, this.generation, records.map(record => ({ id: record.handle, role: record.task.role, episode: replays.get(record.handle)?.episode ?? record.episode, route: replays.get(record.handle)?.route ?? record.route!, replayed: replays.has(record.handle), objective: record.task.objective })), () => clock.elapsed(), snapshot => this.publishObserver(snapshot), () => ++this.observerRevision) : undefined;
+		const observer = ["tui", "rpc"].includes(ctx.mode) ? new ManagedObserver(execution.runId, owner, this.generation, records.map(record => ({ id: record.handle, role: record.task.role, episode: replays.get(record.handle)?.episode ?? record.episode, route: replays.get(record.handle)?.route ?? record.route!, replayed: replays.has(record.handle), label: record.task.id, objective: record.task.objective })), () => clock.elapsed(), snapshot => this.publishObserver(snapshot), () => ++this.observerRevision) : undefined;
 		if (observer) { this.observers.add(observer); observer.begin(); }
 		try {
 			const scheduled = await runScheduledTasks(tasks, {
@@ -814,7 +814,7 @@ export class ContinuationService {
 					managedWorkerScratch: scratch, ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
 					capability,
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, ownerSessionId: revision.sessionId, async removeUnused() {} },
-					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: lifecycle.childSettled, onActivity: lifecycle.activity,
+					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: () => { observer?.childStopped(handle); lifecycle.childSettled(); }, onActivity: lifecycle.activity,
 				}).finally(() => observer?.childStopped(handle));
 				result.id = record.handle; result.label = record.task.id;
 				result.executionStatus = result.telemetry?.childStarted === true ? result.status : result.telemetry?.childStarted === false ? "not-started" : "unavailable";

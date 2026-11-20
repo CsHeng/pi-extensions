@@ -52,6 +52,16 @@ function snapshot(overrides: Record<string, unknown> = {}): Record<string, unkno
 	};
 }
 
+test("additive task facts are bounded and old rows remain readable", () => {
+	assert.equal(parseObserverSnapshot(snapshot()).ok, true);
+	const parsed = parseObserverSnapshot(snapshot({ tasks: [task({ label: "Readable task", responding: true })] }));
+	assert.equal(parsed.ok, true);
+	if (parsed.ok) assert.equal(parsed.value.tasks[0]?.label, "Readable task");
+	for (const bad of [{ label: "bad\nlabel" }, { label: "x".repeat(241) }, { responding: "true" }]) {
+		assert.equal(parseObserverSnapshot(snapshot({ tasks: [task(bad)] })).ok, false);
+	}
+});
+
 test("observer event name and version are exact", () => {
 	assert.equal(OBSERVER_EVENT, "agents.observer.v5");
 	assert.equal(OBSERVER_VERSION, 5);

@@ -1,91 +1,40 @@
-import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type KeyId, type TUI } from "@earendil-works/pi-tui";
-import type { ObserverSnapshot, ObserverTask } from "../agents/observer-events.ts";
+import { Key, matchesKey, type KeyId, type TUI } from "@earendil-works/pi-tui";
+import type { ObserverSnapshot } from "../agents/observer-events.ts";
 import type { SessionViewReply } from "../agents/session-view.ts";
+import { inspectionRow, ItemDetailPage, type InspectionItem } from "../shared/inspection-rows.ts";
+import type { PanelTone } from "../shared/panel-heading.ts";
 import {
-	EMPTY_OBSERVER_MESSAGE,
-	OBSERVER_STALE_MS,
-	closeMarkerColumns,
-	displayElapsed,
-	fillPanelRow,
-	formatHistoryCollapsed,
-	formatHistoryNav,
-	formatHistoryRow,
-	formatLiveRow,
-	formatRunningNav,
-	formatSessionCountRows,
-	formatSessionCounts,
-	formatSessionTitle,
-	formatSessionUsage,
-	historyColumns,
-	observerFreshness,
-	overlayPanelWidth,
-	panelTextWidth,
-	panelTitleRow,
-	PANEL_FRAME,
-	sessionCountMetaRows,
-	sessionCounts,
-	sessionHelpText,
-	shortLabel,
-	taskColumns,
-	liveRowLines,
-	type OverlayRow,
-	type RowColor,
-	type ObserverFreshness,
-	type SessionHelpState,
+	agentItemKey, agentListSections, closeMarkerColumns, EMPTY_OBSERVER_MESSAGE, fillPanelRow, formatAgentUsage, formatHistoryCollapsed,
+	formatHistoryNav, formatSessionTitle, observationAt, OBSERVER_STALE_MS, overlayPanelWidth,
+	panelTextWidth, panelTitleRow, PANEL_FRAME, sessionHelpText,
 } from "./render.ts";
 
 export interface SessionViewState {
 	kind: "idle" | "loading" | "ready" | "unavailable";
 	reason?: string;
 	reply?: SessionViewReply;
-	/** A same-page refresh keeps the previous rows visible instead of a blank loading state. */
 	refreshing?: boolean;
 }
+export interface OverlaySnapshot { snapshot: ObserverSnapshot | undefined; receivedAt: number; session: SessionViewState }
+export interface OverlayTheme { fg(color: PanelTone | "border" | "borderMuted", text: string): string }
 
-export interface OverlaySnapshot {
-	snapshot: ObserverSnapshot | undefined;
-	receivedAt: number;
-	session: SessionViewState;
-}
+function isKey(data: string, name: KeyId): boolean { return data === name || matchesKey(data, name); }
 
-/** Theme subset used to paint the panel; callers may omit it for plain text. */
-export interface OverlayTheme {
-	fg(color: "accent" | "border" | "borderMuted" | "dim" | "text", text: string): string;
-}
-
-/** Subset of the fullscreen mouse event consumed by the close marker. */
-interface OverlayPointerEvent {
-	type: string;
-	button?: string;
-	x: number;
-	y: number;
-}
-
-function isKey(data: string, name: KeyId): boolean {
-	return data === name || matchesKey(data, name);
-}
-
-function isLiveTask(task: ObserverTask): boolean {
-	return task.status === "pending" || task.status === "running";
-}
-
-function moreRow(text: string): OverlayRow {
-	return { kind: "more", text, segments: [{ text, color: "dim" }] };
-}
-
-/**
- * Session-scoped overlay: a pinned live area driven by fresh observer snapshots and a
- * separately navigable history section driven by the core session-view contract.
- */
+/** Session-scoped, read-only inspector. Selection belongs to an episode key, not its mutable title or position. */
 export class AgentsOverlay {
 	focused = true;
 	private historyOpen = false;
+	private selectedKey: string | undefined;
+	private followSelection = false;
+	private detailKey: string | undefined;
+	private detailPage = new ItemDetailPage();
+	private readonly inlineOrigin: boolean;
 	private liveOffset = 0;
 	private historyOffset = 0;
-	private lastLiveOverflow = false;
-	private lastHistoryOverflow = false;
+	private liveOverflow = false;
 	private closeRange: { start: number; end: number } | undefined;
 	private model: OverlaySnapshot;
+	private readonly readModel: (() => OverlaySnapshot) | undefined;
 	private readonly tui: TUI;
 	private readonly done: () => void;
 	private readonly now: () => number;
@@ -93,335 +42,164 @@ export class AgentsOverlay {
 	private readonly theme: OverlayTheme | undefined;
 	private readonly onPage: ((page: number) => void) | undefined;
 
-	constructor(
-		model: OverlaySnapshot,
-		tui: TUI,
-		done: () => void,
-		options: { now?: () => number; staleMs?: number; theme?: OverlayTheme; onPage?: (page: number) => void } = {},
-	) {
-		this.model = model;
-		this.tui = tui;
-		this.done = done;
-		this.now = options.now ?? (() => Date.now());
-		this.staleMs = options.staleMs ?? OBSERVER_STALE_MS;
-		this.theme = options.theme;
-		this.onPage = options.onPage;
+	constructor(model: OverlaySnapshot | (() => OverlaySnapshot), tui: TUI, done: () => void,
+		options: { now?: () => number; staleMs?: number; theme?: OverlayTheme; onPage?: (page: number) => void; detailKey?: string } = {}) {
+		this.readModel = typeof model === "function" ? model : undefined;
+		this.model = typeof model === "function" ? model() : model;
+		this.detailKey = this.selectedKey = options.detailKey;
+		this.inlineOrigin = options.detailKey !== undefined;
+		this.tui = tui; this.done = done;
+		this.now = options.now ?? Date.now; this.staleMs = options.staleMs ?? OBSERVER_STALE_MS;
+		this.theme = options.theme; this.onPage = options.onPage;
 	}
 
 	invalidate(): void {}
+	update(model: OverlaySnapshot): void { this.model = model; this.tui.requestRender(); }
 
-	update(model: OverlaySnapshot): void {
-		this.model = model;
-		const live = this.liveTasks().length;
-		if (this.liveOffset > Math.max(0, live - 1)) this.liveOffset = Math.max(0, live - 1);
-		this.tui.requestRender();
-	}
-
-	/** Fullscreen-only close affordance; regular mode never captures pointer input. */
-	handleMouse(event: OverlayPointerEvent): { handled: true } | undefined {
+	handleMouse(event: { type: string; button?: string; x: number; y: number }): { handled: true } | undefined {
 		const range = this.closeRange;
-		if (!range || event.y !== PANEL_FRAME || event.x < range.start || event.x >= range.end) return undefined;
-		if (event.button !== "left") return undefined;
-		// Arm the press gesture so the host synthesizes the matching click.
+		if (!range || event.y !== PANEL_FRAME || event.x < range.start || event.x >= range.end || event.button !== "left") return undefined;
 		if (event.type === "press") return { handled: true };
 		if (event.type !== "click") return undefined;
-		this.done();
-		return { handled: true };
+		this.done(); return { handled: true };
+	}
+
+	private sections() {
+		const { snapshot, receivedAt, session } = this.model;
+		const { tasks, stale } = observationAt(snapshot, receivedAt, this.now(), this.staleMs);
+		const reply = session.reply;
+		const allowHistory = !this.inlineOrigin || (session.kind !== "unavailable" && session.kind !== "idle" && reply?.inventory.state === "ready" && reply.summary != null);
+		const page = allowHistory && reply?.history.state === "ready" ? reply.history : undefined;
+		const { live, finished, retained } = agentListSections(tasks, page?.rows ?? [], stale);
+		// The core owns page membership. Keep a selected, just-finished episode reachable while its retained row catches up.
+		const recent = finished.filter(item => !page || page.totalPages <= 1 || item.key === this.selectedKey || page.rows.some(row => item.key === agentItemKey(row.handle, row.episode)));
+		return { stale, observed: live, retained: [...recent, ...retained.map(item => session.kind === "unavailable"
+			? { ...item, detail: () => [`Cached history · unavailable (${session.reason ?? "unknown"})`, ...item.detail()] } : item)] };
+	}
+
+	private detailItem(key: string): InspectionItem | undefined {
+		const { observed, retained } = this.sections();
+		return observed.find(item => item.key === key) ?? retained.find(item => item.key === key);
 	}
 
 	handleInput(data: string): void {
-		if (isKey(data, Key.ctrlAlt("f"))) {
-			this.done();
+		if (isKey(data, Key.ctrlAlt("f"))) { this.done(); return; }
+		if (isKey(data, "escape")) {
+			if (this.detailKey && !this.inlineOrigin) { this.detailKey = undefined; this.tui.requestRender(); } else this.done();
 			return;
 		}
-		if (isKey(data, "enter")) {
-			this.historyOpen = !this.historyOpen;
-			this.historyOffset = 0;
-			// Opening history on an idle or failed query retries through the core contract.
-			if (this.historyOpen && (this.model.session.kind === "idle" || this.model.session.kind === "unavailable")) {
-				this.onPage?.(this.model.session.reply?.history.page ?? 0);
-			}
-			this.tui.requestRender();
-			return;
+		if (this.detailKey) { if (this.detailPage.handleInput(data)) this.tui.requestRender(); return; }
+		if (data.toLowerCase() === "h") {
+			this.historyOpen = !this.historyOpen; this.historyOffset = 0;
+			if (!this.historyOpen && this.sections().retained.some(item => item.key === this.selectedKey)) this.selectedKey = undefined;
+			if (this.historyOpen && (this.model.session.kind === "idle" || this.model.session.kind === "unavailable")) this.onPage?.(this.model.session.reply?.history.page ?? 0);
+			this.tui.requestRender(); return;
 		}
 		if (isKey(data, "pageUp") || isKey(data, "pageDown")) {
 			const history = this.model.session.reply?.history;
 			if (!this.historyOpen || !history) return;
 			const target = Math.max(0, Math.min(Math.max(1, history.totalPages) - 1, history.page + (isKey(data, "pageDown") ? 1 : -1)));
-			if (target === history.page) return;
-			this.historyOffset = 0;
-			this.onPage?.(target);
-			this.tui.requestRender();
+			if (target !== history.page) { this.historyOffset = 0; this.onPage?.(target); this.tui.requestRender(); }
 			return;
 		}
-		if (isKey(data, "up")) {
-			if (this.lastLiveOverflow) this.liveOffset = Math.max(0, this.liveOffset - 1);
-			else if (this.historyOpen && this.lastHistoryOverflow) this.historyOffset = Math.max(0, this.historyOffset - 1);
-			this.tui.requestRender();
+		if (!isKey(data, "enter") && !isKey(data, "up") && !isKey(data, "down")) return;
+		const { observed, retained } = this.sections();
+		const items = this.historyOpen ? [...observed, ...retained] : observed;
+		if (isKey(data, "enter")) {
+			const key = this.selectedKey ?? items[0]?.key;
+			if (key) { this.followSelection = true; this.detailKey = this.selectedKey = key; this.detailPage = new ItemDetailPage(); this.tui.requestRender(); }
 			return;
 		}
-		if (isKey(data, "down")) {
-			if (this.lastLiveOverflow) this.liveOffset += 1;
-			else if (this.historyOpen && this.lastHistoryOverflow) this.historyOffset += 1;
-			this.tui.requestRender();
-		}
+		const at = items.findIndex(item => item.key === this.selectedKey);
+		const next = Math.max(0, Math.min(items.length - 1, at < 0 ? 0 : at + (isKey(data, "down") ? 1 : -1)));
+		this.selectedKey = items[next]?.key;
+		this.followSelection = this.selectedKey !== undefined;
+		if (next < observed.length && this.liveOverflow) this.liveOffset = next;
+		this.tui.requestRender();
 	}
 
-	/** Panel width that fits the current observation, before the host's own margins. */
-	desiredWidth(terminalColumns: number): number {
-		return overlayPanelWidth(this.currentRows(true), terminalColumns);
+	private historyHeading(): string {
+		const session = this.model.session;
+		if (!this.historyOpen) return formatHistoryCollapsed(session);
+		const history = session.reply?.history;
+		if (history?.state === "ready") return formatHistoryNav(history).text;
+		if (session.kind === "loading") return session.refreshing ? "history refreshing…" : "history loading…";
+		return session.kind === "unavailable" ? `⚠ history unavailable${session.reason ? ` (${session.reason})` : ""}` : "history not loaded";
 	}
 
-	/** Reply usable for display; a refreshing same-page query keeps the previous rows. */
-	private displayReply(): SessionViewReply | undefined {
-		return this.model.session.reply;
-	}
-
-	private liveTasks(): ObserverTask[] {
-		return this.model.snapshot?.tasks.filter(isLiveTask) ?? [];
-	}
-
-	private labels(rows: ReadonlyArray<SessionViewReply["history"]["rows"][number]>): Map<string, string> {
-		const handles = [...this.liveTasks().map(task => task.id), ...rows.map(row => row.handle)];
-		return new Map(handles.map(handle => [handle, shortLabel(handle, handles)]));
-	}
-
-	private currentRows(forWidth: boolean, compactHeader = false): OverlayRow[] {
-		const now = this.now();
-		const snapshot = this.model.snapshot;
-		const freshness: ObserverFreshness = observerFreshness(snapshot?.phase, this.model.receivedAt, now, this.staleMs);
-		const reply = this.displayReply();
-		const counts = sessionCounts(snapshot, reply, this.model.session.kind, this.model.session.reason, this.model.session.refreshing === true);
-		const rows: OverlayRow[] = [
-			{ kind: "title", text: formatSessionTitle(reply?.ownerSessionId) },
-			{ kind: "rule", text: "" },
-			...(compactHeader ? [formatSessionCounts(counts), ...sessionCountMetaRows(counts)] : formatSessionCountRows(counts)),
-		];
-		const usage = formatSessionUsage(reply?.usage ?? null);
-		if (usage && !compactHeader) rows.push(usage);
-		rows.push({ kind: "rule", text: "" });
-		const live = this.liveTasks();
-		if (live.length === 0 && !reply) {
-			const text = EMPTY_OBSERVER_MESSAGE;
-			rows.push({ kind: "summary", text, segments: [{ text, color: "dim" }] });
-		} else if (live.length === 0) {
-			const text = "No live agents; retained work is in history.";
-			rows.push({ kind: "summary", text, segments: [{ text, color: "dim" }] });
-		} else {
-			rows.push(formatRunningNav(live.length));
-			rows.push(...this.liveRows(freshness));
-			rows.push({ kind: "rule", text: "" });
-		}
-		if (this.historyOpen) {
-			if (!reply || reply.history.state !== "ready") {
-				const label = this.model.session.kind === "loading"
-					? (this.model.session.refreshing ? "history refreshing…" : "history loading…")
-					: this.model.session.kind === "unavailable"
-						? `⚠ history unavailable${this.model.session.reason ? ` (${this.model.session.reason})` : ""}`
-						: "history not loaded";
-				rows.push({ kind: "group", text: label, segments: [{ text: label, color: "borderMuted" }] });
-			} else {
-				rows.push(formatHistoryNav(reply.history));
-				const labels = this.labels(reply.history.rows);
-				const columns = historyColumns(reply.history.rows, labels);
-				rows.push(...reply.history.rows.map(row => formatHistoryRow(row, labels.get(row.handle) ?? row.handle, columns)));
-			}
-		} else {
-			const collapsed = formatHistoryCollapsed(this.model.session);
-			const warning = collapsed.includes("⚠");
-			rows.push({
-				kind: "group",
-				text: collapsed,
-				segments: [{ text: collapsed, color: warning ? "borderMuted" : "dim" }],
-			});
-		}
-		const help: SessionHelpState = { liveOverflow: forWidth ? false : this.lastLiveOverflow, historyOpen: this.historyOpen, historyOverflow: forWidth ? false : this.lastHistoryOverflow };
-		rows.push({ kind: "help", text: sessionHelpText(help) });
-		return rows;
-	}
-
-	private liveRows(freshness: ObserverFreshness): OverlayRow[] {
-		const snapshot = this.model.snapshot;
-		if (!snapshot) return [];
-		const now = this.now();
-		const columns = taskColumns(snapshot.tasks, freshness);
-		const ids = this.liveTasks().map(row => row.id);
-		return this.liveTasks().map(task => {
-			const elapsed = displayElapsed(task.elapsedMs, this.model.receivedAt, now, freshness);
-			return formatLiveRow({ ...task, elapsedMs: elapsed }, freshness, columns, shortLabel(task.id, ids));
-		});
-	}
-
-	private colorRow(row: OverlayRow): string {
-		const theme = this.theme;
-		if (!theme) return row.text;
-		if (row.segments) return row.segments.map(segment => theme.fg(segment.color ?? "text", segment.text)).join("");
-		const color: RowColor = row.kind === "title" ? "accent"
-			: row.kind === "rule" ? "borderMuted"
-			: row.kind === "help" || row.kind === "more" || row.kind === "summary" ? "dim"
-			: "text";
-		return theme.fg(color, row.text);
-	}
-
-	private wrapRow(text: string, width: number): string[] {
-		if (width <= 0) return [];
-		return text.split("\n").flatMap(part => wrapTextWithAnsi(part, width));
-	}
-
-	private physicalRow(row: OverlayRow, textWidth: number, panelWidth: number): string[] {
-		const colored = this.colorRow(row);
-		const lines = row.kind === "live" ? liveRowLines(colored, textWidth) : this.wrapRow(colored, textWidth);
-		return lines.map(line => fillPanelRow(line, panelWidth));
-	}
-
-	private renderHeaderRows(rows: OverlayRow[], width: number, textWidth: number, compactHeader: boolean): string[] {
-		const liveSectionStart = rows.findIndex(row => row.kind === "liveHeader" || row.kind === "live");
-		const headerEnd = liveSectionStart < 0 ? rows.findIndex(row => row.kind === "group") : liveSectionStart;
-		return rows.slice(0, Math.max(0, headerEnd)).flatMap(row =>
-			row.kind === "title" ? [panelTitleRow(this.colorRow(row), width)]
-				: row.kind === "rule" ? [this.panelRule(width, textWidth)]
-					: row.kind === "counts" && compactHeader ? [fillPanelRow(truncateToWidth(this.colorRow(row), textWidth), width)]
-						: this.wrapRow(this.colorRow(row), textWidth).map(line => fillPanelRow(line, width)));
-	}
-
-	private liveSectionRows(rows: OverlayRow[]): OverlayRow[] {
-		const start = rows.findIndex(row => row.kind === "liveHeader");
-		const end = rows.findIndex(row => row.kind === "group");
-		if (start < 0) return rows.filter(row => row.kind === "live");
-		return rows.slice(start, end < 0 ? undefined : end).filter(row => row.kind !== "rule");
-	}
-
-	private panelRule(width: number, textWidth: number): string {
-		return fillPanelRow(this.theme?.fg("borderMuted", "─".repeat(textWidth)) ?? "─".repeat(textWidth), width);
-	}
-
-	private fitLiveAgents(
-		section: OverlayRow[],
-		width: number,
-		textWidth: number,
-		viewport: number,
-		headerLines: string[],
-		reserve: number,
-	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number; total: number; complete: boolean } {
-		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
-		const pinned = section.filter(row => row.kind === "liveHeader").flatMap(physical);
-		const agents = section.filter(row => row.kind === "live");
-		const total = agents.length;
-		const budget = Math.max(0, viewport - headerLines.length - reserve);
-		const prefix = [...headerLines, ...pinned];
-		// Every identity pins before any detail shows: retry identity-only rows before windowing.
-		const startOffset = Math.min(this.liveOffset, Math.max(0, total - 1));
-		const attempts = [true, false].map(detail => this.fitLiveWindow(agents, prefix, budget, startOffset, detail, physical));
-		const fullyPinned = attempts.find(attempt => attempt.windowStart === 1 && attempt.windowEnd === total);
-		const chosen = fullyPinned
-			?? attempts.reduce((best, attempt) => (attempt.windowEnd - attempt.windowStart > best.windowEnd - best.windowStart ? attempt : best));
-		this.liveOffset = chosen.windowStart - 1;
-		const complete = total > 0 && chosen.windowStart === 1 && chosen.windowEnd === total;
-		return { lines: chosen.lines, overflow: chosen.overflow, windowStart: chosen.windowStart, windowEnd: chosen.windowEnd, total, complete };
-	}
-
-	/** One candidate layout of the live block at a given detail level; backs off a stale offset. */
-	private fitLiveWindow(
-		agents: OverlayRow[],
-		prefix: string[],
-		budget: number,
-		offset: number,
-		detail: boolean,
-		physical: (row: OverlayRow) => string[],
-	): { lines: string[]; overflow: boolean; windowStart: number; windowEnd: number } {
-		for (let start = offset;; start = Math.max(0, start - 1)) {
-			const lines = [...prefix];
-			let shown = 0;
-			let overflow = false;
-			for (let index = start; index < agents.length; index++) {
-				const agentLines = physical(agents[index]!);
-				const kept = detail ? agentLines : agentLines.slice(0, 1);
-				if (lines.length + kept.length > budget && shown > 0) {
-					overflow = index < agents.length || start > 0;
-					break;
-				}
-				if (lines.length + kept.length > budget && shown === 0) {
-					lines.push(...kept.slice(0, Math.max(1, budget - lines.length)));
-					return { lines, overflow: true, windowStart: start + 1, windowEnd: start + 1 };
-				}
-				lines.push(...kept);
-				shown += 1;
-			}
-			if (shown > 0 || start === 0) {
-				return { lines, overflow: overflow || start + shown < agents.length, windowStart: start + 1, windowEnd: start + shown };
-			}
-		}
-	}
-
-	/** One full-frame candidate layout at a given header verbosity. */
-	private layoutSession(width: number, textWidth: number, viewport: number, reserve: number, compactHeader: boolean) {
-		const rows = this.currentRows(false, compactHeader);
-		const groupIndex = rows.findIndex(row => row.kind === "group");
-		const liveSection = this.liveSectionRows(rows);
-		const agentCount = liveSection.filter(row => row.kind === "live").length;
-		const header = this.renderHeaderRows(rows, width, textWidth, compactHeader);
-		const fitted = agentCount > 0 ? this.fitLiveAgents(liveSection, width, textWidth, viewport, header, reserve) : undefined;
-		return { rows, groupIndex, agentCount, header, fitted, complete: fitted?.complete ?? false };
+	desiredWidth(terminalColumns = this.tui.terminal?.columns ?? 80): number {
+		const { observed, retained } = this.sections();
+		return overlayPanelWidth([{ kind: "title", text: formatSessionTitle(this.model.session.reply?.ownerSessionId) }, { kind: "group", text: this.historyHeading() },
+			...[...observed, ...(this.historyOpen ? retained : [])].map(item => ({ kind: "live" as const, item, text: inspectionRow(item, terminalColumns) }))], terminalColumns);
 	}
 
 	render(width: number, height?: number): string[] {
 		if (width <= 0) return [];
-		if (width <= PANEL_FRAME * 2) return this.renderBody(width, Math.max(1, height ?? this.tui.terminal?.rows ?? 30));
-		const inner = Math.max(1, width - PANEL_FRAME * 2);
-		const viewport = Math.max(1, (height ?? this.tui.terminal?.rows ?? 30) - PANEL_FRAME * 2);
-		const body = this.renderBody(inner, viewport);
-		// Same hit area as the shared list overlay: the title row's last four columns around the mark.
+		// An idle repaint still checks the current owner's trust before displaying detail.
+		if (this.readModel) this.model = this.readModel();
+		const rows = Math.max(1, height ?? this.tui.terminal?.rows ?? 30);
+		if (width <= PANEL_FRAME * 2 || rows <= PANEL_FRAME * 2) return this.renderBody(width, rows);
+		const inner = width - PANEL_FRAME * 2;
+		const body = this.renderBody(inner, rows - PANEL_FRAME * 2);
 		if (this.closeRange) this.closeRange = { start: Math.max(0, width - 4), end: width };
-		// Transparent rounded frame shared with the Tasks and Jobs list overlays.
-		const border = (text: string) => this.theme?.fg("border", text) ?? text;
+		const border = (s: string) => this.theme?.fg("border", s) ?? s;
 		const rule = "─".repeat(inner);
 		return [border("╭" + rule + "╮"), ...body.map(line => border("│") + line + border("│")), border("╰" + rule + "╯")];
 	}
 
 	private renderBody(width: number, viewport: number): string[] {
 		const textWidth = panelTextWidth(width);
-		const reserve = (this.historyOpen ? 4 : 2) + 1;
-		// Identity pinning outranks chrome: reflow with a compact header, then a minimal reserve.
-		let layout = this.layoutSession(width, textWidth, viewport, reserve, false);
-		if (layout.agentCount > 0 && !layout.complete) {
-			for (const tighterReserve of [reserve, Math.min(reserve, 3)]) {
-				const tighter = this.layoutSession(width, textWidth, viewport, tighterReserve, true);
-				if (tighter.complete
-					|| tighter.fitted!.windowEnd - tighter.fitted!.windowStart > layout.fitted!.windowEnd - layout.fitted!.windowStart) {
-					layout = tighter;
-				}
-				if (layout.complete) break;
-			}
+		const theme = this.theme;
+		const fg = (tone: PanelTone | "borderMuted", text: string) => theme?.fg(tone, text) ?? text;
+		this.closeRange = closeMarkerColumns(width);
+		if (this.detailKey) {
+			const item = this.detailItem(this.detailKey), usage = this.model.session.reply?.usage;
+			const detail = item && usage ? { ...item, detail: () => [...item.detail(), `Session recorded usage: ${formatAgentUsage(usage)}`] } : item;
+			return this.detailPage.render("Agent detail", detail, textWidth, viewport, theme).map((line, i) => i === 0 ? panelTitleRow(line, width) : fillPanelRow(line, width));
 		}
-		const { rows, groupIndex, agentCount, header, fitted } = layout;
-		const physical = (row: OverlayRow) => this.physicalRow(row, textWidth, width);
-		const compact = (row: OverlayRow) => fillPanelRow(this.colorRow(row), width);
-		this.lastLiveOverflow = false;
-		this.lastHistoryOverflow = false;
-		const lines: string[] = [];
-		if (fitted) {
-			this.lastLiveOverflow = fitted.overflow;
-			lines.push(...fitted.lines);
-			if (this.lastLiveOverflow && lines.length < viewport) {
-				lines.push(compact(moreRow(`live ${fitted.windowStart}–${fitted.windowEnd}/${fitted.total} · ↑↓ live · ctrl+alt+f close`)));
-			}
-		} else {
-			lines.push(...header.slice(0, Math.max(0, viewport - 2)));
-		}
-		const group = rows[groupIndex];
-		if (group && lines.length < viewport - 1) {
-			if (agentCount > 0 && lines.length < viewport - 1) lines.push(this.panelRule(width, textWidth));
-			if (lines.length < viewport - 1) lines.push(compact(group));
-		}
-		const history = rows.filter(row => row.kind === "settled").flatMap(physical);
-		const budget = Math.max(0, viewport - lines.length - 1);
-		this.lastHistoryOverflow = this.historyOpen && history.length > budget;
-		this.historyOffset = Math.min(this.historyOffset, Math.max(0, history.length - budget));
-		if (this.historyOpen) lines.push(...history.slice(this.historyOffset, this.historyOffset + budget));
-		if (lines.length < viewport) {
-			lines.push(compact({ kind: "help", text: sessionHelpText({ liveOverflow: this.lastLiveOverflow, historyOpen: this.historyOpen, historyOverflow: this.lastHistoryOverflow }) }));
-		}
-		this.closeRange = header.length > 0 ? closeMarkerColumns(width) : undefined;
+		const sections = this.sections();
+		const { observed, stale } = sections;
+		// Follow a person-selected episode into history, not the default cursor on an untouched list.
+		if (this.followSelection && sections.retained.some(item => item.key === this.selectedKey)) this.historyOpen = true;
+		const retained = this.historyOpen ? sections.retained : [];
+		const all = [...observed, ...retained];
+		if (!all.some(item => item.key === this.selectedKey)) { this.selectedKey = all[0]?.key; this.followSelection = false; }
+		const session = this.model.session, reply = session.reply;
+		const lines = [panelTitleRow(fg("accent", formatSessionTitle(reply?.ownerSessionId)), width)];
+		const add = (s: string) => { if (lines.length < viewport) lines.push(fillPanelRow(s, width)); };
+		const draw = (item: InspectionItem) => add(inspectionRow(item, textWidth, theme, item.key === this.selectedKey));
+		const rule = () => add(fg("borderMuted", "─".repeat(textWidth)));
+		if (viewport < 6) { const selected = all.find(item => item.key === this.selectedKey); if (selected) draw(selected); return lines; }
+		if (viewport >= 10) rule();
+		add(fg("accent", `${stale ? "?" : this.model.snapshot ? observed.length : reply?.summary?.liveAgents ?? "?"} live`) + fg("dim", ` · ${reply?.summary?.agents ?? "?"} agent${reply?.summary?.agents === 1 ? "" : "s"}`));
+		if (session.kind === "unavailable" && reply?.history.state === "ready") add(fg("warning", `⚠ history unavailable (${session.reason ?? "unknown"}) · cached`));
+		else if (reply?.inventory.state === "ready" && !reply.inventory.complete) add(fg("warning", "⚠ history partial"));
+		else if (!reply && this.model.snapshot) add(fg("dim", "limited live observation"));
+		else if (session.refreshing) add(fg("dim", "history refreshing"));
+		this.liveOverflow = false;
+		if (observed.length) {
+			if (viewport >= 9) add(fg("accent", stale ? "observation stale" : "running") + fg("dim", ` · ${observed.length} agent${observed.length === 1 ? "" : "s"}`));
+			// Pin live identities first while keeping history navigation and one selected historical row reachable.
+			const room = Math.max(1, viewport - lines.length - 2 - Number(retained.length > 0));
+			this.liveOverflow = observed.length > room;
+			const count = Math.max(1, Math.min(observed.length, room - Number(this.liveOverflow)));
+			this.liveOffset = windowStart(this.liveOffset, observed, count, this.selectedKey);
+			observed.slice(this.liveOffset, this.liveOffset + count).forEach(draw);
+			if (this.liveOverflow && room > 1) add(fg("dim", `live ${this.liveOffset + 1}–${this.liveOffset + count}/${observed.length} · ↑↓ live`));
+		} else if (viewport >= 9) add(fg("dim", reply ? "No live agents; retained work is in history." : EMPTY_OBSERVER_MESSAGE));
+		if (observed.length && viewport - lines.length >= 4 + Number(retained.length > 0)) rule();
+		add(fg(session.kind === "unavailable" ? "warning" : "accent", this.historyHeading()));
+		const room = Math.max(0, viewport - lines.length - 1);
+		this.historyOffset = windowStart(this.historyOffset, retained, room, this.selectedKey);
+		retained.slice(this.historyOffset, this.historyOffset + room).forEach(draw);
+		add(fg("dim", sessionHelpText({ historyOpen: this.historyOpen })));
 		return lines;
 	}
+}
+
+/** Scroll just enough to keep the actual selected item in this single-line section. */
+function windowStart(offset: number, items: InspectionItem[], count: number, selected?: string): number {
+	const at = items.findIndex(item => item.key === selected);
+	if (at >= 0 && count > 0) offset = Math.min(at, Math.max(offset, at - count + 1));
+	return Math.max(0, Math.min(offset, items.length - count));
 }

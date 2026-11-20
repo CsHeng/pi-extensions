@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor } from "../extensions/shared/above-editor.ts";
+import { ABOVE_EDITOR_WIDGET_KEY, createAboveEditor, type AboveEditorComposer, type AboveEditorContribution } from "../extensions/shared/above-editor.ts";
 import { ManagedObserver } from "../extensions/agents/managed-observer.ts";
 import {
 	createAgentsUiExtension,
@@ -13,19 +13,15 @@ import {
 import { AgentsOverlay, type OverlaySnapshot, type SessionViewState } from "../extensions/agents-ui/component.ts";
 import {
 	OBSERVER_STALE_MS,
-	compactCount,
 	formatHistoryNav,
-	formatSessionCountRows,
-	formatSessionCounts,
 	formatSessionTitle,
-	formatLiveRow,
-	formatSessionUsage,
 	formatAgentsInline,
-	sessionCounts,
+	formatAgentsInspection,
+	agentItemKey,
+	observationAt,
 	sessionHelpText,
 	shortLabel,
 	agentsInlineBudget,
-	taskColumns,
 } from "../extensions/agents-ui/render.ts";
 import { OBSERVER_EVENT, OBSERVER_VERSION, type ObserverSnapshot } from "../extensions/agents/observer-events.ts";
 import {
@@ -42,6 +38,117 @@ import type { RecordedUsageProjection } from "../extensions/agents/observability
 type Handler = (event?: unknown, ctx?: ExtensionContext) => unknown;
 type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<unknown>;
 type ShortcutHandler = (ctx: ExtensionContext) => Promise<unknown>;
+
+test("activity-first rows expose only evidenced current activity and frozen outcomes", () => {
+	const live = task({ id: "live-handle", label: "Fix focus", role: "worker", route: { provider: "private-provider", model: "model", thinking: "high" }, activeTools: ["bash"], calls: [{ id: "private-call-id", parentId: null, tool: "bash", summary: "TARGET", startedMs: 1, updatedMs: 2, outputMs: null, status: "running", deadlineMs: null, tail: "private tail", truncated: false }] });
+	const generating = task({ id: "generating", label: "Write answer", responding: true });
+	const running = task({ id: "running", label: "Inspect state", responding: false });
+	const queued = task({ id: "queued", label: "Wait turn", status: "pending" });
+	const finished = settledTask({ id: "finished", label: "Finish work", activeTools: ["bash"], calls: live.calls, elapsedMs: 5000 });
+	const tasks = [live, generating, running, queued, finished];
+	const inline = formatAgentsInspection({ counts: { running: 3, queued: 1, agents: 5 }, tasks }, 180, 10, undefined).lines.join("\n");
+	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({ handle: "finished", label: "Finish work", elapsedMs: 5000 })] } });
+	const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: tasks.slice(0, 4) })), { terminal: { rows: 40 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("h");
+	const central = overlay.render(180, 40).join("\n");
+	for (const text of [inline, central]) {
+		assert.match(text, /Worker: Fix focus.*model.*high.*bash.*TARGET.*4s/);
+		assert.match(text, /Write answer.*generating reply/);
+		assert.match(text, /Inspect state.*running/);
+		assert.match(text, /Wait turn.*queued/);
+		assert.match(text, /Finish work.*succeeded.*5s/);
+		assert.doesNotMatch(text, /private-provider|private-call-id|private tail|ep0|recorded ↑/);
+		assert.doesNotMatch(text.split("Finish work")[1]?.split("\n")[0] ?? "", /bash|TARGET/);
+	}
+	overlay.handleInput("enter");
+	const detail = overlay.render(180, 40).join("\n");
+	assert.match(detail, /Agent live-handle ep0/);
+	assert.match(detail, /private-provider.*model.*high/);
+	assert.match(detail, /Usage:/);
+	assert.match(detail, /private-call-id/);
+});
+
+test("clock advances only during measured child execution; a proposal or finished call is not current work", () => {
+	const pending = task({ executionPhase: "workspace-preparation", activeTools: ["proposed"], elapsedMs: null });
+	const live = task({ id: "active", activeTools: ["proposed"] });
+	const closing = task({ id: "close", executionPhase: "convergence-critical", activeTools: ["proposed"], responding: true });
+	const tasks = observationAt(snapshot({ tasks: [pending, live, closing] }), 1000, 4000).tasks;
+	assert.deepEqual(tasks.map(t => t.elapsedMs), [null, 7000, 4000]);
+	const list = formatAgentsInspection({ tasks, counts: { running: 3, queued: 0, agents: 3 } }, 140, 8, undefined).lines.join("\n");
+	assert.match(list, /preparing workspace/);
+	assert.match(list, /Work active.*running.*7s/);
+	assert.match(list, /Work close.*finalizing.*4s/);
+	assert.doesNotMatch(list, /proposed|generating/);
+});
+
+test("a same-episode unconfirmed record cannot erase an observed result or stale duration", () => {
+	const row = historyRow({ handle: "A", label: "Check files", state: "queued", latestOutcome: "unknown" });
+	const terminal = settledTask({ id: "A", label: row.label!, episode: row.episode, elapsedMs: 6000 });
+	const base = { counts: { running: 0, queued: 0, agents: 1 }, history: [row] };
+	const line = (value: typeof base & { tasks: typeof terminal[]; stale?: boolean }) => formatAgentsInspection(value, 140, 6, undefined).lines[1]!;
+	assert.match(line({ ...base, tasks: [terminal] }), /Check files.*succeeded.*6s/);
+	assert.match(line({ ...base, tasks: [task({ ...terminal, status: "running" })], stale: true }), /observation stale.*6s/);
+	assert.match(line({ ...base, tasks: [terminal], history: [{ ...row, state: "closed" }] }), /Check files.*succeeded.*6s/);
+	assert.doesNotMatch(line({ ...base, tasks: [terminal], history: [{ ...row, state: "closed", episode: 2 }] }), /succeeded|6s/);
+});
+
+test("settled failure and abort rows keep their frozen elapsed and omit stale activity", () => {
+	const tasks = [
+		settledTask({ id: "failed-id", label: "Failed work", status: "failed", elapsedMs: 6000, activeTools: ["bash"] }),
+		settledTask({ id: "aborted-id", label: "Aborted work", status: "aborted", elapsedMs: 7000, activeTools: ["read"] }),
+	];
+	const inline = formatAgentsInspection({ counts: { running: 0, queued: 0, agents: 2 }, tasks }, 160, 5, undefined).lines.join("\n");
+	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 2, totalPages: 1, rows: [
+		historyRow({ handle: "failed-id", label: "Failed work", state: "closed", latestOutcome: "failed", elapsedMs: 6000 }),
+		historyRow({ handle: "aborted-id", label: "Aborted work", state: "closed", latestOutcome: "aborted", elapsedMs: 7000 }),
+	] } });
+	const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("h");
+	for (const text of [inline, overlay.render(160, 24).join("\n")]) {
+		assert.match(text, /Failed work.*failed.*6s/);
+		assert.match(text, /Aborted work.*aborted.*7s/);
+		assert.doesNotMatch(text, /bash|read|closed|ep1/);
+	}
+	overlay.handleInput("enter");
+	const detail = overlay.render(160, 24).join("\n");
+	assert.match(detail, /Agent failed-id ep1/);
+	assert.match(detail, /State: closed.*outcome: failed/);
+	assert.match(detail, /Usage:/);
+});
+
+test("a missing label uses the generic title instead of leaking a handle", () => {
+	const row = task({ id: "private-handle", role: "worker" });
+	delete row.label;
+	const text = formatAgentsInspection({ counts: { running: 1, queued: 0, agents: 1 }, tasks: [row] }, 120, 4, undefined).lines.join("\n");
+	assert.match(text, /Worker: untitled task/);
+	assert.doesNotMatch(text, /private-handle/);
+});
+
+test("inspection selection follows agent identity across reorder and uses wide space", () => {
+	const first = task({ id: "first-agent", headline: "Inspect the assigned business question" });
+	const second = task({ id: "second-agent", headline: "Review another assignment" });
+	const model = { counts: { running: 2, queued: 0, agents: 2 }, tasks: [first, second] };
+	const key = agentItemKey(second.id, second.episode);
+	const frame = formatAgentsInspection(model, 160, 4, undefined, key);
+	assert.equal(frame.items[1], key);
+	assert.ok(frame.lines[frame.keys.indexOf(key)]?.includes("›"));
+	const reordered = formatAgentsInspection({ ...model, tasks: [second, first] }, 35, 3, undefined, key);
+	assert.ok(reordered.lines[reordered.keys.indexOf(key)]?.includes("›"));
+	assert.ok(reordered.lines.every(line => visibleWidth(line) <= 35));
+});
+
+test("inspection disambiguates duplicate readable titles but hides handles for unique titles", () => {
+	const tasks = [
+		task({ id: "session_11111111-aaaa", label: "Review evidence" }),
+		task({ id: "session_22222222-bbbb", label: "Review evidence" }),
+		task({ id: "session_33333333-cccc", label: "Check route" }),
+	];
+	const lines = formatAgentsInspection({ counts: { running: 3, queued: 0, agents: 3 }, tasks }, 160, 8, undefined).lines.join("\n");
+	assert.match(lines, /Review evidence.*11111111/);
+	assert.match(lines, /Review evidence.*22222222/);
+	assert.match(lines, /Explorer.*Check route/);
+	assert.doesNotMatch(lines, /33333333|ep0/);
+});
 
 class FakeScheduler {
 	callback: (() => void) | undefined;
@@ -80,6 +187,7 @@ class FakePi {
 function task(overrides: Partial<ObserverSnapshot["tasks"][number]> = {}): ObserverSnapshot["tasks"][number] {
 	return {
 		id: "scan",
+		label: `Work ${(overrides.id ?? "scan").replace(/^session_/, "")}`,
 		ordinal: 1,
 		role: "explorer",
 		episode: 0,
@@ -148,7 +256,7 @@ function context(options: {
 	working?: Array<string | undefined>;
 	footers?: unknown[];
 	session?: ReturnType<typeof owner>;
-	custom?: (factory: (tui: TUI, theme: unknown, kb: unknown, done: (value: null) => void) => unknown, options?: { overlay?: boolean }) => unknown;
+	custom?: (factory: (tui: TUI, theme: unknown, kb: unknown, done: (value: null) => void) => unknown, options?: { overlay?: boolean; overlayOptions?: { width?: number | string } }) => unknown;
 } = {}): ExtensionContext {
 	const statuses = options.statuses ?? [];
 	const widgets = options.widgets ?? [];
@@ -218,6 +326,7 @@ const usageProjection = (overrides: Partial<RecordedUsageProjection> = {}): Reco
 function historyRow(overrides: Partial<SessionViewHistoryRow> = {}): SessionViewHistoryRow {
 	return {
 		handle: "session_11111111-1111-4111-8111-111111111111",
+		label: `Review ${(overrides.handle ?? "session_11111111-1111-4111-8111-111111111111").replace(/^session_/, "").slice(0, 8)}`,
 		role: "worker",
 		state: "idle",
 		episode: 1,
@@ -267,6 +376,27 @@ function requestCount(pi: FakePi): number {
 	return pi.events.emitted.filter(entry => entry.name === SESSION_VIEW_REQUEST_EVENT).length;
 }
 
+test("a later session query for a known terminal episode cannot resurrect it or erase its duration", async () => {
+	let clock = 10;
+	const pi = install({ now: () => clock });
+	const held: { overlay?: AgentsOverlay } = {};
+	const ctx = captureCtx(held);
+	await pi.handlers.get("session_start")?.({}, ctx);
+	const end = settledTask({ id: "Saved", label: "Save result", episode: 1, elapsedMs: 6100 });
+	pi.events.emit(OBSERVER_EVENT, snapshot({ phase: "settled", activeChildren: 0, settledTasks: 1, tasks: [end] }));
+	clock += 100;
+	await openWith(pi, ctx);
+	const row = historyRow({ handle: end.id, episode: 1, label: end.label!, state: "queued", latestOutcome: "unknown" });
+	const history = { state: "ready" as const, pageSize: 20, page: 0, totalPages: 1, totalRows: 1, rows: [row] };
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId, live: [], history }));
+	const collapsed = held.overlay!.render(120, 24).join("\n");
+	assert.match(collapsed, /0 live/);
+	assert.doesNotMatch(collapsed, /Save result/);
+	held.overlay!.handleInput("h");
+	assert.match(held.overlay!.render(120, 24).join("\n"), /Save result.*succeeded.*6s/);
+	await pi.handlers.get("session_shutdown")?.({}, ctx);
+});
+
 test("core timeout uses one interval and closing the overlay cancels it", async () => {
 	let clock = 0, sequence = 0;
 	const timers = new Map<number, () => void>();
@@ -295,7 +425,7 @@ test("a session reply alone supplies fresh live rows and a clock", async () => {
 	pi.events.emit(SESSION_VIEW_EVENT, reply);
 	const text = held.overlay!.render(80).join("\n");
 	assert.match(text, /1 live/);
-	assert.match(text, /ReplyLiv ep3 explorer/);
+	assert.match(text, /Explorer: Work ReplyLive/);
 	await pi.handlers.get("session_shutdown")?.({}, ctx);
 });
 
@@ -310,7 +440,7 @@ test("physical layout stays bounded with wrapped counts, long history and all te
 	const seenLive = new Set<string>();
 	for (let index = 0; index < 100; index++) {
 		const text = heavyOverlay.render(80, 24).join("\n");
-		for (const match of text.matchAll(/(\d{8}) ep0 explorer/g)) seenLive.add(match[1]!);
+		for (const match of text.matchAll(/Work (\d{8})/g)) seenLive.add(match[1]!);
 		heavyOverlay.handleInput("down");
 	}
 	assert.equal(seenLive.size, 10, "every live identity is reachable through live overflow");
@@ -319,7 +449,7 @@ test("physical layout stays bounded with wrapped counts, long history and all te
 	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 20, totalPages: 1, rows } });
 	const pinnedTasks = Array.from({ length: 2 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, ordinal: index + 1, headline: "" }));
 	const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: pinnedTasks })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	overlay.handleInput("enter");
+	overlay.handleInput("h");
 	for (let index = 0; index < 100; index++) overlay.handleInput("up");
 	const seen = new Set<string>();
 	for (let index = 0; index < 100; index++) {
@@ -332,28 +462,110 @@ test("physical layout stays bounded with wrapped counts, long history and all te
 	assert.equal(seen.size, 20, "every wrapped historical identity is reachable while live rows stay pinned");
 });
 
-test("session-scoped title, counts and recorded usage use the footer usage grammar without turns", () => {
+test("selection reaches each history item with ten pinned live agents at 80 and 40 columns", () => {
+	for (const width of [80, 40]) {
+		const live = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}`, headline: "assignment" }));
+		const rows = Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index + 100).padStart(8, "0")}` }));
+		const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 20, totalPages: 1, rows } });
+		const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: live })), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+		overlay.handleInput("h");
+		const seen = new Set<string>();
+		for (let index = 0; index < 35; index++) {
+			const text = overlay.render(width, 24).join("\n");
+			if (width === 80) for (const item of live) assert.ok(text.includes(item.id.slice(8)), "live identities remain pinned at 80×24");
+			for (const match of text.matchAll(/› [^\n]*?(000001\d\d)/g)) seen.add(match[1]!);
+			overlay.handleInput("down");
+		}
+		assert.equal(seen.size, 20, `selected history identities at ${width} columns`);
+	}
+});
+
+test("every selected retained identity is visible across both pages at 80 and 40 columns", () => {
+	for (const width of [80, 40]) {
+		const live = Array.from({ length: 10 }, (_, index) => task({ id: `session_${String(index).padStart(8, "0")}` }));
+		const rows = Array.from({ length: 27 }, (_, index) => historyRow({ handle: `session_${String(index + 100).padStart(8, "0")}`, state: index % 2 ? "closed" : "idle" }));
+		const page = (index: number) => sessionReply({ history: { state: "ready", pageSize: 20, page: index, totalRows: 27, totalPages: 2, rows: rows.slice(index * 20, index * 20 + 20) } });
+		const model = (index: number) => overlayModel({ kind: "ready", reply: page(index) }, snapshot({ tasks: live }));
+		const overlay = new AgentsOverlay(model(0), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => 0, onPage: index => overlay.update(model(index)) });
+		overlay.handleInput("h");
+		for (let index = 0; index < 10; index++) { overlay.render(width, 24); overlay.handleInput("down"); }
+		for (let index = 0; index < rows.length; index++) {
+			if (index === 20) {
+				overlay.handleInput("pageDown");
+				overlay.render(width, 24);
+				for (let n = 0; n < 10; n++) overlay.handleInput("down");
+			}
+			const text = overlay.render(width, 24).join("\n");
+			assert.match(text, new RegExp(`› [^\\n]*${rows[index]!.handle.slice(8)}`), `selected history ${index} at ${width}`);
+			overlay.handleInput("down");
+		}
+	}
+});
+
+test("inline detail uses finished observer rows in mixed and settled snapshots", () => {
+	const finished = settledTask({ id: "Finished", headline: "finished assignment" });
+	for (const observed of [snapshot({ tasks: [task(), finished] }), snapshot({ phase: "settled", tasks: [finished] })]) {
+		const overlay = new AgentsOverlay(overlayModel({ kind: "idle" }, observed), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {},
+			{ now: () => 0, detailKey: agentItemKey("Finished", finished.episode) });
+		assert.match(overlay.render(80, 24).join("\n"), /finished assignment/);
+	}
+});
+
+test("central selection follows physical live and history order despite status ranking", () => {
+	const live = [task({ id: "queued", status: "pending" }), task({ id: "running" })];
+	const rows = [historyRow({ handle: "closed", label: "First review", state: "closed" }), historyRow({ handle: "interrupted", label: "Second review", state: "interrupted" })];
+	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 2, totalPages: 1, rows } });
+	const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: live })), { terminal: { rows: 40 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("h");
+	for (const [handle, label] of [["queued", "Work queued"], ["running", "Work running"], ["closed", "First review"], ["interrupted", "Second review"]]) {
+		const list = overlay.render(100, 40).join("\n");
+		assert.match(list, new RegExp(`› [^\\n]*${label}`));
+		overlay.handleInput("enter");
+		assert.match(overlay.render(100, 40).join("\n"), new RegExp(`Agent ${handle} ep`));
+		overlay.handleInput("escape");
+		overlay.handleInput("down");
+	}
+});
+
+test("central detail follows the exact episode into folded history, then Escape reveals that same row", () => {
+	const first = task({ id: "A", episode: 1, label: "Inspect evidence" });
+	const second = task({ id: "B", label: "Other work" });
+	const history = (rows: SessionViewHistoryRow[]) => sessionReply({ history: { state: "ready", page: 0, pageSize: 20, totalPages: 1, totalRows: rows.length, rows } });
+	const panel = new AgentsOverlay(overlayModel({ kind: "ready", reply: history([]) }, snapshot({ tasks: [first, second] })), { requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	panel.handleInput("enter");
+	const row = historyRow({ handle: "A", episode: 1, label: first.label!, state: "closed", elapsedMs: 5000 });
+	panel.update(overlayModel({ kind: "ready", reply: history([row]) }, snapshot({ tasks: [second] })));
+	assert.match(panel.render(100, 24).join("\n"), /Agent A ep1[\s\S]*outcome: succeeded[\s\S]*Elapsed: 5s/);
+	panel.handleInput("escape");
+	assert.match(panel.render(100, 24).join("\n"), /› [^\n]*Inspect evidence.*succeeded.*5s/);
+	panel.handleInput("enter");
+	panel.update(overlayModel({ kind: "ready", reply: history([{ ...row, episode: 2 }]) }, snapshot({ tasks: [second] })));
+	assert.match(panel.render(100, 24).join("\n"), /Record unavailable/);
+	assert.doesNotMatch(panel.render(100, 24).join("\n"), /ep2|Other work/);
+});
+
+test("detail follows selected identity across reorder and reports unavailable after it disappears", () => {
+	let clock = 0;
+	const one = task({ id: "first-agent", headline: "first assignment" });
+	const two = task({ id: "second-agent", headline: "second assignment" });
+	const model = (tasks: typeof one[]) => overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({ tasks }));
+	const overlay = new AgentsOverlay(model([one, two]), { terminal: { rows: 24 }, requestRender() {} } as TUI, () => {}, { now: () => clock });
+	overlay.render(80, 24);
+	overlay.handleInput("down");
+	overlay.update(model([two, one]));
+	overlay.handleInput("enter");
+	assert.match(overlay.render(80, 24).join("\n"), /second assignment/);
+	clock = OBSERVER_STALE_MS + 1;
+	assert.match(overlay.render(80, 24).join("\n"), /stale · record unavailable/);
+	overlay.handleInput("escape");
+	assert.match(overlay.render(80, 24).join("\n"), /observation stale/);
+});
+
+test("session title and help remain available independently of list presentation", () => {
 	assert.equal(formatSessionTitle(undefined), "Agents · session");
 	assert.equal(formatSessionTitle("parent_session-1"), "Agents · session parent…");
-	const counts = sessionCounts(snapshot(), sessionReply(), "ready", undefined, false);
-	const countRows = formatSessionCountRows(counts);
-	assert.equal(countRows[0]?.text, "1 live");
-	assert.match(countRows[1]?.text ?? "", /^1 agents · 1 episodes · 1 idle · 0 int · 0 closed$/);
-	assert.match(formatSessionCounts(counts).text, /^1 live · /);
-	assert.equal(counts.limitedLive, false);
-	const awaitingHistory = sessionCounts(snapshot(), undefined, "ready", undefined, false);
-	assert.equal(awaitingHistory.limitedLive, true);
-	assert.match(formatSessionCounts(awaitingHistory).text, /limited live observation/);
-	const usage = formatSessionUsage(usageProjection());
-	assert.equal(usage?.text, "recorded ↑12k ↓2.0k CH0.0% $1.250");
-	const cached = formatSessionUsage(usageProjection({ usage: { input: 1_000, output: 200, cacheRead: 9_000, cacheWrite: 0, totalTokens: 10_200, cost: 0.5 },
-		lane: { promptTokens: 10_000, promptCacheRead: 9_000, rebillCount: 2, rebillTokens: 4_000, rebillCost: 0.01 } }));
-	assert.equal(cached?.text, "recorded ↑1.0k ↓200 R9.0k CH90.0% $0.500 RB2 4.0k $0.010", "CH is the token-weighted mean and RB follows the footer");
-	assert.match(formatSessionUsage(usageProjection({ status: "incomplete", usage: { input: 100, output: null, cacheRead: 0, cacheWrite: 0, totalTokens: null, cost: null }, assistantTurns: 12 }))?.text ?? "", /partial/);
-	assert.equal(formatSessionUsage(usageProjection({ status: "unavailable", usage: { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null }, assistantTurns: null, metrics: { input: "unavailable", output: "unavailable", cacheRead: "unavailable", cacheWrite: "unavailable", totalTokens: "unavailable", cost: "unavailable" }, turnsCoverage: "unavailable" }))?.text, "recorded usage unavailable");
-	assert.equal(compactCount(null), "?");
-	assert.equal(sessionHelpText({ liveOverflow: false, historyOpen: false, historyOverflow: false }), "enter history · ctrl+alt+f close");
-	assert.equal(sessionHelpText({ liveOverflow: true, historyOpen: true, historyOverflow: true }), "↑↓ live · ↑↓ rows · enter collapse · pgup/pgdn page · ctrl+alt+f close");
+	assert.equal(sessionHelpText({ liveOverflow: false, historyOpen: false, historyOverflow: false }), "H history ↑↓ select Enter detail Esc");
+	assert.equal(sessionHelpText({ liveOverflow: true, historyOpen: true, historyOverflow: true }), "H hide PgUp/PgDn ↑↓ select Enter detail Esc");
 });
 
 test("short agent labels disambiguate collisions and history navigation reports honest ranges", () => {
@@ -378,21 +590,22 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 	assert.ok(lines.length <= 40, `panel fits 80x40, got ${lines.length}`);
 	assert.match(lines[1] ?? "", /Agents · session parent…/, "the title row follows the top border");
 	const text = lines.join("\n");
-	assert.equal((text.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "all ten identified live rows stay visible");
-	assert.match(text, /running · 10 agents/);
-	assert.match(text, /task 0/, "headline stays on the agent entry, not batched at the bottom");
-	assert.match(text, /37 agents · 49 episodes/);
-	assert.match(text, /▸ 27 retained agents · enter/);
+	assert.equal((text.match(/Explorer: Work [0-9]{8}/g) ?? []).length, 10, "all ten identified live rows stay visible");
+	assert.match(text, /10 live/);
+	assert.match(text, /Work 00000000/, "readable title stays on the agent entry");
+	assert.match(text, /37 agents/);
+	assert.doesNotMatch(text, /49 episodes|recorded ↑/);
+	assert.match(text, /▸ 27 retained agents · H/);
 	assert.doesNotMatch(text, /batch/, "no batch title");
 	assert.doesNotMatch(text, /run [a-z0-9]/, "no run-prefix session title");
 	// History paging never scrolls the live area away.
-	overlay.handleInput("enter");
+	overlay.handleInput("h");
 	const expanded = overlay.render(80, 40).join("\n");
 	assert.match(expanded, /history 1–20 of 27 · page 1\/2/);
-	assert.equal((expanded.match(/● [0-9]{8} ep0 explorer/g) ?? []).length, 10, "live rows stay pinned under history");
+	assert.equal((expanded.match(/Explorer: Work [0-9]{8}/g) ?? []).length, 10, "live rows stay pinned under history");
 });
 
-test("live rows show call identity and summary without a control", () => {
+test("live rows show current tool without call identity or a control", () => {
 	const row = task({
 		activeTools: ["bash"],
 		calls: [{
@@ -409,17 +622,17 @@ test("live rows show call identity and summary without a control", () => {
 			truncated: false,
 		}],
 	});
-	const rendered = formatLiveRow(row, "live", taskColumns([row], "live")).text;
-	assert.match(rendered, /bash bash-1 running grep -R \//);
-	assert.doesNotMatch(rendered, /cancel|apply|join|quiet tail/);
+	const rendered = formatAgentsInspection({ counts: { running: 1, queued: 0, agents: 1 }, tasks: [row] }, 160, 5, undefined).lines.join("\n");
+	assert.match(rendered, /bash/);
+	assert.doesNotMatch(rendered, /bash-1|cancel|apply|join|quiet tail/);
 });
 
-test("live route renders on the primary row while headline and tools stay on the secondary line", () => {
+test("both rows show the readable task and evidenced activity; a tool proposal stays off the list", () => {
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({
 			tasks: [
-				task({ id: "session_00000001", headline: "Read-only C-ROUTEROS", activeTools: ["read"] }),
-				task({ id: "session_00000002", ordinal: 2, headline: "Read-only C-ADGUARD", activeTools: [], route: null }),
+				task({ id: "session_00000001", label: "Read-only C-ROUTEROS", headline: "Read-only C-ROUTEROS", activeTools: ["read"] }),
+				task({ id: "session_00000002", label: "Read-only C-ADGUARD", ordinal: 2, headline: "Read-only C-ADGUARD", activeTools: [], route: null }),
 			],
 			requestedTasks: 2,
 			admittedTasks: 2,
@@ -428,16 +641,17 @@ test("live route renders on the primary row while headline and tools stay on the
 		})),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
 	const text = overlay.render(80, 30).join("\n");
-	const first = text.indexOf("00000001");
-	const second = text.indexOf("00000002");
+	const first = text.indexOf("Read-only C-ROUTEROS");
+	const second = text.indexOf("Read-only C-ADGUARD");
 	assert.ok(first >= 0 && second > first);
 	const firstBlock = text.slice(first, second);
-	assert.match(firstBlock, /running[^\n]*openai gpt-4\.1 thinking:off/, "route shares the primary row with status and elapsed");
-	assert.match(firstBlock, /Read-only C-ROUTEROS/);
-	assert.match(firstBlock, /read/);
+	assert.match(firstBlock, /gpt-4\.1.*off/, "model and thinking share the primary row");
+	assert.doesNotMatch(firstBlock, /openai|ep0/);
+	assert.match(firstBlock, /running/);
+	assert.doesNotMatch(firstBlock, /\bread\b/);
 	const secondBlock = text.slice(second);
-	assert.match(secondBlock, /route unavailable/);
-	assert.match(secondBlock, /Read-only C-ADGUARD/);
+	assert.match(secondBlock, /running/);
+	assert.doesNotMatch(secondBlock, /openai|ep0/);
 });
 
 test("detail text keeps visible spaces across zero-width separators and wrapped lines", () => {
@@ -446,9 +660,10 @@ test("detail text keeps visible spaces across zero-width separators and wrapped 
 			tasks: [task({ headline: "Read-only\u200bC-ROUTEROS and more words here", activeTools: ["read", "bash"] })],
 		})),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("enter");
 	const text = overlay.render(80, 24).join("\n");
 	assert.match(text, /Read-only C-ROUTEROS/);
-	assert.match(text, /read, bash/);
+	assert.doesNotMatch(text, /read, bash/);
 	const wrapped = overlay.render(36, 24).join("\n");
 	assert.match(wrapped, /Read-only C-ROUTEROS/);
 });
@@ -468,6 +683,7 @@ test("themed overlay renders bounded per-root destination, apply, recovery and r
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply }),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
+	overlay.handleInput("h");
 	overlay.handleInput("enter");
 	const text = overlay.render(120, 30).join("\n");
 	assert.match(text, /rootone applied\/released \/work\/alpha/, "a released root keeps its own apply and release facts in the themed panel");
@@ -490,6 +706,7 @@ test("themed overlay keeps scratch-only cleanup failure separate from fully rele
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply }),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, theme });
+	overlay.handleInput("h");
 	overlay.handleInput("enter");
 	const text = overlay.render(120, 30).join("\n");
 	assert.match(text, /rootone not-applied\/released \/work\/alpha/);
@@ -498,7 +715,7 @@ test("themed overlay keeps scratch-only cleanup failure separate from fully rele
 	assert.match(text, /cleanup=partial remaining=1/, "the aggregate cleanup failure stays visible in the themed panel");
 });
 
-test("history reaches every retained handle across pages with enter, pageUp and pageDown", () => {
+test("history reaches every retained handle across pages with H, pageUp and pageDown", () => {
 	const handles = Array.from({ length: 37 }, (_, index) => `session_${String(index + 10).padStart(8, "0")}-${String(index).padStart(4, "0")}-4000-8000-${String(index).padStart(12, "0")}`);
 	const page = (index: number): SessionViewReply => sessionReply({
 		summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 },
@@ -512,7 +729,7 @@ test("history reaches every retained handle across pages with enter, pageUp and 
 	const pages: number[] = [];
 	const overlay = new AgentsOverlay(overlayModel({ kind: "idle" }), { terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0, onPage: target => pages.push(target) });
 	overlay.update(overlayModel({ kind: "ready", reply: page(0) }));
-	overlay.handleInput("enter");
+	overlay.handleInput("h");
 	const first = overlay.render(80, 40).join("\n");
 	assert.match(first, /history 1–20 of 37 · page 1\/2/);
 	overlay.handleInput("\u001b[6~"); // pageDown
@@ -527,7 +744,7 @@ test("history reaches every retained handle across pages with enter, pageUp and 
 	assert.deepEqual(pages, [1, 0]);
 	const seen = [page(0).history.rows, page(1).history.rows].flat().map(row => row.handle);
 	assert.equal(new Set(seen).size, 37, "both pages cover every retained handle exactly once");
-	assert.match(second, /recorded ↑49k/);
+	assert.doesNotMatch(second, /recorded ↑49k|49 episodes/);
 });
 
 test("tiny terminals keep live rows reachable through explicit live-only overflow", () => {
@@ -563,18 +780,18 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	answer(pi, sessionReply({ requestId: first.requestId, ownerSessionId: "another_session" }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /history unavailable \(owner_changed\)/);
 	// Enter retries through the core contract and the matching reply lands.
-	held.overlay?.handleInput("enter");
+	held.overlay?.handleInput("h");
 	const retry = lastRequest(pi);
 	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
 	answer(pi, sessionReply({ requestId: retry.requestId, history: paged, summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 } }));
 	const text = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(text, /Agents · session parent…/);
 	assert.match(text, /history 1–20 of 37 · page 1\/2/);
-	assert.match(text, /✓ [0-9a-f]{8} worker ep1 idle succeeded/);
-	held.overlay?.handleInput("enter");
-	assert.match(held.overlay?.render(120).join("\n") ?? "", /▸ 37 retained agents · enter/);
+	assert.match(text, /Worker: Review [0-9a-f]{8}.*succeeded/);
+	held.overlay?.handleInput("h");
+	assert.match(held.overlay?.render(120).join("\n") ?? "", /▸ 37 retained agents · H/);
 	// Page navigation requests the next page; an out-of-order older reply stays ignored.
-	held.overlay?.handleInput("enter");
+	held.overlay?.handleInput("h");
 	const second = lastRequest(pi);
 	assert.equal(second.page, 0, "no page change yet");
 	held.overlay?.handleInput("\u001b[6~");
@@ -612,10 +829,10 @@ test("missing core replies surface a bounded unavailable state instead of loadin
 	assert.equal(audits.length, 1);
 	assert.equal(audits[0]!.data.source, "ui"); assert.equal(audits[0]!.data.state, "timeout");
 	assert.equal(audits[0]!.data.durationMs, 4_000);
-	// Enter retries through the core contract.
+	// H retries through the core contract.
 	const before = requestCount(pi);
-	held.overlay?.handleInput("enter");
-	assert.ok(requestCount(pi) > before, "enter on unavailable history requeries");
+	held.overlay?.handleInput("h");
+	assert.ok(requestCount(pi) > before, "H on unavailable history requeries");
 });
 
 test("a foreign observer cannot invalidate a history-only cached panel", async () => {
@@ -644,7 +861,7 @@ test("timed-out history accepts only its correlated late reply and preserves cac
 	assert.match(held.overlay!.render(120).join("\n"), /core_timeout/);
 	answer(pi, sessionReply({ requestId: first.requestId }));
 	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /core_timeout/);
-	held.overlay!.handleInput("enter");
+	held.overlay!.handleInput("h");
 	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
 	const refresh = lastRequest(pi); clock += 4_000; scheduler.tick();
 	const cached = held.overlay!.render(120).join("\n");
@@ -656,6 +873,7 @@ test("timed-out history accepts only its correlated late reply and preserves cac
 	assert.match(held.overlay!.render(120).join("\n"), /core_query_failed/);
 	assert.match(held.overlay!.render(120).join("\n"), /11111111/);
 	let trusted = false; ctx.isProjectTrusted = () => trusted;
+	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /11111111/, "an idle repaint drops cached facts immediately on trust loss");
 	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
 	assert.doesNotMatch(held.overlay!.render(120).join("\n"), /11111111/);
 	assert.match(held.overlay!.render(120).join("\n"), /project_trust_required/);
@@ -701,7 +919,7 @@ test("changed events coalesce into one requery of the current page while the ove
 	const first = lastRequest(pi);
 	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
 	answer(pi, sessionReply({ requestId: first.requestId, history: paged, summary: { agents: 37, acceptedEpisodes: 49, states: { idle: 35, queued: 0, running: 0, interrupted: 0, closed: 2 }, liveAgents: 0 } }));
-	held.overlay?.handleInput("enter");
+	held.overlay?.handleInput("h");
 	held.overlay?.handleInput("\u001b[6~");
 	assert.equal(lastRequest(pi).page, 1);
 	const pageRequest = lastRequest(pi);
@@ -740,14 +958,14 @@ test("live transitions move a handle between live and history without double cou
 	observer.childStarted("LiveHandle1");
 	answer(pi, sessionReply({ requestId: request.requestId }));
 	const liveText = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(liveText, /│ 1 live\s+│/);
-	assert.match(liveText, /● \S+ ep\d+ explorer/);
+	assert.match(liveText, /│ 1 live · 1 agent\b/);
+	assert.match(liveText, /Explorer: untitled task/);
 	// The live handle leaves the history section; settled work returns to it.
 	observer.childStopped("LiveHandle1");
 	observer.finish(false, false);
 	const settledText = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(settledText, /No live agents; retained work is in history\./);
-	assert.doesNotMatch(settledText, /● \S+ ep\d+ explorer/, "no fresh observation, no live row");
+	assert.doesNotMatch(settledText, /Explorer: untitled task.*running/, "no fresh observation, no live row");
 });
 
 test("owner lifecycle resets dismiss an open overlay and reject its retired generation", async () => {
@@ -821,8 +1039,8 @@ test("missing heartbeats freeze elapsed time and label live status unknown", asy
 	answer(pi, sessionReply({ requestId: request.requestId }));
 	clock += OBSERVER_STALE_MS + 1;
 	const staleText = held.overlay?.render(120).join("\n") ?? "";
-	assert.match(staleText, /unknown/);
-	assert.match(staleText, /unknown 4s/, "elapsed time freezes without heartbeats");
+	assert.match(staleText, /observation stale/);
+	assert.match(staleText, /4s/, "elapsed time freezes without heartbeats");
 	// A fresh observation revives the live label.
 	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, elapsedMs: 6_000, tasks: [task({ elapsedMs: 6_000 })] }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /running/);
@@ -870,7 +1088,7 @@ test("narrow terminals wrap session rows and keep the close chip hit-testable", 
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({ handle: "session_11111111-1111-4111-8111-111111111111", latestOutcome: "failed", state: "interrupted", onCurrentBranch: false, legacy: true })] } }) }),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	overlay.handleInput("enter");
+	overlay.handleInput("h");
 	const lines = overlay.render(40, 30);
 	assert.ok(lines.length > 0);
 	assert.ok(lines.every(line => visibleWidth(line) <= 40));
@@ -879,8 +1097,29 @@ test("narrow terminals wrap session rows and keep the close chip hit-testable", 
 	const text = lines.join("\n");
 	assert.match(text, /off-branch/);
 	assert.match(text, /legacy/);
-	assert.match(text, /interrupted/);
 	assert.match(text, /failed/);
+});
+
+test("a settled overlay refits on resize and on history disclosure without a new publication", async () => {
+	const pi = install();
+	const terminal = { columns: 40, rows: 24 };
+	let panel!: AgentsOverlay, layout!: { width?: number | string };
+	const ctx = context({ custom: (factory, options) => {
+		panel = factory({ terminal, requestRender() {} } as TUI, undefined, undefined, () => {}) as AgentsOverlay;
+		layout = options!.overlayOptions!;
+		return new Promise<null>(() => {});
+	} });
+	await pi.handlers.get("session_start")?.({}, ctx);
+	await openWith(pi, ctx);
+	const row = historyRow({ label: "A long retained title ".repeat(4).trim() });
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId, history: { state: "ready", pageSize: 20, page: 0, totalPages: 1, totalRows: 1, rows: [row] } }));
+	assert.equal(layout.width, 38);
+	terminal.columns = 180;
+	assert.equal(layout.width, 80);
+	panel.handleInput("h");
+	assert.ok(Number(layout.width) > 100 && Number(layout.width) < terminal.columns);
+	terminal.columns = 48;
+	assert.equal(layout.width, 46);
 });
 
 test("live observations widen an open panel without filling the terminal", async () => {
@@ -891,12 +1130,11 @@ test("live observations widen an open panel without filling the terminal", async
 	await openWith(pi, ctx);
 	const request = lastRequest(pi);
 	answer(pi, sessionReply({ requestId: request.requestId }));
-	const narrow = held.overlay?.render(80).length ?? 0;
-	pi.events.emit(OBSERVER_EVENT, snapshot({ tasks: [task({ headline: "wider observation headline ".repeat(4).trim() })] }));
+	assert.equal(held.overlay?.desiredWidth(200), 80);
+	pi.events.emit(OBSERVER_EVENT, snapshot({ tasks: [task({ label: "wider observation title ".repeat(4).trim() })] }));
 	const wide = held.overlay?.desiredWidth(200) ?? 0;
 	assert.ok(wide > 80, "content grows the panel");
 	assert.ok(wide <= 200);
-	void narrow;
 });
 
 test("themable rows keep hierarchy colors inside the shared transparent frame", () => {
@@ -982,6 +1220,60 @@ function summaryHost(options: { enableWidget?: boolean; now?: () => number; mode
 	};
 }
 
+test("inline opening returns the detail lifetime and ignores a disappeared key", async () => {
+	let contribution: AboveEditorContribution | undefined;
+	const composer: AboveEditorComposer = { attach() {}, set(_slot, value) { contribution = value; return true; }, focus() { return true; }, invalidate() { return true; }, slots() { return []; } };
+	let finish: (() => void) | undefined;
+	let panel: AgentsOverlay | undefined;
+	const ctx = context({ custom: factory => new Promise<null>(resolve => {
+		finish = () => resolve(null);
+		panel = factory({ terminal: { rows: 24 }, requestRender() {} } as TUI, undefined, undefined, finish) as AgentsOverlay;
+	}) });
+	Object.assign(ctx, { hasUI: true });
+	const pi = install({ composer, enableWidget: true, now: () => 0 });
+	await pi.handlers.get("session_start")?.({}, ctx);
+	pi.events.emit(OBSERVER_EVENT, snapshot());
+	const missing = contribution!.openItem!(agentItemKey("missing", 0));
+	await missing;
+	assert.equal(panel, undefined);
+	const pending = contribution!.openItem!(agentItemKey("scan", 0)) as unknown as Promise<void>;
+	assert.ok(pending instanceof Promise);
+	assert.match(panel!.render(80, 24).join("\n"), /Agent scan ep0/);
+	let resolved = false;
+	void pending.then(() => { resolved = true; });
+	await Promise.resolve();
+	assert.equal(resolved, false);
+	panel!.handleInput("escape");
+	await pending;
+	assert.equal(resolved, true);
+});
+
+test("inline retained detail refreshes its existing history page", async () => {
+	let contribution: AboveEditorContribution | undefined;
+	const composer: AboveEditorComposer = { attach() {}, set(_slot, value) { contribution = value; return true; }, focus() { return true; }, invalidate() { return true; }, slots() { return []; } };
+	let panel: AgentsOverlay | undefined;
+	const ctx = context({ custom: factory => new Promise<null>(resolve => {
+		panel = factory({ terminal: { rows: 24 }, requestRender() {} } as TUI, undefined, undefined, () => resolve(null)) as AgentsOverlay;
+	}) });
+	Object.assign(ctx, { hasUI: true });
+	const pi = install({ composer, enableWidget: true, now: () => 0 });
+	await pi.handlers.get("session_start")?.({}, ctx);
+	void pi.commands.get(AGENTS_UI_COMMAND)!.handler("list", ctx);
+	const row = historyRow({ handle: "PageTwo", episode: 3 });
+	const page0 = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 21, totalPages: 2, rows: [] };
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId, history: page0 }));
+	panel!.handleInput("h");
+	panel!.handleInput("pageDown");
+	answer(pi, sessionReply({ requestId: lastRequest(pi).requestId, history: { ...page0, page: 1, rows: [row] } }));
+	panel!.handleInput("escape");
+	await new Promise(resolve => setImmediate(resolve));
+	const opening = contribution!.openItem!(agentItemKey(row.handle, row.episode)) as unknown as Promise<void>;
+	assert.equal(lastRequest(pi).page, 1);
+	assert.match(panel!.render(80, 24).join("\n"), /Agent PageTwo ep3/);
+	panel!.handleInput("escape");
+	await opening;
+});
+
 test("agents summary is one line and does not copy live rows, history, or costs", async () => {
 	const host = summaryHost({ enableWidget: true });
 	await host.pi.handlers.get("session_start")?.({}, host.ctx);
@@ -1032,7 +1324,7 @@ test("title click toggles inline expansion and never opens the overlay", async (
 		requestId: lastRequest(host.pi).requestId,
 		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 1, queued: 1, running: 1, interrupted: 0, closed: 0 }, liveAgents: 0 },
 	}));
-	const agentLines = () => host.content(80).filter(line => /Agents|explorer |worker /.test(line));
+	const agentLines = () => host.content(80).filter(line => /Agents|Explorer:|Worker:/.test(line));
 	const folded = agentLines();
 	assert.equal(folded.length, 1);
 	assert.match(folded[0] ?? "", /▸ Agents/);
@@ -1044,13 +1336,10 @@ test("title click toggles inline expansion and never opens the overlay", async (
 	assert.equal(tasksClicks, 0, "agents title click does not activate Tasks");
 	const expanded = agentLines();
 	assert.match(expanded[0] ?? "", /▾ Agents/);
-	assert.match(expanded.join("\n"), /explorer scan ep0\s+running/);
-	assert.match(expanded.join("\n"), /explorer wait ep0\s+queued/);
-	assert.match(expanded.join("\n"), /worker\s+11111111 ep1\s+idle/);
-	assert.match(expanded.join("\n"), /openai gpt-4.1 off/);
-	// Usage is the last column and clips first at 80 columns; the widget's 120-column cap shows it.
-	assert.match(host.content(120).join("\n"), /\$0\.500/);
-	assert.doesNotMatch(expanded.join("\n"), /scan the bounded/);
+	assert.match(expanded.join("\n"), /Explorer: Work scan.*running/);
+	assert.match(expanded.join("\n"), /Explorer: Work wait.*queued/);
+	assert.match(expanded.join("\n"), /Worker: Review 11111111.*succeeded/);
+	assert.doesNotMatch(expanded.join("\n"), /ep0|recorded ↑/);
 	assert.ok(expanded.length > 1);
 	clickHeader(host, 2);
 	const collapsed = agentLines();
@@ -1111,9 +1400,9 @@ test("list opens the existing overlay while the summary stays hidden", async () 
 	answer(host.pi, sessionReply({ requestId: request.requestId }));
 	host.pi.events.emit(OBSERVER_EVENT, snapshot());
 	const overlay = host.panel.render(120).join("\n");
-	assert.match(overlay, /scan the bounded facts/);
+	assert.match(overlay, /Explorer: Work scan/);
 	assert.match(overlay, /1 live/);
-	assert.doesNotMatch(host.content().join("\n"), /scan the bounded facts/);
+	assert.doesNotMatch(host.content().join("\n"), /Explorer: Work scan/);
 	await host.closeDetails();
 	assert.equal(host.panel, undefined);
 	assert.equal(host.content().length, 0, "closing details does not show the summary");
@@ -1184,20 +1473,20 @@ test("late-mounted inline view uses correlated session live facts without an obs
 		history: { state: "ready", pageSize: 20, page: 0, totalRows: 0, totalPages: 0, rows: [] },
 	}));
 	await host.pi.commands.get(AGENTS_UI_COMMAND)!.handler("expand", host.ctx);
-	assert.match(host.content(80).join("\n"), /LateAgen ep0\s+running/);
+	assert.match(host.content(80).join("\n"), /Work LateAgent.*running/);
 	assert.equal(host.panel, undefined);
 	clock += OBSERVER_STALE_MS + 1;
 	host.tick();
-	assert.doesNotMatch(host.content(80).join("\n"), /LateAgen.*running/, "query-only live facts expire without a new query or observer push");
+	assert.doesNotMatch(host.content(80).join("\n"), /Work LateAgent.*running/, "query-only live facts expire without a new query or observer push");
 });
 
 test("inline settlement and history show a handle only once and prefer its newest episode", () => {
 	const model = { counts: { running: 0, queued: 0, agents: 1 }, tasks: [settledTask({ id: "SameAgent" })],
 		history: [historyRow({ handle: "SameAgent" })], historyTotal: 1 };
-	let lines = formatAgentsInline(model, 120, 6, { folded: false });
+	let lines = formatAgentsInspection(model, 120, 6, undefined).lines;
 	assert.equal(lines.length, 2, "observer settlement must not duplicate its retained row");
 	model.history = [historyRow({ handle: "SameAgent", episode: 2, latestOutcome: "failed" })];
-	lines = formatAgentsInline(model, 120, 6, { folded: false });
+	lines = formatAgentsInspection(model, 120, 6, undefined).lines;
 	assert.equal(lines.length, 2);
 	assert.match(lines[1]!, /failed/);
 	assert.doesNotMatch(lines[1]!, /succeeded/);
@@ -1242,7 +1531,7 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	await command.handler("expand", host.ctx);
 	assert.equal(host.panel, undefined, "expand does not open the overlay");
 	assert.match(host.content(80)[0] ?? "", /▾ Agents/);
-	assert.match(host.content(80).join("\n"), /explorer scan ep0\s+running/);
+	assert.match(host.content(80).join("\n"), /Explorer: Work scan.*running/);
 	const narrowWidget = host.mounts.at(-1)?.value;
 	const narrow = (narrowWidget as (tui: unknown, theme: unknown) => { render(width: number): string[] })({ terminal: { rows: 8 } }, undefined).render(12)
 		.filter(line => line.trim().length > 0);
@@ -1251,7 +1540,7 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	assert.ok(narrow.every(line => visibleWidth(line) <= 12));
 	const expandedRequests = requestCount(host.pi);
 	host.pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 2, tasks: [task({ id: "next", status: "pending" })] }));
-	assert.match(host.content(80).join("\n"), /explorer next ep0\s+queued/);
+	assert.match(host.content(80).join("\n"), /Explorer: Work next.*queued/);
 	assert.match(host.content(80)[0] ?? "", /▾/, "status updates keep the expanded fold");
 	assert.equal(requestCount(host.pi), expandedRequests, "same-generation updates do not rescan");
 	await command.handler("hide", host.ctx);
@@ -1259,7 +1548,7 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	assert.equal(host.content().length, 0, "hide survives status updates");
 	await command.handler("show", host.ctx);
 	assert.match(host.content(80)[0] ?? "", /▾/, "show restores the previous expansion");
-	assert.match(host.content(80).join("\n"), /hidden/);
+	assert.match(host.content(80).join("\n"), /Work hidden/);
 	await command.handler("collapse", host.ctx);
 	assert.equal(host.content(80).filter(line => line.trim().length > 0).length, 1);
 	assert.match(host.content(80)[0] ?? "", /▸ Agents/);
@@ -1285,19 +1574,20 @@ test("expand and collapse stay inline, independent of visibility, and do not ope
 	assert.equal(host.content(80).filter(line => line.trim().length > 0).length > 1, true);
 });
 
-test("live inline rows shorten generated handles like retained rows and align columns", () => {
+test("inline rows show readable labels instead of generated handles", () => {
 	const live = "3f8a91c2d4e5f60718293a4b5c6d7e8f";
-	const lines = formatAgentsInline({
+	const lines = formatAgentsInspection({
 		counts: { running: 1, queued: 0, agents: 2 },
-		tasks: [task({ id: live, role: "reviewer", status: "running", episode: 2 })],
+		tasks: [task({ id: live, label: "Check observation", role: "reviewer", status: "running", episode: 2 })],
 		history: [historyRow({ handle: "c859cbeeaaaabbbbccccddddeeeeffff", state: "closed", latestOutcome: "failed" })],
-	}, 120, 4, { folded: false });
+	}, 120, 4, undefined).lines;
 	const text = lines.join("\n");
 	assert.doesNotMatch(text, new RegExp(live));
-	assert.match(lines[1] ?? "", /^├─ ◐ reviewer 3f8a91c2 ep2 /);
-	assert.match(lines[2] ?? "", /^└─ ✗ worker   c859cbee ep\d+ /);
-	const stateColumn = (line: string) => line.search(/running|closed/);
-	assert.equal(stateColumn(lines[1] ?? ""), stateColumn(lines[2] ?? ""), "state starts on one column");
+	assert.match(lines[1] ?? "", /Reviewer: Check observation/);
+	assert.match(lines[2] ?? "", /Worker: Review c859cbee/);
+	assert.match(lines[1] ?? "", /running.*4s/);
+	assert.match(lines[2] ?? "", /failed/);
+	assert.doesNotMatch(lines[2] ?? "", /closed|ep\d/);
 });
 
 test("expanded inline rows keep the title first and stay inside width and row bounds", () => {
@@ -1315,15 +1605,15 @@ test("expanded inline rows keep the title first and stay inside width and row bo
 		history,
 		historyTotal: 40,
 	};
-	const lines = formatAgentsInline(model, 80, 4, { folded: false });
+	const lines = formatAgentsInspection(model, 80, 4, undefined).lines;
 	assert.equal(lines.length, 4);
 	assert.match(lines[0] ?? "", /^▾ Agents \(32\/40 done\) 1 running · 7 queued$/);
-	assert.match(lines[1] ?? "", /◐ explorer agent0 ep0\s+running/);
-	assert.match(lines[2] ?? "", /○ explorer agent1 ep0\s+queued/);
+	assert.match(lines[1] ?? "", /Explorer: Work agent0.*running/);
+	assert.match(lines[2] ?? "", /Explorer: Work agent1.*queued/);
 	assert.match(lines[3] ?? "", /more · \/agents-ui list/);
-	assert.match(lines.join("\n"), /openai gpt-4.1 off/);
-	assert.doesNotMatch(lines.join("\n"), /scan the bounded/);
-	const narrow = formatAgentsInline(model, 28, 4, { folded: false });
+	assert.match(lines.join("\n"), /gpt-4.1.*off/);
+	assert.doesNotMatch(lines.join("\n"), /openai|ep0/);
+	const narrow = formatAgentsInspection(model, 28, 4, undefined).lines;
 	assert.equal(narrow.length, 4);
 	assert.match(narrow[0] ?? "", /^▾/);
 	assert.ok(narrow.every(line => visibleWidth(line) <= 28));
@@ -1335,13 +1625,13 @@ test("expanded inline rows keep the title first and stay inside width and row bo
 	const warned = formatAgentsInline({ counts: { running: "unknown", queued: 0, agents: "unknown" } }, 200, 4, { folded: true, theme });
 	assert.match(warned[0] ?? "", /^<warning>▸ ! Agents<\/warning>.*<warning>running unknown<\/warning>.*<warning>agents unknown<\/warning>/);
 	assert.doesNotMatch(warned[0] ?? "", /! !|▸ ▸/);
-	const unconfirmed = formatAgentsInline({
+	const unconfirmed = formatAgentsInspection({
 		counts: { running: 0, queued: 0, agents: 1 },
 		history: [historyRow({ state: "running", latestOutcome: "unknown" })],
-	}, 80, 4, { folded: false });
-	assert.match(unconfirmed.join("\n"), /running\?/);
+	}, 80, 4, undefined).lines;
+	assert.match(unconfirmed.join("\n"), /unconfirmed/);
 	assert.equal(agentsInlineBudget(24), 6);
 	assert.equal(agentsInlineBudget(8), 2);
 	assert.equal(agentsInlineBudget(3), 1);
-	assert.equal(formatAgentsInline(model, 0, 4, { folded: false }).length, 0);
+	assert.equal(formatAgentsInspection(model, 0, 4, undefined).lines.length, 0);
 });

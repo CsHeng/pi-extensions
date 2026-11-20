@@ -20,6 +20,29 @@ function assistant(stopReason = "stop", text = "done", errorMessage?: string) {
 	};
 }
 
+test("responding follows actual text deltas without exposing text and resets across lifecycle", () => {
+	const parser = new JsonlProtocolParser();
+	const push = (value: unknown) => parser.push(line(value));
+	push({ type: "message_start", message: { role: "assistant" } });
+	push({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "private" } });
+	assert.notEqual(parser.snapshot().responding, true);
+	push({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "private prose" } });
+	assert.equal(parser.snapshot().responding, true);
+	assert.doesNotMatch(JSON.stringify(parser.snapshot()), /private/);
+	push({ type: "tool_execution_start", toolCallId: "a", toolName: "read" });
+	assert.notEqual(parser.snapshot().responding, true);
+	push({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "during tool" } });
+	assert.notEqual(parser.snapshot().responding, true);
+	push({ type: "tool_execution_end", toolCallId: "a", toolName: "read" });
+	push({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "again" } });
+	assert.equal(parser.snapshot().responding, true);
+	push({ type: "turn_start" });
+	assert.notEqual(parser.snapshot().responding, true);
+	push({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "again" } });
+	push({ type: "agent_settled" });
+	assert.notEqual(parser.snapshot().responding, true);
+});
+
 test("failed response proposals are not active executions; actual starts still fence final completion", () => {
 	for (const started of [false, true]) {
 		const parser = new JsonlProtocolParser();

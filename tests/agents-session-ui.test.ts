@@ -107,10 +107,9 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 	await until(() => mounted.reply?.summary?.agents === 37 && mounted.reply.live.length === 10);
 	assert.equal(mounted.reply!.summary!.acceptedEpisodes, 49);
 	const live = created.sessions.map(row => row.handle);
-	const all = [...seeded, ...live];
-	const scan = async (expected: string[], liveHandles: string[]) => {
+	const scan = async (expected: string[], liveLabels: string[]) => {
 		const seen = new Set<string>();
-		mounted.panel.handleInput("enter");
+		mounted.panel.handleInput("h");
 		for (let page = 0; page < mounted.reply!.history.totalPages; page++) {
 			if (mounted.reply!.history.page !== page) {
 				mounted.panel.handleInput(page === 0 ? "pageUp" : "pageDown");
@@ -120,21 +119,23 @@ test("37 retained handles and 49 episodes survive real core-to-overlay paging an
 				const frame = mounted.panel.render(80, 48);
 				assert.ok(frame.length <= 48);
 				const text = frame.join("\n");
-				for (const handle of liveHandles) assert.ok(text.includes(handle.slice(0, 8)), "every live identity remains pinned");
-				for (const handle of expected) if (text.includes(handle.slice(0, 8))) seen.add(handle);
+				for (const label of liveLabels) assert.match(text, new RegExp(`Explorer: ${label}\\b`), "every live title remains pinned");
+				for (const label of expected) if (new RegExp(`Explorer: ${label}\\b`).test(text)) seen.add(label);
 				mounted.panel.handleInput("down");
 			}
 		}
 		assert.deepEqual([...seen].sort(), [...expected].sort());
-		mounted.panel.handleInput("enter");
+		mounted.panel.handleInput("h");
 	};
-	await scan(seeded, live);
+	const seedLabels = seeded.map((_, index) => `seed${index}`);
+	const liveLabels = live.map((_, index) => `live${index}`);
+	await scan(seedLabels, liveLabels);
 	release();
 	await until(() => !mounted.service.busy && mounted.reply?.history.totalRows === 37 && mounted.reply.live.length === 0);
 	assert.equal(mounted.reply!.usage!.assistantTurns, 49);
 	assert.equal(mounted.reply!.usage!.usage.input, 49);
 	assert.equal(mounted.reply!.usage!.status, "complete");
-	await scan(all, []);
+	await scan([...seedLabels, ...liveLabels], []);
 	await mounted.event("session_shutdown");
 	const before = await bytes(join(base, "agent"));
 	const calls = launches;

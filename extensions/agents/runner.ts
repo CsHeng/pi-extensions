@@ -169,6 +169,7 @@ function cloneActivity(activity: Readonly<ChildActivity>): ChildActivity {
 
 function closedActivity(activity: Readonly<ChildActivity>, elapsedMs: number): ChildActivity {
 	const cloned = cloneActivity(activity);
+	delete cloned.responding; // An interrupted text stream can close without a message_end.
 	return {
 		...cloned,
 		phase: "closed",

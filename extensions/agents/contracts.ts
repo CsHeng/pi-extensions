@@ -115,6 +115,7 @@ export interface ChildToolCall {
 }
 
 export interface ChildActivity {
+	responding?: boolean;
 	phase: ChildActivityPhase;
 	assistantTurns: number;
 	/** Usage lane of this episode's requests so far; absent on activity recorded before it existed. */

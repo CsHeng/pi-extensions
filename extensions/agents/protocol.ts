@@ -52,6 +52,7 @@ export class JsonlProtocolParser {
 	private discardingLine = false;
 	private discardedAggregate = false;
 	private assistantOpen = false;
+	private responding = false;
 	private compactionOpen = false;
 	private protocolInvalid = false;
 	private finalOutput = "";
@@ -127,6 +128,7 @@ export class JsonlProtocolParser {
 		const projected = this.projectedCalls();
 		return Object.freeze({
 			phase: this.phase,
+			...(this.responding ? { responding: true } : {}),
 			assistantTurns: this.messageCount,
 			usage: usageLaneOf(this.lane),
 			activeTools: Object.freeze(activeTools) as unknown as string[],
@@ -168,7 +170,11 @@ export class JsonlProtocolParser {
 	}
 
 	private projectEvent(eventType: string, event: Record<string, unknown>): void {
+		if (["turn_start", "turn_end", "message_start", "message_end", "tool_execution_start", "tool_execution_end", "agent_start", "agent_end", "agent_settled", "compaction_start"].includes(eventType)) this.responding = false;
 		if (eventType === "message_update") {
+			const update = event.assistantMessageEvent;
+			if (isRecord(update) && update.type === "text_delta" && typeof update.delta === "string" && update.delta.length > 0 && this.activeToolCalls.size === 0) this.responding = true;
+			else if (isRecord(update) && update.type !== "text_delta") this.responding = false;
 			// Native print JSON carries a delta, not a full message envelope.
 			if (!isRecord(event.assistantMessageEvent) || typeof event.assistantMessageEvent.type !== "string" || !event.assistantMessageEvent.type) this.protocolInvalid = true;
 			this.assistantOpen = true;

@@ -1,7 +1,7 @@
 import type { CurrentOwner, ManagedState } from "./session-contracts.ts";
 import { COLLABORATION_CONTRACT_VERSION } from "./contracts.ts";
 import type { ManagedSessionStore, SessionInventoryResult } from "./managed-sessions.ts";
-import { parseObserverTask, parseObserverRoute, type ObserverTask } from "./observer-events.ts";
+import { MAX_HEADLINE_BYTES, parseObserverTask, parseObserverRoute, type ObserverTask } from "./observer-events.ts";
 import {
 	projectRecordedUsage,
 	type ObservedUsage,
@@ -23,10 +23,12 @@ export const SESSION_VIEW_LIMITS = Object.freeze({ pageSize: 20, maxLiveRows: 16
 
 export interface SessionViewLimits { pageSize: number; maxLiveRows: number; maxRequestPage: number; maxPayloadBytes: number }
 export interface SessionViewRequest { version: typeof SESSION_VIEW_VERSION; requestId: string; page: number }
-export type SessionViewOutcome = "succeeded" | "failed" | "aborted" | "unknown";
+export type SessionViewOutcome = "succeeded" | "failed" | "blocked" | "aborted" | "unknown";
 
 export interface SessionViewHistoryRow {
 	handle: string;
+	label?: string;
+	elapsedMs?: number;
 	route?: ObserverTask["route"];
 	role: "worker" | "reviewer" | "explorer";
 	/** Durable managed state; running/queued without a fresh live row is unconfirmed, never animated. */
@@ -78,7 +80,7 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const TERMINAL_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 const BOUNDED_REASON = /^[a-z0-9_]{1,48}$/;
 const MANAGED_STATES: readonly ManagedState[] = ["idle", "queued", "running", "interrupted", "closed"];
-const OUTCOMES: readonly SessionViewOutcome[] = ["succeeded", "failed", "aborted", "unknown"];
+const OUTCOMES: readonly SessionViewOutcome[] = ["succeeded", "failed", "blocked", "aborted", "unknown"];
 const ROOT_STATUSES = ["not-applied", "applying", "applied", "partial", "conflict", "unknown"] as const;
 const ROOT_RELEASES = ["pending", "remaining", "released"] as const;
 const COVERAGES: readonly RecordedCoverage[] = ["complete", "incomplete", "unavailable"];
@@ -87,7 +89,7 @@ const METRIC_KEYS: readonly RecordedUsageMetric[] = ["input", "output", "cacheRe
 const REQUEST_KEYS = ["version", "requestId", "page"];
 const SUMMARY_KEYS = ["agents", "acceptedEpisodes", "states", "liveAgents"];
 const ROW_KEYS = ["handle", "role", "state", "episode", "latestOutcome", "acceptedEpisodes", "onCurrentBranch", "legacy", "reportComplete", "retained", "recordedUsage"];
-const ROW_OPTIONAL = ["route", "roots", "release"];
+const ROW_OPTIONAL = ["route", "roots", "release", "label", "elapsedMs"];
 const USAGE_KEYS = ["status", "usage", "lane", "assistantTurns", "metrics", "turnsCoverage", "episodes", "conflicts", "reason"];
 const LANE_KEYS = ["promptTokens", "promptCacheRead", "rebillCount", "rebillTokens", "rebillCost"] as const;
 
@@ -170,6 +172,8 @@ export function parseSessionViewRequest(value: unknown): SessionViewRequest | un
 
 function parseHistoryRow(value: unknown): SessionViewHistoryRow | undefined {
 	if (!isRecord(value) || !keysExact(value, ROW_KEYS, ROW_OPTIONAL)) return undefined;
+	if (value.label !== undefined && !boundedLabel(value.label, MAX_HEADLINE_BYTES)) return undefined;
+	if (value.elapsedMs !== undefined && (typeof value.elapsedMs !== "number" || !Number.isFinite(value.elapsedMs) || value.elapsedMs < 0)) return undefined;
 	const route = value.route === undefined ? undefined : parseObserverRoute(value.route);
 	if (value.route !== undefined && route === undefined) return undefined;
 	if (!opaqueId(value.handle) || !["worker", "reviewer", "explorer"].includes(value.role as string)) return undefined;
@@ -178,7 +182,7 @@ function parseHistoryRow(value: unknown): SessionViewHistoryRow | undefined {
 	if (typeof value.onCurrentBranch !== "boolean" || typeof value.legacy !== "boolean" || typeof value.reportComplete !== "boolean" || typeof value.retained !== "boolean") return undefined;
 	const recordedUsage = parseRecordedUsageProjection(value.recordedUsage);
 	if (recordedUsage === undefined) return undefined;
-	const row: SessionViewHistoryRow = { handle: value.handle, ...(route === undefined ? {} : { route }), role: value.role as SessionViewHistoryRow["role"], state: value.state as ManagedState, episode: value.episode,
+	const row: SessionViewHistoryRow = { handle: value.handle, ...(value.label === undefined ? {} : { label: value.label as string }), ...(value.elapsedMs === undefined ? {} : { elapsedMs: value.elapsedMs as number }), ...(route === undefined ? {} : { route }), role: value.role as SessionViewHistoryRow["role"], state: value.state as ManagedState, episode: value.episode,
 		latestOutcome: value.latestOutcome as SessionViewOutcome, acceptedEpisodes: value.acceptedEpisodes as number | null,
 		onCurrentBranch: value.onCurrentBranch, legacy: value.legacy, reportComplete: value.reportComplete, retained: value.retained, recordedUsage };
 	if (value.roots !== undefined) {
@@ -328,7 +332,7 @@ export class SessionViewBuilder {
 					usage = cache.usage;
 					const liveHandles = new Set(live.map((row) => row.id));
 					nonLive = cache.inventory.entries.filter((entry) => !liveHandles.has(entry.handle)).map((entry) => ({
-						handle: entry.handle, route: entry.route, role: entry.role, state: entry.state, episode: entry.episode, latestOutcome: entry.latestOutcome,
+						handle: entry.handle, ...(entry.label === undefined ? {} : { label: entry.label }), ...(entry.elapsedMs === undefined ? {} : { elapsedMs: entry.elapsedMs }), route: entry.route, role: entry.role, state: entry.state, episode: entry.episode, latestOutcome: entry.latestOutcome,
 						acceptedEpisodes: entry.acceptedEpisodes, onCurrentBranch: entry.ownerAnchor === null || scope.owner!.branch.includes(entry.ownerAnchor) || scope.owner!.anchor === entry.ownerAnchor, legacy: entry.legacy,
 						reportComplete: entry.reportComplete, retained: entry.retained, recordedUsage: cache.rows.get(entry.handle)!,
 						...(entry.roots ? { roots: entry.roots } : {}), ...(entry.release ? { release: entry.release } : {}),

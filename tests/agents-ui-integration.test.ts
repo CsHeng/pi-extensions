@@ -87,6 +87,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 		elapsedMs: 1000,
 		tasks: [{
 			id: "scan",
+			label: "Bounded facts",
 			ordinal: 1,
 			role: "explorer",
 			episode: 0,
@@ -99,7 +100,7 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 			replayed: false,
 			headline: "scan the bounded facts",
 			activeTools: ["read"],
-			calls: [],
+			calls: [{ id: "call_private", tool: "read", summary: "README.md", status: "running", parentId: null, startedMs: 0, updatedMs: 0, outputMs: null, deadlineMs: null, tail: "", truncated: false }],
 			callsTruncated: false,
 		}],
 	};
@@ -121,22 +122,33 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 		inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 		summary: { agents: 2, acceptedEpisodes: 2, states: { idle: 0, queued: 0, running: 1, interrupted: 0, closed: 1 }, liveAgents: 1 },
 		live: snapshot.tasks,
-		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [{ handle: "session_22222222-2222-4222-8222-222222222222", role: "reviewer", state: "closed", episode: 1, latestOutcome: "succeeded", acceptedEpisodes: 1, onCurrentBranch: true, legacy: false, reportComplete: true, retained: true, recordedUsage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, lane: { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 } }] },
+		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [{ handle: "session_22222222-2222-4222-8222-222222222222", label: "Review findings", elapsedMs: 5000, route: { provider: "history-provider", model: "history-model", thinking: "high" }, role: "reviewer", state: "closed", episode: 1, latestOutcome: "succeeded", acceptedEpisodes: 1, onCurrentBranch: true, legacy: false, reportComplete: true, retained: true, recordedUsage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, lane: { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 } }] },
 		usage: { status: "complete", usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 13, cost: 0.2 }, lane: { promptTokens: 0, promptCacheRead: 0, rebillCount: 0, rebillTokens: 0, rebillCost: 0 }, assistantTurns: 1, metrics: { input: "complete", output: "complete", cacheRead: "complete", cacheWrite: "complete", totalTokens: "complete", cost: "complete" }, turnsCoverage: "complete", episodes: { recorded: 1, missing: 0, orphaned: 0, unprovable: false }, conflicts: 0 },
 	};
 	events.emit(SESSION_VIEW_EVENT, reply);
 	const text = overlay?.render(80).join("\n") ?? "";
 	const wide = overlay?.render(160).join("\n") ?? "";
-	assert.match(wide, /running\s+1s\s+.*openai gpt-4\.1 thinking:medium/, "the route shares the primary row with status and elapsed");
 	assert.match(text, /Agents · session parent…/, "the title identifies the session, never a batch or run");
-	assert.match(text, /1 live\n|1 live\s+│/);
-	assert.match(text, /2 agents · 2 episodes · 0 idle · 0 int · 1 closed/);
-	assert.match(text, /recorded ↑10 ↓3 \$0\.200/);
-	assert.match(wide, /● scan ep0 explorer running\s+1s  ↑2\.0k ↓500 R18k CH90\.0% \$0\.040 RB1 1\.5k \$0\.002  openai/, "live usage precedes the route; no turns column");
-	assert.match(text, /scan the bounded facts · read/);
-	overlay?.handleInput("enter");
+	assert.match(text, /1 live/);
+	assert.match(wide, /Explorer.*Bounded facts/);
+	assert.match(wide, /gpt-4\.1.*medium/);
+	assert.match(wide, /read · README\.md/);
+	assert.doesNotMatch(wide, /ep0|recorded ↑|RB1|\$0\.040/);
+	overlay?.handleInput("h");
 	const history = overlay?.render(80).join("\n") ?? "";
-	assert.match(history, /■ 22222222 reviewer ep1 closed succeeded/);
+	assert.match(history, /Reviewer.*Review findings/);
+	assert.match(history, /succeeded/);
+	assert.match(history, /history-model.*high/);
+	assert.match(history, /5s/);
+	assert.doesNotMatch(history, /ep1|closed|recorded ↑|history-provider/);
+	overlay?.handleInput("down");
+	overlay?.handleInput("enter");
+	const detail = overlay?.render(160).join("\n") ?? "";
+	assert.match(detail, /Agent session_22222222-2222-4222-8222-222222222222 ep1/);
+	assert.match(detail, /history-provider.*history-model.*high/);
+	assert.match(detail, /State: closed.*outcome: succeeded/);
+	assert.match(detail, /Usage:/);
+	overlay?.handleInput("escape");
 	events.emit(OBSERVER_EVENT, { ...snapshot, revision: 1, phase: "settled", activeChildren: 0, settledTasks: 1 });
 	assert.deepEqual(working, []);
 	assert.deepEqual(footers, []);

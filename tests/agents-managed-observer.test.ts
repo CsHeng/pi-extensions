@@ -63,8 +63,17 @@ test("observer publishes actual starts, route, usage and frozen terminal values 
 	const revision = seen.at(-1)!.revision;
 	t.mock.timers.tick(OBSERVER_HEARTBEAT_MS);
 	assert.ok(seen.at(-1)!.revision > revision);
-	observer.childStopped("task"); observer.update([result("succeeded")]);
-	now = 90; observer.update([result("succeeded")]);
+	observer.childStopped("task");
+	assert.equal(seen.at(-1)?.tasks[0]?.executionPhase, "convergence-critical");
+	assert.equal(seen.at(-1)?.tasks[0]?.elapsedMs, 40);
+	assert.deepEqual(seen.at(-1)?.tasks[0]?.calls, []);
+	now = 90; observer.update([withCall]);
+	assert.equal(seen.at(-1)?.tasks[0]?.executionPhase, "convergence-critical");
+	assert.equal(seen.at(-1)?.tasks[0]?.elapsedMs, 40);
+	assert.deepEqual(seen.at(-1)?.tasks[0]?.activeTools, []);
+	assert.deepEqual(seen.at(-1)?.tasks[0]?.calls, []);
+	observer.update([result("succeeded")]);
+	assert.equal(seen.at(-1)?.tasks[0]?.executionPhase, "settled");
 	assert.equal(seen.at(-1)?.tasks[0]?.elapsedMs, 40);
 	assert.deepEqual(seen.at(-1)?.tasks[0]?.activeTools, []);
 	observer.finish(false, false);
@@ -75,6 +84,22 @@ test("observer publishes actual starts, route, usage and frozen terminal values 
 	const count = seen.length; t.mock.timers.tick(20_000); observer.childStarted("task");
 	assert.equal(seen.length, count);
 	assert.doesNotMatch(JSON.stringify(seen), /not-published|never-published/);
+});
+
+test("label and responding are projected only while the child is live", () => {
+	const seen: ObserverSnapshot[] = [];
+	const observer = new ManagedObserver("run", owner, "generation", [{ id: "task", label: "read\nlabel", role: "explorer", episode: 1, replayed: false }], () => 0, value => seen.push(value));
+	observer.begin(); observer.childStarted("task");
+	const live = result("running", ["read"]);
+	live.activity!.responding = true;
+	observer.update([live]);
+	assert.equal(seen.at(-1)?.tasks[0]?.label, "read label");
+	assert.equal(seen.at(-1)?.tasks[0]?.responding, true);
+	observer.childStopped("task");
+	assert.notEqual(seen.at(-1)?.tasks[0]?.responding, true);
+	observer.update([live]);
+	assert.notEqual(seen.at(-1)?.tasks[0]?.responding, true);
+	observer.finish(false, false);
 });
 
 test("cached rows do not launch and unknown clocks stay null; abort closes remaining work", () => {

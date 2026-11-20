@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Terminal } from "@xterm/headless";
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -25,7 +26,14 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 		env: { PATH: process.env.PATH, HOME: base, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_TELEMETRY: "0", TERM: "xterm-256color", COLORTERM: "truecolor" },
 	});
 	let output = "";
+	const terminal = new Terminal({ cols: 160, rows: 40, allowProposedApi: true, scrollback: 0 });
+	const frame = async () => {
+		await new Promise<void>(resolve => terminal.write("", resolve));
+		const buffer = terminal.buffer.active;
+		return Array.from({ length: terminal.rows }, (_, row) => buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+	};
 	const capture = (data: Buffer) => {
+		terminal.write(data);
 		output += data.toString();
 		if (output.length > 1024 * 1024) { child.kill("SIGTERM"); return; }
 		if (data.toString().includes("\u001b[6n")) child.stdin.write("\u001b[1;1R");
@@ -38,6 +46,7 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 			await Promise.race([exited.catch(() => {}), delay(500)]);
 			if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
 		}
+		terminal.dispose();
 		await rm(base, { recursive: true, force: true });
 	});
 	const waitFor = async (predicate: () => Promise<boolean> | boolean, label: string) => {
@@ -50,10 +59,21 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	await waitFor(async () => { try { return (await readFile(join(agent, "observer-ready"), "utf8")) === "ready"; } catch { return false; } }, "fixture tool did not start");
 	await delay(300);
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F, the registered shortcut.
-	await waitFor(() => output.includes("Agents") && output.includes("1 live"), "real floating observer not visible");
-	await waitFor(() => output.includes("0 live") && output.includes("recorded ↑8 ↓8"), "observer did not update to settled work");
-	child.stdin.write("\r"); // Enter expands the folded settled group; routes are tertiary detail.
-	await waitFor(() => output.includes("OBSERVER_MODEL") && output.includes("thinking:high"), "folded settled route not revealed by enter");
+	await waitFor(async () => {
+		const lines = await frame();
+		return lines.some(line => line.includes("1 live")) && lines.some(line => line.includes("Review 000000") && !line.includes("ui000000"));
+	}, "real floating observer did not show the readable live title in its physical frame");
+	await waitFor(async () => {
+		const lines = await frame();
+		return lines.some(line => line.includes("0 live")) && lines.some(line => line.includes("▸ 1 retained agent"));
+	}, "settlement did not preserve the collapsed disclosure in the physical frame");
+	child.stdin.write("h"); // H expands retained history; Enter inspects the selected episode.
+	await waitFor(async () => (await frame()).some(line => line.includes("Review 000000") && line.includes("succeeded") && line.includes("OBSERVER_MODEL") && !line.includes("ui000000")), "retained activity row not revealed by H in the physical frame");
+	child.stdin.write("\r");
+	await waitFor(async () => {
+		const text = (await frame()).join("\n");
+		return text.includes("Agent ui000000 ep1") && text.includes("fixture-provider") && text.includes("Usage:");
+	}, "retained detail omitted identity, route or usage");
 	assert.ok(output.includes("1 live"));
 	assert.equal(output.includes("CC_HIDDEN_LIVE_MARKER"), false, "CC must really replace/hide the partial tool card in this oracle");
 	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F toggles the observer closed.

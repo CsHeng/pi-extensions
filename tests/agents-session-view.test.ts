@@ -103,7 +103,14 @@ test("session-view requests and replies validate strictly and reject foreign sha
 	assert.equal(legacyReads, 0);
 	assert.equal(parseSessionViewRequest({ version: 1, requestId: "old", page: 0 }), undefined);
 	assert.equal(reply.history.rows.length, 1);
+	assert.equal(reply.history.rows[0]?.label, "at0");
+	assert.equal(reply.history.rows[0]?.elapsedMs, undefined);
+	const oldReply = structuredClone(reply);
+	delete oldReply.history.rows[0]!.label;
+	assert.equal(parseSessionViewReply(oldReply).ok, true);
 	for (const [mutate, label] of [
+		[(value: SessionViewReply) => { value.history.rows[0]!.label = "bad\nlabel"; }, "unsafe label"],
+		[(value: SessionViewReply) => { value.history.rows[0]!.elapsedMs = -1; }, "negative elapsed"],
 		[(value: SessionViewReply) => { (value as unknown as Record<string, unknown>).extra = 1; }, "extra key"],
 		[(value: SessionViewReply) => { value.summary = { agents: 1, acceptedEpisodes: null, states: { idle: 0, queued: 0, running: 0, interrupted: 0, closed: 0 }, liveAgents: 2 }; }, "live count mismatch"],
 		[(value: SessionViewReply) => { value.history.totalPages = 5; }, "navigation mismatch"],
@@ -123,6 +130,38 @@ test("session-view requests and replies validate strictly and reject foreign sha
 	const usage = (fabricated as unknown as { usage: { status: string; assistantTurns: number | null; usage: { input: number } } }).usage!;
 	usage.status = "unavailable"; usage.assistantTurns = null; usage.usage.input = 5;
 	assert.equal(parseSessionViewReply(fabricated).ok, false, "unavailable projection never carries a known total");
+});
+
+test("retained elapsed time excludes placeholders and preserves genuine zero", async (t) => {
+	const { base, repo } = await rootFixture(t);
+	const store = new ManagedSessionStore(base);
+	const record = (await allocateFixture(store, repo, "duration")).records[0]!;
+	const result: TaskResult = { id: record.handle, role: "explorer", status: "failed", executionStatus: "not-started", output: "", stderr: "", usage: emptyUsage(), durationMs: 0, changedPaths: [], convergence: "not-applicable" };
+	for (const [executionStatus, durationMs, expected] of [["not-started", 0, undefined], [undefined, 0, undefined], ["succeeded", 0, 0], ["succeeded", 42, 42]] as const) {
+		await store.withSession(record.handle, ownerOf(repo), async current => { current.result = { ...result, durationMs }; if (executionStatus === undefined) delete current.result.executionStatus; else current.result.executionStatus = executionStatus; await store.save(current); });
+		const reply = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-duration", page: 0 }, scope(ownerOf(repo)));
+		assert.equal(reply.history.rows[0]?.elapsedMs, expected);
+		assert.equal(parseSessionViewReply(reply).ok, true);
+	}
+	await store.withSession(record.handle, ownerOf(repo), async current => {
+		current.result = { ...result, status: "failed", executionStatus: "failed", durationMs: 3800,
+			route: { provider: "fixture", model: "episode-model", thinking: "high", source: "package-default", candidateIndex: 0,
+				executionProfileApplied: false, thinkingProfileApplied: false, profileFallbacks: [] },
+			telemetry: { childStarted: true, childMs: 1250, workspaceMs: 2000, queueMs: 0, convergenceMs: 0 } };
+		await store.save(current);
+	});
+	const timed = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-duration", page: 0 }, scope(ownerOf(repo)));
+	assert.equal(timed.history.rows[0]?.elapsedMs, 1250, "keeps the live clock's child-runtime scope");
+	assert.deepEqual(timed.history.rows[0]?.route, { provider: "fixture", model: "episode-model", thinking: "high" });
+	await store.withSession(record.handle, ownerOf(repo), async current => {
+		current.result = { ...result, status: "blocked", durationMs: 38, telemetry: { childStarted: false, childMs: 0, workspaceMs: 38, queueMs: 0, convergenceMs: 0 } };
+		delete current.result.executionStatus;
+		await store.save(current);
+	});
+	const blocked = await new SessionViewBuilder({ store }).build({ version: 4, requestId: "ui-duration", page: 0 }, scope(ownerOf(repo)));
+	assert.equal(blocked.history.rows[0]?.latestOutcome, "blocked");
+	assert.equal(blocked.history.rows[0]?.elapsedMs, undefined);
+	assert.equal(parseSessionViewReply(blocked).ok, true);
 });
 
 test("live pages reject settled or duplicate identities and retain safe route detail", async (t) => {

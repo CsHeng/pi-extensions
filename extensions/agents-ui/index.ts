@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mintProductId } from "../agents/identity.ts";
-import { Key, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
+import { Key, type OverlayOptions } from "@earendil-works/pi-tui";
 import {
 	OBSERVER_EVENT,
 	OBSERVER_VERSION,
@@ -24,6 +24,10 @@ import {
 	AGENTS_UI_PANEL_KEY,
 	AGENTS_UI_STATUS_KEY,
 	formatAgentsInline,
+	formatAgentsInspection,
+	agentInspectionItems,
+	isLiveTask,
+	observationAt,
 	agentsInlineBudget,
 	agentsSummaryHasState,
 	type AgentsInlineModel,
@@ -111,7 +115,7 @@ function isSettled(snapshot: ObserverSnapshot): boolean {
 }
 
 function isStaleCache(cache: CachedObservation, at: number): boolean {
-	return !isSettled(cache.snapshot) && at - cache.receivedAt > OBSERVER_STALE_MS;
+	return !isSettled(cache.snapshot) && at - cache.receivedAt >= OBSERVER_STALE_MS;
 }
 
 export function createAgentsUiExtension(
@@ -135,8 +139,6 @@ export function createAgentsUiExtension(
 		let viewObservedAt = 0;
 		let overlay: AgentsOverlay | undefined;
 		let overlayOpen = false;
-		let overlayLayout: OverlayOptions | undefined;
-		let overlayTui: TUI | undefined;
 		let intervalHandle: unknown;
 		let staleHandle: unknown;
 		let dismissOverlay: (() => void) | undefined;
@@ -163,11 +165,16 @@ export function createAgentsUiExtension(
 			let receivedAt = current?.receivedAt ?? latestTerminal?.receivedAt ?? 0;
 			const reply = sessionView.reply;
 			if (reply && (!snapshot || viewObservedAt > receivedAt)) {
-				const tasks = reply.live;
+				// The query confirms visible identities. Its live-only slice cannot roll back a measured same-episode settlement.
+				const finished = snapshot?.generation === reply.generation ? snapshot.tasks.filter(t => !isLiveTask(t) && (
+					reply.live.some(live => live.id === t.id && live.episode === t.episode)
+					|| reply.history.rows.some(row => row.handle === t.id && row.episode === t.episode))) : [];
+				const live = reply.live.filter(t => !finished.some(done => done.id === t.id && done.episode === t.episode));
+				const tasks = [...live, ...finished];
 				snapshot = { version: OBSERVER_VERSION, parentSessionId: reply.ownerSessionId, anchor: reply.anchor, generation: reply.generation,
-					runId: null, revision: reply.revision, phase: tasks.length ? "running" : "settled", tasks,
+					runId: null, revision: reply.revision, phase: live.length ? "running" : "settled", tasks,
 					requestedTasks: tasks.length, admittedTasks: tasks.length, launchedChildren: tasks.filter(t => t.elapsedMs !== null).length,
-					activeChildren: tasks.filter(t => t.status === "running").length, settledTasks: 0,
+					activeChildren: live.filter(t => t.status === "running").length, settledTasks: finished.length,
 					aggregateAssistantTurns: tasks.reduce((sum, t) => sum + t.assistantTurns, 0), elapsedMs: null };
 				receivedAt = viewObservedAt;
 			}
@@ -223,37 +230,39 @@ export function createAgentsUiExtension(
 			const counts = summaryCounts();
 			if (!ctx?.isProjectTrusted()) return { counts };
 			const model = displayed();
-			const fresh = model.snapshot && (isSettled(model.snapshot) || now() - model.receivedAt < OBSERVER_STALE_MS);
 			const reply = sessionView.reply;
 			const historyReady = sessionView.kind !== "unavailable" && sessionView.kind !== "idle"
 				&& reply?.inventory.state === "ready" && reply.history.state === "ready" && reply.summary != null;
 			return {
 				counts,
-				...(fresh && model.snapshot ? { tasks: model.snapshot.tasks } : {}),
+				...observationAt(model.snapshot, model.receivedAt, now()),
 				...(historyReady && reply ? { history: reply.history.rows, historyTotal: reply.history.totalRows } : {}),
 			};
 		};
 
 		const publishSummary = (): void => {
 			const counts = summaryCounts();
-			if (!summaryWanted() || !ctx || summaryFailed || !(enableWidget || agentsSummaryHasState(counts))) {
+			if (!summaryWanted() || !ctx || summaryFailed || !(enableWidget || agentsSummaryHasState(counts) || displayed().snapshot?.tasks.length)) {
 				releaseSummary();
 				return;
 			}
 			composer.attach(ctx);
 			const ok = composer.set("agents", {
-				render(width, terminalRows, theme) {
+				render(width, terminalRows, theme, selected) {
 					try {
-						const bounded = Math.min(120, Math.max(0, Math.floor(Number(width) || 0)));
-						return formatAgentsInline(inlineModel(), bounded, agentsInlineBudget(terminalRows), {
-							folded: summaryFolded,
-							theme,
-						});
+						const bounded = Math.max(0, Math.floor(Number(width) || 0));
+						return summaryFolded
+							? formatAgentsInline(inlineModel(), bounded, agentsInlineBudget(terminalRows), { folded: true, theme })
+							: formatAgentsInspection(inlineModel(), bounded, agentsInlineBudget(terminalRows), theme, selected);
 					} catch {
 						summaryFailed = true;
 						queueMicrotask(() => { if (summaryFailed) releaseSummary(); });
 						return [];
 					}
+				},
+				openItem(key) {
+					if (!agentInspectionItems(inlineModel()).some(item => item.key === key)) return Promise.resolve();
+					return openOverlay(key);
 				},
 				activate() {
 					summaryFolded = !summaryFolded;
@@ -353,17 +362,9 @@ export function createAgentsUiExtension(
 			if (latestTerminal && !ownedBy(latestTerminal.snapshot, owner)) latestTerminal = undefined;
 		};
 
-		// The host resolves this object before every render, so growing content widens the panel
-		// instead of wrapping, and short content keeps it near the previous default width.
-		const syncOverlayWidth = (): void => {
-			if (!overlay || !overlayLayout || !overlayTui) return;
-			overlayLayout.width = overlay.desiredWidth(overlayTui.terminal?.columns ?? FALLBACK_TERMINAL_COLUMNS);
-		};
-
 		const publishOverlay = (): void => {
 			if (overlay) {
 				overlay.update(displayed());
-				syncOverlayWidth();
 				startRepaint();
 			}
 			publishSummary();
@@ -386,27 +387,24 @@ export function createAgentsUiExtension(
 			if (isSettled(incoming)) latestTerminal = current;
 		};
 
-		const openOverlay = async (): Promise<void> => {
+		const openOverlay = async (detailKey?: string): Promise<void> => {
 			if (!tui() || !ctx || overlay) return;
 			revalidate();
 			const version = ++overlayVersion;
-			const model = displayed();
 			const layout: OverlayOptions = {
 				anchor: "center",
-				width: FALLBACK_TERMINAL_COLUMNS,
+				// Pi reads the options object's width on each layout, including idle resize and H disclosure.
+				get width() { return overlay?.desiredWidth() ?? FALLBACK_TERMINAL_COLUMNS; },
 				margin: { left: OVERLAY_HORIZONTAL_MARGIN, right: OVERLAY_HORIZONTAL_MARGIN },
 			};
 			await Promise.resolve(ctx.ui.custom<null>(
 				(tuiInstance, theme, _kb, done) => {
 					dismissOverlay = () => done(null);
 					overlayOpen = true;
-					overlay = new AgentsOverlay(model, tuiInstance, dismissOverlay, { now, theme, onPage: requestSessionView });
-					overlayTui = tuiInstance;
-					overlayLayout = layout;
-					syncOverlayWidth();
+					overlay = new AgentsOverlay(displayed, tuiInstance, dismissOverlay, { now, theme, onPage: requestSessionView, ...(detailKey === undefined ? {} : { detailKey }) });
 					startRepaint();
-					// Opening (or reopening) the overlay queries retained history again.
-					requestSessionView(0);
+					// Inline detail keeps the page that supplied its selected record.
+					requestSessionView(detailKey === undefined ? 0 : (sessionView.reply?.history.page ?? 0));
 					return overlay;
 				},
 				{
@@ -418,8 +416,6 @@ export function createAgentsUiExtension(
 				if (version !== overlayVersion) return;
 				overlay = undefined;
 				overlayOpen = false;
-				overlayLayout = undefined;
-				overlayTui = undefined;
 				dismissOverlay = undefined;
 				stopRepaint();
 				forgetPendingView();
@@ -539,6 +535,7 @@ export function createAgentsUiExtension(
 					return;
 				}
 				if (!interactive()) return;
+				if (arg === "focus") { reveal(false); composer.focus("agents"); return; }
 				if (arg === "hide") { hideSummary(); ctx.ui.notify("Agents UI off.", "info"); return; }
 				if (arg === "show") { if (!summaryVisible) showSummary(true); ctx.ui.notify("Agents UI on.", "info"); return; }
 				if (arg === "expand") { reveal(false); return; }

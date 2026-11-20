@@ -1,6 +1,6 @@
 /** TUI-only read-only Jobs view. It does not start, cancel, renew, or wake. */
 import { randomUUID } from "node:crypto";
-import { openListOverlay } from "../shared/list-overlay.ts";
+import { openJobsInspection, type JobsInspectionHandle } from "./inspection.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sharedAboveEditor, type AboveEditorComposer } from "../shared/above-editor.ts";
 import {
@@ -15,10 +15,10 @@ import {
 	type JobsViewRecord,
 	type JobsViewReply,
 } from "../async-bash/jobs-view.ts";
-import { jobRows, jobsRenderBudget, type JobsUiTheme, type JobsUiView } from "./render.ts";
+import { jobFrame, jobItems, jobRows, jobsRenderBudget, type JobsUiTheme, type JobsUiView } from "./render.ts";
 
 export const JOBS_UI_COMMAND = "jobs-ui";
-export const JOBS_LIST_PAGE_SIZE = 20;
+export { JOBS_LIST_PAGE_SIZE } from "./inspection.ts";
 export const JOBS_VIEW_TIMEOUT_MS = 4_000;
 const TICK_MS = 1_000;
 
@@ -34,7 +34,7 @@ type Display =
 	| { kind: "idle" }
 	| { kind: "waiting" }
 	| { kind: "unavailable"; reason: string }
-	| { kind: "ready"; records: JobsViewRecord[] };
+	| { kind: "ready"; anchor: string | null; records: JobsViewRecord[] };
 
 interface PendingQuery { requestId: string; sessionId: string; anchor: string | null }
 
@@ -71,35 +71,59 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 		let folded = true;
 		let failed = false;
 		let pinned: string | undefined;
+		let ownerSession: string | undefined;
 		let display: Display = { kind: "idle" };
 		let pending: PendingQuery | undefined;
 		let timer: unknown;
 		let tick: unknown;
 		let stops: Array<() => void> = [];
+		const inspections = new Set<JobsInspectionHandle>();
+		const closeInspections = () => { for (const inspection of inspections) inspection.close(); inspections.clear(); };
+		const inspect = (context: ExtensionContext, initial?: string): Promise<void> => {
+			let mounted: JobsInspectionHandle | undefined;
+			return openJobsInspection(context, inspectionItems(), initial, handle => {
+				if (mounted) inspections.delete(mounted);
+				mounted = handle;
+				if (handle) inspections.add(handle);
+				armTick();
+			});
+		};
 		const tui = () => ctx?.mode === "tui" && ctx.hasUI === true;
 		const clearTimer = () => { if (timer !== undefined) { cancelTimer(timer); timer = undefined; } };
 		const clearTick = () => { if (tick !== undefined) { cancelTimer(tick); tick = undefined; } };
+		// New messages advance the leaf within a branch. A validated ancestor snapshot still belongs to it.
+		const currentScope = () => {
+			if (!ctx?.isProjectTrusted() || ctx.sessionManager.getSessionId() !== ownerSession) return false;
+			const anchor = display.kind === "ready" ? display.anchor : null;
+			return anchor === null || anchor === leafId(ctx) || ctx.sessionManager.getBranch().some(entry => entry.id === anchor);
+		};
 		const currentView = (): JobsUiView => {
+			if (!currentScope()) return { unavailable: "stale" };
 			if (display.kind === "ready") return { records: display.records };
 			if (display.kind === "unavailable" || display.kind === "waiting") return { unavailable: display.kind === "waiting" ? "unreachable" : display.reason };
 			return {};
 		};
-		const needsTick = () => visible && tui() && display.kind === "ready" && display.records.some((record) => record.status === "running");
+		const needsTick = () => (visible || inspections.size > 0) && tui() && display.kind === "ready" && display.records.some((record) => record.status === "running");
 		const armTick = () => {
 			if (!needsTick()) { clearTick(); return; }
 			if (tick !== undefined) return;
 			tick = schedule(() => { tick = undefined; publish(); }, TICK_MS);
 		};
 		const publish = () => {
+			if (!currentScope()) closeInspections();
+			for (const inspection of inspections) inspection.refresh();
 			if (!tui() || !ctx || failed) { clearTick(); composer.set("jobs", undefined); return; }
 			composer.attach(ctx);
 			const view = currentView();
-			if (!visible || !view.records?.length) { clearTick(); composer.set("jobs", undefined); return; }
+			if (!visible || !view.records?.length) { composer.set("jobs", undefined); armTick(); return; }
 			const ok = composer.set("jobs", {
-				render(width, terminalRows, theme) {
-					try { return jobRows(currentView(), Math.min(width, 120), folded ? 1 : jobsRenderBudget(terminalRows), now(), themeOf(theme), { folded }); }
-					catch { failed = true; return []; }
+				render(width, terminalRows, theme, selected) {
+					try {
+						const view = currentView();
+						return folded ? jobRows(view, width, 1, now(), themeOf(theme), { folded }) : jobFrame(view, width, jobsRenderBudget(terminalRows), now(), themeOf(theme), selected);
+					} catch { failed = true; return []; }
 				},
+				openItem(key) { if (ctx && jobItems(currentView(), now()).some(item => item.key === key)) return inspect(ctx, key); },
 				activate() { folded = !folded; publish(); },
 			});
 			if (!ok) { failed = true; clearTick(); composer.set("jobs", undefined); return; }
@@ -109,7 +133,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			if (!tui() || !ctx) return;
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionId) { display = { kind: "unavailable", reason: "unreachable" }; publish(); return; }
-			if (!ctx.isProjectTrusted()) { display = { kind: "unavailable", reason: "untrusted" }; pending = undefined; clearTimer(); publish(); return; }
+			if (!ctx.isProjectTrusted()) { closeInspections(); display = { kind: "unavailable", reason: "untrusted" }; pending = undefined; clearTimer(); publish(); return; }
 			const requestId = randomUUID();
 			pending = { requestId, sessionId, anchor: leafId(ctx) };
 			if (display.kind !== "ready") display = { kind: "waiting" };
@@ -126,6 +150,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			publish();
 		};
 		const rejectPending = (reason: string) => {
+			closeInspections();
 			pending = undefined;
 			clearTimer();
 			display = { kind: "unavailable", reason };
@@ -150,7 +175,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 				clearTimer();
 				pinned = reply.generation;
 				display = reply.availability === "ready"
-					? { kind: "ready", records: reply.records ?? [] }
+					? { kind: "ready", anchor: reply.anchor, records: reply.records ?? [] }
 					: { kind: "unavailable", reason: reply.reason ?? "unavailable" };
 				publish();
 			} catch { /* Display-only consumer. */ }
@@ -170,6 +195,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 				if (!reset) return;
 				const sessionId = ctx.sessionManager.getSessionId();
 				if (reset.ownerSessionId && reset.ownerSessionId !== sessionId) return;
+				closeInspections();
 				pinned = reset.generation;
 				pending = undefined;
 				clearTimer();
@@ -187,11 +213,13 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			];
 		};
 		const bind = (next: ExtensionContext) => {
+			closeInspections();
 			ctx = next;
 			failed = false;
 			listen();
 			if (!tui()) { clearTick(); composer.set("jobs", undefined); return; }
 			pinned = undefined;
+			ownerSession = next.sessionManager.getSessionId();
 			pending = undefined;
 			clearTimer();
 			display = { kind: "idle" };
@@ -199,6 +227,7 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			query();
 		};
 		const shutdown = () => {
+			closeInspections();
 			clearTimer();
 			clearTick();
 			pending = undefined;
@@ -208,18 +237,23 @@ export function createJobsUi(options: JobsUiOptions = {}): (pi: ExtensionAPI) =>
 			stops = [];
 			composer.set("jobs", undefined);
 		};
+		const inspectionItems = () => {
+			const session = ownerSession, generation = pinned;
+			return () => {
+				const view = session === ownerSession && (generation === undefined || generation === pinned) ? currentView() : { unavailable: "stale" };
+				return { items: jobItems(view, now()), ...(view.unavailable !== undefined ? { unavailable: view.unavailable } : !view.records ? { unavailable: "unreachable" } : {}) };
+			};
+		};
 		const openList = async () => {
 			if (!tui() || !ctx) return;
-			await openListOverlay(ctx, "Jobs", (width, theme) => {
-				const view = currentView();
-				return jobRows(view, width, (view.records?.length ?? 0) + 1, now(), themeOf(theme));
-			}, { pageSize: JOBS_LIST_PAGE_SIZE });
+			await inspect(ctx);
 		};
 		const handle = async (args: string, commandCtx: ExtensionContext) => {
 			ctx = commandCtx;
 			if (!tui()) return;
 			const arg = args.trim();
 			if (arg === "list") { await openList(); return; }
+			if (arg === "focus") { visible = true; folded = false; failed = false; publish(); composer.focus("jobs"); return; }
 			if (arg === "show") visible = true;
 			else if (arg === "hide") visible = false;
 			else if (arg === "expand") { visible = true; folded = false; }

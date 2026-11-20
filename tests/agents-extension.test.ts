@@ -740,6 +740,12 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	const snapshots: import("../extensions/agents/observer-events.ts").ObserverSnapshot[] = [];
 	const { state } = await registered(t, { onObserver: value => snapshots.push(value), runChild: async options => {
 		options.onChildStarted?.(); options.onChildSettled?.();
+		const closed = snapshots.at(-1)!;
+		if (closed.tasks.length === 1) {
+			assert.equal(closed.activeChildren, 0);
+			assert.equal(closed.tasks[0]?.executionPhase, "convergence-critical");
+			assert.notEqual(closed.tasks[0]?.elapsedMs, null);
+		}
 		return { ...successful(options.task), route: options.route };
 	} });
 	const ctx = { ...context(), mode: "tui" };

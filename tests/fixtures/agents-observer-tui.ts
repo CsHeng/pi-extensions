@@ -32,7 +32,7 @@ export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void
 			generation: latest.generation, revision: latest.revision, inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 			summary: { agents: records.length, acceptedEpisodes: records.reduce((sum, record) => sum + record.episode, 0), liveAgents: live.length, states: { idle: 0, queued: 0, running: live.length, interrupted: 0, closed: history.length } },
 			live, usage: projectRecordedUsage(records.map(input)), history: { state: "ready", pageSize: 20, page, totalRows: history.length, totalPages: pages,
-				rows: history.slice(page * 20, page * 20 + 20).map(record => ({ handle: record.handle, role: "reviewer", state: "closed", episode: record.episode, acceptedEpisodes: record.episode,
+				rows: history.slice(page * 20, page * 20 + 20).map(record => ({ handle: record.handle, label: `Review ${record.handle.slice(2)}`, role: "reviewer", state: "closed", episode: record.episode, acceptedEpisodes: record.episode,
 					latestOutcome: "succeeded", onCurrentBranch: true, legacy: false, reportComplete: true, retained: false, recordedUsage: projectRecordedUsage([input(record)]), route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } })) } };
 		pi.events.emit(SESSION_VIEW_EVENT, reply);
 	});
@@ -56,7 +56,7 @@ export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void
 			const start = performance.now();
 			const active = records.slice(0, historyFixture ? 10 : 1);
 			const observer = new ManagedObserver("FixtureRun", { repo: ctx.cwd, parentSessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch().map(entry => entry.id) }, "FixtureGeneration",
-				active.map(record => ({ id: record.handle, role: "reviewer", episode: record.episode, replayed: false, objective: "review fixture", route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } as EffectiveRoute })),
+				active.map(record => ({ id: record.handle, label: `Review ${record.handle.slice(2)}`, role: "reviewer", episode: record.episode, replayed: false, objective: "review fixture", route: { provider: "fixture-provider", model: "OBSERVER_MODEL", thinking: "high" } as EffectiveRoute })),
 				() => performance.now() - start, snapshot => { latest = snapshot; pi.events.emit(OBSERVER_EVENT, snapshot); });
 			observer.begin();
 			for (const record of active) observer.childStarted(record.handle);

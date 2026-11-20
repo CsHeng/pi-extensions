@@ -338,7 +338,7 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	assert.equal(handles.includes("corrupt0001"), false);
 	assert.equal(handles.includes(legacy.handle), false);
 	const byHandle = new Map(inventory.entries.map((entry) => [entry.handle, entry]));
-	assert.deepEqual(byHandle.get(closed.handle), { handle: closed.handle, role: "worker", route: null, state: "closed", episode: 0, latestOutcome: "unknown", acceptedEpisodes: 0, ownerAnchor: owner.anchor, onCurrentBranch: true, legacy: false, reportComplete: false, retained: true, usageEvidence: { episodes: [] } });
+	assert.deepEqual(byHandle.get(closed.handle), { handle: closed.handle, label: closed.task.id, role: "worker", route: null, state: "closed", episode: 0, latestOutcome: "unknown", acceptedEpisodes: 0, ownerAnchor: owner.anchor, onCurrentBranch: true, legacy: false, reportComplete: false, retained: true, usageEvidence: { episodes: [] } });
 	await assert.rejects(store.load(legacy.handle, owner), /unsupported_contract/);
 	const runnerView = byHandle.get(runner.handle)!;
 	assert.equal(runnerView.state, "interrupted"); assert.equal(runnerView.latestOutcome, "failed"); assert.equal(runnerView.acceptedEpisodes, 2); assert.deepEqual(runnerView.usageEvidence, { episodes: [1, 2] }); assert.equal(runnerView.reportComplete, true);

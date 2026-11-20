@@ -53,6 +53,8 @@ export type ObserverParse<T> = { ok: true; value: T } | { ok: false };
 
 export interface ObserverTask {
 	id: string;
+	label?: string;
+	responding?: boolean;
 	ordinal: number;
 	role: RoleName;
 	episode: number | null;
@@ -318,7 +320,9 @@ function parseUsageLane(value: unknown): UsageLane | undefined {
 }
 
 function parseTask(value: unknown): ObserverTask | undefined {
-	if (!isRecord(value) || !keysExact(value, TASK_KEYS)) return undefined;
+	if (!isRecord(value) || !keysExact(value, [...TASK_KEYS, ...(["label", "responding"] as const).filter(key => key in value)])) return undefined;
+	if (value.label !== undefined && parseHeadline(value.label) === undefined) return undefined;
+	if (value.responding !== undefined && typeof value.responding !== "boolean") return undefined;
 	if (!productId(value.id) || !nonNegativeInt(value.ordinal) || value.ordinal < 1 || value.ordinal > HARD_LIMITS.maxTasks) {
 		return undefined;
 	}
@@ -339,6 +343,8 @@ function parseTask(value: unknown): ObserverTask | undefined {
 	if (headline === undefined || activeTools === undefined || calls === undefined || typeof value.callsTruncated !== "boolean") return undefined;
 	return {
 		id: value.id,
+		...(value.label === undefined ? {} : { label: value.label as string }),
+		...(value.responding === undefined ? {} : { responding: value.responding as boolean }),
 		ordinal: value.ordinal,
 		role: value.role as RoleName,
 		episode: value.episode as number | null,

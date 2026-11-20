@@ -14,7 +14,7 @@ import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
 import { boundNativeObservation, unavailableObservation, type NativeObservation, type RecordedUsageEpisodes } from "./observability.ts";
 import type { WorkerInputState } from "./worker-inputs.ts";
-import { parseObserverRoute, type ObserverTask } from "./observer-events.ts";
+import { observerHeadline, parseObserverRoute, type ObserverTask } from "./observer-events.ts";
 import type { CapturedProjectSkill } from "./guidance-resources.ts";
 import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, type CandidateRef, type CurrentOwner, type ManagedState, type OwnedRootOutcome, type SessionOwner, type SessionView, type SessionActionResult, type EpisodeExecution } from "./session-contracts.ts";
 
@@ -108,13 +108,15 @@ class OutOfScopeRecord extends Error {}
 
 export interface SessionInventoryEntry {
 	handle: string;
+	label?: string;
+	elapsedMs?: number;
 	route: ObserverTask["route"];
 	role: "worker" | "reviewer" | "explorer";
 	/** Durable managed state; persisted running/queued is not proof that a child is currently alive. */
 	state: ManagedState;
 	episode: number;
 	/** Latest committed episode outcome; unknown without terminal evidence. */
-	latestOutcome: "succeeded" | "failed" | "aborted" | "unknown";
+	latestOutcome: "succeeded" | "failed" | "blocked" | "aborted" | "unknown";
 	/** Distinct accepted episode identities; null when persistence cannot prove the count. */
 	acceptedEpisodes: number | null;
 	/** Retained ownership anchor for cheap per-query branch projection without rescanning storage. */
@@ -449,11 +451,18 @@ export class ManagedSessionStore {
 			if (episode >= 1 && episode <= MANAGED_LIMITS.maxEpisodes) episodes.push(episode);
 		}
 		episodes.sort((left, right) => left - right);
-		const status = record.result?.status;
+		const result = record.result;
+		const status = result?.status;
+		// Prefer the child's actual runtime, the scope of the live clock. A not-started or unknown zero is a placeholder.
+		const ran = result?.executionStatus === undefined ? result != null && result.durationMs > 0
+			: result.executionStatus === "succeeded" || result.executionStatus === "failed" || result.executionStatus === "aborted";
+		const duration = result?.telemetry ? (result.telemetry.childStarted ? result.telemetry.childMs : undefined) : ran ? result?.durationMs : undefined;
+		const route = result?.route ?? record.route;
 		const roots = (record.candidate || record.release) ? ownedRootProjection(record) : [];
-		return { handle: record.handle, role: record.task.role, state: record.state, episode: record.episode,
-			route: record.route ? parseObserverRoute({ provider: record.route.provider, model: record.route.model, thinking: record.route.thinking }) ?? null : null,
-			latestOutcome: status === "succeeded" || status === "failed" || status === "aborted" ? status : "unknown",
+		return { handle: record.handle, label: observerHeadline(record.task.id), role: record.task.role, state: record.state, episode: record.episode,
+			...(typeof duration === "number" && Number.isFinite(duration) && duration >= 0 ? { elapsedMs: duration } : {}),
+			route: route ? parseObserverRoute({ provider: route.provider, model: route.model, thinking: route.thinking }) ?? null : null,
+			latestOutcome: status === "succeeded" || status === "failed" || status === "aborted" || status === "blocked" ? status : "unknown",
 			acceptedEpisodes: acceptedEpisodes === record.episode ? acceptedEpisodes : null,
 			ownerAnchor: record.owner.anchor,
 			onCurrentBranch: record.owner.anchor === null || owner.branch.includes(record.owner.anchor) || owner.anchor === record.owner.anchor,
