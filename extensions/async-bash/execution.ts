@@ -42,11 +42,8 @@ export interface BashExecutionView {
 	/** Executable basename retained for telemetry; preview is human UI only. */
 	label: string;
 	commandPreview: string;
-	/** True only after start returned a still-running execution. */
 	background: boolean;
-	/** Actual close time. Null while running. */
 	terminalAt: number | null;
-	/** Last stdout/stderr time. Null when the process has produced no output. */
 	lastOutputAt: number | null;
 }
 
@@ -81,9 +78,7 @@ export interface StartBashInput {
 	sessionId: string | null;
 	branchAnchor: string | null;
 	toolCallId: string | null;
-	/** Checkpoint delay. */
 	deadlineMs: number;
-	/** Opt-in hard lifetime. */
 	timeoutMs?: number;
 	foregroundWindowMs: number;
 	signal?: AbortSignal;
@@ -109,7 +104,6 @@ interface ExecutionRecord {
 	deadlineTimer: CancellableDelay | undefined;
 	timeoutTimer: CancellableDelay | undefined;
 	waiters: Array<() => void>;
-	/** Observation windows that end when the checkpoint is reached. */
 	checkpointWaiters: Array<() => void>;
 	settled: boolean;
 	terminalCause: Exclude<BashStatus, "running" | "exited"> | undefined;
@@ -143,7 +137,6 @@ const ABORTED_BEFORE_START = "Job start aborted before execution";
 const OUTSIDE_SCOPE = "Bash job is outside the current session branch";
 const LABEL_LIMIT = 24;
 
-/** Conservative executable basename, or Bash. Arguments, assignments, and shell syntax are not labels. */
 export function commandLabel(command: string): string {
 	const trimmed = command.trim();
 	if (!trimmed || /[\n\r;&|<>`$(){}='"]/.test(trimmed) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(trimmed)) return "Bash";
@@ -154,7 +147,6 @@ export function commandLabel(command: string): string {
 	return base.length > LABEL_LIMIT ? base.slice(0, LABEL_LIMIT) : base;
 }
 
-/** Single-line preview of the command (including inline scripts) for the session-local human view. */
 export function commandPreview(command: string): string {
 	const line = stripTerminalSequences(command).replace(/\\\r?\n/gu, "")
 		.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
@@ -297,7 +289,6 @@ export function createBashExecutionOwner(options: {
 		});
 	};
 
-	/** Only an explicit timeout ends the process at a fixed time. */
 	const armTimeout = (record: ExecutionRecord): void => {
 		record.timeoutTimer?.cancel();
 		if (record.timeoutAt === null) { record.timeoutTimer = undefined; return; }

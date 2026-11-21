@@ -1,4 +1,3 @@
-/** Owner-scoped read-only Jobs snapshot. Queries never start, cancel, renew, wake, or enter model context. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OUTPUT_MAX_BYTES } from "./policy.ts";
 import type { BashExecutionView, BashScope, BashStatus } from "./execution.ts";
@@ -162,7 +161,6 @@ export function parseJobsViewReply(value: unknown): { ok: true; value: JobsViewR
 	return { ok: true, value: { version: JOBS_VIEW_VERSION, requestId: value.requestId, ownerSessionId: value.ownerSessionId, anchor: value.anchor, generation: value.generation, availability: "ready", records } };
 }
 
-/** Successful background exits shorter than this stay out of Jobs. Zero shows every background job. */
 export const JOBS_MIN_VISIBLE_SUCCESS_MS = 0;
 
 /** Foreground work stays out. A positive threshold can hide short successful background exits. */
@@ -177,7 +175,6 @@ function statusRank(status: BashStatus): number {
 	return status === "running" ? 0 : 1;
 }
 
-/** Running jobs first, then every stopped state, each by start time. */
 export function compareJobsViewRecords(left: JobsViewRecord, right: JobsViewRecord): number {
 	return statusRank(left.status) - statusRank(right.status) || left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId);
 }

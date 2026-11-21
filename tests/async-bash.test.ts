@@ -178,7 +178,6 @@ test("a checkpoint keeps the process running once, renew re-arms it, and only ti
 	});
 	const base = { command: "sleep 30", cwd: dir, env: process.env, sessionId: null, branchAnchor: null, toolCallId: null, foregroundWindowMs: 0 } as const;
 	const watched = await owner.start({ ...base, deadlineMs: 100 });
-	// A wait returns at the checkpoint so the model can judge it; the process is not killed.
 	const atCheckpoint = await owner.wait(watched.executionId, unscoped, { waitMs: 5_000 });
 	assert.equal(atCheckpoint.status, "running");
 	assert.equal(atCheckpoint.overdue, true);
@@ -458,7 +457,6 @@ test("nine background terminals remain listed and are handed to Pi once", async 
 	assert.equal(exited.size, ids.length);
 	assert.equal(owner.list(scope).filter((view) => view.status !== "running").length, ids.length);
 	for (const id of ids) assert.equal(owner.inspect(id, scope)?.status, "exited");
-	// Busy while the terminals arrive; the settled idle boundary hands one combined native notice to Pi.
 	assert.equal(sent.length, 0);
 	idle = true;
 	const settled = async () => { for (const handler of handlers.get("agent_settled") ?? []) await handler({ aborted: false }, ctx); };
@@ -467,7 +465,6 @@ test("nine background terminals remain listed and are handed to Pi once", async 
 	const notice = sent[0]!;
 	assert.equal(notice.customType, NOTICE_TYPE);
 	for (const id of ids) assert.equal((notice.content ?? "").split(id).length - 1, 1, id);
-	// Request preparation of that immutable message consumes and acknowledges every result.
 	idle = false;
 	for (const handler of handlers.get("context_with_system") ?? []) await handler({ messages: [{ role: "custom", ...notice }] }, ctx);
 	idle = true;
@@ -485,17 +482,20 @@ test("terminal retention is bounded and a dropped wake stays inspectable", () =>
 	});
 	delivery.noteReady(event("exec-a"));
 	delivery.noteReturning(event("exec-b"));
-	assert.equal(delivery.hasDeliverable(scope), true);
+	assert.deepEqual(delivery.pending(scope).map(fact => fact.executionId), ["exec-a"]);
 	delivery.notePull("exec-b");
 	assert.equal(delivery.inspectable("exec-b")?.consumed, true);
-	assert.equal(delivery.preview(scope)?.includes("exec-a"), true);
 	delivery.fence();
-	assert.equal(delivery.hasDeliverable(scope), false);
+	assert.deepEqual(delivery.pending(scope), []);
 	assert.equal(delivery.inspectable("exec-a")?.consumed, false);
+	assert.equal(delivery.inspectable("exec-a")?.outputTail, "");
 	delivery.noteReady(event("exec-c"));
-	assert.equal(delivery.project(scope)?.includes("exec-c"), true);
-	assert.equal(delivery.hasDeliverable(scope), false);
+	const pending = delivery.pending(scope).map(fact => fact.executionId);
+	assert.deepEqual(pending, ["exec-c"]);
+	delivery.acknowledge(pending);
+	assert.deepEqual(delivery.pending(scope), []);
 	assert.equal(delivery.inspectable("exec-c")?.outputTail, "");
+	delivery.noteReady({ ...event("needed"), outputTail: "still needed" });
 	for (let index = 0; index < 12; index++) {
 		const id = `old-${index}`;
 		delivery.noteReturning({ ...event(id), outputTail: "x".repeat(50 * 1024) });
@@ -503,10 +503,10 @@ test("terminal retention is bounded and a dropped wake stays inspectable", () =>
 	}
 	assert.equal(delivery.inspectable("old-0"), undefined);
 	assert.equal(delivery.inspectable("old-11")?.outputTail, "");
-	delivery.noteReady({ ...event("needed"), outputTail: "still needed" });
-	assert.ok(delivery.preview(scope)?.includes("still needed"), "unconsumed required facts must survive obsolete trimming");
+	assert.deepEqual(delivery.pending(scope).map(fact => fact.outputTail), ["still needed"], "unconsumed required facts must survive obsolete trimming");
 	delivery.fence();
-	assert.equal(delivery.inspectable("needed")?.outputTail, "");
+	assert.deepEqual(delivery.pending(scope), []);
+	assert.ok(!delivery.inspectable("needed")?.outputTail, "fenced notice metadata keeps no terminal output");
 });
 
 test("terminal records stay inspectable after later terminals finish", async (t) => {
@@ -1041,11 +1041,9 @@ test("foreground windows and waits yield to steering and ready notices, not to f
 	assert.equal(steered.result.details.status, "running");
 	assert.ok(steered.ms < 2_000);
 	assert.match(steered.result.content[0]!.text, /user message is waiting/);
-	// Steering already queued in this turn releases a window opened afterwards at once.
 	const queued = await timed({ action: "wait", executionId: String(steered.result.details.executionId), waitSeconds: 30 });
 	assert.ok(queued.ms < 2_000);
 	await h.fire("turn_start");
-	// Another execution's terminal notice is ready: the window returns so turn_end can deliver it.
 	const other = await h.tool().execute("call-other", { command: "true", background: true }, undefined, undefined, h.ctx);
 	await h.owner.wait(String(other.details.executionId), scope, { waitMs: 5_000 });
 	const released = await timed({ command: "sleep 30", foregroundSeconds: 30 });

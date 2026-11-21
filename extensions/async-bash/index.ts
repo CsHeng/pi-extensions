@@ -383,7 +383,6 @@ const CHECKPOINT_GUIDANCE = (executionId: string) => `This execution passed its 
 
 const CHECKPOINT_TAIL_CHARS = 2_000;
 
-/** One bounded attention notice: elapsed, output age, the choices, and recent output. */
 function checkpointSummary(view: BashExecutionView, now = Date.now()): string {
 	const elapsed = formatPanelDuration(Math.max(0, now - view.startedAt));
 	const quiet = view.lastOutputAt === null ? "no output yet" : `last output ${formatPanelDuration(Math.max(0, now - view.lastOutputAt))} ago`;

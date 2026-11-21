@@ -1,6 +1,5 @@
 import { DEFAULT_OBSERVATION_WAIT_SECONDS } from "../shared/observation-budget.ts";
 
-/** Modes that can return from a bash call without ending the process. */
 export const ASYNC_BASH_MODES = ["tui", "rpc"] as const;
 
 export const BASH_EXECUTION_EVENT = "async-bash.execution";
@@ -22,6 +21,6 @@ export type BashClaim = "claim" | "leave-native" | "other-owner";
  */
 export function bashClaim(mode: string, bashSource: string | undefined): BashClaim {
 	if (mode !== "tui" && mode !== "rpc") return "leave-native";
-	if (bashSource === undefined || bashSource !== "builtin") return bashSource === undefined ? "leave-native" : "other-owner";
-	return "claim";
+	if (bashSource === undefined) return "leave-native";
+	return bashSource === "builtin" ? "claim" : "other-owner";
 }

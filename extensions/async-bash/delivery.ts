@@ -1,13 +1,7 @@
 import { inBashScope, type BashExecutionEvent, type BashScope } from "./execution.ts";
 
 const TERMINAL = new Set(["exited", "cancelled", "timeout", "interrupted"]);
-/** Consumed wake copies only. This is not the Jobs list. */
 const MAX_OBSOLETE_BASH_FACTS = 8;
-
-function textOf(facts: BashFact[]): string | undefined {
-	if (facts.length === 0) return undefined;
-	return facts.map((fact) => `Bash job ${fact.executionId} finished with status ${fact.status}, exit_code ${fact.exitCode === null ? "unknown" : String(fact.exitCode)}. This is the same execution, not a second tool result.\n${fact.outputTail}`.trim()).join("\n");
-}
 
 export interface BashFact {
 	executionId: string;
@@ -70,20 +64,6 @@ export function createBashDelivery() {
 		fence(): void {
 			for (const fact of facts.values()) if (!fact.consumed) fact.suppressed = true;
 			trimObsolete();
-		},
-		hasDeliverable(scope: BashScope): boolean {
-			return [...facts.values()].some((fact) => deliverable(fact, scope));
-		},
-		preview(scope: BashScope): string | undefined {
-			return textOf([...facts.values()].filter((fact) => deliverable(fact, scope)));
-		},
-		project(scope: BashScope): string | undefined {
-			const ready = [...facts.values()].filter((fact) => deliverable(fact, scope));
-			const text = textOf(ready);
-			if (!text) return undefined;
-			for (const fact of ready) fact.consumed = true;
-			trimObsolete();
-			return text;
 		},
 		/** In-scope terminals not yet projected or observed. Survives owner output eviction. */
 		pending(scope: BashScope): BashFact[] {
