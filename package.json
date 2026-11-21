@@ -19,7 +19,7 @@
     "agents-ui"
   ],
   "scripts": {
-    "check": "bun run typecheck && bun run test:fast && bun run test:isolated && bun run test:host-optional && bash -n scripts/*.sh",
+    "check": "bun run typecheck && bun run test:fast && bun run test:isolated && bun run test:host-optional && for f in scripts/*.sh; do bash -n \"$f\" || exit 1; done",
     "e2e:installed-offline": "bash scripts/run-installed-tasklist-probe.sh",
     "e2e:host-offline": "bun scripts/run-test-lane.ts host-required",
     "e2e:ui-offline": "bun scripts/run-test-lane.ts ui-required",

@@ -40,9 +40,10 @@ All selected Skills are read before submission. If any selected skill can no lon
 bun run typecheck
 bun test ./tests/multi-skill-mentions.test.ts
 bun test ./tests/multi-skill-mentions-installed.test.ts
-bash -n scripts/run-temporary-multi-skill-mentions-probe.sh scripts/run-installed-multi-skill-mentions-probe.sh
+bash -n scripts/run-temporary-multi-skill-mentions-probe.sh
+bash -n scripts/run-installed-multi-skill-mentions-probe.sh
 ```
 
-The unit suite covers normalization, deduplication, literal/escaped text, the native single-selection path, and read failure against the host's own `parseSkillBlock`. The `.e2e.ts` suite is deliberate, not part of the source test glob: it runs the real installed Pi with a disposable home, agent directory, and skills, then asserts a deterministic synthetic-provider request capture for grouped and native single-slash prompts and actual fullscreen TUI evidence that both selected names and a clean user tail are rendered. It makes no live model call.
+The unit suite covers normalization, deduplication, literal/escaped text, the native single-selection path, and read failure against the host's own `parseSkillBlock`. The installed-host test runs the real installed Pi with a disposable home, agent directory, and skills, then asserts a deterministic synthetic-provider request capture for grouped and native single-slash prompts and actual fullscreen TUI evidence that both selected names and a clean user tail are rendered. It makes no live model call.
 
 The print-mode probes are a separate paid lane because they require provider inference: `PI_OFFLINE=1` disables update traffic but not model calls. Run them only with explicit provider-call authority. Probe output contains only counts and fixed status fields.
