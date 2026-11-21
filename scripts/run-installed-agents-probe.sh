@@ -27,9 +27,9 @@ export default function probe(pi: ExtensionAPI): void {
 		handler: async () => {
 			const tools = pi.getAllTools();
 			const commands = pi.getCommands();
-			const managedTool = tools.find((tool) => tool.name === "agent");
-			const managed = managedTool !== undefined;
-			const managedSource = isPackagePath(managedTool?.sourceInfo?.path);
+			const peerTools = ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"].map(name => tools.find(tool => tool.name === name));
+			const managed = peerTools.every(tool => tool !== undefined);
+			const managedSource = peerTools.every(tool => isPackagePath(tool?.sourceInfo?.path));
 			const ui = commands.some((command) => command.name === "agents-ui" && isPackagePath(command.sourceInfo?.path));
 			pi.appendEntry("agents-probe", { managed, managedSource, ui });
 		},

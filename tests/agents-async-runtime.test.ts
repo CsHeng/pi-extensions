@@ -15,7 +15,7 @@ import { prepareChildGuidance } from "../extensions/agents/guidance-resources.ts
 import { ContinuationService, registerContinuationTool, type ContinuationDependencies } from "../extensions/agents/continuation.ts";
 import { AGENT_INACTIVITY_CHECKPOINT_MS, type ScheduleCheckpoint } from "../extensions/agents/inactivity.ts";
 import { NOTICE_DELIVERY_CHANGED, NOTICE_DELIVERY_REQUEST, EXECUTION_FACTS_EVENT, NOTICE_ACK, checkpointNoticeId, type ExecutionRef, type ProducerFacts } from "../extensions/shared/execution-facts.ts";
-import { formatManagedResult } from "../extensions/agents/render.ts";
+import { formatManagedContent, formatManagedResult } from "../extensions/agents/render.ts";
 import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 import { validateGraphStructure } from "../extensions/agents/graph.ts";
 import type { SessionActionResult } from "../extensions/agents/session-contracts.ts";
@@ -58,7 +58,9 @@ test("foreground and join budget expiry release observation, preserve one execut
  const inspect = await f.service.execute({ action: "inspect", runId: first.runId }, f.ctx); assert.equal(inspect.status, "accepted"); assert.equal(inspect.wait, undefined);
  slow.release(); const completed = await f.service.execute({ action: "join", runId: first.runId, waitSeconds: 1800 }, f.ctx);
  assert.equal(completed.status, "succeeded"); assert.equal(completed.wait, undefined); assert.equal(executions, 1);
- await new Promise(resolve => setTimeout(resolve, 10)); assert.ok(f.wakes.some(event => event.runId === first.runId && !event.foreground));
+ const deadline = Date.now() + 3000;
+ while (!f.wakes.some(event => event.runId === first.runId && !event.foreground) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+ assert.ok(f.wakes.some(event => event.runId === first.runId && !event.foreground));
 });
 
 test("foreground abort keeps the live run identifiable and its unfinished work reviewable on resume", async t => {
@@ -127,7 +129,7 @@ test("v3 receipts precede completion, early apply leaves sibling active, fixed i
 		await writeFile(join(options.cwd, `${options.task.id}.txt`), options.prompt === "repair" ? "repair\n" : "first\n");
 	});
 	const receipt = await f.service.execute({ action: "create", tasks: [task("fast"), task("slow")] }, f.ctx, undefined, undefined, "submission-call");
-	assert.equal(receipt.status, "accepted", JSON.stringify(receipt)); assert.equal(receipt.schemaVersion, 4);
+	assert.equal(receipt.status, "accepted", JSON.stringify(receipt)); assert.equal(receipt.schemaVersion, 5);
 	await started.promise;
 	await writeFile(join(f.repo, "base.txt"), "new parent\n");
 	for (let attempt = 0; !f.events.some(event => event.kind === "task-terminal" && event.sessions[0]?.result?.label === "fast"); attempt++) { assert.ok(attempt < 500); await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -306,7 +308,7 @@ test("same-process batch completions await the root writer instead of treating i
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	const make = async (id: string): Promise<SessionActionResult> => {
 		const graph = validateGraphStructure({ tasks: [task(id)] }); if (!graph.ok) throw new Error("fixture");
-		return { schemaVersion: 4, action: "create", status: "succeeded", sessions: (await f.store.allocate(owner, id, graph.tasks)).records.map(record => f.store.view(record)) };
+		return { schemaVersion: 5, action: "create", status: "succeeded", sessions: (await f.store.allocate(owner, id, graph.tasks)).records.map(record => f.store.view(record)) };
 	};
 	const a = await make("a"), b = await make("b");
 	const entered = gate(), proceed = gate(); t.after(() => proceed.release()); const write = f.store.write.bind(f.store); let pause = true, secondDone = false;
@@ -319,17 +321,23 @@ test("same-process batch completions await the root writer instead of treating i
 function mainLoopHarness() {
 	const events = new EventEmitter();
 	const handlers = new Map<string, Array<(...args: any[]) => any>>();
-	let tool: any;
+	let service: ContinuationService;
 	let pending: ExecutionRef[] = [];
 	const facts: ProducerFacts[] = [];
 	events.on(NOTICE_DELIVERY_REQUEST, request => request.accept({ version: 1, pending, scheduled: [], blocked: false }));
 	events.on(EXECUTION_FACTS_EVENT, value => facts.push(value));
-	const pi = { events, appendEntry() {}, registerTool(value: any) { tool = value; }, on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } } as unknown as ExtensionAPI;
+	const pi = { events, appendEntry() {}, registerTool() {}, on(name: string, handler: (...args: any[]) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } } as unknown as ExtensionAPI;
 	return {
 		pi, events, facts,
 		async emit(name: string, event = {}) { for (const handler of handlers.get(name) ?? []) await handler(event); },
 		notices(refs: ExecutionRef[]) { pending = refs; events.emit(NOTICE_DELIVERY_CHANGED, {}); },
-		async call(id: string, request: unknown, ctx: ExtensionContext) { return await tool.execute(id, request, undefined, undefined, ctx) as { details: SessionActionResult; content: Array<{ text: string }> }; },
+		attach(value: ContinuationService) { service = value; },
+		async call(id: string, request: unknown, ctx: ExtensionContext) {
+			for (const handler of handlers.get("agent_start") ?? []) await handler({}, ctx);
+			const details = await service.execute(request, ctx, undefined, undefined, id);
+			service.acknowledge(details);
+			return { details, content: [{ text: formatManagedContent(details) }] };
+		},
 	};
 }
 function checkpointClock() {
@@ -348,6 +356,7 @@ const checkpointActivity = (elapsedMs = 0, inactiveForMs = 0): import("../extens
 test("join yields for steering but keeps follow-up queued and never kills the child", async t => {
 	const h = mainLoopHarness(), started = gate(), hold = gate(); t.after(() => hold.release()); let signal!: AbortSignal;
 	const f = await fixture(t, async options => { signal = options.signal!; started.release(); await hold.promise; }, 2, undefined, { pi: h.pi });
+	h.attach(f.service);
 	const receipt = (await h.call("create", { action: "create", tasks: [task("one")] }, f.ctx)).details; await started.promise;
 	let finished = false;
 	const join = h.call("join", { action: "join", runId: receipt.runId, waitSeconds: 1800 }, f.ctx).then(value => { finished = true; return value; });
@@ -367,6 +376,7 @@ test("join yields for steering but keeps follow-up queued and never kills the ch
 test("join ignores its own run's notices but yields for another run's pending notice", async t => {
 	const h = mainLoopHarness(), started = gate(), hold = gate(); t.after(() => hold.release()); let signal!: AbortSignal;
 	const f = await fixture(t, async options => { signal = options.signal!; started.release(); await hold.promise; }, 2, undefined, { pi: h.pi });
+	h.attach(f.service);
 	const receipt = (await h.call("create", { action: "create", tasks: [task("one")] }, f.ctx)).details; await started.promise;
 	h.notices([{ producer: "agents", id: `${receipt.runId}:sibling`, runId: receipt.runId! }]);
 	let finished = false;
@@ -384,6 +394,7 @@ test("foreground create and continue yield their windows without cancelling owne
 	const h = mainLoopHarness(); let hold = gate(), started = gate(), signal!: AbortSignal;
 	t.after(() => hold.release());
 	const f = await fixture(t, async options => { signal = options.signal!; started.release(); await hold.promise; }, 2, undefined, { pi: h.pi });
+	h.attach(f.service);
 	const first = h.call("foreground", { action: "create", mode: "foreground", waitSeconds: 1800, tasks: [task("one")] }, f.ctx);
 	await started.promise; await h.emit("input", { source: "rpc", streamingBehavior: "steer" });
 	const created = (await first).details; assert.deepEqual(created.wait, { status: "yielded", reason: "steer" }); assert.equal(signal.aborted, false);
@@ -400,6 +411,7 @@ test("inactivity publishes once while idle, acknowledges exact notices, and re-a
 	const h = mainLoopHarness(), clock = checkpointClock(), hold = gate(), started = gate(); t.after(() => hold.release());
 	let child!: ChildRunOptions;
 	const f = await fixture(t, async options => { child = options; options.onActivity?.(checkpointActivity()); started.release(); await hold.promise; }, 2, undefined, { pi: h.pi, dependencies: { now: clock.now, scheduleInactivity: clock.schedule } });
+	h.attach(f.service);
 	const receipt = (await h.call("create", { action: "create", tasks: [task("one")] }, f.ctx)).details; await started.promise;
 	const id = `${receipt.runId}:${receipt.sessions[0]!.handle}`;
 	const checkpoint = () => f.service.executionFacts("parent", "anchor").executions.find(item => item.id === id)?.checkpoint;
@@ -407,7 +419,8 @@ test("inactivity publishes once while idle, acknowledges exact notices, and re-a
 	const count = h.facts.length; clock.advance(1);
 	assert.equal(h.facts.length, count + 1, "the timer publishes facts even without a parent poll");
 	const first = checkpoint()!; assert.equal(first.disposition, "pending");
-	for (const text of ["one", receipt.runId!, receipt.sessions[0]!.handle, "10m", "bash running waiting for fixture", "still running; it is not killed", "keep waiting, inspect, or cancel"]) assert.ok(first.summary.includes(text));
+	for (const text of ["one", "10m", "bash running waiting for fixture", "still running; it is not killed", "keep waiting (wait_agents)", "stop_agent"]) assert.ok(first.summary.includes(text));
+	for (const internal of [receipt.runId!, receipt.sessions[0]!.handle]) assert.ok(!first.summary.includes(internal), "a checkpoint names the agent, not internal identities");
 	clock.advance(AGENT_INACTIVITY_CHECKPOINT_MS * 2); assert.equal(checkpoint()!.id, first.id); assert.equal(h.facts.length, count + 1); assert.equal(clock.timers.size, 0);
 	// A repeated old snapshot is not resumed activity.
 	child.onActivity?.(checkpointActivity(clock.now(), clock.now())); assert.equal(checkpoint()!.id, first.id);
@@ -427,6 +440,7 @@ test("inactivity publishes once while idle, acknowledges exact notices, and re-a
 for (const boundary of ["terminal", "cancel", "shutdown"] as const) test(`inactivity timers clear on ${boundary}`, async t => {
 	const h = mainLoopHarness(), clock = checkpointClock(), hold = gate(), started = gate(); t.after(() => hold.release());
 	const f = await fixture(t, async () => { started.release(); await hold.promise; }, 2, undefined, { pi: h.pi, dependencies: { now: clock.now, scheduleInactivity: clock.schedule } });
+	h.attach(f.service);
 	const receipt = (await h.call("create", { action: "create", tasks: [task("one")] }, f.ctx)).details; await started.promise;
 	assert.equal(clock.timers.size, 1, "even a child with no protocol activity has a timer");
 	if (boundary === "terminal") { hold.release(); await f.service.execute({ action: "join", runId: receipt.runId }, f.ctx); }

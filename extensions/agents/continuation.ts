@@ -3,7 +3,6 @@ import { DEFAULT_OBSERVATION_WAIT_SECONDS } from "../shared/observation-budget.t
 import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Text } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type ConfigLoadResult } from "./config.ts";
 import { CAPABILITY_RECOVERY_HINT, CHILD_CAPABILITY_MANIFEST_VERSION, CHILD_MARKER_ENV, HARD_LIMITS, emptyUsage, type ChildCapabilityManifest, type EffectiveRoute, type AgentTask, type TaskResult } from "./contracts.ts";
@@ -20,9 +19,10 @@ import { ManagedSessionStore, fingerprint, managedWriteRoots, type ManagedRecord
 import { applyCandidate, conflictScope, freezeCandidate, prepareManagedWorkspace, reviewRecoveryWorkspaces, releaseManagedResources, syncManagedInputs } from "./candidates.ts";
 import { captureGitInput, discardGitInput, retainGitInput, inspectGitInput, GitWorkspaceError } from "./git-workspace.ts";
 import { SessionExecutionSupervisor, SupervisorError, type ExecutionContext, type ExecutionEvent } from "./session-supervisor.ts";
-import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, uncertainApply, AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
-import { formatManagedContent, formatManagedResult, formatProgress } from "./render.ts";
-import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "./tool-surface.ts";
+import { MANAGED_LIMITS, MANAGED_SESSION_VERSION, ManagedError, uncertainApply, parseSessionRequest, type CurrentOwner, type SessionActionResult, type SessionRequest, type SessionView, type ManagedRequestTelemetry } from "./session-contracts.ts";
+import { PeerHub } from "./peer-hub.ts";
+import { peerToolDefinitions } from "./peer-tools.ts";
+import { AGENT_MESSAGE_TYPE, PEER_TOOLS } from "./peer-protocol.ts";
 import { createRunClock, monotonicNow } from "./telemetry.ts";
 import type { ObservedRun } from "./observation-hooks.ts";
 import type { ProvenanceCore } from "./provenance.ts";
@@ -34,6 +34,10 @@ import { emptyProducerFacts, EXECUTION_FACTS_EVENT, NOTICE_ACK, EXECUTION_FACTS_
 import { createMainLoopYield, type MainLoopYield, type YieldReason } from "../shared/main-loop-yield.ts";
 import { registerRecoveryDiscovery } from "./recovery-discovery.ts";
 import { AgentInactivityCheckpoints, type ScheduleCheckpoint } from "./inactivity.ts";
+import type { Participant, PeerLinkBinding } from "./peer-protocol.ts";
+import { isolatedWriteRoots } from "./managed-sessions.ts";
+import { readSharedWrites, sharedWritesDirectory } from "./shared-writes.ts";
+import { loadRoleDefinitions, type AgentRoleDefinition } from "./role-definitions.ts";
 
 export interface ContinuationDependencies {
 	store: ManagedSessionStore;
@@ -53,8 +57,31 @@ export interface ContinuationDependencies {
 	mainLoopYield?: MainLoopYield;
 	onFactsChanged?: () => void;
 	scheduleInactivity?: ScheduleCheckpoint;
+	/** Peer coordination hooks owned by the hub; absent for direct service callers. */
+	peer?: PeerBridge;
+	/** Role catalog override for fixtures; the default reads packaged, user and trusted project definitions. */
+	loadRoleDefinitions?(projectRoot: string, trusted: boolean): Promise<Map<string, AgentRoleDefinition>>;
+	agentDir?: string;
+}
+/** Hub hooks: one live link per child episode and the terminal facts of every turn. */
+export interface PeerBridge {
+	/** `capability` is the episode's prepared grant set; nested invocations stay inside it. */
+	openLink(record: ManagedRecord, capability: ChildCapabilityManifest): { binding: PeerLinkBinding; close(): void } | undefined;
+	turnStarted(record: ManagedRecord, runId: string, initiator: Participant): void;
+	turnTerminal(event: AgentExecutionEvent, initiator: Participant): void | Promise<void>;
+}
+export interface ExecuteOptions {
+	/** Who started this turn: the invoking model, or an agent whose message woke an idle agent. */
+	initiator?: Participant;
+	/** Called once admission is released, before a foreground caller observes the run. */
+	admitted?: (handles: readonly string[]) => void;
+	/** Return the admission receipt instead of observing the run; an agent caller or a wake waits through wait_agents. */
+	detach?: boolean;
+	/** Checked during preparation, before any record is queued or dispatched; a throw rejects the whole admission. */
+	authorize?: (records: readonly ManagedRecord[]) => Promise<void>;
 }
 interface RunBinding {
+	initiator: Participant;
 	owner: CurrentOwner;
 	toolCallId: string;
 	records: ManagedRecord[];
@@ -93,10 +120,10 @@ function closingExcerpt(output: string): string {
 	const boundary = /(?:\n\s*\n|[.!?]\s+)/.exec(tail);
 	return marker + (boundary ? tail.slice(boundary.index + boundary[0].length) : tail);
 }
-function taskNotice(label: string, handle: string, runId: string, phase: string, view?: SessionView): string {
+function taskNotice(label: string, _handle: string, _runId: string, phase: string, view?: SessionView): string {
 	const result = view?.result;
 	const excerpt = result?.output ? closingExcerpt(result.output) : "";
-	return `Agent task ${label} (handle ${handle}) in run ${runId}: phase ${phase}${result ? `; status ${result.status}` : ""}${view ? `; expectedEpisode ${view.episode}` : ""}${view?.candidate ? `; candidateId ${view.candidate.id}` : ""}${result ? `; changed paths ${result.changedPaths.length}` : "; result unavailable"}.${excerpt ? ` Closing summary: ${excerpt}` : ""} Full report available through inspect; execution is not acceptance.`;
+	return `Agent ${label}${view ? ` (role ${view.role})` : ""}: turn ${phase}${result ? `; status ${result.status}` : ""}${view?.candidate ? `; isolated candidate ready (${view.candidate.changedPaths.length} changed paths)` : result && result.changedPaths.length ? `; changed paths ${result.changedPaths.length}` : ""}${result ? "" : "; result unavailable"}.${excerpt ? ` Closing summary: ${excerpt}` : ""} Full report: list_agents with name ${label}. A finished turn is not acceptance.`;
 }
 
 interface AdmissionProgress {
@@ -136,12 +163,43 @@ export class ContinuationService {
 	private stopped = false;
 	private readonly sessionViewBuilder: SessionViewBuilder;
 	private readonly inactivity: AgentInactivityCheckpoints;
+	/** Set by registerContinuationTool; direct service callers run without a hub. */
+	peerHub: PeerHub | undefined;
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
 		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
 		this.sessionViewBuilder = new SessionViewBuilder({ store: this.dependencies.store });
 		this.inactivity = new AgentInactivityCheckpoints(this.dependencies.now, () => this.dependencies.onFactsChanged?.(), this.dependencies.scheduleInactivity);
 	}
 	get busy(): boolean { return this.admission || this.supervisor?.hasActiveWork === true; }
+	get store(): ManagedSessionStore { return this.dependencies.store; }
+	ownerOf(ctx: ExtensionContext): Promise<CurrentOwner> { return this.owner(ctx); }
+	/** Cancel the live turn of one agent, whichever run started it. */
+	/** The episode a run carried for one agent, for notices acknowledged after a later turn began. */
+	episodeOf(runId: string, handle: string): number | undefined { return this.bindings.get(runId)?.records.find(item => item.handle === handle)?.episode; }
+	/** True while a supervised run still owns this agent's turn, including finalization after the child exits. */
+	agentLive(handle: string): boolean {
+		for (const [runId, binding] of this.bindings) {
+			if (!binding.records.some(item => item.handle === handle)) continue;
+			const run = this.supervisor?.inspect(runId)[0];
+			if (!run || !["preparing", "queued", "running"].includes(run.phase)) continue;
+			// A task settles (result saved) before its batch run ends; until listed it is still being prepared.
+			const task = run.tasks.find(item => item.taskId === handle);
+			if (!task || ["preparing", "queued", "running"].includes(task.phase)) return true;
+		}
+		return false;
+	}
+	cancelAgent(handle: string): boolean {
+		for (const [runId, binding] of this.bindings) {
+			const record = binding.records.find(item => item.handle === handle);
+			if (!record) continue;
+			const run = this.supervisor?.inspect(runId)[0];
+			if (!run || !["preparing", "queued", "running"].includes(run.phase)) continue;
+			const outcome = binding.control?.cancelTask(handle) ?? (this.supervisor!.cancel(runId) ? "accepted" : "not-active");
+			if (outcome === "accepted") { this.inactivity.stop(runId, handle); return true; }
+		}
+		return false;
+	}
+
 	private invalidateSessionView(): void {
 		this.sessionViewBuilder.invalidate();
 		try { this.dependencies.onSessionViewChange?.(); } catch { /* Display consumers never affect execution. */ }
@@ -246,12 +304,14 @@ export class ContinuationService {
 			});
 			for (const task of view.tasks) {
 				if (task.phase === "preparing" || task.phase === "queued" || task.phase === "running") {
-					const checkpoint = this.inactivity.checkpoint(view.runId, task.taskId);
+					// A turn another agent started reports to that agent, including its inactivity checkpoint.
+					const checkpoint = binding?.initiator.kind === "agent" ? undefined : this.inactivity.checkpoint(view.runId, task.taskId);
 					executions.push({ id: `${view.runId}:${task.taskId}`, runId: view.runId, ...(binding?.toolCallId ? { toolCallId: binding.toolCallId } : {}), phase: task.phase, status: task.phase, exitCode: null, summary: "", disposition: "pending", ...(checkpoint ? { checkpoint } : {}) });
 					continue;
 				}
 				const record = binding?.records.find(item => item.handle === task.taskId);
-				const observed = this.closedHandles.has(task.taskId) || record?.state === "closed" || (!!record && (this.observedEpisodes.get(record.handle) ?? 0) >= record.episode);
+				// A turn another agent started reports to that agent; the main agent reads it through list.
+				const observed = binding?.initiator.kind === "agent" || this.closedHandles.has(task.taskId) || record?.state === "closed" || (!!record && (this.observedEpisodes.get(record.handle) ?? 0) >= record.episode);
 				const label = record?.task.id ?? task.taskId;
 				const cached = binding?.views.get(task.taskId);
 				const terminalView = cached?.episode === record?.episode ? cached : undefined;
@@ -288,7 +348,7 @@ export class ContinuationService {
 		const cause = (error as { code?: unknown })?.code ?? (error instanceof Error && error.name !== "Error" ? error.name : "unclassified");
 		return { schemaVersion: MANAGED_SESSION_VERSION, action, status: aborted ? "aborted" : "failed", sessions: [], error: { code: known ? error.code : "managed_operation_failed", ...(error instanceof ManagedError && error.detail ? { detail: error.detail } : known ? {} : { detail: typeof cause === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(cause) ? cause : "unclassified" }), ...(error instanceof ManagedError && error.missingFields ? { missingFields: error.missingFields } : {}), ...(error instanceof ManagedError && error.unexpectedFields ? { unexpectedFields: error.unexpectedFields } : {}), ...(error instanceof ManagedError && error.invalidFields ? { invalidFields: error.invalidFields } : {}), ...(error instanceof ManagedError && error.conflicts ? { conflicts: error.conflicts } : {}) } };
 	}
-	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void, toolCallId?: string): Promise<SessionActionResult> {
+	async execute(raw: unknown, ctx: ExtensionContext, signal?: AbortSignal, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void, toolCallId?: string, options: ExecuteOptions = {}): Promise<SessionActionResult> {
 		// Replay identity comes from the host tool-call boundary; a direct service call gets its own fresh identity.
 		const callIdentity = fingerprint(["agent-call", toolCallId ?? `direct-${mintProductId()}`]);
 		const dispatchCallId = toolCallId ?? callIdentity;
@@ -302,7 +362,7 @@ export class ContinuationService {
 			if (!ctx.isProjectTrusted()) throw new ManagedError("project_trust_required");
 			const owner = await this.owner(ctx);
 			try { const provenance = await this.dependencies.provenance?.observeExtension(); if (provenance?.available) telemetry.extensionEpoch = provenance.extensionEpoch; } catch { /* Optional. */ }
-			let result = await this.action(request, owner, ctx, signal, onProgress, dispatchCallId, callIdentity, telemetry);
+			let result = await this.action(request, owner, ctx, signal, onProgress, dispatchCallId, callIdentity, telemetry, options.initiator ?? { kind: "main" }, options.admitted, options.detach === true, options.authorize);
 			telemetry.durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
 			result = { ...result, sessions: this.projectLiveSessions(result.sessions), requestTelemetry: { ...telemetry, ...(result.kind === "submission" ? { launchedChildren: 0 } : {}) } };
 			if (request.action === "inspect" || request.action === "join") this.inactivity.observe(result.sessions.map(view => view.handle));
@@ -318,7 +378,7 @@ export class ContinuationService {
 			return { ...result, requestTelemetry: telemetry };
 		}
 	}
-	private async action(request: SessionRequest, owner: CurrentOwner, ctx: ExtensionContext, signal: AbortSignal | undefined, onProgress: ((tasks: readonly TaskResult[], elapsedMs: number | null) => void) | undefined, toolCallId: string, callIdentity: string, telemetry: ManagedRequestTelemetry): Promise<SessionActionResult> {
+	private async action(request: SessionRequest, owner: CurrentOwner, ctx: ExtensionContext, signal: AbortSignal | undefined, onProgress: ((tasks: readonly TaskResult[], elapsedMs: number | null) => void) | undefined, toolCallId: string, callIdentity: string, telemetry: ManagedRequestTelemetry, initiator: Participant, admitted?: (handles: readonly string[]) => void, detach = false, authorize?: (records: readonly ManagedRecord[]) => Promise<void>): Promise<SessionActionResult> {
 		const store = this.dependencies.store;
 		if (request.action === "inspect") {
 			if (request.runId) return this.runResult(request.runId, request.action, owner);
@@ -370,6 +430,7 @@ export class ContinuationService {
 					if (record.version !== MANAGED_SESSION_VERSION) throw new ManagedError("unsupported_contract");
 					if (request.action === "apply" || request.action === "refresh") {
 						if (record.state !== "idle") throw new ManagedError("session_not_idle");
+						if (isolatedWriteRoots(record).length === 0) throw new ManagedError("not_isolated", undefined, "Only an agent invoked with an isolated workspace has a candidate or pinned input.");
 						await this.constrainNestedAccess([record.task]);
 						if (request.action === "apply") await applyCandidate(store, record, request.candidateId!);
 						else { store.nativePath(record); await syncManagedInputs(store, record); delete record.projectSkills; await store.save(record); }
@@ -395,9 +456,10 @@ export class ContinuationService {
 		this.admissionToolCallId = toolCallId;
 		let runId: string;
 		let foreground: boolean;
+		let admittedHandles: string[] = [];
 		try {
 			signal?.throwIfAborted();
-			foreground = request.mode === "foreground" || !["tui", "rpc"].includes(ctx.mode);
+			foreground = !detach && (request.mode === "foreground" || !["tui", "rpc"].includes(ctx.mode));
 			if (request.mode === "async" && foreground) throw new ManagedError("async_host_mode_unsupported");
 			if (request.waitSeconds !== undefined && !foreground) throw new ManagedError("wait_requires_foreground");
 			const replays = new Map<string, SessionView>();
@@ -427,6 +489,7 @@ export class ContinuationService {
 				}
 			}
 			const loaded = await this.dependencies.loadConfig();
+			const roleDefinitions = await this.roleDefinitions(owner, ctx);
 			if (!loaded.config) throw new ManagedError(loaded.diagnostic?.code ?? "invalid_route_config");
 			const config = loaded.config;
 			// Custom executors own their invocation; the native default must be available before admission.
@@ -435,11 +498,11 @@ export class ContinuationService {
 			if (this.supervisorOwner && this.supervisorOwner !== ownerKey) throw new ManagedError("managed_owner_mismatch");
 			if (!this.supervisor) {
 				this.supervisorOwner = ownerKey;
-				this.supervisor = new SessionExecutionSupervisor({ repository: owner.repo, sessionId: owner.parentSessionId, branchAnchor: owner.anchor }, { concurrency: config.maxConcurrency, roles: { worker: config.routes.worker.maxConcurrency, reviewer: config.routes.reviewer.maxConcurrency, explorer: config.routes.explorer.maxConcurrency } }, {
+				this.supervisor = new SessionExecutionSupervisor({ repository: owner.repo, sessionId: owner.parentSessionId, branchAnchor: owner.anchor }, { concurrency: config.maxConcurrency, roles: Object.fromEntries(Object.entries(config.routes).map(([role, route]) => [role, route.maxConcurrency])) }, {
 					now: this.dependencies.now,
 					onEvent: event => this.publish(event),
 					onWake: async events => {
-						const values = events.flatMap(event => this.delivered.get(event.eventId) ? [this.delivered.get(event.eventId)!] : []).filter(event => !this.bindings.get(event.runId)?.foreground);
+						const values = events.flatMap(event => this.delivered.get(event.eventId) ? [this.delivered.get(event.eventId)!] : []).filter(event => !this.bindings.get(event.runId)?.foreground && this.bindings.get(event.runId)?.initiator.kind !== "agent");
 						for (const event of events) this.delivered.delete(event.eventId);
 						if (values.length && !this.stopped && ctx.isProjectTrusted()) await this.dependencies.onWake?.(values);
 					},
@@ -455,7 +518,10 @@ export class ContinuationService {
 				const related = validateGraphRelationships(admission.tasks); if (!related.ok) throw new ManagedError(related.error.code);
 				tasks = admission.tasks;
 				// Resolve every requested route before creating any persistent task.
-				for (const task of tasks) this.route(task, config, ctx);
+				for (const task of tasks) {
+					if (!roleDefinitions.has(task.role)) throw new ManagedError("unknown_role", undefined, `No role definition named ${task.role}. Packaged, user (agent-roles/) and trusted project (.pi/agent-roles/) definitions are available by name.`);
+					this.route(task, config, ctx, roleDefinitions.get(task.role));
+				}
 				const allocation = await store.allocate(owner, callIdentity, tasks, digest);
 				if (!allocation.fresh) throw new ManagedError("request_outcome_unknown");
 				freshAllocation = true;
@@ -483,7 +549,7 @@ export class ContinuationService {
 			let receipt: Awaited<ReturnType<SessionExecutionSupervisor["submit"]>>;
 			try {
 			for (const record of records) if (!replays.has(record.handle)) await validateReadRoots(record);
-			routes = records.map(record => replays.get(record.handle)?.route ?? this.route(record.task, config, ctx));
+			routes = records.map(record => replays.get(record.handle)?.route ?? this.route(record.task, config, ctx, roleDefinitions.get(record.task.role)));
 			telemetry.replayedEpisodes = replays.size;
 			telemetry.admittedTasks = tasks.length;
 			try { const provenance = loaded.source ? await this.dependencies.provenance?.observeConfiguration(loaded.source) : undefined; if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; } } catch { /* Optional. */ }
@@ -493,8 +559,9 @@ export class ContinuationService {
 					const inputs = new Map<string, Awaited<ReturnType<typeof captureGitInput>>>();
 					for (const record of records) {
 						if (replays.has(record.handle)) continue;
-						for (const root of managedWriteRoots(record)) {
-							await validateRepositoryTarget(root.target);
+						// Shared and isolated writers alike bind to the checkout identity admitted at creation.
+						for (const root of managedWriteRoots(record)) await validateRepositoryTarget(root.target);
+						for (const root of isolatedWriteRoots(record)) {
 							if (!root.inputs && !root.input && !inputs.has(root.source)) inputs.set(root.source, await captureGitInput(root.source));
 						}
 					}
@@ -508,7 +575,8 @@ export class ContinuationService {
 						if (uncertainApply(record.candidate)) throw new ManagedError("candidate_recovery_required");
 						if ((await store.nativeRevision(record)).leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 					}
-					this.bindings.set(identity.runId, { owner, toolCallId, records: records.map(record => replays.has(record.handle) ? { ...record, episode: replays.get(record.handle)!.episode } : record), foreground, views: new Map(replays), replayed: new Set(replays.keys()) });
+					await authorize?.(records);
+					this.bindings.set(identity.runId, { initiator, owner, toolCallId, records: records.map(record => replays.has(record.handle) ? { ...record, episode: replays.get(record.handle)!.episode } : record), foreground, views: new Map(replays), replayed: new Set(replays.keys()) });
 					admissionRunId = identity.runId;
 					for (const [index, record] of records.entries()) {
 						if (replays.has(record.handle)) continue;
@@ -524,8 +592,8 @@ export class ContinuationService {
 							// The rollback snapshot must be the record observed under this lock: a same-episode refresh
 							// or apply accepted between the outer load and here is state this admission builds on.
 							progress.before = structuredClone(current);
-							for (const root of managedWriteRoots(current)) {
-								await validateRepositoryTarget(root.target);
+							for (const root of managedWriteRoots(current)) await validateRepositoryTarget(root.target);
+							for (const root of isolatedWriteRoots(current)) {
 								const input = inputs.get(root.source);
 								if (!root.inputs) {
 									if (!root.input && input) { root.input = input; root.inputRef = await retainGitInput(root.source, root.id, input); retained.push({ rootId: root.id, source: root.source, ref: root.inputRef, input }); }
@@ -535,14 +603,16 @@ export class ContinuationService {
 							}
 							current.episode++; current.state = "queued"; delete current.result; delete current.candidate;
 							current.route = routes[index]!;
-							current.inheritSkills = config.roles[current.task.role].inheritSkills;
+							current.inheritSkills = config.roles[current.task.role]?.inheritSkills ?? true;
 							if (current.projectSkills === undefined && current.roots.some(root => root.source === owner.repo)) {
 								const parentSkills = this.dependencies.getParentSkills?.(owner.repo);
 								if (parentSkills !== undefined) current.projectSkills = selectedProjectSkills(owner.repo, parentSkills);
 							}
-							current.dispatch = { ...identity, toolCallId, taskId: tasks[index]!.id };
+							current.dispatch = { ...identity, toolCallId, taskId: tasks[index]!.id, initiator: initiator.kind === "main" ? "main" : initiator.name };
+							if (current.episode === 1) current.assigner = initiator.kind === "main" ? "main" : initiator.name;
 							current.requests.push({ id: episodeIdentity(current.handle), fingerprint: request.episodes?.[index] ? fingerprint([request.episodes[index]!.expectedEpisode, request.episodes[index]!.message]) : digest, episode: current.episode, state: "running", runId: identity.runId, generation: identity.generation });
 							await store.save(current);
+							try { this.dependencies.peer?.turnStarted(current, identity.runId, initiator); } catch { /* Telemetry only. */ }
 							records[index] = current; this.bindings.get(identity.runId)!.records[index] = current;
 							this.bindings.get(identity.runId)!.views.set(current.handle, store.view(current));
 						});
@@ -572,8 +642,9 @@ export class ContinuationService {
 				throw error;
 			}
 			runId = receipt.runId;
+			admittedHandles = records.map(record => record.handle);
 			if (!foreground) return { schemaVersion: MANAGED_SESSION_VERSION, action: request.action, status: "accepted", kind: "submission", runId, generation: receipt.generation, sessions: records.map(record => store.view(record)) };
-		} finally { this.admission = false; this.admissionToolCallId = undefined; }
+		} finally { this.admission = false; this.admissionToolCallId = undefined; admitted?.(admittedHandles); }
 		const abort = () => { this.supervisor!.cancel(runId!); };
 		signal?.addEventListener("abort", abort, { once: true });
 		if (signal?.aborted) abort();
@@ -690,13 +761,14 @@ export class ContinuationService {
 			return this.boundView(binding, record);
 		}));
 		const run = this.supervisor?.inspect(event.runId)[0];
-		const value: AgentExecutionEvent = { version: 4, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
+		const value: AgentExecutionEvent = { version: 5, eventId: event.eventId, kind: event.kind, runId: event.runId, generation: event.generation, owner: event.owner, toolCallId: binding.toolCallId, sessions, foreground: binding.foreground,
 			...(run && Number.isFinite(run.submittedAt) ? { timing: { clockKey: createRunClock(this.dependencies.now).clockKey, submittedAtMs: run.submittedAt, preparedAtMs: run.preparedAt, finishedAtMs: event.task?.finishedAt ?? run.finishedAt, ...(event.task ? { queuedAtMs: event.task.queuedAt, startedAtMs: event.task.startedAt } : {}) } } : {}),
 			...(!event.task && binding.runObservation ? { runObservation: binding.runObservation } : {}),
 		};
 		try {
 			for (const record of records) await this.dependencies.store.write(join(this.dependencies.store.path(record.handle), `event_${record.episode}_${event.kind}.json`), value);
 			await this.dependencies.onExecution?.(value);
+			if (event.kind === "task-terminal") { try { await this.dependencies.peer?.turnTerminal(value, binding.initiator); } catch { /* Receipts never fail execution evidence. */ } }
 			this.delivered.set(event.eventId, value);
 			while (this.delivered.size > 256) this.delivered.delete(this.delivered.keys().next().value!);
 		} catch (error) { binding.deliveryError = "terminal_delivery_failed"; throw error; }
@@ -725,7 +797,7 @@ export class ContinuationService {
 					if (!childSignal.aborted) this.inactivity.start(execution.runId, record.handle, record.task.id);
 					childSignal.addEventListener("abort", stopInactivity, { once: true });
 					const trackedLifecycle: ChildLifecycle = { ...lifecycle, activity: activity => { this.inactivity.activity(execution.runId, record.handle, activity); lifecycle.activity(activity); } };
-					return this.episode(record.handle, owner, message, childSignal, trackedLifecycle, telemetry, observer, () => binding.control!.enterConvergence(task.id)).then(result => ({ ...result, id: task.id, label: record.task.id })).finally(() => { childSignal.removeEventListener("abort", stopInactivity); stopInactivity(); });
+					return this.episode(record.handle, owner, message, childSignal, trackedLifecycle, telemetry, observer, () => binding.control!.enterConvergence(task.id), ctx).then(result => ({ ...result, id: task.id, label: record.task.id })).finally(() => { childSignal.removeEventListener("abort", stopInactivity); stopInactivity(); });
 					});
 				},
 			});
@@ -767,12 +839,19 @@ export class ContinuationService {
 			return response;
 		} finally { this.inactivity.stop(execution.runId); if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
 	}
-	private route(task: Pick<NormalizedTask, "role" | "model" | "thinking" | "executionProfile" | "thinkingProfile">, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext): EffectiveRoute {
+	private route(task: Pick<NormalizedTask, "role" | "model" | "thinking" | "executionProfile" | "thinkingProfile">, config: NonNullable<ConfigLoadResult["config"]>, ctx: ExtensionContext, definition?: AgentRoleDefinition): EffectiveRoute {
 		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
-		const result = resolveRoute(task.role, config, context, task); if (!result.ok) throw new ManagedError(result.error.code); return result.route;
+		const result = resolveRoute(task.role, config, context, task, definition); if (!result.ok) throw new ManagedError(result.error.code); return result.route;
 	}
-	private async episode(handle: string, owner: CurrentOwner, message: string, signal: AbortSignal, lifecycle: ChildLifecycle, telemetry: ManagedRequestTelemetry, observer: ManagedObserver | undefined, enterConvergence: () => boolean): Promise<TaskResult> {
+	/** Packaged, user and trusted project role definitions, read at each admission and episode. */
+	async roleDefinitions(owner: Pick<CurrentOwner, "repo">, ctx: Pick<ExtensionContext, "isProjectTrusted">): Promise<Map<string, AgentRoleDefinition>> {
+		if (this.dependencies.loadRoleDefinitions) return this.dependencies.loadRoleDefinitions(owner.repo, ctx.isProjectTrusted());
+		try { return (await loadRoleDefinitions({ agentDir: this.dependencies.agentDir ?? getAgentDir(), projectRoot: owner.repo, trusted: ctx.isProjectTrusted() })).roles; }
+		catch { return new Map(); }
+	}
+	private async episode(handle: string, owner: CurrentOwner, message: string, signal: AbortSignal, lifecycle: ChildLifecycle, telemetry: ManagedRequestTelemetry, observer: ManagedObserver | undefined, enterConvergence: () => boolean, ctx?: ExtensionContext): Promise<TaskResult> {
 		const store = this.dependencies.store;
+		const definitions = ctx ? await this.roleDefinitions(owner, ctx).catch(() => new Map<string, AgentRoleDefinition>()) : new Map<string, AgentRoleDefinition>();
 		try { return await store.withSession(handle, owner, async record => {
 			const operation = record.requests.at(-1)!;
 			let childResult: TaskResult | undefined;
@@ -783,6 +862,7 @@ export class ContinuationService {
 				signal.throwIfAborted();
 				if (Buffer.byteLength(message) + Buffer.byteLength(record.task.objective) > HARD_LIMITS.maxPromptBytes) throw new ManagedError("prompt_too_large");
 				const preparationStarted = this.dependencies.now();
+				// Shared writers edit the assigned checkout directly; only isolated roots get a private worktree.
 				await prepareManagedWorkspace(store, record);
 				const workspaceMs = Math.max(0, this.dependencies.now() - preparationStarted);
 				await store.writerPhase(handle, "not-started");
@@ -792,10 +872,14 @@ export class ContinuationService {
 				const writes = managedWriteRoots(record);
 				const sourceRoot = writes[0]?.source ?? record.roots[0]?.source ?? owner.repo;
 				const parentSkills = sourceRoot === owner.repo ? this.dependencies.getParentSkills?.(sourceRoot) : undefined;
+				// The checkout may have been replaced while this turn waited for capacity.
+				for (const root of writes) await validateRepositoryTarget(root.target);
 				const cwd = store.nativeCwd(record);
 				const scratch = join(store.path(handle), "scratch");
 				await mkdir(cwd, { recursive: true });
 				await mkdir(scratch, { recursive: true });
+				const sharedWrites = writes.length > 0 && isolatedWriteRoots(record).length === 0 ? sharedWritesDirectory(store, record) : undefined;
+				if (sharedWrites) { await rm(sharedWrites, { recursive: true, force: true }); await mkdir(sharedWrites, { recursive: true, mode: 0o700 }); }
 				const parsed = validateGraphStructure({ tasks: [{ ...record.task, dependsOn: [] }] });
 				if (!parsed.ok) throw new ManagedError(parsed.error.code);
 				const preparedBySource = new Map(record.roots.flatMap(root => root.inputs?.gitWorkspace ? [[root.source, root.inputs.gitWorkspace.path] as const] : []));
@@ -820,7 +904,8 @@ export class ContinuationService {
 				const preparedPathFor = (root: (typeof record.roots)[number]): string => root.inputs?.gitWorkspace?.path ?? preparedBySource.get(root.source) ?? root.source;
 				const grants: ChildCapabilityManifest["grants"] = [];
 				for (const root of record.roots) {
-					const prepared = root.inputs?.gitWorkspace?.path ?? preparedBySource.get(root.source);
+					const shared = root.permission === "write" && root.git && record.task.workspace === "shared";
+					const prepared = root.inputs?.gitWorkspace?.path ?? preparedBySource.get(root.source) ?? (shared ? root.source : undefined);
 					if (root.permission === "write" && prepared) {
 						for (const relative of root.paths) {
 							const path = relative === "." || relative === "" ? prepared : join(prepared, relative);
@@ -848,19 +933,20 @@ export class ContinuationService {
 					guidanceParts.push(await prepareChildGuidance(root.source, prepared, record.inheritSkills ?? true, undefined, undefined, skills, ownRoot ? record.projectSkills : undefined));
 				}
 				const preparedGuidance = guidanceParts.length ? mergeChildGuidance(guidanceParts) : undefined;
-				const capability: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: record.task.role, cwd, grants, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission })) };
+				const capability: ChildCapabilityManifest = { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: record.task.role, cwd, grants, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission })), ...(record.task.may ? { may: record.task.may } : {}), ...(sharedWrites ? { sharedWrites } : {}), ...(definitions.get(record.task.role) ? { rolePrompt: definitions.get(record.task.role)!.systemPrompt } : {}) };
 				const native = store.nativePath(record);
 				const revision = await store.nativeRevision(record);
 				if (revision.leaf !== record.nativeLeaf) throw new ManagedError("native_leaf_mismatch");
 				await store.writerPhase(handle, "launch-intent");
 				const childProof = store.childProofBinding(handle, record.episode);
-				const result = await this.dependencies.runChild({ task: { ...parsed.tasks[0]!, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission, git: root.git, paths: root.paths })) }, role: getManagedRole(record.task.role, writes.length > 0), route: record.route!, cwd, sourceRoot, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), ...(preparedGuidance ? { preparedGuidance } : {}), prompt: message, approveProject: true, signal, managedProcessGroup: true,
+				const link = this.dependencies.peer?.openLink(record, capability);
+				const result = await this.dependencies.runChild({ ...(link ? { link: link.binding } : {}), task: { ...parsed.tasks[0]!, roots: record.roots.map(root => ({ id: root.id, source: root.source, path: preparedPathFor(root), permission: root.permission, git: root.git, paths: root.paths })) }, role: getManagedRole(record.task.role, writes.length > 0, definitions.get(record.task.role)?.systemPrompt), route: record.route!, cwd, sourceRoot, inheritSkills: record.inheritSkills ?? true, ...(parentSkills === undefined ? {} : { parentSkills }), ...(record.projectSkills === undefined ? {} : { projectSkills: record.projectSkills }), ...(preparedGuidance ? { preparedGuidance } : {}), prompt: message, approveProject: true, signal, managedProcessGroup: true,
 					guardExtensionPath: fileURLToPath(new URL("./worker-tools.ts", import.meta.url)),
 					managedWorkerScratch: scratch, ...(childProof ? { childProof } : {}), ...(writes[0]?.inputs ? { managedWorkerInputs: writes[0].inputs } : {}),
 					capability,
 					diagnosticSession: { path: native, ref: `managed/${handle}/native`, ownerSessionId: revision.sessionId, async removeUnused() {} },
 					onChildStarted: () => { telemetry.launchedChildren++; observer?.childStarted(handle); lifecycle.childStarted(); }, onChildSettled: () => { observer?.childStopped(handle); lifecycle.childSettled(); }, onActivity: lifecycle.activity,
-				}).finally(() => observer?.childStopped(handle));
+				}).finally(() => { observer?.childStopped(handle); link?.close(); });
 				result.id = record.handle; result.label = record.task.id;
 				result.executionStatus = result.telemetry?.childStarted === true ? result.status : result.telemetry?.childStarted === false ? "not-started" : "unavailable";
 				childResult = result;
@@ -871,7 +957,11 @@ export class ContinuationService {
 				if (record.state === "interrupted" && result.status === "succeeded") record.result = { ...result, status: "failed", finalization: { status: "failed", stage: "candidate-freeze", code: "worker_tools_unsettled" }, error: { code: "worker_tools_unsettled", message: "Worker tools did not settle." } };
 				// A dead parent may have left candidate Git writers behind. Fence before the first convergence write.
 				await store.beginFinalization(handle, record.episode); finalizationPending = true;
-				if (writes.length > 0 && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
+				if (sharedWrites) {
+					try { const written = await readSharedWrites(sharedWrites); result.changedPaths = written.paths; }
+					catch { /* Attribution is optional evidence; the working-tree diff remains authoritative. */ }
+				}
+				if (isolatedWriteRoots(record).length > 0 && result.status === "succeeded" && result.reportComplete && record.state === "idle") {
 					if (!enterConvergence()) record.result = { ...result, status: "aborted", executionStatus: result.status, finalization: { status: "failed", stage: "candidate-freeze", code: "aborted" }, error: { code: "aborted", message: "aborted" } };
 					else { finalizationStage = "candidate-freeze"; await freezeCandidate(store, record); result.changedPaths = record.candidate?.changedPaths ?? []; }
 				}
@@ -903,14 +993,21 @@ export class ContinuationService {
 
 export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial<ContinuationDependencies> = {}): ContinuationService {
 	let context: ExtensionContext | undefined;
+	let hub: PeerHub | undefined;
+	const bridge: PeerBridge = {
+		openLink: (record, capability) => hub?.openLink(record, capability),
+		turnStarted: (record, runId, initiator) => hub?.turnStarted(record, runId, initiator),
+		turnTerminal: (event, initiator) => hub?.turnTerminal(event, initiator),
+	};
 	const current = (event: AgentExecutionEvent) => context?.isProjectTrusted() && context.sessionManager.getSessionId() === event.owner.sessionId && (!event.owner.branchAnchor || context.sessionManager.getLeafId() === event.owner.branchAnchor || context.sessionManager.getBranch().some(entry => entry.id === event.owner.branchAnchor));
 	const publishFacts = (): void => {
 		if (!context) return;
 		try { pi.events.emit(EXECUTION_FACTS_EVENT, service.executionFacts(context.sessionManager.getSessionId(), context.sessionManager.getLeafId())); }
 		catch { /* Fact publication cannot fail an admitted execution. */ }
 	};
-	const service = new ContinuationService({ ...dependencies,
-		mainLoopYield: dependencies.mainLoopYield ?? createMainLoopYield(pi),
+	const mainLoopYield = dependencies.mainLoopYield ?? createMainLoopYield(pi);
+	const service = new ContinuationService({ peer: bridge, ...dependencies,
+		mainLoopYield,
 		onFactsChanged: () => { publishFacts(); dependencies.onFactsChanged?.(); },
 		onObserver: dependencies.onObserver ?? (snapshot => pi.events.emit(OBSERVER_EVENT, snapshot)),
 		onSessionViewChange: dependencies.onSessionViewChange ?? (() => pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {})),
@@ -924,6 +1021,11 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 			await dependencies.onWake?.(events);
 		},
 	});
+	hub = new PeerHub({ service, mainLoopYield, context: () => context,
+		appendEntry: (customType, data) => pi.appendEntry(customType, data),
+		sendToMain: (text, details) => pi.sendMessage({ customType: AGENT_MESSAGE_TYPE, content: text, display: true, details }, { deliverAs: "steer", triggerTurn: true }),
+	});
+	service.peerHub = hub;
 	registerRecoveryDiscovery(pi, service);
 	pi.events.on(EXECUTION_FACTS_REQUEST, (raw) => {
 		const accept = (raw as Partial<ProducerFactsRequest> | undefined)?.accept;
@@ -933,7 +1035,7 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 	});
 	pi.events.on(NOTICE_ACK, raw => {
 		const ack = raw as Partial<NoticeAck> | undefined;
-		if (ack?.version === 1 && ack.producer === "agents" && Array.isArray(ack.ids) && ack.ids.every(id => typeof id === "string")) service.acknowledgeNotices(ack.ids);
+		if (ack?.version === 1 && ack.producer === "agents" && Array.isArray(ack.ids) && ack.ids.every(id => typeof id === "string")) { service.acknowledgeNotices(ack.ids); void hub?.noticesShown(ack.ids); }
 	});
 	pi.events.on(SESSION_VIEW_REQUEST_EVENT, (data: unknown) => {
 		// Display-only request/reply: malformed or foreign requests never affect execution.
@@ -959,8 +1061,10 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 			}
 		})();
 	});
-	pi.on("session_start", async (_event, ctx) => { context = ctx; await service.reset(); publishFacts(); });
-	pi.on("session_tree", async (_event, ctx) => { await service.reset(); context = ctx; publishFacts(); });
+	pi.on("session_start", async (_event, ctx) => { context = ctx; await service.reset(); hub?.reset(); publishFacts(); });
+	// Results returned to the main agent count as shown once its next model request carries them.
+	pi.on("turn_start", () => { hub?.promoteShown("main"); });
+	pi.on("session_tree", async (_event, ctx) => { await service.reset(); hub?.reset(); context = ctx; publishFacts(); });
 	pi.on("agent_start", (_event, ctx) => { context = ctx; publishFacts(); });
 	pi.on("session_compact_failed", event => { if (event.aborted) service.suppressWake(); });
 	pi.on("input", event => { if (event.source === "interactive" || event.source === "rpc") service.allowWake(); });
@@ -970,31 +1074,18 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		return { messages: event.messages.filter(message => !(message.role === "custom" && message.customType === "agents.live-activity")) };
 	});
 	pi.on("tool_execution_end", event => {
-		if (event.toolName !== AGENT_SESSION_TOOL_NAME) return;
-		const details = event.result.details as SessionActionResult | undefined;
-		if (details?.schemaVersion === MANAGED_SESSION_VERSION) { service.acknowledge(details); publishFacts(); }
+		if (!PEER_TOOLS.includes(event.toolName)) return;
+		const details = event.result.details as Pick<SessionActionResult, "sessions"> & { schemaVersion?: number } | undefined;
+		if (details?.schemaVersion === MANAGED_SESSION_VERSION && Array.isArray(details.sessions)) { service.acknowledge(details); publishFacts(); }
 	});
-	pi.registerTool({
-		name: AGENT_SESSION_TOOL_NAME, label: "Agents",
-		description: AGENT_TOOL_DESCRIPTION,
-		promptSnippet: AGENT_TOOL_PROMPT_SNIPPET,
-		promptGuidelines: [...AGENT_TOOL_PROMPT_GUIDELINES],
-		parameters: AgentSessionToolSchema,
-		async execute(id, input, signal, onUpdate, ctx) {
-			context = ctx;
-			const details = await service.execute(input, ctx, signal, (tasks, elapsedMs) => onUpdate?.({ content: [{ type: "text", text: formatProgress(tasks, elapsedMs) }], details: undefined }), id);
-			publishFacts();
-			return { content: [{ type: "text", text: formatManagedContent(details) }], details };
-		},
-		renderResult(result, { expanded, isPartial }) {
-			return new Text(isPartial || !result.details ? result.content.filter(part => part.type === "text").map(part => part.text).join("\n") : formatManagedResult(result.details as SessionActionResult, expanded), 0, 0);
-		},
-	});
-	pi.on("tool_result", event => {
-		if (event.toolName !== AGENT_SESSION_TOOL_NAME) return;
-		const details = event.details as SessionActionResult | undefined;
-		if (details && details.schemaVersion === MANAGED_SESSION_VERSION) return { isError: !["accepted", "succeeded"].includes(details.status) };
-	});
-	pi.on("session_shutdown", async () => { context = undefined; await service.shutdown(); });
+	// Inside a managed child the guard owns these tools and forwards them to the invoking hub.
+	if (process.env[CHILD_MARKER_ENV] !== "1") for (const tool of peerToolDefinitions(async (op, args, signal, toolCallId, ctx) => {
+		context = ctx;
+		await hub!.start();
+		const outcome = await hub!.execute(op, args, hub!.mainCaller(), signal, toolCallId);
+		publishFacts();
+		return outcome;
+	})) pi.registerTool(tool);
+	pi.on("session_shutdown", async () => { context = undefined; await service.shutdown(); await hub?.shutdown(); });
 	return service;
 }

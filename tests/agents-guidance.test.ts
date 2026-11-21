@@ -36,11 +36,14 @@ async function fixture() {
 	return { root, agentDir, original, child, installed };
 }
 
+// The temporary tree can live below an actual context-file ancestor in managed tests.
+const contextInFixture = (root: string, files: Array<{ path: string; content: string }>) => files.filter(file => file.path.startsWith(root + "/")).map(file => file.content);
+
 describe("child native guidance bridge", () => {
 	it("inherits native catalog and original ancestors while snapshot context wins", async () => {
-		const { agentDir, original, child, installed } = await fixture();
-		const guidance = await prepareChildGuidance(original, child, true, agentDir);
-		assert.deepEqual(guidance.contextFiles.map(file => file.content), ["global context", "ancestor context", "snapshot override"]);
+		const { root, agentDir, original, child, installed } = await fixture();
+		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(root, "empty-home"));
+		assert.deepEqual(contextInFixture(root, guidance.contextFiles), ["global context", "ancestor context", "snapshot override"]);
 		assert.ok(guidance.skillPaths.includes(join(child, ".agents", "skills", "project-guide")));
 		assert.ok(!guidance.skillPaths.includes(join(original, ".agents", "skills", "project-guide")));
 		assert.ok(guidance.skillPaths.includes(join(agentDir, "skills", "global-guide")));
@@ -65,7 +68,7 @@ describe("child native guidance bridge", () => {
 		await writeFile(join(agentDir, "sibling-secret"), "private");
 		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"));
 		assert.ok(guidance.skillPaths.includes(namedMd));
-		const manifest = { version: 4 as const, cwd: child, role: "explorer" as const, grants: [{ permission: "read" as const, path: child }], roots: [],
+		const manifest = { version: 5 as const, cwd: child, role: "explorer" as const, grants: [{ permission: "read" as const, path: child }], roots: [],
 			guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } };
 		assert.equal((await authorizePath(manifest, "read", join(namedMd, "SKILL.md"))).allowed, true);
 		assert.equal((await authorizePath(manifest, "read", join(agentDir, "sibling-secret"))).allowed, false);
@@ -76,7 +79,7 @@ describe("child native guidance bridge", () => {
 		await writeFile(join(agentDir, "skills", "adjacent.txt"), "adjacent reference");
 		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"));
 		assert.ok(guidance.skillPaths.includes(join(agentDir, "skills", "standalone.md")));
-		const manifest = { version: 4 as const, cwd: child, role: "worker" as const, grants: [{ permission: "write" as const, path: child }], roots: [],
+		const manifest = { version: 5 as const, cwd: child, role: "worker" as const, grants: [{ permission: "write" as const, path: child }], roots: [],
 			guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } };
 		assert.equal((await authorizePath(manifest, "read", join(agentDir, "skills", "adjacent.txt"))).allowed, true);
 		assert.equal((await authorizePath(manifest, "write", join(agentDir, "skills", "adjacent.txt"))).allowed, false);
@@ -90,16 +93,16 @@ describe("child native guidance bridge", () => {
 		assert.ok(!guidance.skillPaths.includes(join(original, ".agents", "skills", "project-guide")));
 	});
 	it("an explicitly empty effective parent catalog does not rediscover excluded defaults", async () => {
-		const { agentDir, original, child } = await fixture();
+		const { root, agentDir, original, child } = await fixture();
 		const guidance = await prepareChildGuidance(original, child, true, agentDir, join(agentDir, "empty-home"), []);
 		assert.deepEqual(guidance.skillPaths, []);
-		assert.deepEqual(guidance.contextFiles.map(file => file.content), ["global context", "ancestor context", "snapshot override"]);
+		assert.deepEqual(contextInFixture(root, guidance.contextFiles), ["global context", "ancestor context", "snapshot override"]);
 	});
 	it("opt-out only disables catalog, not context", async () => {
-		const { agentDir, original, child } = await fixture();
+		const { root, agentDir, original, child } = await fixture();
 		const guidance = await prepareChildGuidance(original, child, false, agentDir);
 		assert.deepEqual(guidance.skillPaths, []);
-		assert.deepEqual(guidance.contextFiles.map(file => file.content), ["global context", "ancestor context", "snapshot override"]);
+		assert.deepEqual(contextInFixture(root, guidance.contextFiles), ["global context", "ancestor context", "snapshot override"]);
 	});
 	it("effective parent catalog keeps a custom skill reference root and drops temporary or disabled skills", async () => {
 		const { agentDir, original, child } = await fixture();

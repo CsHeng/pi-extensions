@@ -2,11 +2,11 @@ import type {
 	EffectiveRoute,
 	ExecutionProfile,
 	ThinkingProfile,
-	RoleName,
 	TaskError,
 	ThinkingLevel,
 } from "./contracts.ts";
-import type { EffectiveAgentConfig, RouteCandidateConfig } from "./config.ts";
+import { neutralRoute, type EffectiveAgentConfig, type RoleRouteConfig, type RouteCandidateConfig } from "./config.ts";
+import type { AgentRoleDefinition } from "./role-definitions.ts";
 
 export interface RouteModel {
 	provider: string;
@@ -38,6 +38,22 @@ export interface TaskRouteProfiles {
 export type RouteResolution =
 	| { ok: true; route: EffectiveRoute }
 	| { ok: false; error: TaskError };
+
+/** Share route selection with capacity admission, including for explicit model overrides. */
+export function resolveRoleRoute(
+	role: string,
+	config: EffectiveAgentConfig,
+	definition?: AgentRoleDefinition,
+): { route: RoleRouteConfig; roleRouteFallback?: string } {
+	const own = Object.hasOwn(config.routes, role) ? config.routes[role] : undefined;
+	if (own !== undefined) return { route: own };
+	const fallback = definition?.fallbackRoute;
+	if (fallback !== undefined && Object.hasOwn(config.routes, fallback)) {
+		const route = config.routes[fallback];
+		if (route !== undefined) return { route, roleRouteFallback: fallback };
+	}
+	return { route: neutralRoute(config.maxConcurrency), roleRouteFallback: "$parent" };
+}
 
 function parseModelReference(reference: string): { provider: string; model: string } | undefined {
 	const separator = reference.indexOf("/");
@@ -192,10 +208,11 @@ function resolveExplicitModelRoute(
 }
 
 export function resolveRoute(
-	role: RoleName,
+	role: string,
 	config: EffectiveAgentConfig,
 	context: RouteContext,
 	profiles: TaskRouteProfiles = {},
+	definition?: AgentRoleDefinition,
 ): RouteResolution {
 	const allModels = context.modelRegistry.getAll();
 	const availableModels = context.modelRegistry.getAvailable();
@@ -203,7 +220,7 @@ export function resolveRoute(
 		return resolveExplicitModelRoute(config, context, profiles, allModels, availableModels);
 	}
 
-	const roleRoute = config.routes[role];
+	const { route: roleRoute, roleRouteFallback } = resolveRoleRoute(role, config, definition);
 	const executionRoute = profiles.executionProfile === undefined ? undefined : roleRoute.executionProfiles[profiles.executionProfile];
 	const candidates = executionRoute?.candidates ?? roleRoute.candidates;
 	const mappedThinkingProfile = profiles.thinkingProfile === undefined ? undefined : config.thinkingProfiles[profiles.thinkingProfile];
@@ -246,6 +263,7 @@ export function resolveRoute(
 				thinking,
 				source: profileSource ?? executionRoute?.source ?? roleRoute.source,
 				candidateIndex: index,
+				...(roleRouteFallback === undefined ? {} : { roleRouteFallback }),
 				...(profiles.executionProfile === undefined ? {} : { executionProfileRequested: profiles.executionProfile }),
 				executionProfileApplied: executionRoute !== undefined,
 				...(profiles.thinkingProfile === undefined ? {} : { thinkingProfileRequested: profiles.thinkingProfile }),

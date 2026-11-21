@@ -25,7 +25,7 @@ test("managed refusals preserve field diagnostics without launching or reading c
 		[{ action: "join", runId: "run", taskId: "worker" }, "join", "unexpectedFields", ["taskId"]],
 	] as const) {
 		const result = await service.execute(request, ctx);
-		assert.equal(result.schemaVersion, 4);
+		assert.equal(result.schemaVersion, 5);
 		assert.equal(result.action, action);
 		assert.equal(result.status, "failed");
 		const rendered = JSON.parse(formatManagedContent(result));
@@ -45,7 +45,7 @@ test("managed refusals preserve field diagnostics without launching or reading c
 test("managed results retain actual model/thinking even on failed and historical results", () => {
 	const view: SessionView = { handle: "h", role: "worker", episode: 1, state: "interrupted", reportComplete: false, route,
 		result: { id: "task", role: "worker", status: "failed", output: "", stderr: "", usage: emptyUsage(), durationMs: 10, changedPaths: [], convergence: "not-applied", route, error: { code: "timeout", message: "fixture" } } };
-	for (const schemaVersion of [4] as const) {
+	for (const schemaVersion of [5] as const) {
 		const details: SessionActionResult = { schemaVersion, action: "create", status: "failed", sessions: [view] };
 		const content = JSON.parse(formatManagedContent(details));
 		assert.deepEqual(content.sessions[0].route, {

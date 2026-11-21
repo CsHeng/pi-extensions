@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CHILD_CAPABILITY_FAILURE_EVENT, HARD_LIMITS, type RunTelemetry } from "./contracts.ts";
 import { boundNativeObservation, collectNativeObservation, unavailableObservation, type NativeObservation } from "./observability.ts";
-import { MANAGED_LIMITS, AGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
+import { MANAGED_LIMITS } from "./session-contracts.ts";
+import { PEER_TOOL_NAMES } from "./peer-protocol.ts";
 import { LocalTimingRecorder, monotonicNow, type LocalTiming } from "./telemetry.ts";
 
 /** Native audit is optional; inability to record must never permit a rejected tool. */
@@ -10,7 +11,7 @@ export function recordCapabilityInvalidation(pi: Pick<ExtensionAPI, "appendEntry
 }
 
 const MAX_CUSTOM_BYTES = 64 * 1024;
-const DELEGATION_TOOLS = new Set([AGENT_SESSION_TOOL_NAME]);
+const DELEGATION_TOOLS = new Set<string>([PEER_TOOL_NAMES.invoke, PEER_TOOL_NAMES.wait]);
 export interface ObservedRun { telemetry: RunTelemetry; clockKey: string; originMs: number | null }
 export interface ParentObservation {
 	version: 1;

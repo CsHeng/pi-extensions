@@ -356,7 +356,7 @@ export async function runScheduledTasks(tasks: readonly NormalizedTask[], option
 				metrics.peakConcurrency = Math.max(metrics.peakConcurrency, activeChildren);
 				const roleChildren = (activeChildRoles.get(task.role) ?? 0) + 1;
 				activeChildRoles.set(task.role, roleChildren);
-				metrics.peakConcurrencyByRole[task.role] = Math.max(metrics.peakConcurrencyByRole[task.role], roleChildren);
+				(metrics.peakConcurrencyByRole as Record<string, number>)[task.role] = Math.max((metrics.peakConcurrencyByRole as Record<string, number>)[task.role] ?? 0, roleChildren);
 				const running = results.get(task.id);
 				if (running?.telemetry) running.telemetry.childStarted = true;
 				options.onChildConcurrency?.(activeChildren);

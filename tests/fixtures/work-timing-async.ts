@@ -99,7 +99,7 @@ export default function timingAsyncFixture(pi: ExtensionAPI): void {
 		streamSimple(model, input) {
 			const wire = JSON.stringify(input.messages);
 			bashSeen ||= wire.includes("TIMING_BASH_DONE");
-			agentSeen ||= wire.includes("Agent task timing-agent");
+			agentSeen ||= wire.includes("Full report: list_agents with name timing-agent");
 			timingLeaked ||= input.messages.some(message => (message as { customType?: unknown }).customType === WORK_TIMING_ENTRY_TYPE);
 			const call = turn++;
 			const stream = createAssistantMessageEventStream();
@@ -109,7 +109,7 @@ export default function timingAsyncFixture(pi: ExtensionAPI): void {
 				stream.push({ type: "start", partial: message });
 				const tool = call === 0 ? { name: "tasklist", args: { operation: "set", title: "Timing fixture", tasks: [{ id: "unfinished", title: "Keep this passive", status: "doing" }] } }
 					: call === 1 ? { name: "bash", args: { command: `i=0; while [ ! -f ${quote(gate)} ] && [ "$i" -lt 500 ]; do i=$((i+1)); sleep 0.02; done; [ -f ${quote(gate)} ] || exit 7; printf TIMING_BASH_DONE`, background: true, deadlineSeconds: 15 } }
-					: call === 2 ? { name: "agent", args: { action: "create", tasks: [{ id: "timing-agent", role: "explorer", objective: "Controlled offline lifetime", access: [{ permission: "read", scope: context!.cwd }] }] } } : undefined;
+					: call === 2 ? { name: "invoke_agent", args: { name: "timing-agent", role: "explorer", prompt: "Controlled offline lifetime", access: [{ permission: "read", scope: context!.cwd }] } } : undefined;
 				if (tool) {
 					const toolCall = { type: "toolCall" as const, id: `timing-call-${call}`, name: tool.name, arguments: tool.args };
 					message.content = [toolCall]; message.stopReason = "toolUse";

@@ -41,7 +41,7 @@ export class AgentInactivityCheckpoints {
 			if (this.watches.get(`${watch.runId}:${watch.handle}`) !== watch || watch.checkpoint) return;
 			const inactiveForMs = Math.max(0, this.now() - watch.lastActivityAt);
 			if (inactiveForMs < AGENT_INACTIVITY_CHECKPOINT_MS) { this.arm(watch); return; }
-			watch.checkpoint = { id: mintProductId(), disposition: "pending", summary: `Agent task ${watch.label} (handle ${watch.handle}) in run ${watch.runId}: inactive for ${formatDuration(inactiveForMs)}${watch.calls ? `; current tool calls: ${watch.calls}` : ""}; still running; it is not killed. Next actions: keep waiting, inspect, or cancel.` };
+			watch.checkpoint = { id: mintProductId(), disposition: "pending", summary: `Agent ${watch.label}: inactive for ${formatDuration(inactiveForMs)}${watch.calls ? `; current tool calls: ${watch.calls}` : ""}; still running; it is not killed. Next actions: keep waiting (wait_agents), check it (list_agents), or stop it (stop_agent).` };
 			this.changed();
 		}, remaining);
 	}

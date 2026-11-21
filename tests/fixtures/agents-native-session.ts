@@ -97,7 +97,6 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					}
 				}
 				const input = last?.role === "user" ? JSON.stringify(last.content) : "";
-				await import("node:fs/promises").then(fs => fs.appendFile("/tmp/dbg.txt", JSON.stringify({ text: text.slice(0,160), last: last?.role, mode: process.env.PI_EXTENSIONS_NATIVE_CONTEXT_MODE, cm: process.env.PI_EXTENSIONS_NATIVE_COMPACTION_MODE, err: Boolean(message.errorMessage), stop: message.stopReason, n: context.messages.length }) + "\n"));
 				if (process.env.PI_EXTENSIONS_APPEND_EXPECT_PARTS) {
 					const system = getCurrentSystemPrompt(context.messages);
 					const parts: string[] = JSON.parse(process.env.PI_EXTENSIONS_APPEND_EXPECT_PARTS);
@@ -161,38 +160,28 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					}
 					message.content = [{ type: "text", text: `catalog=${guide && system.includes(guide) ? 1 : 0};ancestor=${system.includes("ancestor context") ? 1 : 0};snapshot=${system.includes("snapshot override") ? 1 : 0};managed=${system.includes("unrelated managed context") ? 1 : 0};reads=${results.length};reference=${JSON.stringify(results).includes("reference marker") ? 1 : 0};forbidden=${system.includes(process.env.PI_EXTENSIONS_GUIDANCE_FORBIDDEN_PATH ?? "<no-forbidden-path>") ? 1 : 0}` }];
 				}
-				else if (text !== "SYNTHETIC_SUMMARY" && input.includes("parent-observation-fixture")) {
-					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1);
-					const priorText = prior?.role === "toolResult" ? prior.content.find((part) => part.type === "text") : undefined;
-					const view = priorText?.type === "text" ? JSON.parse(priorText.text).sessions[0] : undefined;
-					const arguments_ = input.includes("continue-parent-observation-fixture")
-						? { action: "continue", episodes: [{ handle: view.handle, expectedEpisode: view.episode, message: "host-worker-fixture" }] }
-						: { action: "create", tasks: [{ id: "worker", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.cwd() }] }] };
-					// A host re-delivery repeats the original tool call id; a new call gets a new one.
-					const priorCallId = input.includes("replay-parent-observation-fixture")
-						? context.messages.filter((item) => item.role === "assistant").flatMap((item) => Array.isArray(item.content) ? item.content : []).filter((part) => part.type === "toolCall" && (part as { name?: string }).name === "agent").map((part) => (part as { id?: string }).id).at(-1)
-						: undefined;
-					message.content = [{ type: "toolCall", id: priorCallId ?? `parent-${context.messages.filter((item) => item.role === "user").length}`, name: "agent", arguments: arguments_ }];
-					message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
-				}
-				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("nested-delegation-fixture")) {
-					// A managed child invokes the co-loaded typed delegation tool for an explicit scope.
-					const prior = context.messages.filter((item) => item.role === "toolResult" && item.toolName === "agent").at(-1) as { content?: Array<{ type?: string; text?: string }> } | undefined;
-					if (!prior) {
-						message.content = [{ type: "toolCall", id: "nested-delegation", name: "agent", arguments: { action: "create", tasks: [{ id: "nested", role: "worker", objective: "host-worker-fixture", access: [{ permission: "write", scope: process.env.PI_EXTENSIONS_NESTED_SCOPE ?? "." }] }] } }];
-						message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("parent-observation-fixture")) {
+					const parentUser = context.messages.findLast(item => item.role === "user");
+					if (JSON.stringify(parentUser?.content).includes("parent-observation-fixture")) {
+						const count = context.messages.filter(item => item.role === "user").length;
+						const next = last?.role !== "toolResult" ? (count === 1
+							? { name: "invoke_agent", arguments: { name: "worker", role: "worker", prompt: "host-worker-fixture", workspace: "isolated", access: [{ permission: "write", scope: process.cwd() }] } }
+							: { name: "message_agent", arguments: { to: "worker", message: "host-worker-fixture" } })
+							: last.toolName === "wait_agents" ? undefined
+							: { name: "wait_agents", arguments: { names: ["worker"], waitSeconds: 20 } };
+						if (next) {
+							message.content = [{ type: "toolCall", id: `parent-${count}-${next.name}`, ...next }];
+							message.stopReason = "toolUse"; stream.push({ type: "done", reason: "toolUse", message }); stream.end(); return;
+						}
 					}
-					const part = prior.content?.find((item) => item.type === "text");
-					let parsed: { status?: string; error?: { code?: string } } = {};
-					try { parsed = JSON.parse(part?.text ?? "{}"); } catch { parsed = {}; }
-					message.content = [{ type: "text", text: `nested=${parsed.status ?? "?"};code=${parsed.error?.code ?? "none"}` }];
 				}
 				if (input.includes("after-child-compaction-fixture") && !JSON.stringify(context.messages).includes("SYNTHETIC_SUMMARY")) {
 					message.stopReason = "error"; message.errorMessage = "fixture_requires_retained_summary";
 					stream.push({ type: "error", reason: "error", error: message }); stream.end(); return;
 				}
 				if (text !== "SYNTHETIC_SUMMARY" && (input.includes("host-worker-fixture") || input.includes("host-reviewer-fixture") || input.includes("host-explorer-fixture"))) {
-					const count = context.messages.filter((item) => item.role === "user").length;
+					// Agent messages reach the provider as user-role context; the fixture counts turns, not deliveries.
+					const count = context.messages.filter((item) => item.role === "user" && !/^\[(Message|Result) from /.test(typeof item.content === "string" ? item.content : JSON.stringify(item.content).replace(/^\[\{"type":"text","text":"/, ""))).length;
 					if (input.includes("capability-invalidated-fixture") && process.env.PI_EXTENSIONS_NATIVE_REPLACE_ROOT) {
 						const root = process.env.PI_EXTENSIONS_NATIVE_REPLACE_ROOT;
 						await rename(root, `${root}.old`);

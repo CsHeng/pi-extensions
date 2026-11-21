@@ -36,7 +36,7 @@ export default function panelsFixture(pi: ExtensionAPI): void {
 	const replySession = (requestId: string) => {
 		if (!ctx || !snapshot) return;
 		pi.events.emit(SESSION_VIEW_EVENT, {
-			version: 4, requestId, ...owner(), generation, revision,
+			version: 5, requestId, ...owner(), generation, revision,
 			inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 			summary: { agents: 2, acceptedEpisodes: 2, liveAgents: 2, states: { idle: 0, queued: 0, running: 2, interrupted: 0, closed: 0 } },
 			live: snapshot.tasks, usage: projectRecordedUsage([]),

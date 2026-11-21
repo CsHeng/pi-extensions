@@ -47,7 +47,7 @@ test("real native worker reopens one history and edits the same state with host 
 			task: graph.tasks[0]!, role: { ...getRole("worker"), tools: [...getRole("worker").tools, "bash"] }, route, cwd,
 			guardExtensionPath: new URL("../extensions/agents/worker-tools.ts", import.meta.url).pathname,
 			managedWorkerScratch: scratch,
-			capability: { version: 4, cwd, role: "worker", grants: [{ permission: "write", path: cwd }], roots: [] },
+			capability: { version: 5, cwd, role: "worker", grants: [{ permission: "write", path: cwd }], roots: [] },
 			prompt: `host-worker-fixture${count === 3 ? " done-only-thinking-fixture" : ""}`, approveProject: false,
 			diagnosticSession: { path, ref: "managed/native", async removeUnused() {} },
 			invocation: { command: process.execPath, args: [new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url).pathname, "-e", new URL("fixtures/agents-native-session.ts", import.meta.url).pathname, "--no-context-files"] },
@@ -157,7 +157,7 @@ test("typed subdelegation cannot widen enclosing grants while a contained task s
 	const f = await serviceFixture(t);
 	const outside = join(f.base, "outside"); await mkdir(outside); await promisify(execFile)("git", ["init", "-q", outside]);
 	// The invoking child owns a write grant only inside f.repo.
-	const enclosing = { version: 4 as const, role: "worker" as const, cwd: f.repo, grants: [{ permission: "write" as const, path: f.repo }], roots: [] };
+	const enclosing = { version: 5 as const, role: "worker" as const, cwd: f.repo, grants: [{ permission: "write" as const, path: f.repo }], roots: [] };
 	let launches = 0;
 	const service = new ContinuationService({ ...f.dependencies, enclosingCapability: async () => enclosing, runChild: async options => { launches++; return f.dependencies.runChild(options); } });
 	const outsideTask = { action: "create", tasks: [{ id: "nested", role: "worker", objective: "x", access: [{ permission: "write", scope: outside }] }] };
@@ -205,7 +205,7 @@ test("known enclosing capability survives cwd differences and packet failures fa
 	});
 	process.env[CHILD_MARKER_ENV] = "1"; process.env[CHILD_CAPABILITY_ENV] = path;
 	await assert.rejects(defaultEnclosingCapability(), { code: "enclosing_capability_unavailable" });
-	const cap = { version: 4, role: "worker", cwd: base, grants: [{ permission: "read", path: base }], roots: [] };
+	const cap = { version: 5, role: "worker", cwd: base, grants: [{ permission: "read", path: base }], roots: [] };
 	await writeFile(path, JSON.stringify(cap), { mode: 0o600 });
 	assert.notEqual(base, process.cwd());
 	assert.deepEqual((await defaultEnclosingCapability())?.grants, cap.grants, "cwd is not an authority discriminator");
@@ -400,7 +400,7 @@ test("an untyped failure keeps its managed code and a bounded, path-free cause",
 	}
 });
 
-test("managed service keeps fixed inputs, replays inertly, restores history and explicitly refreshes before repair/review", async (t) => {
+test("managed service keeps fixed inputs, replays inertly, refreshes isolated writers and resumes readers against live source", async (t) => {
 	const f = await serviceFixture(t);
 	const first = await f.service.execute(createWorker(f.repo), f.ctx, undefined, undefined, "fixedcreate");
 	assert.equal(first.status, "succeeded", JSON.stringify(first));
@@ -436,7 +436,7 @@ test("managed service keeps fixed inputs, replays inertly, restores history and 
 	assert.equal(third.status, "succeeded", JSON.stringify(third));
 	assert.match(third.sessions[0]!.result!.output, /users=3/);
 	assert.equal((await restored.execute({ action: "apply", handle, expectedEpisode: 3, candidateId: third.sessions[0]!.candidate!.id }, f.ctx)).status, "succeeded");
-	assert.equal((await restored.execute({ action: "refresh", handle: reviewer.sessions[0]!.handle, expectedEpisode: 1 }, f.ctx)).status, "succeeded");
+	assert.equal((await restored.execute({ action: "refresh", handle: reviewer.sessions[0]!.handle, expectedEpisode: 1 }, f.ctx)).error?.code, "not_isolated", "a live reader has no private input to refresh");
 	const reviewAgain = await restored.execute({ action: "continue", episodes: [{ handle: reviewer.sessions[0]!.handle, expectedEpisode: 1, message: "host-reviewer-fixture" }] }, f.ctx);
 	assert.equal(reviewAgain.status, "succeeded", JSON.stringify(reviewAgain));
 	assert.match(reviewAgain.sessions[0]!.result!.output, /users=2.*candidate-3/);

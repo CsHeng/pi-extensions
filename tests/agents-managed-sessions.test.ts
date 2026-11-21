@@ -123,7 +123,7 @@ test("above-threshold storage warns without blocking allocation or deleting any 
 	const observation = join(store.path(record.handle), "observation_1.json");
 	const observed = await readFile(observation);
 	assert.equal((await store.allocate(owner, "another", tasks.map(task => ({ ...task, id: `${task.id}b` })))).fresh, true);
-	await store.completeBatch(owner, "request", { schemaVersion: 4, action: "create", status: "succeeded", sessions: [store.view(record)] });
+	await store.completeBatch(owner, "request", { schemaVersion: 5, action: "create", status: "succeeded", sessions: [store.view(record)] });
 	assert.deepEqual(await readFile(observation), observed);
 	assert.deepEqual(await readFile(registry), original);
 	assert.deepEqual(await readFile(native), initialNative);
@@ -316,7 +316,7 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 		await store.save(record);
 	});
 	const legacyFile = join(store.path(legacy.handle), "registry.json");
-	await writeFile(legacyFile, JSON.stringify({ ...JSON.parse(await readFile(legacyFile, "utf8")), version: 2 }), { mode: 0o600 });
+	await writeFile(legacyFile, JSON.stringify({ ...JSON.parse(await readFile(legacyFile, "utf8")), version: 4 }), { mode: 0o600 });
 	await store.withSession(runner.handle, owner, async record => {
 		record.state = "running"; record.episode = 2;
 		record.requests.push({ id: "run1", fingerprint: fingerprint("one"), episode: 1, state: "complete" }, { id: "run2", fingerprint: fingerprint("two"), episode: 2, state: "running" });

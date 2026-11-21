@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { defaultConfig, loadConfig, parseConfig } from "../extensions/agents/config.ts";
-import { resolveRoute, type RouteModel, type RouteRegistry } from "../extensions/agents/routing.ts";
+import type { AgentRoleDefinition } from "../extensions/agents/role-definitions.ts";
+import { resolveRoleRoute, resolveRoute, type RouteModel, type RouteRegistry } from "../extensions/agents/routing.ts";
 
 function canonical(model: RouteModel): string {
 	return `${model.provider}/${model.id}`;
@@ -84,6 +85,64 @@ test("neutral configuration inherits the exact parent route when overrides are o
 			thinkingOverrideRequested: false,
 		});
 	}
+});
+
+const investigator: AgentRoleDefinition = {
+	name: "code-investigator",
+	description: "Find the cause.",
+	systemPrompt: "Investigate the reported problem.",
+	source: "project",
+	may: { message: [], roster: false, invoke: false },
+	workspace: "shared",
+	fallbackRoute: "explorer",
+};
+
+test("an open role uses its configured route and capacity before its role definition's fallback", () => {
+	const config = parseConfig({
+		routes: {
+			explorer: { candidates: [{ model: canonical(fast), thinking: "low" }], maxConcurrency: 4 },
+			"code-investigator": { candidates: [{ model: canonical(deep), thinking: "high" }], maxConcurrency: 2 },
+		},
+	});
+	const selected = resolveRoute(investigator.name, config, context([fast, deep]), {}, investigator);
+	assert.ok(selected.ok);
+	assert.equal(selected.route.model, "deep");
+	assert.equal(selected.route.roleRouteFallback, undefined);
+	assert.equal(resolveRoleRoute(investigator.name, config, investigator).route.maxConcurrency, 2);
+});
+
+test("a configured fallback supplies the route, execution profiles and capacity for an open role", () => {
+	const config = parseConfig({
+		routes: { explorer: {
+			candidates: [{ model: canonical(fast), thinking: "low" }],
+			executionProfiles: { deep: { candidates: [{ model: canonical(deep), thinking: "high" }] } },
+			maxConcurrency: 3,
+		} },
+	});
+	const selected = resolveRoute(investigator.name, config, context([fast, deep]), { executionProfile: "deep" }, investigator);
+	assert.ok(selected.ok);
+	assert.equal(selected.route.model, "deep");
+	assert.equal(selected.route.executionProfileApplied, true);
+	assert.equal(selected.route.roleRouteFallback, "explorer");
+	assert.equal(resolveRoleRoute(investigator.name, config, investigator).route.maxConcurrency, 3);
+	const unavailable = resolveRoute(investigator.name, config, context([parent]), {}, investigator);
+	assert.equal(unavailable.ok, false, "an unavailable configured fallback does not retry through the parent");
+});
+
+test("an undeclared or unconfigured fallback reports the neutral parent route", () => {
+	const config = parseConfig({ maxConcurrency: 7 });
+	for (const definition of [undefined, { ...investigator, fallbackRoute: "constructor" }]) {
+		const selected = resolveRoute(investigator.name, config, context([parent]), {}, definition);
+		assert.ok(selected.ok);
+		assert.equal(selected.route.model, "parent");
+		assert.equal(selected.route.source, "parent");
+		assert.equal(selected.route.roleRouteFallback, "$parent");
+		assert.equal(resolveRoleRoute(investigator.name, config, definition).route.maxConcurrency, 7);
+	}
+	const explicit = resolveRoute(investigator.name, config, context([parent, deep]), { model: canonical(deep) }, investigator);
+	assert.ok(explicit.ok);
+	assert.equal(explicit.route.model, "deep");
+	assert.equal(explicit.route.roleRouteFallback, undefined, "an exact model override does not use the fallback route");
 });
 
 test("ordered user candidates skip missing and unauthenticated models without consulting the cycling subset", () => {
@@ -539,7 +598,10 @@ test("configuration accepts user concurrency and rejects invalid values or unkno
 	assert.deepEqual(Object.values(overlay.roles).map(role => role.inheritSkills), [true, false, true]);
 	assert.deepEqual(Object.values(config.roles).map(role => role.inheritSkills), [true, true, true]);
 	assert.throws(() => parseConfig({ roles: { reviewer: { inheritSkills: "false" } } }), /must be a boolean/);
-	assert.throws(() => parseConfig({ roles: { observer: { inheritSkills: false } } }), /unsupported fields/);
+	assert.throws(() => parseConfig({ roles: { Observer: { inheritSkills: false } } }), /invalid role name/);
+	assert.throws(() => parseConfig({ routes: { "bad_role": { maxConcurrency: 1 } } }), /invalid role name/);
+	assert.throws(() => parseConfig({ routes: { "custom-role": { uncertain: true } } }), /unsupported fields/);
+	assert.throws(() => parseConfig({ roles: { "custom-role": {} } }), /must be a boolean/);
 	assert.throws(() => parseConfig({ roles: { reviewer: { context: false } } }), /unsupported fields/);
 	assert.throws(() => parseConfig({ maxConcurrency: 0 }), /positive safe integer/);
 	assert.throws(() => parseConfig({ routes: { explorer: { maxConcurrency: 1.5 } } }), /positive safe integer/);

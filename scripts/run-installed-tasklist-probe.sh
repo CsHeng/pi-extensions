@@ -40,7 +40,7 @@ const packageRoot = process.env.PI_EXTENSIONS_PROBE_PACKAGE_ROOT ?? "";
 
 const isPackagePath = (value: unknown): boolean =>
 	typeof value === "string" && packageRoot.length > 0 && (value === packageRoot || value.startsWith(packageRoot + "/"));
-const publicNames = ["agent", "bash", "tasklist"];
+const publicNames = [...["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"], "bash", "tasklist"];
 
 export default function probe(pi: ExtensionAPI): void {
 	pi.registerCommand("tasklist-probe", {
@@ -48,7 +48,7 @@ export default function probe(pi: ExtensionAPI): void {
 		handler: async () => {
 			const tools = pi.getAllTools();
 			const tool = tools.find((candidate) => candidate.name === "tasklist");
-			const managed = tools.some((candidate) => candidate.name === "agent");
+			const managed = ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"].every(name => tools.some(candidate => candidate.name === name));
 			const catalog = publicNames.every((name) => {
 				const matches = tools.filter((candidate) => candidate.name === name);
 				return matches.length === 1 && isPackagePath(matches[0]?.sourceInfo?.path);
@@ -118,7 +118,7 @@ export default function probe(pi: ExtensionAPI): void {
 			const commands = pi.getCommands().map((command) => command.name);
 			pi.appendEntry("tasklist-coload", {
 				tasklist: tools.includes("tasklist"),
-				managed: tools.includes("agent"),
+				managed: ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"].every(name => tools.includes(name)),
 				agents: commands.includes("agents"),
 				ui: commands.includes("agents-ui"),
 			});

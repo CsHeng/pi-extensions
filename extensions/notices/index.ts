@@ -44,7 +44,7 @@ export default function noticesExtension(pi: ExtensionAPI): void {
 		if (next.kind !== "notices") return next;
 		const tools = pi.getActiveTools();
 		const reserved = new Set(scheduled.map(notice => noticeKey(notice.producer, notice.id)));
-		const notices = next.notices.filter(notice => !admitted.has(noticeKey(notice.producer, notice.id)) && !reserved.has(noticeKey(notice.producer, notice.id)) && tools.includes(notice.producer === "async-bash" ? "bash" : "agent"));
+		const notices = next.notices.filter(notice => !admitted.has(noticeKey(notice.producer, notice.id)) && !reserved.has(noticeKey(notice.producer, notice.id)) && tools.includes(notice.producer === "async-bash" ? "bash" : "list_agents"));
 		if (notices.length === next.notices.length) return next;
 		if (notices.length === 0) return { kind: "none", text: "", notices: [] };
 		return { kind: "notices", text: notices.map(notice => notice.summary.trim()).join("\n"), notices };

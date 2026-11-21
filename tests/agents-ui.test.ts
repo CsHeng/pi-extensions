@@ -343,7 +343,7 @@ function historyRow(overrides: Partial<SessionViewHistoryRow> = {}): SessionView
 
 function sessionReply(overrides: Partial<SessionViewReply> = {}): SessionViewReply {
 	return {
-		version: 4,
+		version: 5,
 		requestId: "ui-1",
 		ownerSessionId: "parent_session-1",
 		anchor: "leaf_entry-1",
@@ -770,7 +770,7 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	pi.events.emit(OBSERVER_EVENT, snapshot());
 	await openWith(pi, ctx);
 	const first = lastRequest(pi);
-	assert.equal(first.version, 4);
+	assert.equal(first.version, 5);
 	assert.equal(first.page, 0);
 	assert.match(first.requestId, /^[A-Za-z0-9]+$/);
 	// A late reply for an older request cannot replace the pending one.

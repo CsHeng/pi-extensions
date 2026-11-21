@@ -20,7 +20,7 @@ async function fixture(t: test.TestContext) {
  await git("init", "-q"); await writeFile(join(root, "src/a"), "old\n"); await writeFile(join(root, "outside"), "outside secret\n");
  await git("add", "."); await git("commit", "-qm", "first"); const first = await git("rev-parse", "HEAD");
  await writeFile(join(root, "src/a"), "new\n"); await git("add", "."); await git("commit", "-qm", "second"); const second = await git("rev-parse", "HEAD");
- const cap: NormalizedChildCapability = { version: 4, role: "reviewer", cwd: root, grants: [{ permission: "read", path: join(root, "src") }], roots: [] };
+ const cap: NormalizedChildCapability = { version: 5, role: "reviewer", cwd: root, grants: [{ permission: "read", path: join(root, "src") }], roots: [] };
  const query = (input: Record<string, unknown>, signal?: AbortSignal) => queryGitRead(cap, { repository: root, paths: ["src/a"], ...input }, signal);
  const unchanged = async () => ({ index: await readFile(join(root, ".git/index")), config: await readFile(join(root, ".git/config")), refs: await git("for-each-ref", "--format=%(refname) %(objectname)"), source: await readFile(join(root, "src/a")) });
  return { base, root, git, first, second, cap, query, unchanged };
@@ -190,7 +190,7 @@ test("bounded Git process timeout and in-flight cancellation reap the owned proc
 test("a replaced writable selector anchor fails before any Git process starts", async t => {
  const f = await fixture(t);
  const srcInfo = await lstat(join(f.root, "src"));
- const cap: NormalizedChildCapability = { version: 4, role: "worker", cwd: f.root, grants: [{ permission: "write", path: join(f.root, "src"), anchor: { path: join(f.root, "src"), dev: srcInfo.dev, ino: srcInfo.ino } }], roots: [] };
+ const cap: NormalizedChildCapability = { version: 5, role: "worker", cwd: f.root, grants: [{ permission: "write", path: join(f.root, "src"), anchor: { path: join(f.root, "src"), dev: srcInfo.dev, ino: srcInfo.ino } }], roots: [] };
  const canary = join(f.base, "GIT_RAN");
  const bin = join(f.base, "bin"); await mkdir(bin);
  await writeFile(join(bin, "git"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(canary)}, 'ran'); process.exit(0);\n`);
@@ -216,7 +216,7 @@ test("a replaced writable selector anchor fails before any Git process starts", 
 
 test("Git reads preserve write-includes-read after an authorized atomic leaf replacement", async t => {
  const f = await fixture(t); const parent = await lstat(join(f.root, "src")); const before = await lstat(join(f.root, "src/a"));
- const cap: NormalizedChildCapability = { version: 4, role: "worker", cwd: f.root, roots: [], grants: [
+ const cap: NormalizedChildCapability = { version: 5, role: "worker", cwd: f.root, roots: [], grants: [
   { permission: "read", path: join(f.root, "src/a"), pin: { dev: before.dev, ino: before.ino } },
   { permission: "write", path: join(f.root, "src/a"), anchor: { path: join(f.root, "src"), dev: parent.dev, ino: parent.ino } },
  ] };
@@ -229,7 +229,7 @@ test("a fresh empty repository remains readable without extra Git environment", 
  const base = await mkdtemp(join(tmpdir(), "git-read-empty-")); const root = join(base, "repo"); await mkdir(root);
  t.after(() => rm(base, { recursive: true, force: true }));
  await exec("git", ["-C", root, "init", "-q"], { env });
- const cap: NormalizedChildCapability = { version: 4, role: "reviewer", cwd: root, grants: [{ permission: "read", path: root }], roots: [] };
+ const cap: NormalizedChildCapability = { version: 5, role: "reviewer", cwd: root, grants: [{ permission: "read", path: root }], roots: [] };
  const result = await queryGitRead(cap, { operation: "status", repository: root, paths: ["."] });
  assert.equal(result.ok, true, JSON.stringify(result));
  assert.equal(result.operation, "status");

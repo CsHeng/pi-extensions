@@ -10,7 +10,7 @@ import { archiveBucket, archiveFilename, nativeArchiveDirectory, projectBucket }
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { NormalizedTask } from "./graph.ts";
-import { AgentTaskSchema, type EffectiveRoute, type TaskResult } from "./contracts.ts";
+import { AgentTaskSchema, ROLE_NAME_PATTERN, type EffectiveRoute, type TaskResult } from "./contracts.ts";
 import { Check } from "typebox/value";
 import { Type } from "typebox";
 import { validateGraphStructure } from "./graph.ts";
@@ -83,11 +83,20 @@ export interface ManagedRecord {
 	/** A scoped recovery proved quiescence for this episode; never an execution result. */
 	reconciledEpisode?: number;
 	release?: { status: "pending" | "partial" | "complete"; remaining: string[] };
-	dispatch?: { runId: string; generation: string; toolCallId: string; taskId: string };
+	dispatch?: { runId: string; generation: string; toolCallId: string; taskId: string; initiator?: string };
+	/** Name of the agent that invoked this one, or "main" for the invoking model. */
+	assigner?: string;
 	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution; error?: { code: string; detail?: string }; runId?: string; generation?: string }>;
 }
 export function managedWriteRoots(record: ManagedRecord): ManagedRootState[] {
 	return record.roots.filter((root) => root.permission === "write" && root.git);
+}
+/**
+ * Writable roots that run in a private worktree and freeze a candidate; shared writers edit the checkout.
+ * invoke_agent always records the workspace (shared by default); an engine-level task without one is isolated.
+ */
+export function isolatedWriteRoots(record: ManagedRecord): ManagedRootState[] {
+	return record.task.workspace === "shared" ? [] : managedWriteRoots(record);
 }
 /** Per-root owned-resource release fact, derived from that root's own state rather than the aggregate status. */
 function rootReleaseStatus(record: ManagedRecord, rootId: string): "pending" | "remaining" | "released" {
@@ -115,7 +124,7 @@ export interface SessionInventoryEntry {
 	label?: string;
 	elapsedMs?: number;
 	route: ObserverTask["route"];
-	role: "worker" | "reviewer" | "explorer";
+	role: string;
 	/** Durable managed state; persisted running/queued is not proof that a child is currently alive. */
 	state: ManagedState;
 	episode: number;
@@ -173,7 +182,7 @@ const fileStateSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("file"), mode: Type.Integer({ minimum: 0, maximum: 0o777 }), digest: digestSchema }, { additionalProperties: false }),
 	Type.Object({ kind: Type.Literal("symlink"), mode: Type.Integer({ minimum: 0, maximum: 0o777 }), link: Type.String({ maxLength: 4096 }) }, { additionalProperties: false }),
 ]);
-const resultSchema = Type.Object({ id: productId, label: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), role: Type.Union([Type.Literal("worker"), Type.Literal("reviewer"), Type.Literal("explorer")]),
+const resultSchema = Type.Object({ id: productId, label: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), role: Type.String({ pattern: ROLE_NAME_PATTERN }),
 	status: Type.String({ pattern: "^(pending|running|succeeded|failed|blocked|aborted)$" }),
 	executionStatus: Type.Optional(Type.String({ pattern: "^(pending|running|succeeded|failed|blocked|aborted|not-started|unavailable)$" })),
 	finalization: Type.Optional(Type.Object({ status: Type.Literal("failed"), stage: Type.Union([Type.Literal("native-validation"), Type.Literal("candidate-freeze"), Type.Literal("result-save")]), code: hostId, reason: Type.Optional(causeSchema) }, { additionalProperties: false })),
@@ -207,13 +216,14 @@ const executionSchema = Type.Object({ startedAtMs: Type.Number({ minimum: 0 }), 
 	Type.Object({ available: Type.Literal(true), extensionEpoch: hostId, configurationEpoch: hostId }, { additionalProperties: false }),
 ]) }, { additionalProperties: false });
 const ownedRootSchema = Type.Object({ id: productId, destination: Type.String(), status: Type.String(), recovery: Type.Optional(Type.Literal("required")), release: Type.String() }, { additionalProperties: false });
-const viewSchema = Type.Object({ handle: productId, label: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), role: Type.String({ pattern: "^(worker|reviewer|explorer)$" }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), release: Type.Optional(Type.Object({ status: Type.Union([Type.Literal("pending"), Type.Literal("partial"), Type.Literal("complete")]), remaining: Type.Array(Type.String(), { maxItems: 32 }) }, { additionalProperties: false })), roots: Type.Optional(Type.Array(ownedRootSchema, { maxItems: 8 })), requestError: Type.Optional(Type.Object({ code: hostId, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false });
+const viewSchema = Type.Object({ handle: productId, label: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), role: Type.String({ pattern: ROLE_NAME_PATTERN }), episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }), reportComplete: Type.Boolean(), result: Type.Optional(resultSchema), candidate: Type.Optional(candidateSchema), retained: Type.Optional(Type.Boolean()), execution: Type.Optional(executionSchema), route: Type.Optional(Type.Object({})), release: Type.Optional(Type.Object({ status: Type.Union([Type.Literal("pending"), Type.Literal("partial"), Type.Literal("complete")]), remaining: Type.Array(Type.String(), { maxItems: 32 }) }, { additionalProperties: false })), roots: Type.Optional(Type.Array(ownedRootSchema, { maxItems: 8 })), requestError: Type.Optional(Type.Object({ code: hostId, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false });
 const batchSchema = Type.Object({ version: storageVersion, fingerprint: digestSchema, handles: Type.Array(productId, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions, uniqueItems: true }), complete: Type.Boolean(), requestFingerprint: Type.Optional(digestSchema), response: Type.Optional(Type.Object({ schemaVersion: storageVersion, action: Type.Literal("create"), status: Type.String({ pattern: "^(accepted|succeeded|partial|failed|aborted)$" }), kind: Type.Optional(Type.String()), runId: Type.Optional(productId), generation: Type.Optional(hostId), sessions: Type.Array(viewSchema, { minItems: 1, maxItems: MANAGED_LIMITS.maxSessions }), error: Type.Optional(Type.Object({ code: hostId, detail: Type.Optional(causeSchema) }, { additionalProperties: false })) }, { additionalProperties: false })) }, { additionalProperties: false });
 const recordSchema = Type.Object({
 	version: storageVersion, handle: productId, execution: Type.Optional(executionSchema),
 	owner: Type.Object({ repo: Type.String(), parentSessionId: hostId, anchor: Type.Union([hostId, Type.Null()]) }, { additionalProperties: false }),
 	task: AgentTaskSchema, roots: Type.Array(rootSchema, { maxItems: 32 }), state: Type.String({ pattern: "^(idle|queued|running|interrupted|closed)$" }),
-	dispatch: Type.Optional(Type.Object({ runId: productId, generation: hostId, toolCallId: Type.String({ maxLength: 256 }), taskId: productId }, { additionalProperties: false })),
+	dispatch: Type.Optional(Type.Object({ runId: productId, generation: hostId, toolCallId: Type.String({ maxLength: 256 }), taskId: productId, initiator: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })) }, { additionalProperties: false })),
+	assigner: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
 	episode: Type.Integer({ minimum: 0, maximum: MANAGED_LIMITS.maxEpisodes }), nativeLeaf: Type.Union([hostId, Type.Null()]),
 	native: Type.Optional(Type.Object({ bucket: Type.String({ maxLength: 255, pattern: archiveBucket.source }), filename: Type.String({ pattern: archiveFilename.source }) }, { additionalProperties: false })),
 	route: Type.Optional(Type.Object({})), inheritSkills: Type.Optional(Type.Boolean()),
@@ -281,6 +291,8 @@ export class ManagedSessionStore {
 		return join(this.sessions, bucket, "agents", filename);
 	}
 	nativeCwd(record: ManagedRecord): string {
+		const shared = managedWriteRoots(record);
+		if (shared.length > 0 && record.task.workspace === "shared") return shared[0]!.source;
 		const writes = managedWriteRoots(record);
 		const roots = join(this.path(record.handle), "roots");
 		return writes.length === 1 ? join(roots, writes[0]!.id) : roots;
@@ -471,6 +483,23 @@ export class ManagedSessionStore {
 			if (views.length > MANAGED_LIMITS.maxSessions) throw new ManagedError("managed_session_limit");
 		}
 		return views;
+	}
+	/** Agent names bound in this parent session, across branches and including released agents. */
+	async namedRecords(owner: CurrentOwner): Promise<Array<{ name: string; handle: string }>> {
+		let names: string[];
+		try { await this.ensure(false); names = (await readdir(this.root, { withFileTypes: true })).map((entry) => entry.name).filter((name) => safeHandle(name)); }
+		catch (error) { if (missing(error)) return []; throw error; }
+		const bound: Array<{ name: string; handle: string }> = [];
+		for (const handle of names) {
+			try {
+				const raw = await readJson<unknown>(join(this.path(handle), "registry.json"));
+				if (shallowVersion(raw) !== MANAGED_SESSION_VERSION) continue;
+				const record = raw as ManagedRecord;
+				if (record.owner?.repo !== owner.repo || record.owner?.parentSessionId !== owner.parentSessionId || typeof record.task?.id !== "string") continue;
+				bound.push({ name: record.task.id, handle });
+			} catch { /* Unreadable records hold no name this session can address. */ }
+		}
+		return bound;
 	}
 	/** Read-only retained inventory across the owner's session, including closed and off-branch history. */
 	async inventory(owner: CurrentOwner): Promise<SessionInventoryResult> {

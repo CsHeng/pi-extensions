@@ -1,9 +1,9 @@
 import type { SessionView } from "../agents/session-contracts.ts";
 
 /** Execution transport only: never a verification judgment or a task command. */
-export const AGENT_EXECUTION_EVENT = "agents.execution.v4";
+export const AGENT_EXECUTION_EVENT = "agents.execution.v5";
 export interface AgentExecutionEvent {
-	version: 4;
+	version: 5;
 	eventId: string;
 	kind: "task-terminal" | "run-terminal";
 	runId: string;

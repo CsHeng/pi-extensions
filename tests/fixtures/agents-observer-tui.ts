@@ -28,7 +28,7 @@ export default async function observerTuiFixture(pi: ExtensionAPI): Promise<void
 		const history = records.filter(record => !liveIds.has(record.handle));
 		const pages = Math.ceil(history.length / 20);
 		const page = Math.min(request.page, Math.max(0, pages - 1));
-		const reply: SessionViewReply = { version: 4, requestId: request.requestId, ownerSessionId: latest.parentSessionId, anchor: latest.anchor,
+		const reply: SessionViewReply = { version: 5, requestId: request.requestId, ownerSessionId: latest.parentSessionId, anchor: latest.anchor,
 			generation: latest.generation, revision: latest.revision, inventory: { state: "ready", complete: true, unreadableRecords: 0 },
 			summary: { agents: records.length, acceptedEpisodes: records.reduce((sum, record) => sum + record.episode, 0), liveAgents: live.length, states: { idle: 0, queued: 0, running: live.length, interrupted: 0, closed: history.length } },
 			live, usage: projectRecordedUsage(records.map(input)), history: { state: "ready", pageSize: 20, page, totalRows: history.length, totalPages: pages,

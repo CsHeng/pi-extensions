@@ -2,7 +2,7 @@ import { USAGE_LANE_KEYS, usageLaneOf, type UsageLane } from "../shared/usage-me
 import {
 	CHILD_TOOL_CALL_STATUSES,
 	HARD_LIMITS,
-	ROLE_NAMES,
+	isRoleName,
 	TASK_EXECUTION_PHASES,
 	THINKING_LEVELS,
 	type ChildToolCall,
@@ -34,7 +34,6 @@ const TASK_KEYS = [
 ] as const;
 const CALL_KEYS = ["id", "parentId", "tool", "summary", "startedMs", "updatedMs", "outputMs", "status", "deadlineMs", "tail", "truncated"] as const;
 const ROUTE_KEYS = ["provider", "model", "thinking"] as const;
-const ROLE_SET = new Set<string>(ROLE_NAMES);
 const PHASE_SET = new Set<string>(OBSERVER_PHASES);
 const EXECUTION_SET = new Set<string>(TASK_EXECUTION_PHASES);
 const STATUS_SET = new Set<string>(TASK_STATUSES);
@@ -326,7 +325,7 @@ function parseTask(value: unknown): ObserverTask | undefined {
 	if (!productId(value.id) || !nonNegativeInt(value.ordinal) || value.ordinal < 1 || value.ordinal > HARD_LIMITS.maxTasks) {
 		return undefined;
 	}
-	if (!ROLE_SET.has(value.role as string) || !STATUS_SET.has(value.status as string) || !EXECUTION_SET.has(value.executionPhase as string)) {
+	if (!isRoleName(value.role) || !STATUS_SET.has(value.status as string) || !EXECUTION_SET.has(value.executionPhase as string)) {
 		return undefined;
 	}
 	if ((value.episode !== null && !nonNegativeInt(value.episode)) || !nonNegativeInt(value.assistantTurns) || !finiteNonNegativeOrNull(value.elapsedMs)) {

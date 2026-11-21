@@ -3,14 +3,14 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunTelemetry } from "../extensions/agents/contracts.ts";
 import { registerObservationHooks } from "../extensions/agents/observation-hooks.ts";
-import { AGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+import { PEER_TOOL_NAMES } from "../extensions/agents/peer-protocol.ts";
 import { isLocalTiming } from "../extensions/agents/telemetry.ts";
 
 function harness(child = false, now: () => number = () => performance.now()) {
 	const handlers = new Map<string, Array<(...args: any[]) => unknown>>();
 	const customs: Array<{ customType: string; data: any }> = [];
 	const entries: any[] = [{ id: "root", type: "message", parentId: null, message: { role: "user" } }];
-	let tools = [AGENT_SESSION_TOOL_NAME];
+	let tools: string[] = [PEER_TOOL_NAMES.invoke];
 	const pi = {
 		on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		getActiveTools: () => tools,
@@ -27,7 +27,7 @@ function harness(child = false, now: () => number = () => performance.now()) {
 }
 const assistant = { message: { role: "assistant", content: [] } };
 const thinking = (type: string, contentIndex: number) => ({ assistantMessageEvent: { type, contentIndex } });
-const tool = (toolName = AGENT_SESSION_TOOL_NAME, toolCallId = "call") => ({ toolName, toolCallId });
+const tool = (toolName: string = PEER_TOOL_NAMES.invoke, toolCallId = "call") => ({ toolName, toolCallId });
 const run: RunTelemetry = { schemaVersion: 4, runId: "run", runDurationMs: 1, requestedTasks: 1, admittedTasks: 1, launchedChildren: 1, peakConcurrency: 1, peakConcurrencyByRole: { explorer: 0, reviewer: 0, worker: 1 } };
 
 test("public child hooks capture model, overlapping thinking, tool and compaction endpoints", () => {

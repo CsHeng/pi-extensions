@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadConfig, readConfigSources } from "../extensions/agents/config.ts";
+import { loadConfig, parseConfigSources, readConfigSources } from "../extensions/agents/config.ts";
 
 const canonical = "agent-routes.json";
 const other = "routes.json";
@@ -34,6 +34,34 @@ test("canonical Agents route file is used without merging other files", async t 
 	assert.equal(result.config?.routes.explorer.candidates[0]?.model, "fixture/canonical");
 	assert.equal(result.source?.userFile, canonical);
 	assert.equal((await readConfigSources(root)).userFile, canonical);
+});
+
+test("package and user route sources retain open role keys across overlays", () => {
+	const result = parseConfigSources({
+		packageBytes: Buffer.from(JSON.stringify({
+			roles: { "test-author": { inheritSkills: false } },
+			routes: { "test-author": {
+				candidates: [{ model: "fixture/author", thinking: "medium" }],
+				executionProfiles: { fast: { candidates: [{ model: "fixture/fast", thinking: "low" }] } },
+			} },
+		})),
+		userBytes: Buffer.from(JSON.stringify({
+			roles: { auditor: { inheritSkills: true } },
+			routes: { "test-author": { maxConcurrency: 3 }, constructor: { maxConcurrency: 2 } },
+		})),
+	});
+	assert.equal(result.diagnostic, undefined);
+	const config = result.config;
+	assert.ok(config);
+	assert.equal(config.roles["test-author"]?.inheritSkills, false);
+	assert.equal(config.roles.auditor?.inheritSkills, true);
+	assert.equal(config.roles.explorer.inheritSkills, true);
+	assert.equal(config.routes["test-author"]?.source, "package-default");
+	assert.equal(config.routes["test-author"]?.candidates[0]?.model, "fixture/author");
+	assert.equal(config.routes["test-author"]?.executionProfiles.fast?.candidates[0]?.model, "fixture/fast");
+	assert.equal(config.routes["test-author"]?.maxConcurrency, 3);
+	assert.equal(Object.entries(config.routes).find(([role]) => role === "constructor")?.[1].maxConcurrency, 2);
+	assert.equal(config.routes.auditor, undefined);
 });
 
 test("an invalid canonical route file is visible and never silently falls back", async t => {

@@ -31,14 +31,15 @@ export const ROLES: Readonly<Record<RoleName, RoleDefinition>> = Object.freeze({
 	}),
 });
 
+/** Built-in fallback prompts; invoked agents normally receive their role definition's prompt from the host. */
 export function getRole(name: RoleName): RoleDefinition {
-	return ROLES[name];
+	return (ROLES as Record<string, RoleDefinition>)[name] ?? { tools: READ_TOOLS, systemPrompt: COMMON_BOUNDARY };
 }
 
-export function getManagedRole(name: RoleName, write = name === "worker"): RoleDefinition {
-	const role = ROLES[name];
+export function getManagedRole(name: RoleName, write = name === "worker", definitionPrompt?: string): RoleDefinition {
+	const prompt = definitionPrompt?.trim() || getRole(name).systemPrompt;
 	return {
 		tools: toolsForAccess(write),
-		systemPrompt: `${role.systemPrompt}\nKeep temporary output in task scratch and shell operations within the task grants. File and Git checks enforce declared grants; shell remains cooperative, and trusted host tools are not an OS sandbox. The parent owns review adjudication, explicit candidate apply and final acceptance.`,
+		systemPrompt: `${prompt}\nKeep temporary output in task scratch and shell operations within the task grants. File and Git checks enforce declared grants; shell remains cooperative, and trusted host tools are not an OS sandbox. Your assigner and the main agent keep scope, acceptance and authority decisions.`,
 	};
 }

@@ -28,7 +28,7 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 	if (loaded.manifest) registerGitRead(pi, loaded.manifest);
 	if (loaded.manifest) pi.on("before_agent_start", event => {
 		// Let Pi discover APPEND_SYSTEM.md before adding the child role.
-		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest!.role, loaded.manifest!.grants.some(grant => grant.permission === "write")).systemPrompt].filter(Boolean).join("\n\n");
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest!.role, loaded.manifest!.grants.some(grant => grant.permission === "write"), loaded.manifest!.rolePrompt).systemPrompt].filter(Boolean).join("\n\n");
 		// The original project's ancestor chain replaces managed-storage ancestors; the
 		// snapshot file is already selected by the native loader's override precedence.
 		if (loaded.manifest!.guidance) event.systemPromptOptions.contextFiles = loaded.manifest!.guidance!.contextFiles;

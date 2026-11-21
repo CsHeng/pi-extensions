@@ -5,67 +5,48 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-	createExtensionRuntime,
-	discoverAndLoadExtensions,
-	ExtensionRunner,
-	SessionManager,
-	createReadTool,
-	createWriteTool,
-} from "@earendil-works/pi-coding-agent";
-import { AGENT_SESSION_TOOL_NAME, type SessionActionResult } from "../extensions/agents/session-contracts.ts";
-
+import { SessionManager, createReadTool, createWriteTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { registerContinuationTool, type ContinuationService } from "../extensions/agents/continuation.ts";
+import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
+import { defaultConfig } from "../extensions/agents/config.ts";
+import { emptyUsage } from "../extensions/agents/contracts.ts";
 import { JsonlProtocolParser } from "../extensions/agents/protocol.ts";
+import { createHostHarness } from "./fixtures/host-fixture.ts";
 
-function managedResult(status: SessionActionResult["status"], schemaVersion: 4 = 4): SessionActionResult {
-	return { schemaVersion, action: "create", status, sessions: [] };
-}
-
-async function extensionRunner(t: test.TestContext): Promise<ExtensionRunner> {
-	const agentDir = await mkdtemp(join(tmpdir(), "agent-host-contract-"));
-	t.after(async () => rm(agentDir, { recursive: true, force: true }));
-	const loaded = await discoverAndLoadExtensions(
-		["./extensions/agents/index.ts"],
-		process.cwd(),
-		agentDir,
-	);
-	assert.deepEqual(loaded.errors, []);
-	assert.equal(loaded.extensions.length, 1);
-	return new ExtensionRunner(
-		loaded.extensions,
-		createExtensionRuntime(),
-		process.cwd(),
-		SessionManager.inMemory(process.cwd()),
-		{} as ConstructorParameters<typeof ExtensionRunner>[4],
-	);
-}
-
-function event(status: SessionActionResult["status"], toolName = AGENT_SESSION_TOOL_NAME, details: unknown = managedResult(status)) {
-	return {
-		type: "tool_result" as const,
-		toolCallId: `call-${status}`,
-		toolName,
-		input: {},
-		content: [{ type: "text" as const, text: status }],
-		details,
-		isError: false,
+test("Pi host distinguishes a refused peer operation from returned child failure evidence", async t => {
+	const base = await mkdtemp(join(tmpdir(), "agent-host-contract-"));
+	let service!: ContinuationService;
+	const results: Array<{ tool: string; isError: boolean; text: string }> = [];
+	const extension = (pi: ExtensionAPI) => {
+		service = registerContinuationTool(pi, { store: new ManagedSessionStore(base), loadConfig: async () => ({ config: defaultConfig() }), runChild: async options => {
+			options.onChildStarted?.(); options.onChildSettled?.();
+			return { id: options.task.id, role: options.task.role, status: "failed", output: "fixture failure evidence", stderr: "", usage: emptyUsage(), durationMs: 1, changedPaths: [], convergence: "not-applicable", reportComplete: true };
+		} });
+		pi.registerTool({ name: "other_tool", label: "Other tool", description: "Unrelated fixture", parameters: Type.Object({}),
+			async execute() { return { content: [{ type: "text", text: "ordinary result" }], details: { schemaVersion: 5, status: "failed" } }; } });
+		pi.on("tool_execution_end", event => { results.push({ tool: event.toolName, isError: event.isError, text: JSON.stringify(event.result.content) }); });
 	};
-}
-
-test("Pi host result interception maps managed session status to transport errors", async (t) => {
-	const runner = await extensionRunner(t);
-	for (const schemaVersion of [4] as const) {
-		assert.equal((await runner.emitToolResult(event("succeeded", AGENT_SESSION_TOOL_NAME, managedResult("succeeded", schemaVersion))))?.isError, false);
-		assert.equal((await runner.emitToolResult(event("partial", AGENT_SESSION_TOOL_NAME, managedResult("partial", schemaVersion))))?.isError, true);
-		assert.equal((await runner.emitToolResult(event("failed", AGENT_SESSION_TOOL_NAME, managedResult("failed", schemaVersion))))?.isError, true);
-		assert.equal((await runner.emitToolResult(event("aborted", AGENT_SESSION_TOOL_NAME, managedResult("aborted", schemaVersion))))?.isError, true);
-	}
-});
-
-test("Pi host result interception ignores other tools and malformed details", async (t) => {
-	const runner = await extensionRunner(t);
-	assert.equal(await runner.emitToolResult({ ...event("failed"), toolName: "other_tool" }), undefined);
-	assert.equal(await runner.emitToolResult({ ...event("failed"), details: { status: "failed" } }), undefined);
+	const h = await createHostHarness({ mode: "rpc", extensions: [extension] });
+	t.after(async () => { await service.shutdown(); await h.dispose(); await rm(base, { recursive: true, force: true }); });
+	await promisify(execFile)("git", ["init", "-q", h.workDir]);
+	const access = [{ permission: "read", scope: h.workDir }];
+	h.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("invoke_agent", { name: "unknown", role: "undefined-role", prompt: "inspect", access })),
+		fauxAssistantMessage(fauxToolCall("invoke_agent", { name: "worker", role: "worker", prompt: "inspect", access })),
+		fauxAssistantMessage(fauxToolCall("wait_agents", { names: ["worker"], waitSeconds: 10 })),
+		fauxAssistantMessage(fauxToolCall("other_tool", {})),
+		fauxAssistantMessage("results observed"),
+	]);
+	await h.session.prompt("Run host result fixture");
+	assert.deepEqual(results.map(({ tool, isError }) => ({ tool, isError })), [
+		{ tool: "invoke_agent", isError: true }, { tool: "invoke_agent", isError: false },
+		{ tool: "wait_agents", isError: false }, { tool: "other_tool", isError: false },
+	]);
+	assert.match(results[0]!.text, /unknown_role/);
+	assert.match(results[2]!.text, /turn failed.*fixture failure evidence/);
+	assert.deepEqual(h.errors, []);
 });
 
 for (const installed of [false, true]) {

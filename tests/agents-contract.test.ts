@@ -30,6 +30,7 @@ import type {
 	RunTelemetryV3,
 } from "../extensions/agents/contracts.ts";
 import { ROLES } from "../extensions/agents/roles.ts";
+import { InvokeAgentSchema } from "../extensions/agents/peer-tools.ts";
 import { AgentSessionToolSchema } from "../extensions/agents/session-contracts.ts";
 
 test("agent roles have fixed least-authority tool sets", () => {
@@ -48,10 +49,11 @@ test("agent roles have fixed least-authority tool sets", () => {
 });
 
 test("model-facing string choices serialize as provider-compatible enums", () => {
-	const properties = (AgentTaskSchema as unknown as {
-		properties: Record<string, { enum?: unknown; anyOf?: unknown }>;
+	const properties = (InvokeAgentSchema as unknown as {
+		properties: Record<string, { enum?: unknown; anyOf?: unknown; pattern?: string }>;
 	}).properties;
-	assert.deepEqual(properties.role?.enum, ROLE_NAMES);
+	assert.equal(properties.role?.enum, undefined);
+	assert.match("custom-role", new RegExp(properties.role!.pattern!));
 	assert.deepEqual(properties.executionProfile?.enum, ["fast", "balanced", "deep"]);
 	assert.deepEqual(properties.thinkingProfile?.enum, ["light", "standard", "deep"]);
 	assert.deepEqual(properties.thinking?.enum, THINKING_LEVELS);
@@ -223,7 +225,7 @@ test("telemetry schema v3 adds start time, provenance, and optional effective ca
 test("path grammar and private capability manifests are exact and additive", () => {
 	assert.equal(HARD_LIMITS.maxExternalReadRoots, 8);
 	assert.equal(HARD_LIMITS.maxPathBytes, 4096);
-	assert.equal(CHILD_CAPABILITY_MANIFEST_VERSION, 4);
+	assert.equal(CHILD_CAPABILITY_MANIFEST_VERSION, 5);
 	assert.equal(isSafePathGrammar("src/file.ts"), true);
 	assert.equal(isSafePathGrammar("."), true);
 	assert.equal(isSafePathGrammar(""), false);
@@ -241,7 +243,7 @@ test("path grammar and private capability manifests are exact and additive", () 
 		grants: [{ permission: "read", path: "/repo" }],
 		roots: [],
 	};
-	assert.equal(runtime.version, 4);
+	assert.equal(runtime.version, 5);
 	assert.equal(runtime.grants[0]?.permission, "read");
 });
 

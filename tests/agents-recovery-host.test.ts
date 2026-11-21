@@ -12,16 +12,16 @@ for (const mode of ["tui", "rpc"] as const) test(`resumed ${mode} host persists 
 	let lookups = 0;
 	const extension = (pi: ExtensionAPI) => {
 		registerRecoveryDiscovery(pi, {
-			resolveRecoveryHandles: async (_ctx, handles) => { assert.deepEqual(handles, ["fixture"]); lookups++; return [{ handle: "fixture", state: "interrupted", role: "worker", episode: 2, reportComplete: false }]; },
+			resolveRecoveryHandles: async (_ctx, handles) => { assert.deepEqual(handles, ["fixture"]); lookups++; return [{ handle: "fixture", label: "fixture-agent", state: "interrupted", role: "worker", episode: 2, reportComplete: false }]; },
 			liveObserverTasks: () => [],
 		});
-		pi.registerTool({ name: "agent", label: "Agent fixture", description: "Ordinary fixture tool", parameters: Type.Object({}),
-			async execute() { return { content: [{ type: "text", text: "ordinary receipt" }], details: { schemaVersion: 4, sessions: [{ handle: "fixture", episode: 2 }] } }; } });
+		pi.registerTool({ name: "list_agents", label: "Agent fixture", description: "Ordinary fixture tool", parameters: Type.Object({}),
+			async execute() { return { content: [{ type: "text", text: "ordinary receipt" }], details: { schemaVersion: 5, sessions: [{ handle: "fixture", episode: 2 }] } }; } });
 		pi.registerCommand("wake", { description: "Extension-origin wake", handler: async () => { pi.sendUserMessage("extension wake"); } });
 	};
 	const original = await createHostHarness({ mode, realSessionFile: true, extensions: [extension] });
 	t.after(() => original.dispose());
-	original.faux.setResponses([fauxAssistantMessage(fauxToolCall("agent", {})), fauxAssistantMessage("initial")]);
+	original.faux.setResponses([fauxAssistantMessage(fauxToolCall("list_agents", {})), fauxAssistantMessage("initial")]);
 	await original.session.prompt("start");
 	const h = await createHostHarness({ mode, extensions: [extension], sessionManager: original.session.sessionManager, sessionStartReason: "resume" });
 	t.after(() => h.dispose());
@@ -29,7 +29,7 @@ for (const mode of ["tui", "rpc"] as const) test(`resumed ${mode} host persists 
 	const capture = (response: ReturnType<typeof fauxAssistantMessage>) => (context: TranscriptContext) => { requests.push(structuredClone(context)); return response; };
 	h.faux.setResponses([
 		capture(fauxAssistantMessage("wake handled")),
-		capture(fauxAssistantMessage(fauxToolCall("agent", {}))),
+		capture(fauxAssistantMessage(fauxToolCall("list_agents", {}))),
 		capture(fauxAssistantMessage("continued")),
 		capture(fauxAssistantMessage("next turn")),
 	]);
@@ -44,9 +44,9 @@ for (const mode of ["tui", "rpc"] as const) test(`resumed ${mode} host persists 
 	assert.equal(lookups, 1);
 	const entries = h.session.sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.customType === hint);
 	assert.equal(entries.length, 1, "hint is a single persisted native entry");
-	assert.match(JSON.stringify(entries[0]), /handle fixture, expectedEpisode 2/);
-	assert.doesNotMatch(JSON.stringify(requests[0]), /Owned Agent work is available/);
-	for (const request of requests.slice(1)) assert.equal(JSON.stringify(request.messages).split("Owned Agent work is available").length - 1, 1);
+	assert.match(JSON.stringify(entries[0]), /fixture-agent \(worker\): interrupted or aborted; confirm it stopped with stop_agent/);
+	assert.doesNotMatch(JSON.stringify(requests[0]), /Agents from this session are available/);
+	for (const request of requests.slice(1)) assert.equal(JSON.stringify(request.messages).split("Agents from this session are available").length - 1, 1);
 	for (let i = 1; i < requests.length; i++) {
 		const { messages: previous, ...previousRest } = requests[i - 1]!;
 		const { messages: current, ...currentRest } = requests[i]!;

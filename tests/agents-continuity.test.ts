@@ -22,15 +22,14 @@ test("registration adds no context projection and keeps only operational event h
 	const pi = {
 		on(name: string, handler: unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
 		registerTool() {}, registerCommand() {}, appendEntry() {},
-		getActiveTools: () => ["agent"], events: { on() {}, emit() {} },
+		getActiveTools: () => ["list_agents"], events: { on() {}, emit() {} },
 	} as unknown as ExtensionAPI;
 	registerContinuationTool(pi, {});
 	assert.equal(handlers.has("context"), false, "no automatic session index is projected into the model context");
 	assert.equal(handlers.has("before_agent_start"), true, "bounded user-directed recovery is separate from a per-turn index");
-	assert.deepEqual([...handlers.keys()].sort(), ["agent_end", "agent_start", "before_agent_start", "context_with_system", "input", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_result", "turn_start"]);
+	assert.deepEqual([...handlers.keys()].sort(), ["agent_end", "agent_start", "before_agent_start", "context_with_system", "input", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "turn_start"]);
 });
 
-test("the current storage contract is unchanged so supported old records stay readable", () => {
-	// Labels and generated handles live inside version 4 records; no migration or version bump is required.
-	assert.equal(MANAGED_SESSION_VERSION, 4);
+test("the collaboration cutover uses storage contract version 5", () => {
+	assert.equal(MANAGED_SESSION_VERSION, 5);
 });

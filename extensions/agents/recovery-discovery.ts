@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { SessionView } from "./session-contracts.ts";
+import { MANAGED_SESSION_VERSION, type SessionView } from "./session-contracts.ts";
+import { PEER_TOOLS, PEER_TOOL_NAMES } from "./peer-protocol.ts";
+import { AGENT_EXECUTION_EVENT } from "../shared/agent-execution.ts";
 import type { ObserverTask } from "./observer-events.ts";
 
 /** Resolve only the selected handles under the current owner and branch. */
@@ -28,18 +30,20 @@ function hints(ctx: ExtensionContext, live: readonly ObserverTask[]): { handles:
 	for (const entry of branch.slice(-MAX_BRANCH_ENTRIES) as any[]) {
 		const message = entry.type === "message" ? entry.message : undefined;
 		if (message?.role === "assistant" && Array.isArray(message.content)) for (const part of message.content) {
-			if (part?.type === "toolCall" && part.name === "agent") {
+			if (part?.type === "toolCall" && PEER_TOOLS.includes(part.name)) {
 				if (typeof part.id === "string") calls.add(part.id); else incomplete = true;
 			}
 		}
 		let payload: any;
-		if (message?.role === "toolResult" && message.toolName === "agent") {
+		if (message?.role === "toolResult" && PEER_TOOLS.includes(message.toolName)) {
 			if (typeof message.toolCallId === "string") receipts.add(message.toolCallId); else incomplete = true;
 			payload = message.details;
-			if (payload?.schemaVersion !== 4 || !Array.isArray(payload.sessions)) { incomplete = true; continue; }
-		} else if (entry.type === "custom" && entry.customType === "agents.execution.v4") {
+			// A refused operation carries no agents.
+			if (payload?.schemaVersion === MANAGED_SESSION_VERSION && payload.error) continue;
+			if (payload?.schemaVersion !== MANAGED_SESSION_VERSION || !Array.isArray(payload.sessions)) { if (!message.isError) incomplete = true; continue; }
+		} else if (entry.type === "custom" && entry.customType === AGENT_EXECUTION_EVENT) {
 			payload = entry.data;
-			if (payload?.version !== 4 || !Array.isArray(payload.sessions)) { incomplete = true; continue; }
+			if (payload?.version !== MANAGED_SESSION_VERSION || !Array.isArray(payload.sessions)) { incomplete = true; continue; }
 		} else continue;
 		for (const session of payload.sessions.slice(0, MAX_HINTS + 1)) add(session?.handle, session?.episode);
 		if (payload.sessions.length > MAX_HINTS) incomplete = true;
@@ -54,11 +58,11 @@ function describe(view: SessionView, live: readonly ObserverTask[]): string {
 	const active = live.some(row => row.id === view.handle && row.episode === view.episode && (row.status === "running" || row.status === "pending"));
 	let status: string;
 	if (view.state === "running" || view.state === "queued") status = active ? `live ${view.state}` : `${view.state}, activity unconfirmed`;
-	else if (view.state === "interrupted" || view.result?.status === "aborted") status = "interrupted/aborted; reconcile evidence";
+	else if (view.state === "interrupted" || view.result?.status === "aborted") status = "interrupted or aborted; confirm it stopped with stop_agent";
 	else status = view.result ? `result ${view.result.status}${view.reportComplete ? "" : ", report incomplete"}` : "idle, result unavailable";
-	if (view.candidate && identifier(view.candidate.id)) status += `; ${view.candidate.episode === view.episode && view.candidate.status === "not-applied" ? "candidate available for inspection" : "candidate"} ${view.candidate.id} (${view.candidate.status}${view.candidate.episode === view.episode ? "" : ", different episode"})`;
+	if (view.candidate && view.candidate.episode === view.episode) status += `; isolated candidate ${view.candidate.status}`;
 	if (view.roots?.some(root => root.recovery === "required")) status += "; root recovery required";
-	return `- handle ${view.handle}, expectedEpisode ${view.episode}: ${status}`;
+	return `- ${view.label ?? "unnamed agent"} (${view.role}): ${status}`;
 }
 
 /** Register inside registerContinuationTool after constructing its service. No wake or mutation is performed. */
@@ -85,7 +89,7 @@ export function registerRecoveryDiscovery(pi: ExtensionAPI, service: RecoveryDis
 	pi.on("before_agent_start", async (event, ctx) => {
 		const genuineInput = source === "human";
 		source = undefined;
-		if (!pending || !genuineInput || event.messageType !== "user" || !ctx.isProjectTrusted() || !pi.getActiveTools().includes("agent")) return;
+		if (!pending || !genuineInput || event.messageType !== "user" || !ctx.isProjectTrusted() || !pi.getActiveTools().includes(PEER_TOOL_NAMES.list)) return;
 		const revision = generation;
 		const session = ctx.sessionManager.getSessionId();
 		const leaf = ctx.sessionManager.getLeafId();
@@ -101,12 +105,12 @@ export function registerRecoveryDiscovery(pi: ExtensionAPI, service: RecoveryDis
 		if (views.some(view => !allowed.has(view.handle) || !identifier(view.handle) || !Number.isSafeInteger(view.episode))) selected.incomplete = true;
 		views = views.filter(view => allowed.has(view.handle) && identifier(view.handle) && Number.isSafeInteger(view.episode));
 		if (selected.handles.some(handle => !views.some(view => view.handle === handle))) selected.incomplete = true;
-		if (!pending || generation !== revision || !ctx.isProjectTrusted() || !pi.getActiveTools().includes("agent") || ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) return;
+		if (!pending || generation !== revision || !ctx.isProjectTrusted() || !pi.getActiveTools().includes(PEER_TOOL_NAMES.list) || ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) return;
 		pending = false;
 		const relevant = views.filter(view => view.state !== "closed");
 		if (!relevant.length && !selected.incomplete) return;
 		const rows = relevant.slice(0, 20).map(view => describe(view, live));
-		if (relevant.length > rows.length || selected.incomplete) rows.push("- Discovery is incomplete; use bare inspect to recover all available evidence.");
-		return { message: { customType: "agents.recovery-discovery", display: false, content: `Owned Agent work is available after interruption or session recovery:\n${rows.join("\n")}\nInspect and reconcile the evidence, use reconcile(handle, expectedEpisode) for unconfirmed work. Keep useful results and changes; when the current user instruction makes work obsolete, cancel a live task or close it after its writers have stopped. Do not implicitly discard work.` } };
+		if (relevant.length > rows.length || selected.incomplete) rows.push("- Discovery is incomplete; list_agents recovers all available agents.");
+		return { message: { customType: "agents.recovery-discovery", display: false, content: `Agents from this session are available after interruption or session recovery:\n${rows.join("\n")}\nRead their results with list_agents and confirm interrupted agents stopped with stop_agent. Keep useful results and changes; when the current user instruction makes work obsolete, stop a running agent or release it after it has stopped. Do not implicitly discard work.` } };
 	});
 }

@@ -7,6 +7,7 @@ import {
 	type CapabilityGrant,
 	type ChildCapabilityManifest,
 	type NormalizedChildCapability,
+	isRoleName,
 	type RoleName,
 } from "./contracts.ts";
 import { pathContains } from "./access.ts";
@@ -29,14 +30,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isRole(value: unknown): value is RoleName {
-	return value === "explorer" || value === "reviewer" || value === "worker";
+	return isRoleName(value);
 }
 
 function isPermission(value: unknown): value is "read" | "write" {
 	return value === "read" || value === "write";
 }
 
-const MANIFEST_KEYS = new Set(["version", "role", "cwd", "grants", "roots", "guidance"]);
+const MANIFEST_KEYS = new Set(["version", "role", "cwd", "grants", "roots", "guidance", "may", "sharedWrites", "rolePrompt"]);
 
 function parsePin(value: unknown): { dev: number; ino: number } | undefined {
 	if (value === undefined) return undefined;
@@ -82,7 +83,15 @@ export function parseCapability(value: unknown): NormalizedChildCapability {
 		if (!files.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string" && isAbsolute(file.path))) throw new Error("invalid guidance files");
 		guidance = { readRoots: readRoots as string[], physicalRoots: physicalRoots as string[], contextFiles: files as Array<{ path: string; content: string }> };
 	}
-	return { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: value.role, cwd: resolve(value.cwd), grants, roots, ...(guidance ? { guidance } : {}) };
+	let may: NormalizedChildCapability["may"];
+	if (value.may !== undefined) {
+		const raw = value.may;
+		if (!isRecord(raw) || !Array.isArray(raw.message) || raw.message.some(item => typeof item !== "string") || typeof raw.roster !== "boolean" || typeof raw.invoke !== "boolean") throw new Error("invalid capability grants");
+		may = { message: [...raw.message as string[]], roster: raw.roster, invoke: raw.invoke };
+	}
+	if (value.sharedWrites !== undefined && (typeof value.sharedWrites !== "string" || !isAbsolute(value.sharedWrites))) throw new Error("invalid shared write record");
+	if (value.rolePrompt !== undefined && (typeof value.rolePrompt !== "string" || value.rolePrompt.length > 64 * 1024)) throw new Error("invalid role prompt");
+	return { version: CHILD_CAPABILITY_MANIFEST_VERSION, role: value.role, cwd: resolve(value.cwd), grants, roots, ...(guidance ? { guidance } : {}), ...(may ? { may } : {}), ...(typeof value.sharedWrites === "string" ? { sharedWrites: value.sharedWrites } : {}), ...(typeof value.rolePrompt === "string" ? { rolePrompt: value.rolePrompt } : {}) };
 }
 
 export async function assertCanonicalGrants(manifest: Pick<NormalizedChildCapability, "grants">): Promise<void> {

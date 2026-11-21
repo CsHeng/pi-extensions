@@ -2,7 +2,7 @@ import { mintProductId } from "./identity.ts";
 import { observationWaitMilliseconds } from "../shared/observation-budget.ts";
 import { DelayExpired, raceBudget } from "../shared/duration-timer.ts";
 
-export type ExecutionRole = "worker" | "reviewer" | "explorer";
+export type ExecutionRole = string;
 export interface ExecutionOwner { repository: string; sessionId: string; branchAnchor: string | null }
 export type ExecutionPhase = "preparing" | "queued" | "running" | "completed" | "failed" | "cancelled";
 export interface SupervisorLimits { concurrency: number; roles: Record<ExecutionRole, number>; maxRuns?: number }
@@ -53,7 +53,7 @@ interface Ticket { role: ExecutionRole; locks: string[]; signal: AbortSignal; re
 /** One shared capacity owner across submissions. No model loop, timer polling, or semantic DAG. */
 class Capacity {
 	private active = 0;
-	private byRole: Record<ExecutionRole, number> = { worker: 0, reviewer: 0, explorer: 0 };
+	private byRole: Record<ExecutionRole, number> = {};
 	private held = new Set<string>();
 	private queue: Ticket[] = [];
 	private limits: SupervisorLimits;
@@ -74,13 +74,13 @@ class Capacity {
 	private drain(): void {
 		for (let index = 0; index < this.queue.length && this.active < this.limits.concurrency;) {
 			const ticket = this.queue[index]!;
-			if (this.byRole[ticket.role] >= this.limits.roles[ticket.role] || ticket.locks.some(lock => this.held.has(lock))) { index++; continue; }
+			if ((this.byRole[ticket.role] ?? 0) >= (this.limits.roles[ticket.role] ?? this.limits.concurrency) || ticket.locks.some(lock => this.held.has(lock))) { index++; continue; }
 			this.queue.splice(index, 1); ticket.signal.removeEventListener("abort", ticket.abort);
-			this.active++; this.byRole[ticket.role]++; ticket.locks.forEach(lock => this.held.add(lock));
+			this.active++; this.byRole[ticket.role] = (this.byRole[ticket.role] ?? 0) + 1; ticket.locks.forEach(lock => this.held.add(lock));
 			let released = false;
 			ticket.resolve(() => {
 				if (released) return; released = true;
-				this.active--; this.byRole[ticket.role]--; ticket.locks.forEach(lock => this.held.delete(lock)); this.drain();
+				this.active--; this.byRole[ticket.role] = (this.byRole[ticket.role] ?? 1) - 1; ticket.locks.forEach(lock => this.held.delete(lock)); this.drain();
 			});
 		}
 	}
@@ -113,7 +113,7 @@ export class SessionExecutionSupervisor {
 	private notifications = new Map<string, ExecutionEvent>();
 	private wakeScheduled = false;
 	constructor(owner: ExecutionOwner, limits: SupervisorLimits, hooks: SupervisorHooks = {}) {
-		if (!Number.isSafeInteger(limits.concurrency) || limits.concurrency < 1 || Object.values(limits.roles).length !== 3 || ["worker", "reviewer", "explorer"].some(role => !Number.isSafeInteger(limits.roles[role as ExecutionRole]) || limits.roles[role as ExecutionRole] < 1) || (limits.maxRuns !== undefined && (!Number.isSafeInteger(limits.maxRuns) || limits.maxRuns < 1))) throw new SupervisorError("invalid_capacity");
+		if (!Number.isSafeInteger(limits.concurrency) || limits.concurrency < 1 || Object.values(limits.roles).some(value => !Number.isSafeInteger(value) || value < 1) || (limits.maxRuns !== undefined && (!Number.isSafeInteger(limits.maxRuns) || limits.maxRuns < 1))) throw new SupervisorError("invalid_capacity");
 		this.owner = structuredClone(owner); this.limits = structuredClone(limits); this.hooks = hooks; this.capacity = new Capacity(limits);
 	}
 	private now(): number { return (this.hooks.now ?? (() => performance.now()))(); }
@@ -178,7 +178,7 @@ export class SessionExecutionSupervisor {
 	}
 	private task<T>(entry: Entry, task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[]; signal?: AbortSignal }, execute: (signal: AbortSignal) => Promise<T>): Promise<T> {
 		if (entry.view.phase !== "running") return Promise.reject(new SupervisorError("run_not_active"));
-		if (!task.id || task.id.length > 128 || !["worker", "reviewer", "explorer"].includes(task.role) || entry.view.tasks.some(item => item.taskId === task.id) || (task.resourceLocks ?? []).some(lock => !lock || lock.length > 256)) return Promise.reject(new SupervisorError("invalid_task_identity"));
+		if (!task.id || task.id.length > 128 || !/^[a-z][a-z0-9-]{0,31}$/.test(task.role) || entry.view.tasks.some(item => item.taskId === task.id) || (task.resourceLocks ?? []).some(lock => !lock || lock.length > 256)) return Promise.reject(new SupervisorError("invalid_task_identity"));
 		const view: TaskExecution = { taskId: task.id, role: task.role, phase: "queued", queuedAt: this.now(), startedAt: null, finishedAt: null };
 		entry.view.tasks.push(view);
 		const signal = task.signal ? AbortSignal.any([entry.controller.signal, task.signal]) : entry.controller.signal;

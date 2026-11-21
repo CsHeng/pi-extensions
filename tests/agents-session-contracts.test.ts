@@ -2,17 +2,13 @@ import { before as ensureScopeBefore } from "node:test";
 import { mkdir as ensureScopeMkdir } from "node:fs/promises";
 ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive: true }); await ensureScopeMkdir("/tmp/src", { recursive: true }); });
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import test from "node:test";
 import { normalizeContext, validateToolArguments, type JsonObject, type Model } from "@earendil-works/pi-ai";
 import { stream as responses } from "@earendil-works/pi-ai/api/openai-responses";
 import { stream as codexResponses } from "@earendil-works/pi-ai/api/openai-codex-responses";
-import { registerContinuationTool } from "../extensions/agents/continuation.ts";
-import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
-import { ManagedError, parseSessionRequest, AGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+import { PEER_TOOL_SURFACE, peerToolDefinitions } from "../extensions/agents/peer-tools.ts";
+import { ManagedError, parseSessionRequest } from "../extensions/agents/session-contracts.ts";
 
 test("field diagnostics distinguish missing, unexpected and invalid fields without echoing values", () => {
 	const refusal = (request: unknown) => {
@@ -48,8 +44,7 @@ test("waiting budgets are observation-only, finite and not capped to short host 
  assert.throws(() => parseSessionRequest({ action: "create", mode: "async", tasks: [], waitSeconds: 1 }));
 });
 
-test("one canonical agent tool exposes strict disjoint action fields without caller replay tokens", () => {
-	assert.equal(AGENT_SESSION_TOOL_NAME, "agent");
+test("the internal session engine parses strict disjoint action fields without caller replay tokens", () => {
 	assert.deepEqual(parseSessionRequest({ action: "inspect" }), { action: "inspect" });
 	assert.equal(parseSessionRequest({ action: "close", handle: "h", expectedEpisode: 1 }).disposition, undefined);
 	assert.throws(() => parseSessionRequest({ action: "create" }), /missing_create_fields/);
@@ -83,54 +78,39 @@ test("task labels are readable, hyphens allowed, and ambiguous dependencies fail
 	for (const invalid of ["", "   ", "x".repeat(65)]) assert.throws(() => parseSessionRequest({ action: "create", tasks: [task(invalid)] }), /invalid_session_request/);
 });
 
-test("the agent schema survives the real OpenAI request serializers and rejects wrong action fields before execution", async (t) => {
-	const base = await mkdtemp(join(tmpdir(), "agent-schema-"));
-	t.after(() => rm(base, { recursive: true, force: true }));
-	let tool: any;
-	registerContinuationTool({ registerTool(value: any) { tool = value; }, registerCommand() {}, on() {}, appendEntry() {}, getActiveTools: () => ["agent"], events: { on() {}, emit() {} } } as any,
-		{ store: new ManagedSessionStore(base), loadConfig: async () => { throw new Error("schema fixture never admits work"); } });
-	assert.equal(tool.name, "agent");
-	assert.equal(tool.parameters.type, "object");
-	assert.equal(tool.parameters.additionalProperties, false);
-	assert.equal(tool.parameters.properties.action.type, "string");
-	assert.deepEqual(tool.parameters.properties.action.enum, ["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel", "reconcile"]);
-	assert.equal(tool.parameters.properties.requestId, undefined, "no caller-invented replay identity");
-	assert.equal(tool.parameters.properties.tasks.items.properties.requestId, undefined);
-	assert.deepEqual(tool.parameters.properties.tasks.items.required, ["id", "role", "objective", "access"]);
-
-	const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => "schema-fixture" }, tools: [], executeTool: async () => { throw new Error("outside this fixture"); } } as any;
-	const params = (args: Record<string, unknown>) => validateToolArguments(tool, { type: "toolCall", id: "fixture", name: "agent", arguments: args as JsonObject });
-	const task = { id: "fix-parser-tests", role: "worker", objective: "Repair", access: [{ permission: "write", scope: "/tmp/scope" }] };
-	// Both layers run before any managed effect: the provider validator narrows types, and the
-	// operation contract rejects invented or misplaced fields that a provider tolerates.
-	const rejection = (args: Record<string, unknown>): "provider" | "contract" | "accepted" => {
-		let parsed: unknown;
-		try { parsed = params(args); } catch { return "provider"; }
-		try { parseSessionRequest(parsed); } catch { return "contract"; }
-		return "accepted";
-	};
-	const invalid: Array<[Record<string, unknown>, "provider" | "contract"]> = [
-		[{ tasks: [task] }, "provider"],
-		[{ action: "create", tasks: "not-a-list" }, "provider"],
-		[{ action: "inspect", tasks: [task] }, "contract"],
-		[{ action: "apply", tasks: [task] }, "contract"],
-		[{ action: "join", tasks: [task] }, "contract"],
-		[{ action: "create" }, "contract"],
-	];
-	for (const [args, layer] of invalid) assert.equal(rejection(args), layer, JSON.stringify(args));
-	// The provider validator itself refuses a caller-invented replay token.
-	assert.throws(() => params({ action: "create", tasks: [task], requestId: "invented" }), /requestId/);
-	// Valid operation shapes are accepted by the same validator that guards real provider tool calls.
-	for (const args of [
-		{ action: "inspect" },
-		{ action: "create", mode: "async", tasks: [task] },
-		{ action: "create", tasks: [task, { ...task, id: "review", role: "reviewer", access: [{ permission: "read", scope: "/tmp/scope" }], dependsOn: ["fix-parser-tests"] }] },
-		{ action: "continue", episodes: [{ handle: "abc", expectedEpisode: 1, message: "go" }] },
-		{ action: "join", runId: "abc", waitSeconds: 5 },
-		{ action: "cancel", runId: "abc", taskId: "fix-parser-tests" },
-		{ action: "reconcile", handle: "abc", expectedEpisode: 1 },
-		{ action: "apply", handle: "abc", expectedEpisode: 1, candidateId: "def" },
-	]) params(args);
+test("all seven peer schemas survive the real OpenAI request serializers and reject internal or wrong-operation fields", async () => {
+	const tools = peerToolDefinitions(async () => { throw new Error("Schema validation never executes a tool"); });
+	const shapes = [
+		["invoke_agent", ["name", "role", "prompt", "access"], { name: "fix-parser", role: "custom-role", prompt: "Repair", access: [{ permission: "write", scope: "/tmp/scope" }] }],
+		["message_agent", ["to", "message"], { to: "fix-parser", message: "check findings" }],
+		["list_agents", [], { name: "fix-parser" }],
+		["wait_agents", [], { names: ["fix-parser"], waitSeconds: 5 }],
+		["stop_agent", ["name"], { name: "fix-parser", revert: true }],
+		["release_agent", ["name"], { name: "fix-parser", disposition: "retain" }],
+		["agent_candidate", ["name", "action"], { name: "fix-parser", action: "apply" }],
+	] as const;
+	assert.deepEqual(tools.map(tool => tool.name), shapes.map(([name]) => name));
+	assert.deepEqual(PEER_TOOL_SURFACE.map(tool => tool.name), tools.map(tool => tool.name));
+	const validate = (tool: (typeof tools)[number], args: unknown) => validateToolArguments(tool, { type: "toolCall", id: "fixture", name: tool.name, arguments: args as JsonObject });
+	for (const [name, required, args] of shapes) {
+		const tool = tools.find(item => item.name === name)!;
+		const schema = tool.parameters as Record<string, unknown>;
+		assert.equal(schema.type, "object");
+		assert.equal(schema.additionalProperties, false);
+		assert.deepEqual(schema.required ?? [], [...required]);
+		validate(tool, args);
+		for (const field of ["handle", "expectedEpisode", "candidateId", "requestId", "runId", "tasks"]) {
+			assert.throws(() => validate(tool, { ...args, [field]: "internal" }), new RegExp(field));
+		}
+		for (const field of required) {
+			const missing = { ...args } as Partial<Record<string, unknown>>;
+			delete missing[field];
+			assert.throws(() => validate(tool, missing));
+		}
+	}
+	assert.throws(() => validate(tools[0]!, { ...shapes[0][2], access: "not-a-list" }));
+	assert.throws(() => validate(tools[0]!, { ...shapes[0][2], name: "../private" }));
+	assert.throws(() => validate(tools[6]!, { ...shapes[6][2], action: "join" }));
 
 	for (const api of ["openai-responses", "openai-codex-responses"] as const) {
 		const model: Model<typeof api> = {
@@ -147,15 +127,18 @@ test("the agent schema survives the real OpenAI request serializers and rejects 
 		};
 		const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url");
 		const options = { apiKey: `fixture.${claims}.fixture`, fetch, transport: "sse" as const, maxRetries: 0 };
-		const context = normalizeContext({ messages: [{ role: "user" as const, content: "fixture", timestamp: 1 }], tools: [tool] });
+		const context = normalizeContext({ messages: [{ role: "user" as const, content: "fixture", timestamp: 1 }], tools });
 		const result = await (api === "openai-responses"
 			? responses(model as Model<"openai-responses">, context, options)
 			: codexResponses(model as Model<"openai-codex-responses">, context, options)).result();
 		assert.equal(result.stopReason, "stop", result.errorMessage);
-		const schema = payload!.tools.find((entry) => entry.name === "agent")!.parameters;
-		assert.equal(schema.type, "object");
-		assert.equal(schema.anyOf, undefined, "a provider-compatible object root, not a union");
-		assert.equal(schema.oneOf, undefined);
-		assert.deepEqual(schema.required, ["action"]);
+		assert.deepEqual(payload!.tools.map(tool => tool.name), shapes.map(([name]) => name));
+		for (const [name, required] of shapes) {
+			const schema = payload!.tools.find(entry => entry.name === name)!.parameters;
+			assert.equal(schema.type, "object");
+			assert.equal(schema.anyOf, undefined, "a provider-compatible object root, not a union");
+			assert.equal(schema.oneOf, undefined);
+			assert.deepEqual(schema.required ?? [], [...required]);
+		}
 	}
 });

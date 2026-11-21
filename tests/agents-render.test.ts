@@ -48,7 +48,7 @@ function task(index: number, output: string): TaskResult {
 
 test("model-visible submission retains join identity after large reports", () => {
  const runId = "run123", generation = "generation123";
- const result: SessionActionResult = { schemaVersion: 4, action: "create", kind: "submission", status: "accepted", runId, generation,
+ const result: SessionActionResult = { schemaVersion: 5, action: "create", kind: "submission", status: "accepted", runId, generation,
   sessions: [{ handle: "session123", role: "explorer", episode: 1, state: "running", reportComplete: false, result: task(1, "x".repeat(100_000)) }] };
  const payload = JSON.parse(formatManagedContent(result));
  assert.equal(payload.kind, "submission"); assert.equal(payload.runId, runId); assert.equal(payload.generation, generation);
@@ -196,7 +196,7 @@ function sessionView(index: number, overrides: Partial<SessionView> = {}): Sessi
 }
 
 function managed(sessions: SessionView[], extra: Partial<SessionActionResult> = {}): SessionActionResult {
-	return { schemaVersion: 4, action: "inspect", status: "succeeded", sessions, ...extra };
+	return { schemaVersion: 5, action: "inspect", status: "succeeded", sessions, ...extra };
 }
 
 test("managed model content is parseable JSON with headers for ten huge reports", () => {
@@ -215,7 +215,7 @@ test("managed model content is parseable JSON with headers for ten huge reports"
 			nativeUsage: { recorded: boolean; input: number | null };
 		}>;
 	};
-	assert.equal(parsed.schemaVersion, 4);
+	assert.equal(parsed.schemaVersion, 5);
 	assert.equal(parsed.action, "inspect");
 	assert.equal(parsed.status, "succeeded");
 	assert.equal(parsed.error?.code, "partial_failure");

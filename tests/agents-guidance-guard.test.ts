@@ -15,7 +15,7 @@ test("internal guidance grant is read-only and narrower than task external roots
 	await writeFile(join(global, "reference.md"), "reference");
 	await writeFile(join(unrelated, "secret"), "not guidance");
 	await symlink(unrelated, join(global, "escape"));
-	const manifest: ChildCapabilityManifest = { version: 4, role: "worker", cwd: root, grants: [{ permission: "write", path: root }], roots: [],
+	const manifest: ChildCapabilityManifest = { version: 5, role: "worker", cwd: root, grants: [{ permission: "write", path: root }], roots: [],
 		guidance: { contextFiles: [], readRoots: [global], physicalRoots: [global] } };
 	assert.ok(parseCapability(manifest).guidance);
 	assert.equal((await authorizePath(manifest, "read", join(global, "SKILL.md"))).allowed, true);

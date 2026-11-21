@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "../scripts/fixtures/delegation-probe-guidance.ts";
-import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "../extensions/agents/tool-surface.ts";
+import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "../scripts/fixtures/delegation-probe-surface.ts";
 import {
 	PROBE_GUIDANCE_LEVELS,
 	PROBE_SHAPES,

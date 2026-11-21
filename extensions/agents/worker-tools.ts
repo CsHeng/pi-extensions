@@ -18,6 +18,10 @@ import { workerGitEnvironment } from "./worker-inputs.ts";
 import { recordCapabilityInvalidation, registerObservationHooks } from "./observation-hooks.ts";
 import { getManagedRole, toolsForAccess } from "./roles.ts";
 import { isNativePathTool, isNativeBashTool } from "./native-context.ts";
+import { startPeerLink, PeerLinkError } from "./peer-link.ts";
+import { peerToolDefinitions } from "./peer-tools.ts";
+import { DEFAULT_CAPABILITIES } from "./peer-protocol.ts";
+import { SharedWriteRecorder } from "./shared-writes.ts";
 
 export const WORKER_SCRATCH_ENV = "PI_EXTENSIONS_AGENT_WORKER_SCRATCH";
 
@@ -233,6 +237,17 @@ function configuredToolNames(pi: Pick<ExtensionAPI, "getAllTools">): ReadonlySet
 export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
+	// Messages from the invoking hub enter this run as custom messages; agent operations go back to it.
+	const link = startPeerLink(pi);
+	const may = loaded.manifest?.may ?? DEFAULT_CAPABILITIES;
+	const peerTools = link ? peerToolDefinitions(async (op, args, signal) => {
+		try { return { text: (await link.request(op, args, signal)).text }; }
+		catch (error) { return { isError: true, text: error instanceof PeerLinkError ? (error.detail ?? error.code) : "agent_link_failed" }; }
+	}, op => op === "list" || op === "wait" || op === "message" || may.invoke) : [];
+	// Registered at load so every request of every turn carries the same tool set.
+	for (const tool of peerTools) pi.registerTool(tool);
+	const recorder = loaded.manifest?.sharedWrites ? new SharedWriteRecorder(loaded.manifest.sharedWrites) : undefined;
+	const recorded = new Map<string, string>();
 	let worker: WorkerTools | undefined;
 	let fatal = true;
 	let initialized = false;
@@ -272,13 +287,15 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 		marker("ready", !fatal);
 		if (!loaded.manifest) return;
 		// Preserve Pi's native append-file selection and system prompt construction.
-		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest.role, loaded.manifest.grants.some(grant => grant.permission === "write")).systemPrompt].filter(Boolean).join("\n\n");
+		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest.role, loaded.manifest.grants.some(grant => grant.permission === "write"), loaded.manifest.rolePrompt).systemPrompt].filter(Boolean).join("\n\n");
 		if (loaded.manifest.guidance) event.systemPromptOptions.contextFiles = loaded.manifest.guidance.contextFiles;
 	});
 	pi.on("tool_call", async (event) => {
-		if (!ownedTools.includes(event.toolName) || !["read", "write", "edit", "ls"].includes(event.toolName)) recoverySafe = false;
+		const peerTool = peerTools.some(tool => tool.name === event.toolName);
+		if (!peerTool && (!ownedTools.includes(event.toolName) || !["read", "write", "edit", "ls"].includes(event.toolName))) recoverySafe = false;
 		if (fatal || !loaded.manifest) return { block: true, terminate: true, reason: "Managed worker state is unavailable." };
-		if (isNativeBashTool(event.toolName)) return;
+		if (peerTool) return;
+		if (isNativeBashTool(event.toolName)) { recorder?.shellUsed(); return; }
 		// The typed Git tool authorizes its repository selector and every requested path
 		// itself. A native single-path check would authorize the child cwd (git_read has no
 		// `path`) and reject valid scoped history queries, so only its grant membership is
@@ -295,6 +312,16 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 		if (decision.fatal) { fatal = true; recordCapabilityInvalidation(pi); }
 		if (!decision.allowed) return { block: true, terminate: decision.fatal === true, reason: decision.reason ?? "Path denied." };
 		if (decision.resolvedPath && typeof input.path === "string") input.path = decision.resolvedPath;
+		if (recorder && (event.toolName === "write" || event.toolName === "edit")) {
+			const target = decision.resolvedPath ?? (typeof input.path === "string" ? input.path : undefined);
+			if (target) { recorder.beforeWrite(target); recorded.set(event.toolCallId, target); }
+		}
+	});
+	pi.on("tool_execution_end", event => {
+		const target = recorded.get(event.toolCallId);
+		if (!target) return;
+		recorded.delete(event.toolCallId);
+		if (!event.isError) recorder?.afterWrite(target);
 	});
 	pi.on("agent_settled", async () => {
 		try { if (!worker) throw new Error("unavailable"); await worker.shutdown(); marker("stopped", true); }

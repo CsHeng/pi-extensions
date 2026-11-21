@@ -14,17 +14,17 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
  const transport = (pi: ExtensionAPI) => {
   const publish = () => pi.events.emit(EXECUTION_FACTS_EVENT, running);
   pi.events.on(EXECUTION_FACTS_REQUEST, (raw: unknown) => (raw as { accept?: (facts: ProducerFacts) => void }).accept?.(running));
-  pi.registerTool({ name: "agent", label: "Fixture", description: "Synthetic transport", parameters: Type.Object({ action: Type.Literal("create") }),
+  pi.registerTool({ name: "invoke_agent", label: "Fixture", description: "Synthetic transport", parameters: Type.Object({ action: Type.Literal("create") }),
    async execute() {
     publish();
     send = publish;
-    return { content: [{ type: "text", text: "accepted" }], details: { schemaVersion: 4, kind: "submission", status: "accepted", runId: "run", requestTelemetry: { version: 1, ownerSessionId: "session", admittedTasks: 1 } } };
+    return { content: [{ type: "text", text: "accepted" }], details: { schemaVersion: 5, kind: "submission", status: "accepted", runId: "run", requestTelemetry: { version: 1, ownerSessionId: "session", admittedTasks: 1 } } };
    } });
  };
  const trace = createTrace(); const h = await createHostHarness({ trace, extensions: [early ? noticesExtension : tasklistExtension, early ? tasklistExtension : noticesExtension, transport, createTraceObserver(trace)] }); t.after(() => h.dispose());
  h.faux.setResponses([
   call("tasklist", { operation: "set", title: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] }),
-  call("agent", { action: "create" }), fauxAssistantMessage("Awaiting result"),
+  call("invoke_agent", { action: "create" }), fauxAssistantMessage("Awaiting result"),
   fauxAssistantMessage("must-not-remind"),
  ]);
  await h.session.prompt("go");
@@ -37,9 +37,9 @@ for (const early of [false, true]) test("async completion " + (early ? "before" 
 
 test("replaying an old accepted receipt after recovery cannot wait for a nonexistent live run", async t => {
  const transport = (pi: ExtensionAPI) => {
-  pi.registerTool({ name: "agent", label: "Fixture", description: "Persisted accepted receipt replay", parameters: Type.Object({ action: Type.Literal("create") }),
+  pi.registerTool({ name: "invoke_agent", label: "Fixture", description: "Persisted accepted receipt replay", parameters: Type.Object({ action: Type.Literal("create") }),
    async execute(_id, _args, _signal, _update, ctx) {
-    return { content: [{ type: "text", text: "old accepted receipt" }], details: { schemaVersion: 4, kind: "submission", status: "accepted", runId: "prior-process-run",
+    return { content: [{ type: "text", text: "old accepted receipt" }], details: { schemaVersion: 5, kind: "submission", status: "accepted", runId: "prior-process-run",
      sessions: [{ handle: "old", state: "running" }], requestTelemetry: { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), admittedTasks: null, replayedEpisodes: 1 } } };
    } });
  };
@@ -49,7 +49,7 @@ test("replaying an old accepted receipt after recovery cannot wait for a nonexis
   fauxAssistantMessage("Restored without a resume step"),
  ]);
  await h.session.prompt("restore tracked work");
- h.faux.setResponses([call("tasklist", { operation: "update", tasks: [{ id: "a", note: "continuing" }] }), call("agent", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("must-not-run")]);
+ h.faux.setResponses([call("tasklist", { operation: "update", tasks: [{ id: "a", note: "continuing" }] }), call("invoke_agent", { action: "create" }), fauxAssistantMessage("Recorded historical receipt"), fauxAssistantMessage("must-not-run")]);
  await h.session.prompt("continue current work");
  await waitForTrace(trace, () => trace.entries.filter(e => e.event === "native:agent_settled").length === 2);
  await new Promise(resolve => setTimeout(resolve, 100));

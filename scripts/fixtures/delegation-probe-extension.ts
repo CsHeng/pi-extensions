@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "./delegation-probe-guidance.ts";
 import { AgentTaskSchema } from "../../extensions/agents/contracts.ts";
 import { AGENT_SESSION_TOOL_NAME, AgentSessionToolSchema, parseSessionRequest } from "../../extensions/agents/session-contracts.ts";
-import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "../../extensions/agents/tool-surface.ts";
+import { AGENT_TOOL_DESCRIPTION, AGENT_TOOL_PROMPT_GUIDELINES, AGENT_TOOL_PROMPT_SNIPPET } from "./delegation-probe-surface.ts";
 
 export const PROBE_SHAPE_ENV = "PI_EXTENSIONS_PROBE_SHAPE";
 export const PROBE_GUIDANCE_ENV = "PI_EXTENSIONS_PROBE_GUIDANCE";

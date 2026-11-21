@@ -26,7 +26,7 @@ export default function probe(pi: ExtensionAPI): void {
 		description: "Redacted Tasklist package probe",
 		handler: async () => {
 			const tool = pi.getAllTools().find((candidate) => candidate.name === "tasklist");
-			const managed = pi.getAllTools().some((candidate) => candidate.name === "agent");
+			const managed = ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"].every(name => pi.getAllTools().some(candidate => candidate.name === name));
 			const commands = pi.getCommands();
 			pi.appendEntry("tasklist-probe", {
 				tool: tool !== undefined,
@@ -93,7 +93,7 @@ export default function probe(pi: ExtensionAPI): void {
 			const commands = pi.getCommands().map((command) => command.name);
 			pi.appendEntry("tasklist-coload", {
 				tasklist: tools.includes("tasklist"),
-				managed: tools.includes("agent"),
+				managed: ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"].every(name => tools.includes(name)),
 				agents: commands.includes("agents"),
 				ui: commands.includes("agents-ui"),
 			});

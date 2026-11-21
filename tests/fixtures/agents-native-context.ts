@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ManagedSessionStore } from "../../extensions/agents/managed-sessions.ts";
 import { registerContinuationTool } from "../../extensions/agents/continuation.ts";
+import { PEER_TOOLS } from "../../extensions/agents/peer-protocol.ts";
 import { validateGraphStructure } from "../../extensions/agents/graph.ts";
 
 /** Native host-only fixture: metadata seeds and public compaction, never a child dispatch. */
@@ -32,7 +33,7 @@ export default function nativeContextFixture(pi: ExtensionAPI): void {
 	});
 	if (mode === "late-remove") pi.on("before_provider_request", (event) => {
 		const payload = event.payload as { tools: Array<{ name: string }>; messages: unknown[] };
-		return { ...payload, tools: payload.tools.filter((tool) => tool.name !== "agent"), messages: payload.messages.filter((message) => !JSON.stringify(message).includes("Stored local-task index")) };
+		return { ...payload, tools: payload.tools.filter((tool) => !PEER_TOOLS.includes(tool.name)), messages: payload.messages.filter((message) => !JSON.stringify(message).includes("Stored local-task index")) };
 	});
 	if (mode === "manual") {
 		let compacted = false;

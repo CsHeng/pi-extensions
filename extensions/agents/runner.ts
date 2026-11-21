@@ -9,6 +9,7 @@ import { basename, join, resolve } from "node:path";
 import {
 	CAPABILITY_RECOVERY_HINT,
 	CHILD_CAPABILITY_ENV,
+	CHILD_CAPABILITY_MANIFEST_VERSION,
 	CHILD_MARKER_ENV,
 	HARD_LIMITS,
 	emptyTaskTelemetry,
@@ -35,6 +36,7 @@ import { boundNativeObservation, collectNativeObservation, nativeCapabilityInval
 import { MANAGED_LIMITS, ManagedError } from "./session-contracts.ts";
 import { prepareChildGuidance, type CapturedProjectSkill } from "./guidance-resources.ts";
 import { readOnlyToolArgs } from "./native-context.ts";
+import { PEER_LINK_ENV, type PeerLinkBinding } from "./peer-protocol.ts";
 
 async function readObservationNative(file: string): Promise<string | undefined> {
 	try {
@@ -82,9 +84,11 @@ export interface ChildRunOptions {
 	onActivity?(activity: Readonly<ChildActivity>): void;
 	onChildStarted?(): void;
 	onChildSettled?(): void;
+	/** Live message link to the invoking hub for this episode. */
+	link?: PeerLinkBinding;
 }
 
-const ENV_DENYLIST = new Set([CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "PI_EXTENSIONS_AGENT_TEST_MODE", "PI_EXTENSIONS_AGENT_WORKER_SCRATCH", "PI_EXTENSIONS_AGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
+const ENV_DENYLIST = new Set([PEER_LINK_ENV, CHILD_CAPABILITY_ENV, CHILD_MARKER_ENV, "PI_EXTENSIONS_AGENT_TEST_MODE", "PI_EXTENSIONS_AGENT_WORKER_SCRATCH", "PI_EXTENSIONS_AGENT_WORKER_INPUTS", "RIPGREP_CONFIG_PATH"]);
 
 export function resolvePiInvocation(extraArgs: string[], runtime = { executable: process.execPath, script: process.argv[1], platform: process.platform, pid: process.pid }): PiInvocation {
 	const executableFile = (file: string) => {
@@ -104,13 +108,14 @@ export function resolvePiInvocation(extraArgs: string[], runtime = { executable:
 	throw new ManagedError("launcher_unavailable", undefined, "Current Pi launcher is no longer executable. Restart the affected Pi session from a verified installation; reloading extensions alone cannot replace its runtime executable.");
 }
 
-function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, managedWorkerScratch?: string, managedWorkerInputs?: WorkerInputState): NodeJS.ProcessEnv {
+function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, managedWorkerScratch?: string, managedWorkerInputs?: WorkerInputState, link?: PeerLinkBinding): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(source)) {
 		if (!ENV_DENYLIST.has(key) && value !== undefined) env[key] = value;
 	}
 	env[CHILD_MARKER_ENV] = "1";
 	env[CHILD_CAPABILITY_ENV] = capabilityPath;
+	if (link) env[PEER_LINK_ENV] = JSON.stringify(link);
 	if (managedWorkerScratch) {
 		env.PI_EXTENSIONS_AGENT_WORKER_SCRATCH = managedWorkerScratch;
 		env.TMPDIR = managedWorkerScratch;
@@ -158,7 +163,9 @@ export function buildChildPrompt(task: NormalizedTask, prompt: string, advisoryW
 	const verification = task.verification.length > 0 ? `\nExpected parent evidence:\n- ${task.verification.join("\n- ")}` : "";
 	const grants = task.grants.map((grant) => `${grant.permission} ${grant.path}`).join("\n- ");
 	const roots = (task.roots ?? []).map((root) => `${root.permission} ${root.source} -> ${root.path}`).join("\n- ") || "resolved at execution";
-	return `Task ${task.id}\nRole: ${task.role}\nObjective: ${task.objective}\nAccess grants:\n- ${grants || "none"}\nPrepared mapping:\n- ${roots}\n${advisoryWrites ? "Write tools may change only the listed write grants. Use those prepared paths, not the primary checkout." : "This session has no write grant."}${verification}\n\nInputs:\n${prompt}`;
+	const may = task.may ? `\nYou may message: ${task.may.message.join(", ") || "nobody"}; roster ${task.may.roster ? "visible through list_agents" : "not visible"}; ${task.may.invoke ? "you may invoke agents within your own access" : "you may not invoke agents"}.` : "";
+	const workspace = task.access.some(rule => rule.permission === "write") ? `\nWorkspace: ${task.workspace !== "shared" ? "isolated private copy; your assigner integrates the result" : "shared checkout; other agents and the user may change files beside you, so edit only what your brief assigns"}.` : "";
+	return `Agent ${task.id}\nRole: ${task.role}${workspace}${may}\nAssignment: ${task.objective}\nAccess grants:\n- ${grants || "none"}\nPrepared mapping:\n- ${roots}\n${advisoryWrites ? "Write tools may change only the listed write grants, at the prepared paths shown." : "This session has no write grant."}${verification}\n\nInputs:\n${prompt}`;
 }
 
 function cloneActivity(activity: Readonly<ChildActivity>): ChildActivity {
@@ -214,7 +221,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 			return failure(options, started, now, "prompt_too_large", "Complete child prompt exceeds the byte limit.");
 		}
 		const guidance = options.preparedGuidance ?? (options.sourceRoot ? await prepareChildGuidance(options.sourceRoot, options.cwd, options.inheritSkills ?? true, options.env?.PI_CODING_AGENT_DIR, options.env?.HOME ?? homedir(), options.parentSkills, options.projectSkills) : undefined);
-		const capability = guidance && options.capability.version === 4
+		const capability = guidance && options.capability.version === CHILD_CAPABILITY_MANIFEST_VERSION
 			? { ...options.capability, guidance: { contextFiles: guidance.contextFiles, readRoots: guidance.readRoots, physicalRoots: guidance.physicalRoots } }
 			: options.capability;
 		await Promise.all([
@@ -247,7 +254,7 @@ export async function runChild(options: ChildRunOptions): Promise<TaskResult> {
 				cwd: options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: childEnvironment(options.env ?? process.env, capabilityPath, options.managedWorkerScratch, options.managedWorkerInputs),
+				env: childEnvironment(options.env ?? process.env, capabilityPath, options.managedWorkerScratch, options.managedWorkerInputs, options.link),
 			});
 			let closed = false;
 			let stopping = false;

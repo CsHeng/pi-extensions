@@ -69,9 +69,13 @@ export const STABLE_TASK_ERROR_CODES = [
 ] as const;
 export const CAPABILITY_RECOVERY_HINT = "Reading capability changed or became unavailable. Verify the intended roots and create a new session; continuing the same binding does not reauthorize replaced roots.";
 /** Current collaboration contract. Older envelopes are excluded, not interpreted. */
-export const COLLABORATION_CONTRACT_VERSION = 4 as const;
+export const COLLABORATION_CONTRACT_VERSION = 5 as const;
 export const CHILD_CAPABILITY_MANIFEST_VERSION = COLLABORATION_CONTRACT_VERSION;
-export type RoleName = (typeof ROLE_NAMES)[number];
+/** Packaged role names stay present; user and project definitions add others by name. */
+export type RoleName = (typeof ROLE_NAMES)[number] | (string & {});
+export const ROLE_NAME_PATTERN = "^[a-z][a-z0-9-]{0,31}$";
+const ROLE_NAME_RE = new RegExp(ROLE_NAME_PATTERN);
+export function isRoleName(value: unknown): value is RoleName { return typeof value === "string" && ROLE_NAME_RE.test(value); }
 export type ExecutionProfile = (typeof EXECUTION_PROFILES)[number];
 export type ThinkingProfile = (typeof THINKING_PROFILES)[number];
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -134,7 +138,17 @@ export interface ChildActivity {
 	inactiveForMs: number;
 }
 
-const RoleSchema = StringEnum(ROLE_NAMES);
+const RoleSchema = Type.String({ pattern: ROLE_NAME_PATTERN, description: "Role definition name, such as explorer, reviewer or worker." });
+export const WORKSPACE_MODES = ["shared", "isolated"] as const;
+export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
+export const AGENT_NAME_PATTERN = "^[a-z][a-z0-9-]{0,63}$";
+/** Whom an agent may message ("assigner", "peers" or agent names), whether it sees the roster, whether it may invoke agents. */
+export interface AgentCapabilities { message: string[]; roster: boolean; invoke: boolean }
+export const AgentCapabilitiesSchema = Type.Object({
+	message: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, description: "Whom the agent may message: \"assigner\", \"peers\" (agents with the same assigner) or agent names." }),
+	roster: Type.Boolean({ description: "Whether list_agents shows this agent the other agents." }),
+	invoke: Type.Boolean({ description: "Whether this agent may invoke agents of its own, within its own access." }),
+}, { additionalProperties: false });
 const ExecutionProfileSchema = StringEnum(EXECUTION_PROFILES, {
 	description: "Optional route preference: fast favors quick turnaround, balanced weighs cost and quality, deep favors complex work. Selects configured model/thinking candidates; omit for the role default.",
 });
@@ -176,6 +190,10 @@ export const AgentTaskSchema = Type.Object(
 			description: "Exact ephemeral model selector supplied only for an explicit user model choice; it overrides default model routing for this task.",
 		})),
 		thinking: Type.Optional(ThinkingLevelSchema),
+		/** Internal: shared writes the checkout directly; isolated keeps a private worktree and a candidate. */
+		workspace: Type.Optional(StringEnum(WORKSPACE_MODES)),
+		/** Internal: granted per-agent capabilities, resolved at invocation. */
+		may: Type.Optional(AgentCapabilitiesSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -193,6 +211,8 @@ export interface AgentTask {
 	thinkingProfile?: ThinkingProfile;
 	model?: string;
 	thinking?: ThinkingLevel;
+	workspace?: WorkspaceMode;
+	may?: AgentCapabilities;
 }
 
 export interface AgentToolInput {
@@ -239,6 +259,8 @@ export interface EffectiveRoute {
 	selectionSource?: RouteSelectionSource;
 	modelOverrideRequested?: boolean;
 	thinkingOverrideRequested?: boolean;
+	/** Set when the role has no route of its own: the role whose route applied, or "$parent". */
+	roleRouteFallback?: string;
 }
 
 export type EffectiveRouteV2 = EffectiveRoute & TaskRouteEvidenceV2;
@@ -386,6 +408,12 @@ export interface ChildCapabilityManifest {
 	cwd: string;
 	grants: CapabilityGrant[];
 	roots: CapabilityRoot[];
+	/** Granted capabilities; absent on records that predate them. */
+	may?: AgentCapabilities;
+	/** Shared writers record file-tool pre-images here for attribution and revert. */
+	sharedWrites?: string;
+	/** Role definition prompt resolved by the invoking host; children need no role catalog of their own. */
+	rolePrompt?: string;
 	/** Runtime-derived native guidance, never supplied by a model task. */
 	guidance?: { contextFiles: Array<{ path: string; content: string }>; readRoots: string[]; physicalRoots: string[] };
 }

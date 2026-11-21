@@ -304,7 +304,7 @@ test("timing and scalar honesty reject NaN, negatives, and non-integers", () => 
 		tasks: [task({ episode: 1.5 })],
 	})).ok, false);
 	assert.equal(parseObserverSnapshot(snapshot({
-		tasks: [task({ role: "agent" })],
+		tasks: [task({ role: "Invalid Name" })],
 	})).ok, false);
 	assert.equal(parseObserverSnapshot(snapshot({
 		tasks: [task({ status: "cancelled" })],

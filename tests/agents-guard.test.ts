@@ -54,6 +54,7 @@ test("read grants do not become write grants and write grants stay inside the pa
 });
 
 test("unsupported capability versions are rejected without normalization", () => {
+	assert.throws(() => parseCapability({ version: 4, role: "worker", cwd: "/repo", grants: [{ permission: "read", path: "/repo" }], roots: [] }), /unsupported version/);
 	assert.throws(() => parseCapability({ version: 2, root: "/repo", role: "worker", readRoots: ["/repo"], writePaths: [], externalReadRoots: [] }), /unsupported version/);
 	assert.throws(() => parseCapability({ version: 1, root: "/repo", role: "explorer", readRoots: ["/repo"], writePaths: [] }), /unsupported version/);
 });

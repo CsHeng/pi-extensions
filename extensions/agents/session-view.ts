@@ -30,7 +30,7 @@ export interface SessionViewHistoryRow {
 	label?: string;
 	elapsedMs?: number;
 	route?: ObserverTask["route"];
-	role: "worker" | "reviewer" | "explorer";
+	role: string;
 	/** Durable managed state; running/queued without a fresh live row is unconfirmed, never animated. */
 	state: ManagedState;
 	episode: number;
@@ -176,7 +176,7 @@ function parseHistoryRow(value: unknown): SessionViewHistoryRow | undefined {
 	if (value.elapsedMs !== undefined && (typeof value.elapsedMs !== "number" || !Number.isFinite(value.elapsedMs) || value.elapsedMs < 0)) return undefined;
 	const route = value.route === undefined ? undefined : parseObserverRoute(value.route);
 	if (value.route !== undefined && route === undefined) return undefined;
-	if (!opaqueId(value.handle) || !["worker", "reviewer", "explorer"].includes(value.role as string)) return undefined;
+	if (!opaqueId(value.handle) || !(typeof value.role === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.role))) return undefined;
 	if (!MANAGED_STATES.includes(value.state as ManagedState) || !OUTCOMES.includes(value.latestOutcome as SessionViewOutcome)) return undefined;
 	if (!nonNegativeInt(value.episode) || !intOrNull(value.acceptedEpisodes)) return undefined;
 	if (typeof value.onCurrentBranch !== "boolean" || typeof value.legacy !== "boolean" || typeof value.reportComplete !== "boolean" || typeof value.retained !== "boolean") return undefined;

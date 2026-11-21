@@ -13,7 +13,7 @@ import { ContinuationService, registerContinuationTool } from "../extensions/age
 import { ManagedSessionStore } from "../extensions/agents/managed-sessions.ts";
 import { defaultConfig } from "../extensions/agents/config.ts";
 import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
-import { AGENT_SESSION_TOOL_NAME } from "../extensions/agents/session-contracts.ts";
+import { PEER_TOOLS, PEER_TOOL_NAMES } from "../extensions/agents/peer-protocol.ts";
 
 const git = promisify(execFile);
 
@@ -21,16 +21,16 @@ const git = promisify(execFile);
 function captureRegistration() {
 	const handlers = new Map<string, Array<(event: any, ctx?: any) => any>>();
 	const entries: Array<{ customType?: string }> = [];
-	const tool = { value: undefined as any };
+	const tools = new Map<string, any>();
 	const pi = {
 		on(name: string, handler: (event: any, ctx?: any) => any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
-		registerTool(value: any) { tool.value = value; },
+		registerTool(value: any) { tools.set(value.name, value); },
 		registerCommand() {},
 		appendEntry(customType: string) { entries.push({ customType }); },
-		getActiveTools: () => [AGENT_SESSION_TOOL_NAME],
+		getActiveTools: () => [...tools.keys()],
 		events: { on() {}, emit() {} },
 	} as unknown as ExtensionAPI;
-	return { pi, handlers, entries, tool };
+	return { pi, handlers, entries, tools };
 }
 
 async function fixture(t: test.TestContext) {
@@ -54,24 +54,23 @@ async function fixture(t: test.TestContext) {
 
 const task = (label: string) => ({ id: label, role: "explorer" as const, objective: "scan", access: [{ permission: "read" as const, scope: "/tmp/scope" }] });
 
-test("the registered agent tool injects no managed session index and keeps guidance natively assembled", async (t) => {
+test("the registered peer tools inject no managed session index and keep guidance natively assembled", async (t) => {
 	const f = await fixture(t);
 	const captured = captureRegistration();
-	registerContinuationTool(captured.pi, f.dependencies);
+	const service = registerContinuationTool(captured.pi, f.dependencies);
+	t.after(() => service.shutdown());
 	// No context hook exists any more: nothing can append a per-turn session index or refresh bookkeeping.
 	assert.equal(captured.handlers.has("context"), false);
 	assert.equal(captured.handlers.has("context_with_system"), true, "live-activity cleanup stays registered");
 
-	const tool = captured.tool.value;
-	const parametersBefore = JSON.stringify(tool.parameters);
-	assert.equal(tool.name, "agent");
-	assert.ok(tool.description.length > 0);
-	assert.ok(tool.promptSnippet && tool.promptSnippet.length > 0, "capability guidance uses native prompt assembly");
-	assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0);
-	assert.match(tool.promptGuidelines.join("\n"), /bare inspect/, "discovery is stated in the static guidance");
-	assert.match(tool.promptSnippet, /bare inspect/, "snippet retains handle recovery via bare inspect");
-	assert.doesNotMatch(tool.promptSnippet, /find Agents with a bare inspect,\s*wait with join/i, "snippet omits routine inspect-then-join polling cue");
-	assert.doesNotMatch(JSON.stringify([tool.description, tool.promptSnippet, tool.promptGuidelines]), /requestId|replay token|managed session index|notices extension|notices\.|notices-wait/i);
+	const surface = () => JSON.stringify([...captured.tools.values()].map(tool => [tool.parameters, tool.description, tool.promptSnippet, tool.promptGuidelines]));
+	const before = surface();
+	assert.deepEqual([...captured.tools.keys()], PEER_TOOLS);
+	const invoke = captured.tools.get(PEER_TOOL_NAMES.invoke);
+	assert.ok(invoke.description.length > 0);
+	assert.match(invoke.promptSnippet, /list_agents/, "static capability guidance names the explicit discovery operation");
+	assert.ok(Array.isArray(invoke.promptGuidelines) && invoke.promptGuidelines.length > 0);
+	assert.doesNotMatch(before, /requestId|expectedEpisode|replay token|managed session index|notices extension|notices\.[a-z]|notices-wait/i);
 
 	// Normal input, extension-origin input, settlement and compaction never produce index entries.
 	const settle = async (name: string, event: unknown = {}) => {
@@ -84,8 +83,7 @@ test("the registered agent tool injects no managed session index and keeps guida
 	await settle("session_compact", { reason: "manual" });
 	await settle("session_tree", {});
 	assert.deepEqual(captured.entries, [], "no custom managed-index entry is appended");
-	assert.equal(JSON.stringify(tool.parameters), parametersBefore, "profile guidance stays in stable native tool parameters across lifecycle events");
-	await new ContinuationService(f.dependencies).shutdown();
+	assert.equal(surface(), before, "the complete registered peer surface stays stable across lifecycle events");
 });
 
 test("a bare inspect recovers this session's Agents after resume and compaction without an index", async (t) => {

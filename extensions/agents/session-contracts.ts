@@ -4,6 +4,7 @@ import { validateGraphStructure } from "./graph.ts";
 import { observationWaitMilliseconds } from "../shared/observation-budget.ts";
 import { COLLABORATION_CONTRACT_VERSION, HARD_LIMITS, StringEnum, AgentTaskSchema, type TaskResult, type EffectiveRoute, type ProvenanceTelemetry } from "./contracts.ts";
 
+/** Name of the retired version-4 model tool; kept for the historical delegation probe. The engine request schema below is internal. */
 export const AGENT_SESSION_TOOL_NAME = "agent";
 export const MANAGED_SESSION_VERSION = COLLABORATION_CONTRACT_VERSION;
 export const MANAGED_LIMITS = Object.freeze({
@@ -184,7 +185,7 @@ export interface SessionView {
 	execution?: EpisodeExecution;
 	route?: EffectiveRoute;
 	handle: string;
-	role: "explorer" | "reviewer" | "worker";
+	role: string;
 	episode: number;
 	state: ManagedState;
 	reportComplete: boolean;

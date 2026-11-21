@@ -3,15 +3,15 @@ import { join } from "node:path";
 import { destinationKey, withDestinationLocks } from "./destination-lock.ts";
 import { inspectGitWorkspace, runReadGit, captureGitInput, createGitTaskWorkspace, discardGitInput, discardGitWorkspace, freezeGitCandidate, planGitApply, reconcileGitAttempt, applyGitAttempt, refreshGitInputs, retainGitInput, inspectGitInput, validateGitCandidate, applicableGitAttempt } from "./git-workspace.ts";
 import { mintProductId } from "./identity.ts";
-import { managedWriteRoots, type ManagedRecord, type ManagedRootState, type ManagedSessionStore } from "./managed-sessions.ts";
+import { isolatedWriteRoots, type ManagedRecord, type ManagedRootState, type ManagedSessionStore } from "./managed-sessions.ts";
 import { validateRepositoryTarget } from "./repository-policy.ts";
-import { ManagedError, uncertainApply, type ApplyStatus, type CandidateRef, type CandidateRootStatus, type RecoveryWorkspace } from "./session-contracts.ts";
+import { MANAGED_SESSION_VERSION, ManagedError, uncertainApply, type ApplyStatus, type CandidateRef, type CandidateRootStatus, type RecoveryWorkspace } from "./session-contracts.ts";
 import { inspectWorkerInputs, prepareWorkerInputs, refreshWorkerInputs } from "./worker-inputs.ts";
 
 const rootPath = (store: ManagedSessionStore, record: ManagedRecord, root: ManagedRootState) => join(store.path(record.handle), "roots", root.id);
 
 function writable(record: ManagedRecord): void {
-	if (record.version !== 4) throw new ManagedError("unsupported_contract");
+	if (record.version !== MANAGED_SESSION_VERSION) throw new ManagedError("unsupported_contract");
 }
 
 function aggregate(statuses: readonly ApplyStatus[]): ApplyStatus {
@@ -47,7 +47,7 @@ export function grantCovers(selected: readonly string[], changed: string): boole
 
 export async function prepareManagedWorkspace(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
 	writable(record);
-	for (const root of managedWriteRoots(record)) {
+	for (const root of isolatedWriteRoots(record)) {
 		if (root.released) throw new ManagedError("managed_workspace_missing");
 		await validateRepositoryTarget(root.target);
 		if (root.paths.some((file) => file === ".git" || file.startsWith(".git/"))) throw new ManagedError("managed_git_write_forbidden");
@@ -88,7 +88,7 @@ function scopeSummary(changedPaths: readonly string[]) {
 /** Read only the pinned writable inputs on explicit recovery. A dirty worktree is evidence, not an accepted candidate. */
 export async function reviewRecoveryWorkspaces(store: ManagedSessionStore, record: ManagedRecord): Promise<RecoveryWorkspace[]> {
 	const result: RecoveryWorkspace[] = [];
-	for (const root of managedWriteRoots(record)) {
+	for (const root of isolatedWriteRoots(record)) {
 		if (root.workspaceReleased || root.released) continue;
 		const workspace = root.inputs?.gitWorkspace;
 		try {
@@ -114,7 +114,7 @@ export async function syncManagedInputs(store: ManagedSessionStore, record: Mana
 	writable(record);
 	if (record.state !== "idle") throw new ManagedError("session_not_idle");
 	if (uncertainApply(record.candidate)) throw new ManagedError("candidate_recovery_required");
-	for (const root of managedWriteRoots(record)) {
+	for (const root of isolatedWriteRoots(record)) {
 		await validateRepositoryTarget(root.target);
 		const workspace = root.inputs?.gitWorkspace;
 		if (!workspace) throw new ManagedError("managed_workspace_missing");
@@ -131,7 +131,7 @@ export async function freezeCandidate(store: ManagedSessionStore, record: Manage
 	writable(record);
 	if (!record.result?.reportComplete || record.result.status !== "succeeded") throw new ManagedError("candidate_report_incomplete");
 	const roots: CandidateRootStatus[] = [];
-	for (const root of managedWriteRoots(record)) {
+	for (const root of isolatedWriteRoots(record)) {
 		await validateRepositoryTarget(root.target);
 		const workspace = root.inputs?.gitWorkspace;
 		if (!workspace) throw new ManagedError("managed_workspace_missing");

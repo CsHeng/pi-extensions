@@ -106,7 +106,7 @@ function fakePi() {
 	let idle = true;
 	const ctx = { mode: "tui", isIdle: () => idle, hasPendingMessages: () => false, isProjectTrusted: () => true, signal: undefined, sessionManager: { getSessionId: () => "s", getLeafId: () => "b", getBranch: () => [{ id: "b" }] } } as ExtensionContext;
 	const pi = {
-		getActiveTools: () => ["bash", "tasklist", "agent"],
+		getActiveTools: () => ["bash", "tasklist", "list_agents"],
 		events: {
 			on: (name: string, handler: (data: unknown) => void) => { listeners.set(name, [...(listeners.get(name) ?? []), handler]); return () => {}; },
 			emit: (name: string, data: unknown) => { for (const handler of listeners.get(name) ?? []) handler(data); },
@@ -241,7 +241,7 @@ for (const consumerFirst of [true, false]) test("host " + (consumerFirst ? "cons
 	const notices: string[] = [];
 	const board: { facts: ProducerFacts; emit?: () => void } = { facts: execution("agents", "running", "pending", "child") };
 	const publisher = (pi: ExtensionAPI) => {
-		pi.registerTool({ name: "agent", label: "Fixture", description: "Fact publisher", parameters: Type.Object({}), async execute() { return { content: [], details: undefined }; } });
+		pi.registerTool({ name: "list_agents", label: "Fixture", description: "Fact publisher", parameters: Type.Object({}), async execute() { return { content: [], details: undefined }; } });
 		const publish = () => pi.events.emit(EXECUTION_FACTS_EVENT, board.facts);
 		board.emit = publish;
 		pi.events.on("notices.snapshot.v1", (raw: unknown) => (raw as { accept?: (facts: ProducerFacts) => void }).accept?.(board.facts));
@@ -283,7 +283,7 @@ test("a completion arriving inside a later settlement consumer waits for that co
 	const gate = new Promise<void>(resolve => { release = resolve; });
 	let first = true;
 	const producer = (pi: ExtensionAPI) => {
-		pi.registerTool({ name: "agent", label: "Fixture", description: "Enroll completion", parameters: Type.Object({}), async execute() {
+		pi.registerTool({ name: "list_agents", label: "Fixture", description: "Enroll completion", parameters: Type.Object({}), async execute() {
 			pi.events.emit(EXECUTION_FACTS_EVENT, execution("agents", "running", "pending", "child"));
 			return { content: [], details: undefined };
 		} });
@@ -300,7 +300,7 @@ test("a completion arriving inside a later settlement consumer waits for that co
 	t.after(async () => { release(); await h.dispose(); });
 	h.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("tasklist", { operation: "set", title: "Work", tasks: [{ id: "a", title: "Task", status: "doing" }] } as never)),
-		fauxAssistantMessage(fauxToolCall("agent", {})),
+		fauxAssistantMessage(fauxToolCall("list_agents", {})),
 		fauxAssistantMessage("yield"), fauxAssistantMessage("saw terminal"), fauxAssistantMessage("must-not-run"),
 	]);
 	const running = h.session.prompt("start the fixture");

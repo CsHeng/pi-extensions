@@ -5,14 +5,13 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	EXECUTION_PROFILES,
 	THINKING_PROFILES,
-	ROLE_NAMES,
 	THINKING_LEVELS,
 	type ExecutionProfile,
 	type ThinkingProfile,
-	type RoleName,
 	type RouteSource,
 	type ThinkingLevel,
 } from "./contracts.ts";
+import { ROLE_NAME_PATTERN } from "./role-definitions.ts";
 
 export { THINKING_LEVELS } from "./contracts.ts";
 export const ROUTE_CONFIG_FILE = "agent-routes.json";
@@ -20,11 +19,9 @@ export type ConfiguredThinking = "$parent" | ThinkingLevel;
 
 const PACKAGE_CONFIG_PATH = fileURLToPath(new URL("../../config/agent-routes.json", import.meta.url));
 const DEFAULT_GLOBAL_CONCURRENCY = 10;
-const DEFAULT_ROLE_CONCURRENCY: Record<RoleName, number> = {
-	explorer: 4,
-	reviewer: 4,
-	worker: 2,
-};
+const DEFAULT_ROLE_CONCURRENCY = { explorer: 4, reviewer: 4, worker: 2 };
+type PackagedRole = keyof typeof DEFAULT_ROLE_CONCURRENCY;
+type ByRole<T> = Record<string, T> & Record<PackagedRole, T>;
 
 export interface RouteCandidateConfig {
 	model: string;
@@ -45,8 +42,8 @@ export interface RoleRouteConfig {
 
 export interface EffectiveAgentConfig {
 	maxConcurrency: number;
-	routes: Record<RoleName, RoleRouteConfig>;
-	roles: Record<RoleName, { inheritSkills: boolean }>;
+	routes: ByRole<RoleRouteConfig>;
+	roles: ByRole<{ inheritSkills: boolean }>;
 	thinkingProfiles: Partial<Record<ThinkingProfile, ConfiguredThinking>>;
 	thinkingProfileSources: Partial<Record<ThinkingProfile, RouteSource>>;
 }
@@ -69,10 +66,10 @@ interface ParseOptions {
 	source?: RouteSource;
 }
 
-function neutralRoute(role: RoleName): RoleRouteConfig {
+export function neutralRoute(maxConcurrency: number): RoleRouteConfig {
 	return {
 		candidates: [{ model: "$parent", thinking: "$parent" }],
-		maxConcurrency: DEFAULT_ROLE_CONCURRENCY[role],
+		maxConcurrency,
 		source: "parent",
 		executionProfiles: {},
 	};
@@ -83,9 +80,9 @@ export function defaultConfig(): EffectiveAgentConfig {
 		maxConcurrency: DEFAULT_GLOBAL_CONCURRENCY,
 		roles: { explorer: { inheritSkills: true }, reviewer: { inheritSkills: true }, worker: { inheritSkills: true } },
 		routes: {
-			explorer: neutralRoute("explorer"),
-			reviewer: neutralRoute("reviewer"),
-			worker: neutralRoute("worker"),
+			explorer: neutralRoute(DEFAULT_ROLE_CONCURRENCY.explorer),
+			reviewer: neutralRoute(DEFAULT_ROLE_CONCURRENCY.reviewer),
+			worker: neutralRoute(DEFAULT_ROLE_CONCURRENCY.worker),
 		},
 		thinkingProfiles: {},
 		thinkingProfileSources: {},
@@ -95,15 +92,15 @@ export function defaultConfig(): EffectiveAgentConfig {
 function cloneConfig(config: EffectiveAgentConfig): EffectiveAgentConfig {
 	return {
 		maxConcurrency: config.maxConcurrency,
-		roles: Object.fromEntries(ROLE_NAMES.map(role => [role, { ...config.roles[role] }])) as EffectiveAgentConfig["roles"],
-		routes: Object.fromEntries(ROLE_NAMES.map((role) => [role, {
-			...config.routes[role],
-			candidates: config.routes[role].candidates.map((candidate) => ({ ...candidate })),
-			executionProfiles: Object.fromEntries(Object.entries(config.routes[role].executionProfiles).map(([profile, route]) => [
+		roles: Object.fromEntries(Object.entries(config.roles).map(([role, settings]) => [role, { ...settings }])) as EffectiveAgentConfig["roles"],
+		routes: Object.fromEntries(Object.entries(config.routes).map(([role, route]) => [role, {
+			...route,
+			candidates: route.candidates.map((candidate) => ({ ...candidate })),
+			executionProfiles: Object.fromEntries(Object.entries(route.executionProfiles).map(([profile, profileRoute]) => [
 				profile,
-				{ ...route, candidates: route.candidates.map((candidate) => ({ ...candidate })) },
+				{ ...profileRoute, candidates: profileRoute.candidates.map((candidate) => ({ ...candidate })) },
 			])),
-		}])) as Record<RoleName, RoleRouteConfig>,
+		}])) as EffectiveAgentConfig["routes"],
 		thinkingProfiles: { ...config.thinkingProfiles },
 		thinkingProfileSources: { ...config.thinkingProfileSources },
 	};
@@ -153,7 +150,7 @@ function parseCandidates(value: unknown, owner: string): RouteCandidateConfig[] 
 
 function parseExecutionProfiles(
 	value: unknown,
-	role: RoleName,
+	role: string,
 	source: RouteSource,
 	base: Partial<Record<ExecutionProfile, ProfileRouteConfig>>,
 ): Partial<Record<ExecutionProfile, ProfileRouteConfig>> {
@@ -173,7 +170,7 @@ function parseExecutionProfiles(
 	return profiles;
 }
 
-function parseRoute(value: unknown, role: RoleName, source: RouteSource, base: RoleRouteConfig): RoleRouteConfig {
+function parseRoute(value: unknown, role: string, source: RouteSource, base: RoleRouteConfig): RoleRouteConfig {
 	if (!isRecord(value)) throw new Error(`routes.${role} must be an object`);
 	assertKnownKeys(value, ["candidates", "maxConcurrency", "executionProfiles"], `routes.${role}`);
 	return {
@@ -217,10 +214,8 @@ export function parseConfig(value: unknown, options: ParseOptions = {}): Effecti
 	}
 	if (value.roles !== undefined) {
 		if (!isRecord(value.roles)) throw new Error("roles must be an object");
-		assertKnownKeys(value.roles, ROLE_NAMES, "roles");
-		for (const role of ROLE_NAMES) {
-			const entry = value.roles[role];
-			if (entry === undefined) continue;
+		for (const [role, entry] of Object.entries(value.roles)) {
+			if (!ROLE_NAME_PATTERN.test(role)) throw new Error("roles contains an invalid role name");
 			if (!isRecord(entry)) throw new Error(`roles.${role} must be an object`);
 			assertKnownKeys(entry, ["inheritSkills"], `roles.${role}`);
 			if (typeof entry.inheritSkills !== "boolean") throw new Error(`roles.${role}.inheritSkills must be a boolean`);
@@ -229,9 +224,10 @@ export function parseConfig(value: unknown, options: ParseOptions = {}): Effecti
 	}
 	if (value.routes !== undefined) {
 		if (!isRecord(value.routes)) throw new Error("routes must be an object");
-		assertKnownKeys(value.routes, ROLE_NAMES, "routes");
-		for (const role of ROLE_NAMES) {
-			if (value.routes[role] !== undefined) base.routes[role] = parseRoute(value.routes[role], role, source, base.routes[role]);
+		for (const [role, entry] of Object.entries(value.routes)) {
+			if (!ROLE_NAME_PATTERN.test(role)) throw new Error("routes contains an invalid role name");
+			const existing = Object.hasOwn(base.routes, role) ? base.routes[role] : undefined;
+			base.routes[role] = parseRoute(entry, role, source, existing ?? neutralRoute(base.maxConcurrency));
 		}
 	}
 	return base;

@@ -4,7 +4,7 @@ import {
 	EXECUTION_PROFILES,
 	HARD_LIMITS,
 	THINKING_PROFILES,
-	ROLE_NAMES,
+	isRoleName,
 	isSafePathGrammar,
 	utf8Bytes,
 	type ExecutionProfile,
@@ -16,7 +16,6 @@ import {
 } from "./contracts.ts";
 
 // Kept local to avoid making filesystem policy depend on graph topology.
-const ROLE_SET = new Set<RoleName>(ROLE_NAMES);
 const EXECUTION_PROFILE_SET = new Set<ExecutionProfile>(EXECUTION_PROFILES);
 const THINKING_PROFILE_SET = new Set<ThinkingProfile>(THINKING_PROFILES);
 const SAFE_LOCK = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
@@ -64,7 +63,7 @@ export function validateGraphStructure(input: AgentToolInput): GraphValidation {
 		if (!isTaskLabel(task.id)) return fail("invalid_task_id", `Task at index ${index} needs a readable label: letters, digits, hyphens or underscores, starting with a letter or digit.`);
 		if (ids.has(task.id)) return fail("duplicate_task_id", `Task label ${task.id} is duplicated in this call; labels must be unambiguous here.`);
 		ids.add(task.id);
-		if (!ROLE_SET.has(task.role)) return fail("invalid_role", `Task ${task.id} has an unsupported role.`);
+		if (!isRoleName(task.role)) return fail("invalid_role", `Task ${task.id} has an unsupported role.`);
 		if (!task.objective.trim() || utf8Bytes(task.objective) > HARD_LIMITS.maxObjectiveBytes) {
 			return fail("invalid_objective", `Task ${task.id} objective is empty or exceeds the byte limit.`);
 		}

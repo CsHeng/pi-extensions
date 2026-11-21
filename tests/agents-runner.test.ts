@@ -45,7 +45,7 @@ const task: NormalizedTask = {
 	grants: [],
 };
 const capability: ChildCapabilityManifest = {
-	version: 4,
+	version: 5,
 	cwd: process.cwd(),
 	role: "explorer",
 	grants: [{ permission: "read", path: process.cwd() }],

@@ -1,12 +1,14 @@
-import type { ExtensionAPI, ExtensionContext, Skill } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, sep } from "node:path";
 import { loadConfig } from "./config.ts";
 import { AGENT_STATUS_COMMAND } from "./contracts.ts";
 import { createProvenance, type ProvenanceCore } from "./provenance.ts";
-import { resolveRoute, type RouteContext } from "./routing.ts";
+import { resolveRoleRoute, resolveRoute, type RouteContext } from "./routing.ts";
 import { registerObservationHooks } from "./observation-hooks.ts";
 import { defaultEnclosingCapability, registerContinuationTool, type ContinuationDependencies } from "./continuation.ts";
-import { AGENT_SESSION_TOOL_NAME } from "./session-contracts.ts";
+import { PEER_TOOL_NAMES } from "./peer-protocol.ts";
+import { loadRoleDefinitions } from "./role-definitions.ts";
+import { findCanonicalGitRoot } from "./repository-policy.ts";
 
 export interface AgentDependencies extends Partial<ContinuationDependencies> {
 	createProvenance?(): ProvenanceCore;
@@ -40,18 +42,22 @@ export function createAgentsExtension(dependencies: AgentDependencies = {}): (pi
 					ctx.ui.notify(`Agents unavailable: ${loaded.diagnostic?.message ?? "invalid configuration"}`, "error");
 					return;
 				}
-				const lines = [`tool=${AGENT_SESSION_TOOL_NAME}`, `routes=${loaded.source?.userFile ?? "package-default"}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
-				for (const role of ["explorer", "reviewer", "worker"] as const) {
-					const selected = resolveRoute(role, loaded.config, routeContext(ctx));
+				const lines = [`tools=${Object.values(PEER_TOOL_NAMES).join(",")}`, `routes=${loaded.source?.userFile ?? "package-default"}`, `maxConcurrency=${loaded.config.maxConcurrency}`];
+				const projectRoot = await findCanonicalGitRoot(ctx.cwd).catch(() => undefined);
+				const catalog = await loadRoleDefinitions({ agentDir: getAgentDir(), ...(projectRoot ? { projectRoot } : {}), trusted: ctx.isProjectTrusted() });
+				for (const [role, definition] of [...catalog.roles].sort(([left], [right]) => left < right ? -1 : 1)) {
+					const selected = resolveRoute(role, loaded.config, routeContext(ctx), {}, definition);
+					const max = resolveRoleRoute(role, loaded.config, definition).route.maxConcurrency;
 					lines.push(selected.ok
-						? `${role}=${selected.route.provider}/${selected.route.model}:${selected.route.thinking} source=${selected.route.source} max=${loaded.config.routes[role].maxConcurrency} inheritSkills=${loaded.config.roles[role].inheritSkills}`
-						: `${role}=unavailable max=${loaded.config.routes[role].maxConcurrency} inheritSkills=${loaded.config.roles[role].inheritSkills}`);
+						? `${role} (${definition.source})=${selected.route.provider}/${selected.route.model}:${selected.route.thinking} source=${selected.route.source}${selected.route.roleRouteFallback ? ` routeFallback=${selected.route.roleRouteFallback}` : ""} max=${max} workspace=${definition.workspace} inheritSkills=${loaded.config.roles[role]?.inheritSkills ?? true}`
+						: `${role} (${definition.source})=unavailable max=${max}`);
 				}
+				for (const problem of catalog.problems) lines.push(`role problem: ${problem.reason}`);
 				ctx.ui.notify(lines.join("\n"), "info");
 			},
 		});
 		pi.on("before_agent_start", async (event, ctx) => {
-			if (!pi.getActiveTools().includes(AGENT_SESSION_TOOL_NAME)) return;
+			if (!pi.getActiveTools().includes(PEER_TOOL_NAMES.invoke)) return;
 			if (Array.isArray(event.systemPromptOptions?.skills)) {
 				parentSkills = event.systemPromptOptions.skills.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo } }));
 				parentSkillCwd = ctx.cwd;

@@ -65,7 +65,7 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	h.faux.setResponses([
 		tool("tasklist", { operation: "set", title: "Co-load", tasks: [{ id: "task", title: "Work", status: "doing" }] }),
 		tool("bash", { command: "sleep 30", background: true }),
-		tool("agent", { action: "create", tasks: [{ id: "child", role: "explorer", objective: "Read", access: [{ permission: "read", scope }] }] }),
+		tool("invoke_agent", { name: "child", role: "explorer", prompt: "Read", access: [{ permission: "read", scope }] }),
 		tool("tasklist", { operation: "update", tasks: [{ id: "task", note: "Waiting for actual results" }] }),
 		fauxAssistantMessage("yield"),
 		fauxAssistantMessage("shell completion observed while child remains"),
@@ -90,7 +90,7 @@ for (const consumerFirst of [false, true]) test(`actual three-producer co-load (
 	assert.equal(h.faux.state.callCount, 7, "one child completion with no task-only renewal");
 	assert.equal(projections.length, 3);
 	assert.equal(projections[1], projections[0], "the earlier shell completion remains in the next request");
-	assert.match(projections[2]!, /Agent task child/);
+	assert.match(projections[2]!, /Agent child/);
 	await new Promise(resolve => setTimeout(resolve, 50));
 	assert.equal(h.faux.state.callCount, 7);
 	assert.deepEqual(h.errors, []);
