@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,13 +9,13 @@ const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const TIMEOUT_MS = 20 * 60 * 1000;
 const KILL_GRACE_MS = 5_000;
-const SESSION_TOOL = "agent";
-const REQUIRED_COMMANDS = ["default", "plan", "skill-mentions", "agents"] as const;
-const EXPECTED_ROLE_ROUTES = {
-	explorer: "openai-codex/gpt-5.6-luna:medium",
-	reviewer: "openai-codex/gpt-5.6-sol:high",
-	worker: "openai-codex/gpt-5.6-terra:high",
-} as const;
+const PEER_TOOLS = ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"] as const;
+const SCHEMA_VERSION = 5;
+// Commands owned by three package extensions; the observer requires each from this package root.
+const REQUIRED_COMMANDS = ["skill-mentions", "fast-gpt", "agents"] as const;
+const ROLES = ["explorer", "reviewer", "worker"] as const;
+type Role = typeof ROLES[number];
+const NAMES: Readonly<Record<Role, string>> = { explorer: "explore", reviewer: "review", worker: "worker" };
 
 interface RequestTelemetry {
 	invocationId?: unknown;
@@ -33,25 +33,22 @@ interface SessionCandidate {
 
 interface SessionView {
 	handle?: unknown;
+	label?: unknown;
 	role?: unknown;
 	episode?: unknown;
 	state?: unknown;
-	route?: {
-		provider?: unknown;
-		model?: unknown;
-		thinking?: unknown;
-		source?: unknown;
-		executionProfileRequested?: unknown;
-		thinkingProfileRequested?: unknown;
-	};
+	route?: { provider?: unknown; model?: unknown; thinking?: unknown; source?: unknown; executionProfileRequested?: unknown; thinkingProfileRequested?: unknown };
 	result?: { status?: unknown; output?: unknown; usage?: unknown };
 	candidate?: SessionCandidate;
 }
 
-interface SessionActionResult {
+/** Details of a peer tool result; engine requests add action, status, telemetry and full views. */
+interface PeerDetails {
 	schemaVersion?: unknown;
+	op?: unknown;
 	action?: unknown;
 	status?: unknown;
+	kind?: unknown;
 	requestTelemetry?: RequestTelemetry;
 	sessions?: SessionView[];
 }
@@ -59,20 +56,22 @@ interface SessionActionResult {
 interface JsonEvent {
 	type?: unknown;
 	toolName?: unknown;
-	result?: { details?: SessionActionResult };
-	message?: { role?: unknown; toolName?: unknown; details?: SessionActionResult };
+	args?: unknown;
+	result?: { details?: PeerDetails };
 }
 
 export interface LiveE2eSummary {
 	result: "pass";
 	source: "temporary" | "installed";
 	packageExtensions: 3;
-	tasks: 3;
+	agents: 3;
 	roles: ["explorer", "reviewer", "worker"];
-	routeSource: "package-default";
-	roleRoutes: typeof EXPECTED_ROLE_ROUTES;
+	/** Route provenance per role; model selectors stay out of the redacted summary. */
+	routeSources: Record<Role, string>;
 	profileMode: "role-default";
+	workerWorkspace: "isolated";
 	workerConvergence: "applied";
+	released: 3;
 	launchedChildren: 3;
 }
 
@@ -93,67 +92,36 @@ function parseEvents(stdout: string): JsonEvent[] {
 	return events;
 }
 
-function eventToolName(event: JsonEvent): unknown {
-	return event.toolName ?? event.message?.toolName;
-}
+const isPeerTool = (name: unknown): boolean => typeof name === "string" && (PEER_TOOLS as readonly string[]).includes(name);
 
-function eventDetails(event: JsonEvent): SessionActionResult | undefined {
-	if (event.type === "tool_execution_end" && event.toolName === SESSION_TOOL) return event.result?.details;
-	if (event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === SESSION_TOOL) {
-		return event.message.details;
-	}
-	return undefined;
-}
-
-function collectResults(events: readonly JsonEvent[]): SessionActionResult[] {
-	const starts = events.filter((event) => event.type === "tool_execution_start" && event.toolName === SESSION_TOOL);
-	if (starts.length < 1) fail("unexpected_agent_tool_call_count");
-	const seen = new Set<string>();
-	const results: SessionActionResult[] = [];
+/** Engine requests made by peer tools, once per invocation. */
+function collectRequests(events: readonly JsonEvent[]): Array<PeerDetails & { tool: string }> {
+	if (events.some((event) => event.type === "tool_execution_start" && event.toolName === "agent")) fail("retired_agent_tool_called");
+	if (!events.some((event) => event.type === "tool_execution_start" && isPeerTool(event.toolName))) fail("unexpected_agent_tool_call_count");
 	for (const event of events) {
-		const details = eventDetails(event);
-		if (!details) continue;
+		if (event.type !== "tool_execution_start" || !isPeerTool(event.toolName)) continue;
+		if (/expectedEpisode|candidateId|"handle"/.test(JSON.stringify(event.args ?? {}))) fail("tool_call_carries_internal_identity");
+	}
+	const seen = new Set<string>();
+	const requests: Array<PeerDetails & { tool: string }> = [];
+	for (const event of events) {
+		if (event.type !== "tool_execution_end" || !isPeerTool(event.toolName)) continue;
+		const details = event.result?.details;
+		if (!details || details.schemaVersion !== SCHEMA_VERSION) fail("peer_details_not_current");
+		if (details.action === undefined) continue;
 		const invocationId = details.requestTelemetry?.invocationId;
 		if (typeof invocationId !== "string" || !invocationId) fail("request_telemetry_missing");
 		if (seen.has(invocationId)) continue;
 		seen.add(invocationId);
-		results.push(details);
+		requests.push({ ...details, tool: event.toolName as string });
 	}
-	if (results.length === 0) fail("agent_result_missing");
-	return results;
+	if (requests.length === 0) fail("agent_result_missing");
+	return requests;
 }
 
-function asSessions(value: SessionActionResult): SessionView[] {
-	if (!Array.isArray(value.sessions)) fail("agent_sessions_missing");
-	return value.sessions;
-}
-
-function sessionByRole(sessions: readonly SessionView[], role: "explorer" | "reviewer" | "worker"): SessionView {
-	const matches = sessions.filter((session) => session.role === role);
-	if (matches.length !== 1) fail(`role_${role}_not_succeeded`);
-	return matches[0]!;
-}
-
-function validateRoute(session: SessionView, role: "explorer" | "reviewer" | "worker"): void {
-	const route = session.route ?? undefined;
-	if (route?.source !== "package-default") fail(`role_${role}_route_not_package_default`);
-	if (typeof route.provider !== "string" || typeof route.model !== "string" || typeof route.thinking !== "string") {
-		fail(`role_${role}_route_missing`);
-	}
-	if (`${route.provider}/${route.model}:${route.thinking}` !== EXPECTED_ROLE_ROUTES[role]) fail(`role_${role}_route_mismatch`);
-	if (route.executionProfileRequested !== undefined || route.thinkingProfileRequested !== undefined) {
-		fail(`role_${role}_unexpected_profile`);
-	}
-}
-
-function launchedChildren(results: readonly SessionActionResult[]): number {
-	let total = 0;
-	for (const details of results) {
-		const telemetry = details.requestTelemetry;
-		if (typeof telemetry?.launchedChildren !== "number") fail("request_telemetry_missing");
-		total += telemetry.launchedChildren;
-	}
-	return total;
+function single<T>(items: readonly T[], code: string): T {
+	if (items.length !== 1) fail(code);
+	return items[0]!;
 }
 
 export function validateLiveRun(
@@ -162,77 +130,61 @@ export function validateLiveRun(
 	workerContent: string,
 	source: "temporary" | "installed",
 ): LiveE2eSummary {
-	const results = collectResults(parseEvents(stdout));
-	const freshCreates = results.filter((details) => details.action === "create" && details.requestTelemetry?.replayedEpisodes === 0);
-	if (freshCreates.length !== 1) fail("agent_graph_not_succeeded");
-	const created = freshCreates[0]!;
-	if (created.schemaVersion !== 2 || created.status !== "succeeded") fail("agent_graph_not_succeeded");
-	const telemetry = created.requestTelemetry;
-	if (telemetry?.requestedTasks !== 3 || telemetry.admittedTasks !== 3 || telemetry.launchedChildren !== 3) {
-		fail("agent_graph_not_succeeded");
+	const requests = collectRequests(parseEvents(stdout));
+	const creates = requests.filter((details) => details.tool === "invoke_agent" && details.action === "create");
+	if (creates.length !== 3) fail("agent_invocations_not_succeeded");
+	const routeSources = {} as Record<Role, string>;
+	const views = {} as Record<Role, SessionView>;
+	let launched = 0;
+	for (const role of ROLES) {
+		const created = single(creates.filter((details) => details.sessions?.[0]?.role === role && details.sessions[0].label === NAMES[role]), `role_${role}_not_succeeded`);
+		const telemetry = created.requestTelemetry;
+		if (created.status !== "succeeded" || created.kind !== "execution" || telemetry?.requestedTasks !== 1 || telemetry.admittedTasks !== 1 || telemetry.launchedChildren !== 1 || telemetry.replayedEpisodes !== 0) fail(`role_${role}_not_succeeded`);
+		launched += telemetry.launchedChildren;
+		const view = created.sessions![0]!;
+		if (view.result?.status !== "succeeded") fail(`role_${role}_not_succeeded`);
+		const token = role === "explorer" ? expectedTokens.explore : role === "reviewer" ? expectedTokens.review : expectedTokens.worker;
+		if (typeof view.result.output !== "string" || !view.result.output.includes(token)) fail(`role_${role}_token_missing`);
+		const route = view.route;
+		if (typeof route?.source !== "string" || typeof route.provider !== "string" || typeof route.model !== "string" || typeof route.thinking !== "string") fail(`role_${role}_route_missing`);
+		if (route.executionProfileRequested !== undefined || route.thinkingProfileRequested !== undefined) fail(`role_${role}_unexpected_profile`);
+		routeSources[role] = route.source;
+		views[role] = view;
 	}
-	const sessions = asSessions(created);
-	if (sessions.length !== 3) fail("agent_graph_not_succeeded");
-	const expected = [
-		{ role: "explorer" as const, outputToken: expectedTokens.explore },
-		{ role: "reviewer" as const, outputToken: expectedTokens.review },
-		{ role: "worker" as const },
-	];
-	for (const item of expected) {
-		const session = sessionByRole(sessions, item.role);
-		if (session.result?.status !== "succeeded") fail(`role_${item.role}_not_succeeded`);
-		if ("outputToken" in item && (typeof session.result.output !== "string" || !session.result.output.includes(item.outputToken))) {
-			fail(`role_${item.role}_token_missing`);
-		}
-		validateRoute(session, item.role);
-	}
-	const worker = sessionByRole(sessions, "worker");
-	if (typeof worker.handle !== "string" || typeof worker.episode !== "number") fail("worker_apply_missing");
-	if (!worker.candidate || typeof worker.candidate.id !== "string" || worker.candidate.status === "applied") {
-		fail("worker_apply_missing");
-	}
-	const apply = results.find((details) => {
-		if (details.action !== "apply" || details.status !== "succeeded") return false;
-		const session = details.sessions?.[0];
-		return !!session && session.handle === worker.handle
-			&& session.episode === worker.episode
-			&& session.candidate?.id === worker.candidate?.id
-			&& session.candidate?.status === "applied";
-	});
-	if (!apply || apply.requestTelemetry?.launchedChildren !== 0 || apply.requestTelemetry.replayedEpisodes !== 0) {
-		fail("worker_apply_missing");
-	}
-	for (const session of sessions) {
-		if (typeof session.handle !== "string" || typeof session.episode !== "number") fail("session_not_closed");
-		const closed = results.find((details) => details.action === "close"
-			&& details.status === "succeeded"
-			&& details.sessions?.[0]?.handle === session.handle
-			&& details.sessions?.[0]?.episode === session.episode
-			&& details.sessions?.[0]?.state === "closed");
-		if (!closed || closed.requestTelemetry?.launchedChildren !== 0 || closed.requestTelemetry.replayedEpisodes !== 0) {
-			fail("session_not_closed");
-		}
+	const worker = views.worker;
+	if (typeof worker.handle !== "string" || !worker.candidate || typeof worker.candidate.id !== "string" || worker.candidate.status === "applied") fail("worker_apply_missing");
+	const apply = requests.find((details) => details.tool === "agent_candidate" && details.action === "apply" && details.status === "succeeded"
+		&& details.sessions?.[0]?.handle === worker.handle && details.sessions?.[0]?.candidate?.id === worker.candidate?.id && details.sessions?.[0]?.candidate?.status === "applied");
+	if (!apply || apply.requestTelemetry?.launchedChildren !== 0 || apply.requestTelemetry.replayedEpisodes !== 0) fail("worker_apply_missing");
+	for (const role of ROLES) {
+		const view = views[role];
+		const released = requests.find((details) => details.tool === "release_agent" && details.action === "close" && details.status === "succeeded"
+			&& details.sessions?.[0]?.handle === view.handle && details.sessions?.[0]?.state === "closed");
+		if (!released || released.requestTelemetry?.launchedChildren !== 0 || released.requestTelemetry.replayedEpisodes !== 0) fail("session_not_released");
 	}
 	if (workerContent.trim() !== expectedTokens.worker) fail("worker_content_mismatch");
-	if (launchedChildren(results) !== 3) fail("replay_usage_counted_twice");
+	const total = requests.reduce((sum, details) => sum + (typeof details.requestTelemetry?.launchedChildren === "number" ? details.requestTelemetry.launchedChildren : 0), 0);
+	if (launched !== 3 || total !== 3) fail("replay_usage_counted_twice");
 	return {
 		result: "pass",
 		source,
 		packageExtensions: 3,
-		tasks: 3,
+		agents: 3,
 		roles: ["explorer", "reviewer", "worker"],
-		routeSource: "package-default",
-		roleRoutes: EXPECTED_ROLE_ROUTES,
+		routeSources,
 		profileMode: "role-default",
+		workerWorkspace: "isolated",
 		workerConvergence: "applied",
+		released: 3,
 		launchedChildren: 3,
 	};
 }
 
 async function writeObserver(observerPath: string, packageRoot: string): Promise<void> {
 	const commands = JSON.stringify(REQUIRED_COMMANDS);
+	const tools = JSON.stringify(PEER_TOOLS);
 	const ownedRoot = JSON.stringify(packageRoot);
-	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (event.toolName !== "${SESSION_TOOL}") return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === "${SESSION_TOOL}");\n\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes("${SESSION_TOOL}")) {\n\t\t\tmissing.push("tool:${SESSION_TOOL}");\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
+	await writeFile(observerPath, `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nconst requiredCommands = ${commands};\nconst peerTools: readonly string[] = ${tools};\nconst packageRoot = ${ownedRoot};\nconst isPackagePath = (value: unknown): boolean => typeof value === "string" && (value === packageRoot || value.startsWith(packageRoot + "/"));\n\nexport default function packageObserver(pi: ExtensionAPI): void {\n\tpi.on("tool_call", (event) => {\n\t\tif (!peerTools.includes(event.toolName)) return undefined;\n\t\tconst commands = pi.getCommands();\n\t\tconst missing = requiredCommands.filter((name) => !commands.some((command) =>\n\t\t\t(command.name === name || command.name.startsWith(name + ":")) && isPackagePath(command.sourceInfo.path),\n\t\t));\n\t\tfor (const name of peerTools) {\n\t\t\tconst tool = pi.getAllTools().find((candidate) => candidate.name === name);\n\t\t\tif (!tool || !isPackagePath(tool.sourceInfo.path) || !pi.getActiveTools().includes(name)) missing.push("tool:" + name);\n\t\t}\n\t\treturn missing.length === 0\n\t\t\t? undefined\n\t\t\t: { block: true, terminate: true, reason: \`package_e2e_missing:\${missing.join(",")}\` };\n\t});\n}\n`);
 }
 
 function terminateProcess(child: ReturnType<typeof spawn>): NodeJS.Timeout | undefined {
@@ -317,7 +269,10 @@ async function main(): Promise<void> {
 	}
 	const source = args.includes("--installed") ? "installed" as const : "temporary" as const;
 	const scriptPath = fileURLToPath(import.meta.url);
-	const packageRoot = resolve(dirname(scriptPath), "..");
+	// The installed lane observes the package the local publisher installs; the temporary lane loads this checkout.
+	const packageRoot = source === "installed"
+		? await realpath(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "packages", "csheng-pi-extensions")).catch(() => fail("installed_package_missing"))
+		: resolve(dirname(scriptPath), "..");
 	const tempParent = join(homedir(), "tmp");
 	await mkdir(tempParent, { recursive: true });
 	const harnessRoot = await mkdtemp(join(tempParent, "pi-extensions-agents-e2e-"));
@@ -340,32 +295,17 @@ async function main(): Promise<void> {
 			git.once("error", rejectPromise);
 			git.once("close", (code) => code === 0 ? resolvePromise() : rejectPromise(new Error("git_init_failed")));
 		});
-		const create = {
-			action: "create",
-
-			tasks: [
-				{
-					id: "explore",
-					role: "explorer",
-					objective: `Read seed.txt and return the exact marker ${tokens.explore}.`,
-					scope: ["seed.txt"],
-				},
-				{
-					id: "review",
-					role: "reviewer",
-					objective: `Inspect seed.txt as the bounded review target and include the exact marker ${tokens.review} in the result.`,
-					scope: ["seed.txt"],
-				},
-				{
-					id: "worker",
-					role: "worker",
-					objective: `Create result.txt containing exactly ${tokens.worker} followed by one newline, then include the exact marker ${tokens.worker} in the result.`,
-					scope: ["."],
-					writePaths: ["result.txt"],
-				},
-			],
-		};
-		const prompt = `Call agent with this exact create argument object: ${JSON.stringify(create)}\nAfter create returns succeeded sessions, call agent apply exactly once for the successful worker session using that session's returned handle as handle, returned episode as expectedEpisode, and returned candidate.id as candidateId.\nThen call agent close once for each of the three sessions using each session's returned handle and episode as expectedEpisode and disposition discard.\nDo not call continue or inspect. After those tool calls, call no more tools and reply only E2E_PARENT_DONE.`;
+		const invocations = [
+			{ name: NAMES.explorer, role: "explorer", prompt: `Read seed.txt and summarize it in one line. End your report with this exact marker on its own line: ${tokens.explore}`, access: [{ permission: "read", scope: join(repositoryRoot, "seed.txt") }] },
+			{ name: NAMES.reviewer, role: "reviewer", prompt: `Inspect seed.txt as the bounded review target. End your report with this exact marker on its own line: ${tokens.review}`, access: [{ permission: "read", scope: join(repositoryRoot, "seed.txt") }] },
+			{ name: NAMES.worker, role: "worker", workspace: "isolated", prompt: `Create result.txt containing exactly ${tokens.worker} followed by one newline, then include the exact marker ${tokens.worker} in the result.`, access: [{ permission: "write", scope: repositoryRoot }] },
+		];
+		const prompt = [
+			...invocations.map((args, index) => `${index + 1}. Call invoke_agent with exactly these arguments: ${JSON.stringify(args)}`),
+			`4. After all three invocations returned their results, call agent_candidate with {"name":"${NAMES.worker}","action":"apply"} in a separate step. If it reports a result you have not been shown, repeat the same call once.`,
+			`5. Then call release_agent with disposition "discard" once for each of ${NAMES.explorer}, ${NAMES.reviewer} and ${NAMES.worker}.`,
+			"Call no other tools. After those calls, reply only E2E_PARENT_DONE.",
+		].join("\n");
 		const piArguments = [
 			"--mode", "json",
 			"--no-session",

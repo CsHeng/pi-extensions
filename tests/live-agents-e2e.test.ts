@@ -33,86 +33,40 @@ function telemetry(invocationId: string, extra: Record<string, unknown> = {}) {
 	};
 }
 
-function sessions(routeSource: string, candidateStatus: "not-applied" | "applied" = "not-applied") {
+const labels = { explorer: "explore", reviewer: "review", worker: "worker" } as const;
+function view(role: keyof typeof routes, routeSource: string, extra: Record<string, unknown> = {}) {
+	const output = role === "explorer" ? tokens.explore : role === "reviewer" ? tokens.review : tokens.worker;
+	return { handle: `session_${role}`, label: labels[role], role, episode: 1, state: "idle", route: { ...routes[role], source: routeSource },
+		result: { id: labels[role], role, status: "succeeded", output, usage }, ...extra };
+}
+const candidate = (status: "not-applied" | "applied") => ({ id: "candidate_worker", episode: 1, status, changedPaths: ["result.txt"], appliedPaths: status === "applied" ? ["result.txt"] : [] });
+
+function result(op: string, action: string, invocationId: string, extra: Record<string, unknown> = {}) {
+	return { schemaVersion: 5, op, action, status: "succeeded", requestTelemetry: telemetry(invocationId), sessions: [], ...extra };
+}
+
+function toolEvents(toolName: string, details: object, args: object = {}): string[] {
 	return [
-		{
-			handle: "session_explore",
-			role: "explorer",
-			episode: 1,
-			state: "idle",
-			route: { ...routes.explorer, source: routeSource },
-			result: { id: "explore", role: "explorer", status: "succeeded", output: tokens.explore, usage },
-		},
-		{
-			handle: "session_review",
-			role: "reviewer",
-			episode: 1,
-			state: "idle",
-			route: { ...routes.reviewer, source: routeSource },
-			result: { id: "review", role: "reviewer", status: "succeeded", output: tokens.review, usage },
-		},
-		{
-			handle: "session_worker",
-			role: "worker",
-			episode: 1,
-			state: "idle",
-			route: { ...routes.worker, source: routeSource },
-			result: { id: "worker", role: "worker", status: "succeeded", output: "created result.txt", usage },
-			candidate: {
-				id: "candidate_worker",
-				episode: 1,
-				status: candidateStatus,
-				changedPaths: ["result.txt"],
-				appliedPaths: candidateStatus === "applied" ? ["result.txt"] : [],
-			},
-		},
+		JSON.stringify({ type: "tool_execution_start", toolName, args }),
+		JSON.stringify({ type: "tool_execution_end", toolName, result: { details } }),
 	];
 }
 
-function result(action: string, invocationId: string, extra: Record<string, unknown> = {}) {
-	return {
-		schemaVersion: 2,
-		action,
-		status: "succeeded",
-		requestTelemetry: telemetry(invocationId),
-		sessions: [],
-		...extra,
-	};
-}
-
-function toolEvents(details: object): string[] {
-	return [
-		JSON.stringify({ type: "tool_execution_start", toolName: "agent" }),
-		JSON.stringify({ type: "tool_execution_end", toolName: "agent", result: { details } }),
-		JSON.stringify({ type: "message_end", message: { role: "toolResult", toolName: "agent", details } }),
-	];
-}
-
-function eventStream(routeSource = "package-default", options: { replay?: boolean; apply?: boolean; close?: boolean } = {}) {
-	const created = sessions(routeSource);
-	const applied = sessions(routeSource, "applied")[2];
-	const lines = [
-		...toolEvents(result("create", "create", {
-			requestTelemetry: telemetry("create", { requestedTasks: 3, admittedTasks: 3, launchedChildren: 3 }),
-			sessions: created,
-		})),
-	];
-	if (options.replay !== false) {
-		lines.push(...toolEvents(result("create", "replay", {
-			requestTelemetry: telemetry("replay", { requestedTasks: 3, admittedTasks: null, launchedChildren: 0, replayedEpisodes: 3 }),
-			sessions: created,
-		})));
+function eventStream(routeSource = "user-config", options: { apply?: boolean; release?: boolean; retired?: boolean; handleArg?: boolean } = {}) {
+	const lines: string[] = [];
+	for (const role of ["explorer", "reviewer", "worker"] as const) {
+		lines.push(...toolEvents("invoke_agent", result("invoke", "create", `create-${role}`, {
+			kind: "execution",
+			requestTelemetry: telemetry(`create-${role}`, { requestedTasks: 1, admittedTasks: 1, launchedChildren: 1 }),
+			sessions: [view(role, routeSource, role === "worker" ? { candidate: candidate("not-applied") } : {})],
+		}), { name: labels[role], role, ...(options.handleArg ? { handle: "x" } : {}) }));
 	}
-	if (options.apply !== false) {
-		lines.push(...toolEvents(result("apply", "apply", { sessions: [applied] })));
+	lines.push(...toolEvents("wait_agents", { schemaVersion: 5, op: "wait", sessions: [] }));
+	if (options.apply !== false) lines.push(...toolEvents("agent_candidate", result("candidate", "apply", "apply", { sessions: [view("worker", routeSource, { candidate: candidate("applied") })] })));
+	if (options.release !== false) {
+		for (const role of ["explorer", "reviewer", "worker"] as const) lines.push(...toolEvents("release_agent", result("release", "close", `close-${role}`, { sessions: [view(role, routeSource, { state: "closed" })] })));
 	}
-	if (options.close !== false) {
-		for (const session of created) {
-			lines.push(...toolEvents(result("close", `close-${session.role}`, {
-				sessions: [{ ...session, state: "closed", ...(session.role === "worker" ? { candidate: applied?.candidate } : {}) }],
-			})));
-		}
-	}
+	if (options.retired) lines.push(JSON.stringify({ type: "tool_execution_start", toolName: "agent" }));
 	return lines.join("\n");
 }
 
@@ -120,23 +74,22 @@ const summary = {
 	result: "pass",
 	source: "temporary",
 	packageExtensions: 3,
-	tasks: 3,
+	agents: 3,
 	roles: ["explorer", "reviewer", "worker"],
-	routeSource: "package-default",
-	roleRoutes: {
-		explorer: "openai-codex/gpt-5.6-luna:medium",
-		reviewer: "openai-codex/gpt-5.6-sol:high",
-		worker: "openai-codex/gpt-5.6-terra:high",
-	},
+	routeSources: { explorer: "user-config", reviewer: "user-config", worker: "user-config" },
 	profileMode: "role-default",
+	workerWorkspace: "isolated",
 	workerConvergence: "applied",
+	released: 3,
 	launchedChildren: 3,
 } as const;
 
-test("live E2E oracle requires managed create, explicit worker apply, close, and unique requestTelemetry", () => {
+test("live E2E oracle requires three named invocations, an explicit isolated worker apply, releases and unique requestTelemetry", () => {
 	assert.deepEqual(validateLiveRun(eventStream(), tokens, `${tokens.worker}\n`, "temporary"), summary);
-	assert.throws(() => validateLiveRun(eventStream("user-config"), tokens, `${tokens.worker}\n`, "installed"), /route_not_package_default/);
+	assert.deepEqual(validateLiveRun(eventStream("package-default"), tokens, `${tokens.worker}\n`, "installed").routeSources.worker, "package-default");
 	assert.throws(() => validateLiveRun(eventStream(), tokens, "wrong\n", "installed"), /worker_content_mismatch/);
-	assert.throws(() => validateLiveRun(eventStream("package-default", { apply: false }), tokens, `${tokens.worker}\n`, "installed"), /worker_apply_missing/);
-	assert.throws(() => validateLiveRun(eventStream("package-default", { close: false }), tokens, `${tokens.worker}\n`, "installed"), /session_not_closed/);
+	assert.throws(() => validateLiveRun(eventStream("user-config", { apply: false }), tokens, `${tokens.worker}\n`, "installed"), /worker_apply_missing/);
+	assert.throws(() => validateLiveRun(eventStream("user-config", { release: false }), tokens, `${tokens.worker}\n`, "installed"), /session_not_released/);
+	assert.throws(() => validateLiveRun(eventStream("user-config", { retired: true }), tokens, `${tokens.worker}\n`, "installed"), /retired_agent_tool_called/);
+	assert.throws(() => validateLiveRun(eventStream("user-config", { handleArg: true }), tokens, `${tokens.worker}\n`, "installed"), /tool_call_carries_internal_identity/);
 });
