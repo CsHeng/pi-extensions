@@ -1,8 +1,7 @@
-/** Read-only task presentation. Section headers share the disclosure helper; list rows keep the legacy summary. */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { panelHeading, type PanelTheme } from "../shared/panel-heading.ts";
-import type { TasklistState, TasklistTask, TasklistView } from "../tasklist/contracts.ts";
+import type { TasklistView } from "../tasklist/contracts.ts";
 
 export type TasklistUiTheme = Pick<Theme, "fg" | "strikethrough">;
 const plainTheme: TasklistUiTheme = { fg: (_color, text) => text, strikethrough: text => text };
@@ -12,9 +11,6 @@ export const TASKS_UI_LIST_HINT = "/tasks-ui list";
 function clean(text: string): string {
 	return stripTerminalSequences(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim();
 }
-
-type Progress = TasklistTask["status"];
-export function taskProgress(_state: TasklistState, task: TasklistTask): Progress { return task.status; }
 
 /** The host has already selected a TUI: ambient stdout/Chalk detection must not erase SGR 9. */
 function strike(title: string, theme: TasklistUiTheme): string {
@@ -46,7 +42,6 @@ export function taskRows(view: TasklistView, width: number, maxRows = 12, theme:
 	const tasks = s.tasks.map(task => ({ task, status: task.status, suffix: task.note ? clean(task.note) : "" }));
 	const doneCount = tasks.filter(t => t.status === "done").length;
 	const cancelledCount = tasks.filter(t => t.status === "cancelled").length;
-	// Item-derived only: the list has no engine state to report.
 	const blockedCount = tasks.filter(t => t.status === "blocked").length;
 	const doingCount = tasks.filter(t => t.status === "doing").length;
 	const folded = options?.folded === true;
@@ -65,7 +60,6 @@ export function taskRows(view: TasklistView, width: number, maxRows = 12, theme:
 	const priority = (status: string) => status === "doing" || status === "blocked" ? 0 : (status === "done" || status === "cancelled") ? 2 : 1;
 	const ordered = overflow ? [...tasks].sort((a, b) => priority(a.status) - priority(b.status)) : tasks;
 	const shown = ordered.slice(0, Math.max(0, available - (overflow ? 1 : 0)));
-	// One key column so titles start on the same column.
 	const keyCap = Math.min(16, Math.floor(Math.max(0, width - 5) / 4));
 	const keyColumn = keyCap >= 3 ? Math.min(keyCap, Math.max(0, ...shown.map(({ task }) => visibleWidth(clean(task.id))))) : 0;
 	for (const [index, { task, status, suffix }] of shown.entries()) {
