@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { isNativeObservation, mergeOwnedUsage, nativeLeaf, normalizeCommandCorrelation, unavailableObservation, type NativeObservation, type ObservedUsage } from "../../../../extensions/agents/observability.ts";
 import { isLocalTiming, spanDuration } from "../../../../extensions/agents/telemetry.ts";
-import type { TimeSpan } from "../../../../extensions/agents/contracts.ts";
 import { isProductId } from "../../../../extensions/agents/identity.ts";
+import { AGENT_EXECUTION_EVENT } from "../../../../extensions/shared/agent-execution.ts";
+import { PEER_TOOLS } from "../../../../extensions/agents/peer-protocol.ts";
+import { ROLE_NAME_PATTERN, type TimeSpan } from "../../../../extensions/agents/contracts.ts";
 
 /** Current public managed tool name, plus the retained historical name that carries the same schema. */
-const MANAGED_TOOL_NAME = "agent";
+/** Version-5 peer tools; the retired `agent` tool is a non-current envelope. */
+const MANAGED_TOOL_NAMES = new Set<string>([...PEER_TOOLS, "agent"]);
+const MANAGED_SCHEMA_VERSION = 5;
 
 /** Read-only, cumulative owned evidence. These are not bills per tool invocation. */
 export interface ObservationMetrics {
@@ -175,10 +179,10 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 	// owner-tagged native observations remain owned usage, not receipt usage.
 	const eventIds = new Map<string, string>();
 	for (const entry of parsed.body) {
-		if (entry.type !== "custom" || entry.customType !== "agents.execution.v4") continue;
+		if (entry.type !== "custom" || entry.customType !== AGENT_EXECUTION_EVENT) continue;
 		const event = object(entry.data);
 		if (object(event?.owner)?.sessionId !== parsed.header.id) continue;
-		if (!event || event.version !== 4 || !ownedId(event.eventId) || !Array.isArray(event.sessions) || event.sessions.length > 10) { invalidEvidence = true; continue; }
+		if (!event || event.version !== MANAGED_SCHEMA_VERSION || !ownedId(event.eventId) || !Array.isArray(event.sessions) || event.sessions.length > 10) { invalidEvidence = true; continue; }
 		const serialized = canonical(event); const priorEvent = eventIds.get(event.eventId);
 		if (priorEvent) { if (priorEvent !== serialized) invalidEvidence = true; continue; }
 		eventIds.set(event.eventId, serialized);
@@ -231,9 +235,10 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
 			// Shallow version cut before payload interpretation: explicitly versioned non-current tool envelopes
 			// are excluded from current evidence and reported separately, never treated as invalid.
-			const managedToolName = message.toolName === MANAGED_TOOL_NAME;
-			if (managedToolName && typeof details.schemaVersion === "number" && details.schemaVersion !== 4) { result.excludedRecords++; continue; }
-			if (managedToolName && details.schemaVersion === 4 && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
+			const managedToolName = typeof message.toolName === "string" && MANAGED_TOOL_NAMES.has(message.toolName);
+			if (managedToolName && typeof details.schemaVersion === "number" && details.schemaVersion !== MANAGED_SCHEMA_VERSION) { result.excludedRecords++; continue; }
+			// Only an operation that made an engine request carries its action and views.
+			if (managedToolName && details.schemaVersion === MANAGED_SCHEMA_VERSION && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
 				if (details.kind === "submission") continue;
 				for (const raw of details.sessions) {
@@ -318,7 +323,8 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 				|| telemetry.launchedChildren !== runTiming.children.length || !finite(telemetry.runDurationMs)) { validWorkers = false; continue; }
 			for (const childValue of runTiming.children) {
 				const child = object(childValue); const duration = child ? spanDuration(child as unknown as TimeSpan) : null;
-				if (!child || duration === null || !["worker", "reviewer", "explorer"].includes(child.role as string) || (child.endMs as number) > telemetry.runDurationMs) { validWorkers = false; continue; }
+				// Roles are open: any valid role name is a child span; the packaged worker role's spans count as worker effort.
+				if (!child || duration === null || typeof child.role !== "string" || !new RegExp(ROLE_NAME_PATTERN).test(child.role) || (child.endMs as number) > telemetry.runDurationMs) { validWorkers = false; continue; }
 				const startMs = run.originMs - timing.originMs + (child.startMs as number); const endMs = startMs + duration;
 				if (!finite(startMs) || !finite(endMs) || startMs < timing.boundary.startMs! || endMs > timing.boundary.endMs!) { validWorkers = false; continue; }
 				if (child.role === "worker") workers.push({ startMs, endMs });

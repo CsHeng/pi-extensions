@@ -4,13 +4,14 @@ import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractObservationMetrics, type ObservationMetrics } from "./observation-metrics.ts";
 import { extractManagedDispatch, ManagedDispatchCollector, type ManagedDispatchMetrics } from "./managed-dispatch.ts";
+import { PEER_TOOLS } from "../../../../extensions/agents/peer-protocol.ts";
 
-/** Metric-artifact schema. Independent of the collaboration/managed envelope version (currently 4). */
+/** Metric-artifact schema. Independent of the collaboration/managed envelope version (currently 5). */
 const OUTPUT_SCHEMA_VERSION = 5;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
-/** Registered managed tool: only its current schema is interpreted by the current-only reducers. */
-const MANAGED_TOOL_NAME = "agent";
-const MANAGED_SCHEMA_VERSION = 4;
+/** Registered peer tools: only their current schema is interpreted by the current-only reducers; the retired `agent` tool is excluded. */
+const MANAGED_TOOL_NAMES = new Set<string>([...PEER_TOOLS, "agent"]);
+const MANAGED_SCHEMA_VERSION = 5;
 const MAX_WALK_DEPTH = 8;
 const MAX_WALK_ENTRIES = 20_000;
 const MAX_SESSION_FILES = 4_096;
@@ -102,9 +103,9 @@ function scanEnvelopes(text: string): { selected: number; excluded: number } {
 		const item = record(event);
 		const message = record(item?.message);
 		if (item?.type !== "message" || message?.role !== "toolResult") continue;
-		if (message.toolName === MANAGED_TOOL_NAME) {
-			const version = record(message.details)?.schemaVersion;
-			if (version === MANAGED_SCHEMA_VERSION) selected += 1;
+		if (typeof message.toolName === "string" && MANAGED_TOOL_NAMES.has(message.toolName)) {
+			const details = record(message.details), version = details?.schemaVersion;
+			if (version === MANAGED_SCHEMA_VERSION && message.toolName !== "agent") { if (details && Object.hasOwn(details, "action")) selected += 1; }
 			else excluded += 1;
 		}
 	}

@@ -46,9 +46,9 @@ function physicalSession(rows: Row[], owner = "owner"): string {
 	].map((row) => JSON.stringify(row)).join("\n") + "\n";
 }
 
-/** Current registered managed tool; only schemaVersion 4 is interpreted by the current-only reducers. */
+/** A current peer tool; only schemaVersion 5 is interpreted by the current-only reducers. */
 function managedRow(schemaVersion: number | undefined, details: Record<string, unknown>): Row {
-	return { type: "message", message: { role: "toolResult", toolName: "agent", content: [{ type: "text", text: "managed" }],
+	return { type: "message", message: { role: "toolResult", toolName: "invoke_agent", content: [{ type: "text", text: "managed" }],
 		details: { ...(schemaVersion === undefined ? {} : { schemaVersion }), ...details } } };
 }
 
@@ -61,9 +61,9 @@ const managedCreate = (extra: Record<string, unknown> = {}): Record<string, unkn
 	action: "create", status: "succeeded", sessions: [], requestTelemetry: managedTelemetry(), ...extra,
 });
 
-test("current managed v4 envelopes are counted while non-current managed envelopes are excluded", () => {
+test("current managed v5 envelopes are counted while non-current managed envelopes are excluded", () => {
 	const text = physicalSession([
-		managedRow(4, managedCreate()),
+		managedRow(5, managedCreate()),
 		managedRow(3, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "old-managed" }) })),
 		managedRow(1, { action: "inspect", status: "failed", sessions: [] }),
 	]);
@@ -89,8 +89,8 @@ test("current-epoch mode selects managed provenance by epoch", async (t) => {
 		extensionActivatedAtMs: 100,
 		configurationActivatedAtMs: 100,
 	}));
-	const old = managedRow(4, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "old", extensionEpoch: "ext-old" }) }));
-	const current = managedRow(4, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "current", startedAtMs: 200 }) }));
+	const old = managedRow(5, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "old", extensionEpoch: "ext-old" }) }));
+	const current = managedRow(5, managedCreate({ requestTelemetry: managedTelemetry({ invocationId: "current", startedAtMs: 200 }) }));
 	await writeFile(join(sessions, "a_session.jsonl"), physicalSession([old, current]));
 	const children = join(sessions, "--project--", "agents");
 	await mkdir(children, { recursive: true });

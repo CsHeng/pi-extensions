@@ -205,8 +205,8 @@ export class PeerHub implements PeerBridge {
 		this.names.set(name, view.handle);
 		const writes = access.some(rule => rule.permission === "write");
 		const header = `Agent ${name} (role ${role}) ${result.kind === "execution" ? "finished its first turn" : "is running"}${writes ? `; workspace ${workspace}` : ""}; may message ${may.message.join(", ") || "nobody"}${may.roster ? ", sees the roster" : ""}${may.invoke ? ", may invoke agents" : ""}.`;
-		if (result.kind === "execution") { this.markReturned(caller, view); return { text: `${header}\n${this.reportText(name, view, true)}`, details: this.details("invoke", [view]) }; }
-		return { text: `${header} Its turn result returns to you.`, details: this.details("invoke", [view]) };
+		if (result.kind === "execution") { this.markReturned(caller, view); return { text: `${header}\n${this.reportText(name, view, true)}`, details: this.details("invoke", [view], result) }; }
+		return { text: `${header} Its turn result returns to you.`, details: this.details("invoke", [view], result) };
 	}
 
 	private async message(args: Record<string, unknown>, caller: Caller, owner: CurrentOwner): Promise<PeerToolOutcome> {
@@ -225,12 +225,12 @@ export class PeerHub implements PeerBridge {
 		const target = await this.recordByName(to, owner);
 		if (caller.record && !this.mayMessage(caller.record, target)) throw new PeerError("not_permitted", `This agent may not message ${to}.`);
 		const delivery: Delivery = { id: randomUUID(), kind: "message", from: caller.participant, text };
-		const outcome = await this.deliverMessage(target, delivery);
+		const { outcome, request } = await this.deliverMessage(target, delivery);
 		this.record(PEER_MESSAGE_ENTRY, { from: caller.participant, to: { kind: "agent", name: to, role: target.task.role }, bytes: Buffer.byteLength(text), kind: "message", delivery: outcome, startedTurn: outcome === "started-turn" });
 		const text_ = outcome === "started-turn" ? `${to} was idle and starts a new turn with your message; that turn's result returns to you.`
 			: outcome === "running" ? `${to} is running and reads your message at its next model call.`
 			: `${to} is running; your message is queued and reaches it at its next model call or next turn.`;
-		return { text: text_, details: this.details("message", []) };
+		return { text: text_, details: this.details("message", [], request) };
 	}
 
 	private async list(args: Record<string, unknown>, caller: Caller, owner: CurrentOwner): Promise<PeerToolOutcome> {
@@ -392,7 +392,7 @@ export class PeerHub implements PeerBridge {
 		if (result.status !== "succeeded") throw new ManagedError(result.error?.code ?? "release_failed", undefined, result.error?.detail);
 		this.links.delete(record.handle);
 		if (caller.key === "main") this.deps.service.acknowledge(result);
-		return { text: `${record.task.id} released (${disposition}); its name stays bound in this session.`, details: this.details("release", result.sessions) };
+		return { text: `${record.task.id} released (${disposition}); its name stays bound in this session.`, details: this.details("release", result.sessions, result) };
 	}
 	/** D7: a caller acts on an isolated candidate only after it has been shown that turn's result. */
 	private unseenResult(caller: Caller, record: ManagedRecord): PeerToolOutcome | undefined {
@@ -416,7 +416,7 @@ export class PeerHub implements PeerBridge {
 			const result = await this.deps.service.execute({ action: "close", handle: record.handle, expectedEpisode: record.episode, disposition: "discard" }, ctx, undefined, undefined, `peer-${randomUUID()}`);
 			if (result.status !== "succeeded") throw new ManagedError(result.error?.code ?? "discard_failed", undefined, result.error?.detail);
 			this.links.delete(record.handle);
-			return { text: `${record.task.id}'s candidate and private copy were discarded and the agent released.`, details: this.details("candidate", result.sessions) };
+			return { text: `${record.task.id}'s candidate and private copy were discarded and the agent released.`, details: this.details("candidate", result.sessions, result) };
 		}
 		if (action === "apply" && !record.candidate) throw new PeerError("candidate_missing", `${record.task.id} has no candidate for its latest turn.`);
 		const request = action === "apply" ? { action: "apply", handle: record.handle, expectedEpisode: record.episode, candidateId: record.candidate!.id } : { action: "refresh", handle: record.handle, expectedEpisode: record.episode };
@@ -424,9 +424,9 @@ export class PeerHub implements PeerBridge {
 		const after = result.sessions[0];
 		if (result.status !== "succeeded") {
 			const conflicts = result.error?.conflicts?.map(item => `${item.changedCount} changed path(s) in one root${item.changedPaths.length ? `, including ${item.changedPaths.join(", ")}` : ""}`).join("; ");
-			return { isError: true, text: `${action} did not complete: ${result.error?.code ?? "failed"}${conflicts ? ` (${conflicts})` : ""}${result.error?.detail ? `. ${result.error.detail}` : ""}`, details: this.details("candidate", result.sessions) };
+			return { isError: true, text: `${action} did not complete: ${result.error?.code ?? "failed"}${conflicts ? ` (${conflicts})` : ""}${result.error?.detail ? `. ${result.error.detail}` : ""}`, details: this.details("candidate", result.sessions, result) };
 		}
-		return { text: action === "apply" ? `${record.task.id}'s candidate was applied to the checkout (${after?.candidate?.appliedPaths.length ?? 0} paths). Applying is not acceptance; verify the result.` : `${record.task.id}'s private copy now includes the current checkout; its old candidate is no longer valid.`, details: this.details("candidate", result.sessions) };
+		return { text: action === "apply" ? `${record.task.id}'s candidate was applied to the checkout (${after?.candidate?.appliedPaths.length ?? 0} paths). Applying is not acceptance; verify the result.` : `${record.task.id}'s private copy now includes the current checkout; its old candidate is no longer valid.`, details: this.details("candidate", result.sessions, result) };
 	}
 
 	// ---- Delivery ----
@@ -435,19 +435,19 @@ export class PeerHub implements PeerBridge {
 	 * its next model call; an idle agent starts exactly one turn, whose initiator is the sender that
 	 * started it. The returned disposition is what happened, and telemetry records the same.
 	 */
-	private async deliverMessage(target: ManagedRecord, delivery: Delivery): Promise<"running" | "queued" | "started-turn"> {
+	private async deliverMessage(target: ManagedRecord, delivery: Delivery): Promise<{ outcome: "running" | "queued" | "started-turn"; request?: SessionActionResult }> {
 		if (target.state === "closed") throw new PeerError("agent_released", `${target.task.id} was released.`);
 		if (target.state === "interrupted") throw new PeerError("agent_interrupted", `${target.task.id} was interrupted; its assigner or the main agent can release it.`);
 		if (this.stopping.has(target.handle)) throw new PeerError("agent_stopping", `${target.task.id} is being stopped.`);
 		const link = this.link(target.handle);
 		if (active(target) || this.waking.has(target.handle) || this.deps.service.agentLive(target.handle) || target.episode < (this.expected.get(target.handle) ?? 0)) {
 			link.outbox.push(delivery); this.flush(link);
-			return link.socket && link.accepting ? "running" : "queued";
+			return { outcome: link.socket && link.accepting ? "running" : "queued" };
 		}
 		link.outbox.push(delivery); link.stranded = undefined;
-		try { await this.wake(target.handle, delivery.from); return "started-turn"; }
+		try { const request = await this.wake(target.handle, delivery.from); return { outcome: "started-turn", ...(request ? { request } : {}) }; }
 		catch (error) {
-			if (error instanceof PeerError && error.code === "agent_busy") return "queued";
+			if (error instanceof PeerError && error.code === "agent_busy") return { outcome: "queued" };
 			link.outbox = link.outbox.filter(item => item.id !== delivery.id);
 			// Messages other senders queued behind this failed wake are reported rather than left pending.
 			if (link.outbox.some(item => item.kind === "message")) this.bounce(target.handle, error);
@@ -474,18 +474,18 @@ export class PeerHub implements PeerBridge {
 	 * input is only the neutral host trigger: the waiting messages stay queued and reach the child
 	 * as agent messages when its link attaches, before its first model call.
 	 */
-	private async wake(handle: string, initiator: Participant): Promise<void> {
+	private async wake(handle: string, initiator: Participant): Promise<SessionActionResult | undefined> {
 		if (this.waking.has(handle)) throw new PeerError("agent_busy");
 		const marker = Symbol(handle);
 		this.waking.set(handle, marker);
 		const clear = () => { if (this.waking.get(handle) === marker) this.waking.delete(handle); };
 		try {
-			await this.admit(async release => {
+			return await this.admit(async release => {
 				const ctx = this.deps.context(); if (!ctx) throw new PeerError("agents_unavailable");
 				const owner = await this.deps.service.ownerOf(ctx);
 				const record = await this.deps.service.store.load(handle, owner);
 				const link = this.link(handle);
-				if (!link.outbox.some(item => item.kind === "message")) { release(); return; }
+				if (!link.outbox.some(item => item.kind === "message")) { release(); return undefined; }
 				if (active(record) || this.deps.service.agentLive(handle)) { this.flush(link); release(); throw new PeerError("agent_busy"); }
 				if (record.state !== "idle") throw new PeerError(record.state === "closed" ? "agent_released" : "agent_interrupted");
 				if (this.stopping.has(handle)) throw new PeerError("agent_stopping");
@@ -495,6 +495,7 @@ export class PeerHub implements PeerBridge {
 					const result = await this.deps.service.execute({ action: "continue", episodes: [{ handle, expectedEpisode: record.episode, message: WAKE_TRIGGER }] }, ctx, undefined, undefined, `peer-wake-${randomUUID()}`, { initiator, ...(initiator.kind === "agent" ? { detach: true } : {}),
 						admitted: handles => { if (handles.includes(handle)) this.expected.set(handle, record.episode + 1); clear(); release(); } });
 					if (result.status === "failed" && result.kind !== "execution") throw new ManagedError(result.error?.code ?? "wake_failed", undefined, result.error?.detail);
+					return result;
 				} catch (error) { if (this.wakeIds.get(handle)?.episode === record.episode + 1) this.wakeIds.delete(handle); throw error; }
 			});
 		} finally { clear(); }
@@ -739,8 +740,16 @@ export class PeerHub implements PeerBridge {
 		for (const root of record.roots) if (pathContains(root.source, path)) return path.slice(root.source.length + 1) || ".";
 		return path;
 	}
-	private details(op: PeerOperation, sessions: SessionView[]): Record<string, unknown> {
-		return { schemaVersion: MANAGED_SESSION_VERSION, op, sessions: sessions.map(view => ({ handle: view.handle, ...(view.label ? { label: view.label } : {}), role: view.role, episode: view.episode, state: view.state })) };
+	/**
+	 * Tool-result details stay out of the model's context. An operation that made an engine request
+	 * carries that request's action, status, telemetry and views for evaluators and UI; other
+	 * operations carry only identities and states.
+	 */
+	private details(op: PeerOperation, sessions: SessionView[], request?: SessionActionResult): Record<string, unknown> {
+		const base = { schemaVersion: MANAGED_SESSION_VERSION, op, sessions: sessions.map(view => ({ handle: view.handle, ...(view.label ? { label: view.label } : {}), role: view.role, episode: view.episode, state: view.state })) };
+		if (!request) return base;
+		return { ...base, action: request.action, status: request.status, ...(request.kind ? { kind: request.kind } : {}), ...(request.runId ? { runId: request.runId } : {}),
+			...(request.error ? { error: { code: request.error.code } } : {}), ...(request.requestTelemetry ? { requestTelemetry: request.requestTelemetry } : {}), sessions: request.sessions };
 	}
 	private record(customType: string, data: Record<string, unknown>): void {
 		try { this.deps.appendEntry(customType, { version: 1, atMs: Date.now(), ...data }); } catch { /* Telemetry never fails coordination. */ }

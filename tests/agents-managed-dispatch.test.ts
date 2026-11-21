@@ -4,10 +4,10 @@ import { ManagedDispatchCollector } from "../.agents/skills/evaluate-agent-runs/
 import { extractSessionMetrics } from "../.agents/skills/evaluate-agent-runs/scripts/extract-session-metrics.ts";
 
 const telemetry = { version: 1, ownerSessionId: "owner", invocationId: "invocation", startedAtMs: 100, durationMs: 12, extensionEpoch: "ext", configurationEpoch: "config", requestedTasks: 1, admittedTasks: 1, launchedChildren: 1, replayedEpisodes: 0 };
-function session(details: object[], owner = "owner", toolName = "agent") {
+function session(details: object[], owner = "owner", toolName = "invoke_agent") {
 	return [{ type: "session", version: 3, id: owner }, ...details.map((data, index) => ({ type: "message", id: `entry${index}`, parentId: index ? `entry${index-1}` : null, message: { role: "toolResult", toolName, details: data } }))].map(row => JSON.stringify(row)).join("\n") + "\n";
 }
-const result = (extra = {}) => ({ schemaVersion: 4, action: "create", status: "succeeded", sessions: [], requestTelemetry: telemetry, ...extra });
+const result = (extra = {}) => ({ schemaVersion: 5, action: "create", status: "succeeded", sessions: [], requestTelemetry: telemetry, ...extra });
 
 test("managed dispatch does not need a settled observation window and stays separate from excluded history", () => {
 	const metrics = extractSessionMetrics(session([result(), result({ action: "close", status: "failed", error: { code: "missing_session_version" }, requestTelemetry: { ...telemetry, invocationId: "close", admittedTasks: null, requestedTasks: null, launchedChildren: 0, configurationEpoch: null } })]));
@@ -61,4 +61,14 @@ test("invalid action stays separate and malformed or partial physical evidence i
 		assert.equal(invalid.result().invalidRecords, 1);
 		assert.equal(invalid.result().ownedRequests, 0);
 	}
+});
+
+test("retired agent-tool envelopes are excluded and peer operations without an engine request are not dispatch records", () => {
+	const retired = session([{ ...result(), schemaVersion: 4, requestTelemetry: { ...telemetry, invocationId: "retired" } }], "owner", "agent");
+	const listed = session([{ schemaVersion: 5, op: "list", sessions: [] }], "owner", "list_agents");
+	const retiredMetrics = extractSessionMetrics(retired).managedDispatch;
+	assert.equal(retiredMetrics.excludedRecords, 1); assert.equal(retiredMetrics.selectedRequests, 0);
+	const listedMetrics = extractSessionMetrics(listed);
+	assert.equal(listedMetrics.managedDispatch.recordedResults, 0); assert.equal(listedMetrics.managedDispatch.invalidRecords, 0);
+	assert.equal(listedMetrics.source.selectedRuns, 0); assert.equal(listedMetrics.source.excludedRuns, 0);
 });

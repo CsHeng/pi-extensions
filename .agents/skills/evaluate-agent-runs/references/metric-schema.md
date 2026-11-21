@@ -1,8 +1,8 @@
 # Agent Session Metric Schema
 
-`schemaVersion = 5` identifies a redacted evaluation document; runtime state and task records have their own owners. It is independent of the collaboration/managed envelope version (currently `4`) and of the session-view version (currently `4`): those describe runtime payloads, while `schemaVersion` versions only this report.
+`schemaVersion = 5` identifies a redacted evaluation document; runtime state and task records have their own owners. It is independent of the collaboration/managed envelope version (currently `5`) and of the session-view version (currently `5`): those describe runtime payloads, while `schemaVersion` versions only this report.
 
-The evaluator reads the managed `agent` tool name to **classify** envelopes. Managed envelopes are interpreted only when their `schemaVersion === 4`. Every other version is excluded before any nested field is read and is reported as an exclusion; invalid current evidence has its own category. Classification uses the current-version evidence boundary.
+The evaluator reads the seven peer tool names to **classify** envelopes. Managed envelopes are interpreted only when their `schemaVersion === 5`; a peer operation that made no engine request (a list, a wait, a message to a running agent) carries no `action` and is not a dispatch record. Every other version, and every result of the retired `agent` tool, is excluded before any nested field is read and is reported as an exclusion; invalid current evidence has its own category. Classification uses the current-version evidence boundary.
 
 ## Top level
 
@@ -59,7 +59,7 @@ Validated owned rows, command records, and capabilities retain their own complet
 
 ## Managed dispatch
 
-This section counts transport evidence; missions, acceptance, fresh work on replay, and cost have separate evidence. It reads current managed tool results and owner-tagged v4 execution custom entries; action reconstruction uses those records. A current managed result's `requestTelemetry` carries native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A replayed episode requires a committed episode; queued tasks remain separate.
+This section counts transport evidence; missions, acceptance, fresh work on replay, and cost have separate evidence. It reads current peer tool results and owner-tagged `agents.execution.v5` custom entries; action reconstruction uses those records. A current managed result's `requestTelemetry` carries native owner/invocation identity, wall start, nullable monotonic duration, observed extension/configuration epochs, nullable requested/admitted widths, actual launches, and replayed-episode count. Non-execution actions launch zero children. A replayed episode requires a committed episode; queued tasks remain separate.
 
 - `recordedResults`: all encountered managed tool-result records within bounds, including invalid and copied records.
 - `ownedRequests`: distinct valid current managed owner/invocation pairs after excluding conflicting identities; equal repeated records count once. Physical header ownership must match; copied fork records retain their original ownership.

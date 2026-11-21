@@ -7,7 +7,7 @@ import { unavailableObservation } from "../extensions/agents/observability.ts";
 function replay(f: ReturnType<typeof observationFixture>, action = "inspect", unavailable = false) {
 	const views = structuredClone(f.sessions);
 	if (unavailable) for (const view of views) view.result.observation = unavailableObservation();
-	f.body.splice(3, 0, { type: "message", id: "replay", parentId: "tool", message: { role: "toolResult", toolName: "agent", details: { schemaVersion: 4, action, sessions: views } } });
+	f.body.splice(3, 0, { type: "message", id: "replay", parentId: "tool", message: { role: "toolResult", toolName: "invoke_agent", details: { schemaVersion: 5, action, sessions: views } } });
 }
 
 test("frozen three-worker consumer: thirty minutes effort, ten minutes occupied, five owned tokens/cost", () => {

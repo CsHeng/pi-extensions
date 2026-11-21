@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ManagedDispatchCollector } from "../.agents/skills/evaluate-agent-runs/scripts/managed-dispatch.ts";
 const requestTelemetry = { version: 1, ownerSessionId: "owner", invocationId: "request", startedAtMs: 100, durationMs: 2, extensionEpoch: "ext", configurationEpoch: "config", requestedTasks: 1, admittedTasks: 1, launchedChildren: 0, replayedEpisodes: 0 };
-const receipt = { schemaVersion: 4, action: "create", kind: "submission", status: "accepted", runId: "run", generation: "generation", sessions: [{ handle: "handle", episode: 1, state: "queued", reportComplete: false }], requestTelemetry };
-const event = (kind = "task-terminal", eventId = "terminal") => ({ version: 4, eventId, kind, runId: "run", generation: "generation", owner: { repository: "/redacted", sessionId: "owner", branchAnchor: "anchor" }, toolCallId: "tool", foreground: false,
+const receipt = { schemaVersion: 5, action: "create", kind: "submission", status: "accepted", runId: "run", generation: "generation", sessions: [{ handle: "handle", episode: 1, state: "queued", reportComplete: false }], requestTelemetry };
+const event = (kind = "task-terminal", eventId = "terminal") => ({ version: 5, eventId, kind, runId: "run", generation: "generation", owner: { repository: "/redacted", sessionId: "owner", branchAnchor: "anchor" }, toolCallId: "tool", foreground: false,
  timing: { clockKey: "clock", submittedAtMs: 0, preparedAtMs: 2, queuedAtMs: 2, startedAtMs: 5, finishedAtMs: 20 },
  sessions: [{ handle: "handle", episode: 1, role: "worker", state: "idle", reportComplete: true, execution: { startedAtMs: 100, provenance: { available: true, extensionEpoch: "ext", configurationEpoch: "config" } }, result: { id: "task", status: "succeeded", telemetry: { childStarted: true, workspaceMs: 4, childMs: 10 }, output: "private child report" } }],
 });
 function physical(rows: Array<{ tool?: unknown; event?: unknown }>, owner = "owner") {
- return [{ type: "session", version: 3, id: owner }, ...rows.map((row, i) => ({ id: `row${i}`, parentId: i ? `row${i-1}` : null, ...(row.tool ? { type: "message", message: { role: "toolResult", toolName: "agent", details: row.tool } } : { type: "custom", customType: "agents.execution.v4", data: row.event }) }))].map(row => JSON.stringify(row)).join("\n") + "\n";
+ return [{ type: "session", version: 3, id: owner }, ...rows.map((row, i) => ({ id: `row${i}`, parentId: i ? `row${i-1}` : null, ...(row.tool ? { type: "message", message: { role: "toolResult", toolName: "invoke_agent", details: row.tool } } : { type: "custom", customType: "agents.execution.v5", data: row.event }) }))].map(row => JSON.stringify(row)).join("\n") + "\n";
 }
 
 test("mixed current and unsupported envelopes keep current evidence while exclusions stay separate", () => {

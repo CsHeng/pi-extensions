@@ -17,7 +17,7 @@ export function observationFixture() {
 	const body: Array<Record<string, any>> = [
 		{ type: "message", id: "user", parentId: null, message: { role: "user", content: "PRIVATE_PROMPT" } },
 		{ type: "message", id: "before", parentId: "user", message: assistant },
-		{ type: "message", id: "tool", parentId: "before", message: { role: "toolResult", toolCallId: "call", toolName: "agent", details: { schemaVersion: 4, action: "create", status: "succeeded", sessions }, content: [{ type: "text", text: "PRIVATE_REPORT accepted delivery" }] } },
+		{ type: "message", id: "tool", parentId: "before", message: { role: "toolResult", toolCallId: "call", toolName: "invoke_agent", details: { schemaVersion: 5, action: "create", status: "succeeded", sessions }, content: [{ type: "text", text: "PRIVATE_REPORT accepted delivery" }] } },
 		{ type: "message", id: "after", parentId: "tool", message: assistant },
 	];
 	const timing: LocalTiming = { version: 1, clockKey: "parent-clock", originMs: 0, boundary: { startMs: 0, endMs: 600_000 }, complete: true,

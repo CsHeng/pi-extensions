@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { AsyncDispatchCollector, type AsyncDispatchMetrics } from "./async-dispatch.ts";
 import { nativeLeaf } from "../../../../extensions/agents/observability.ts";
 import type { ManagedRequestTelemetry } from "../../../../extensions/agents/session-contracts.ts";
+import { AGENT_EXECUTION_EVENT } from "../../../../extensions/shared/agent-execution.ts";
+import { PEER_TOOLS } from "../../../../extensions/agents/peer-protocol.ts";
+
+const SCHEMA_VERSION = 5;
+const peerTools = new Set<string>(PEER_TOOLS);
 
 export interface DispatchEpoch { extensionEpoch: string; configurationEpoch: string; extensionActivatedAtMs: number; configurationActivatedAtMs: number }
 type Group = { action: string; status: string; count: number };
@@ -13,7 +18,7 @@ export interface ManagedDispatchMetrics {
 	replayedEpisodes: { known: number; unavailableRequests: number };
 	async?: AsyncDispatchMetrics;
 }
-const actions = new Set(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel"]);
+const actions = new Set(["create", "continue", "inspect", "apply", "close", "refresh", "join", "cancel", "reconcile"]);
 const statuses = new Set(["accepted", "succeeded", "partial", "failed", "aborted"]);
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value);
@@ -64,21 +69,25 @@ export class ManagedDispatchCollector {
 			let row: Record<string, unknown> | undefined;
 			try { row = object(JSON.parse(line)); } catch { continue; }
 			if (index === 0 && row?.type === "session") owner = row.id;
-			if (row?.type === "custom" && row.customType === "agents.execution.v4") {
+			if (row?.type === "custom" && row.customType === AGENT_EXECUTION_EVENT) {
 				if (physical) this.asynchronous.event(row.data, owner); else this.invalid++;
 				continue;
 			}
 			const message = object(row?.message), details = object(message?.details);
-			if (row?.type !== "message" || message?.role !== "toolResult" || message.toolName !== "agent") continue;
+			const toolName = typeof message?.toolName === "string" ? message.toolName : "";
+			if (row?.type !== "message" || message?.role !== "toolResult" || (!peerTools.has(toolName) && toolName !== "agent")) continue;
+			// Shallow version cut before payload interpretation: explicitly versioned non-current envelopes
+			// (including the retired `agent` tool) are excluded, never interpreted as current; malformed
+			// versionless current records still fail validation.
+			if (toolName === "agent" || typeof details?.schemaVersion === "number" && details.schemaVersion !== SCHEMA_VERSION) { if (++this.records > 100000) throw new Error("too_many_runs"); this.unsupported++; continue; }
+			// A peer operation that made no engine request (list, wait, a message to a running agent) is not a dispatch record.
+			if (details && !Object.hasOwn(details, "action")) continue;
 			if (++this.records > 100000) throw new Error("too_many_runs");
-			// Shallow version cut before payload interpretation: explicitly versioned non-current envelopes are
-			// excluded, never interpreted as current; malformed versionless current records still fail validation.
-			if (typeof details?.schemaVersion === "number" && details.schemaVersion !== 4) { this.unsupported++; continue; }
 			const action = details?.action === null ? "invalid-request" : details?.action;
 			const status = details?.status;
 			if (typeof action !== "string" || (action !== "invalid-request" && !actions.has(action)) || typeof status !== "string" || !statuses.has(status)) { this.invalid++; continue; }
 			const telemetry = details?.requestTelemetry;
-			if (!details || details.schemaVersion !== 4 || !physical || !Array.isArray(details.sessions) || details.sessions.length > 10 || !valid(telemetry)) { this.invalid++; continue; }
+			if (!details || details.schemaVersion !== SCHEMA_VERSION || !physical || !Array.isArray(details.sessions) || details.sessions.length > 10 || !valid(telemetry)) { this.invalid++; continue; }
 			if (telemetry.ownerSessionId !== owner) { this.copied++; continue; }
 			if (!actions.has(action) && (status !== "failed" || telemetry.launchedChildren !== 0)) { this.invalid++; continue; }
 			if (!["create", "continue"].includes(action) && (telemetry.launchedChildren !== 0 || telemetry.replayedEpisodes !== 0)) { this.invalid++; continue; }
