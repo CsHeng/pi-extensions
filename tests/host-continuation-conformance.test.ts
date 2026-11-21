@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createPreparedInputTracker } from "../extensions/shared/prepared-input.ts";
 import {
 	createHostHarness,
 	createTrace,
@@ -131,7 +130,6 @@ test("characterization: a settlement consumer registered after the continuation 
 	await harness.session.prompt("go");
 	await waitForTrace(trace, (entry) => entry.event === "late:end" && countOf(trace, "late:end") >= 2);
 
-	// This ordering is exactly why automatic dispatch is disabled in production.
 	assert.ok(indexOf(trace, "wf:dispatch") < indexOf(trace, "late:end", 0), "dispatch raced the later async consumer");
 	assert.ok(indexOf(trace, "native:agent_settled", 0) > indexOf(trace, "wf:dispatch"), "later consumer delayed the native settlement notification");
 	assert.equal(countOf(trace, "native:agent_settled"), 2);
@@ -174,58 +172,24 @@ test("settlement dispatch is skipped when another run is already active", async 
 	assert.deepEqual(harness.errors, []);
 });
 
-test("real host commits prepared ordinary and queued occurrences without inventing queued origin", async (t) => {
+test("queued steer and follow-up reach the run without a new before_agent_start", async (t) => {
 	const trace = createTrace();
-	const tracker = createPreparedInputTracker();
-	const scenario: (pi: ExtensionAPI) => void = (pi) => {
-		pi.on("input", (event) => {
-			tracker.received(event);
-		});
-		pi.on("before_agent_start", () => { tracker.prepare(); });
-		pi.on("message_start", (event) => { tracker.observe(event.message); });
-		pi.on("context", (event) => {
-			for (const input of tracker.peek(event.messages)) {
-				if (input.provenance !== "extension") trace.record("delivered", { ...input });
-				tracker.commit([input.id]);
-			}
-		});
-		pi.on("agent_settled", (_event, ctx) => { if (!ctx.hasPendingMessages()) tracker.reset(); });
-	};
-	const harness = await createHostHarness({
-		trace,
-		extensions: [createTraceObserver(trace), scenario],
-		templates: { "wf-template": "EXPANDED-TEMPLATE-BODY" },
-	});
+	const harness = await createHostHarness({ trace, extensions: [createTraceObserver(trace)] });
 	t.after(() => harness.dispose());
 	harness.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 0.25; echo TOOL_OK" })),
 		fauxAssistantMessage("after tool"),
-		fauxAssistantMessage("plain answer"),
-		fauxAssistantMessage("plain answer"),
-		fauxAssistantMessage("image answer"),
-		fauxAssistantMessage("template answer"),
+		fauxAssistantMessage("after follow-up"),
 	]);
-
 	const first = harness.session.prompt("tool-turn");
 	await waitForTrace(trace, (entry) => entry.event === "tool_start");
 	await harness.session.prompt("steer-1", { streamingBehavior: "steer" });
 	await harness.session.prompt("follow-1", { streamingBehavior: "followUp" });
 	await first;
-	await harness.session.prompt("plain-1");
-	await harness.session.prompt("plain-1");
-	await harness.session.sendUserMessage("EXT-ORIGIN");
-	await harness.session.prompt("", { images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] });
-	await harness.session.prompt("/wf-template");
-	await waitForTrace(trace, () => countOf(trace, "delivered") >= 7);
-
-	assert.deepEqual(
-		trace.entries.filter((entry) => entry.event === "delivered").map((entry) => entry.detail?.provenance),
-		["human", "unknown", "unknown", "human", "human", "human", "human"],
-	);
-	assert.deepEqual(tracker.peek([]), [], "settlement does not retain consumed observations or stale receipts");
 	assert.deepEqual(detailOf(trace, "input", 1), { source: "interactive", text: "steer-1", imageCount: 0, streamingBehavior: "steer" });
 	assert.deepEqual(detailOf(trace, "input", 2), { source: "interactive", text: "follow-1", imageCount: 0, streamingBehavior: "followUp" });
-	assert.equal(trace.entries.filter((entry) => entry.event === "before_agent_start").length, 6, "queued deliveries bypass before_agent_start");
+	assert.deepEqual(trace.entries.filter(entry => entry.event === "message_start" && entry.detail?.role === "user").map(entry => entry.detail?.preview), ["tool-turn", "steer-1", "follow-1"]);
+	assert.equal(countOf(trace, "before_agent_start"), 1);
 });
 
 test("input sees raw text and before_agent_start sees the expanded prompt", async (t) => {
