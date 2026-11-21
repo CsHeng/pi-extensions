@@ -5,7 +5,7 @@ ensureScopeBefore(async () => { await ensureScopeMkdir("/tmp/scope", { recursive
 import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyUsage, type TaskResult } from "../extensions/agents/contracts.ts";
-import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "../extensions/agents/graph.ts";
+import { validateGraphStructure, type NormalizedTask } from "../extensions/agents/graph.ts";
 import { runScheduledTasks } from "../extensions/agents/scheduler.ts";
 import { createRunClock, workerIntervalTotals } from "../extensions/agents/telemetry.ts";
 
@@ -90,22 +90,6 @@ test("v4 marks unclosed child endpoints and backward clocks unavailable", async 
 		assert.equal(invalid.telemetry.runDurationMs, null);
 		assert.equal(invalid.telemetry.timing?.complete, false);
 	}
-});
-
-test("canonical repository-relative hints stay contained but do not serialize isolated workers", () => {
-	assert.equal(validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
-	])).ok, true);
-	assert.equal(validateGraphStructure({ tasks: [
-		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
-		{ id: "b", role: "worker", objective: "b", access: [{ permission: "write", scope: "/tmp/src" }] },
-	] }).ok, true);
-	assert.equal(validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
-	])).ok, true);
-	assert.equal(validateGraphRelationships(graph([
-		{ id: "a", role: "worker", objective: "a", access: [{ permission: "write", scope: "/tmp/src" }] },
-	])).ok, true);
 });
 
 test("graph admission rejects cycles, unknown dependencies and read-only writes; overlapping hints are allowed", () => {

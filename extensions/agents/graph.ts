@@ -129,7 +129,3 @@ export function validateGraphStructure(input: AgentToolInput): GraphValidation {
 
 	return { ok: true, tasks: normalized };
 }
-
-export function validateGraphRelationships(tasks: readonly NormalizedTask[]): GraphValidation {
-	return { ok: true, tasks: [...tasks] };
-}

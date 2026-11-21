@@ -4,7 +4,6 @@ import { mintProductId, MINTED_ID } from "./identity.ts";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
-/** Git owns content versions; the caller owns task/episode authority and writer exclusion. */
 export interface GitInput { commit: string; tree: string }
 export interface GitTaskWorkspace {
 	version: 1;
@@ -77,7 +76,7 @@ async function run(repo: string, args: readonly string[], options: RunOptions = 
 		});
 		const output: Buffer[] = []; const errors: Buffer[] = [];
 		let size = 0; let failure: string | undefined;
-		const kill = () => { try { child.kill("SIGKILL"); } catch { /* already exited */ } };
+		const kill = () => { try { child.kill("SIGKILL"); } catch { } };
 		const abort = () => { failure = "git_aborted"; kill(); };
 		options.signal?.addEventListener("abort", abort, { once: true });
 		const timer = setTimeout(() => { failure = "git_timeout"; kill(); }, Math.min(options.timeoutMs ?? 30_000, 30_000));
@@ -143,7 +142,6 @@ async function supportedInput(repo: string): Promise<string[]> {
 	return visible;
 }
 
-/** Captures visible tracked/non-ignored source, not staging categories or ignored dependencies. */
 export async function captureGitInput(repository: string, parent?: string): Promise<GitInput> {
 	const repo = await root(repository);
 	const files = await supportedInput(repo);
@@ -189,7 +187,6 @@ export async function inspectGitInput(repository: string, ref: string, input: Gi
 export async function discardGitInput(repository: string, ref: string, input: GitInput): Promise<void> {
 	if (!/^refs\/pi-extensions\/agents\/inputs\/[a-z0-9]{32}$/.test(ref)) throw new GitWorkspaceError("invalid_workspace_identity");
 	const repo = await root(repository);
-	// A released input ref stays released: retry is idempotent, but a substituted ref is not deleted.
 	const current = await text(repo, ["rev-parse", "--verify", ref], { allowed: [0, 128] });
 	if (!current) return;
 	if (current !== oid(input.commit)) throw new GitWorkspaceError("owned_ref_changed");
@@ -230,7 +227,6 @@ export async function inspectGitWorkspace(workspace: GitTaskWorkspace): Promise<
 		if (!ref.startsWith(`refs/pi-extensions/agents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
 		if (await text(workspace.repo, ["rev-parse", "--verify", ref]) !== value) throw new GitWorkspaceError("owned_ref_changed");
 	}
-	// An uncreated intent is not yet a published ref; a matching created ref is allowed and a substitution fails closed.
 	for (const [ref, value] of Object.entries(workspace.pendingRefs ?? {})) {
 		if (!ref.startsWith(`refs/pi-extensions/agents/${workspace.id}/`) || !OID.test(value)) throw new GitWorkspaceError("invalid_owned_ref");
 		const current = await text(workspace.repo, ["rev-parse", "--verify", ref], { allowed: [0, 128] });
@@ -264,25 +260,11 @@ export async function mergeGitCandidate(repository: string, inputBase: string, p
 	const lines = result.stdout.toString("utf8").split("\n"); const tree = oid(lines[0]!);
 	return result.status === 0 ? { status: "clean", tree } : { status: "conflict", tree, details: lines.slice(1).join("\n") };
 }
-/** Non-destructive identity check. Safe to run for every bundle entry before the first mutation. */
 export async function validateGitCandidate(workspace: GitTaskWorkspace, candidate: GitCandidate): Promise<void> {
 	await inspectGitWorkspace(workspace); candidateOwner(workspace, candidate);
 	if (await text(workspace.repo, ["rev-parse", `${candidate.commit}^{tree}`]) !== candidate.tree) throw new GitWorkspaceError("candidate_tree_mismatch");
 	if (await text(workspace.repo, ["rev-parse", `${candidate.commit}^`]) !== candidate.inputBase) throw new GitWorkspaceError("candidate_base_mismatch");
 	if (JSON.stringify(await changed(workspace.repo, candidate.inputBase, candidate.commit)) !== JSON.stringify(candidate.changedPaths)) throw new GitWorkspaceError("candidate_paths_mismatch");
-}
-/** Observe whether the destination already contains this candidate. Does not write the worktree. */
-export async function observeGitCandidate(workspace: GitTaskWorkspace, candidate: GitCandidate): Promise<"absent" | "applied" | "unchanged" | "conflict" | "unknown"> {
-	await validateGitCandidate(workspace, candidate);
-	const parent = await captureGitInput(workspace.repo);
-	const result = await mergeGitCandidate(workspace.repo, candidate.inputBase, parent.commit, candidate.commit);
-	if (result.status === "conflict") return "conflict";
-	const patch = (await run(workspace.repo, ["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", parent.tree, result.tree, "--"])).stdout;
-	if (!patch.length) return "unchanged";
-	try { await run(workspace.repo, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patch }); return "absent"; }
-	catch { /* The forward patch does not apply cleanly. A reverse check distinguishes an already-applied prefix from an unknown mixture. */ }
-	try { await run(workspace.repo, ["apply", "--reverse", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patch }); return "applied"; }
-	catch { return "unknown"; }
 }
 /**
  * A stored attempt represents an applicable clean merge result and never conflict markers.
@@ -294,7 +276,6 @@ export function applicableGitAttempt(attempt: GitApplyAttempt): boolean {
 async function treePatch(repo: string, before: string, after: string): Promise<Buffer> {
 	return (await run(repo, ["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", oid(before), oid(after), "--"])).stdout;
 }
-/** Resolve durable creation intents: drop intents whose ref was never created, promote created ones, fail on substitution. */
 async function reconcilePendingRefs(workspace: GitTaskWorkspace): Promise<void> {
 	const pending = workspace.pendingRefs;
 	if (!pending) return;
@@ -319,12 +300,9 @@ async function recordIntegrationRef(workspace: GitTaskWorkspace, parentCommit: s
 	pending[ref] = oid(parentCommit);
 	try { if (checkpoint) await checkpoint(workspace); }
 	catch (error) {
-		// The intent was not durably recorded and no ref exists yet.
 		delete pending[ref];
 		throw error;
 	}
-	// Past this point the intent is durable: creation failure leaves it for missing-ref cleanup, and
-	// a stop after creation leaves it for promotion instead of losing an unrecorded ref.
 	await run(workspace.repo, ["update-ref", ref, oid(parentCommit), ""]);
 	workspace.ownedRefs[ref] = parentCommit;
 	delete pending[ref];
@@ -340,7 +318,6 @@ async function recordIntegrationRef(workspace: GitTaskWorkspace, parentCommit: s
  */
 export async function planGitApply(workspace: GitTaskWorkspace, candidate: GitCandidate, checkpoint?: (workspace: GitTaskWorkspace) => Promise<void>): Promise<{ status: "clean"; attempt: GitApplyAttempt; patch: Buffer } | { status: "conflict"; attempt: GitApplyAttempt; details: string }> {
 	await validateGitCandidate(workspace, candidate);
-	// Resolve any intent left by an earlier interrupted creation before starting a new plan.
 	await reconcilePendingRefs(workspace);
 	const parent = await captureGitInput(workspace.repo);
 	const result = await mergeGitCandidate(workspace.repo, candidate.inputBase, parent.commit, candidate.commit);
@@ -355,7 +332,7 @@ export async function reconcileGitAttempt(repo: string, attempt: GitApplyAttempt
 	const patch = await treePatch(repo, attempt.parentTree, attempt.mergeTree);
 	if (!patch.length) return "applied";
 	try { await run(repo, ["apply", "--reverse", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patch }); return "applied"; }
-	catch { /* The stored result is not fully present. */ }
+	catch { }
 	try { await run(repo, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patch }); return "absent"; }
 	catch { return "unknown"; }
 }
@@ -380,7 +357,6 @@ export async function refreshGitInputs(workspace: GitTaskWorkspace): Promise<Git
 	const previousInput = workspace.inputBase;
 	const result = await mergeGitCandidate(workspace.repo, previousInput, parent.commit, candidate.commit);
 	if (result.status === "conflict") return { ...result, previousInput, parentInput: parent.commit, candidate };
-	// Only the task's isolated worktree/index changes. The previous candidate remains pinned.
 	await run(workspace.path, ["read-tree", "--reset", "-u", result.tree]);
 	await retain(workspace, "input", parent.commit);
 	workspace.inputBase = parent.commit;
@@ -398,7 +374,6 @@ export async function discardGitWorkspace(workspace: GitTaskWorkspace): Promise<
 		present = false;
 	}
 	if (present) await run(workspace.repo, ["worktree", "remove", "--force", "--", workspace.path]);
-	// A durable intent whose ref exists becomes owned and is deleted below; one whose ref is absent is dropped.
 	await reconcilePendingRefs(workspace);
 	for (const [ref, expected] of Object.entries(workspace.ownedRefs)) {
 		const current = await text(workspace.repo, ["rev-parse", "--verify", ref], { allowed: [0, 128] });

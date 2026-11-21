@@ -8,7 +8,7 @@ import { loadConfig, type ConfigLoadResult } from "./config.ts";
 import { CAPABILITY_RECOVERY_HINT, CHILD_CAPABILITY_MANIFEST_VERSION, CHILD_MARKER_ENV, HARD_LIMITS, emptyUsage, type ChildCapabilityManifest, type EffectiveRoute, type AgentTask, type TaskResult } from "./contracts.ts";
 import { assertCanonicalGrants, authorizePath, loadCapability } from "./path-policy.ts";
 import { normalizeAccess } from "./access.ts";
-import { validateGraphRelationships, validateGraphStructure, type NormalizedTask } from "./graph.ts";
+import { validateGraphStructure, type NormalizedTask } from "./graph.ts";
 import { admitRepositoryTasks, defaultRepositoryHost, findCanonicalGitRoot, validateRepositoryTarget, RepositoryPolicyError, type RepositoryHost } from "./repository-policy.ts";
 import { getManagedRole } from "./roles.ts";
 import { resolveRoute, type RouteContext } from "./routing.ts";
@@ -43,7 +43,6 @@ export interface ContinuationDependencies {
 	store: ManagedSessionStore;
 	loadConfig(): Promise<ConfigLoadResult>;
 	runChild(options: ChildRunOptions): Promise<TaskResult>;
-	/** Enclosing child capability, or undefined for a main actor. Nested delegation is bounded by it. */
 	enclosingCapability?(): Promise<ChildCapabilityManifest | undefined>;
 	getParentSkills?(sourceRoot: string): readonly Skill[] | undefined;
 	repositoryHost: RepositoryHost;
@@ -57,25 +56,19 @@ export interface ContinuationDependencies {
 	mainLoopYield?: MainLoopYield;
 	onFactsChanged?: () => void;
 	scheduleInactivity?: ScheduleCheckpoint;
-	/** Peer coordination hooks owned by the hub; absent for direct service callers. */
 	peer?: PeerBridge;
-	/** Role catalog override for fixtures; the default reads packaged, user and trusted project definitions. */
 	loadRoleDefinitions?(projectRoot: string, trusted: boolean): Promise<Map<string, AgentRoleDefinition>>;
 	agentDir?: string;
 }
-/** Hub hooks: one live link per child episode and the terminal facts of every turn. */
 export interface PeerBridge {
-	/** `capability` is the episode's prepared grant set; nested invocations stay inside it. */
 	openLink(record: ManagedRecord, capability: ChildCapabilityManifest): { binding: PeerLinkBinding; close(): void } | undefined;
 	turnStarted(record: ManagedRecord, runId: string, initiator: Participant): void;
 	turnTerminal(event: AgentExecutionEvent, initiator: Participant): void | Promise<void>;
 }
 export interface ExecuteOptions {
-	/** Who started this turn: the invoking model, or an agent whose message woke an idle agent. */
 	initiator?: Participant;
 	/** Called once admission is released, before a foreground caller observes the run. */
 	admitted?: (handles: readonly string[]) => void;
-	/** Return the admission receipt instead of observing the run; an agent caller or a wake waits through wait_agents. */
 	detach?: boolean;
 	/** Checked during preparation, before any record is queued or dispatched; a throw rejects the whole admission. */
 	authorize?: (records: readonly ManagedRecord[]) => Promise<void>;
@@ -109,7 +102,6 @@ const unsettledWriter = (record: ManagedRecord) => record.state === "interrupted
 	&& record.result?.executionStatus !== "not-started" && record.result?.workerToolsSettled !== true;
 const activeState = (record: ManagedRecord) => record.state === "queued" || record.state === "running";
 
-/** Bound the carried closing excerpt independently for every task in a combined notice. */
 export const NOTICE_EXCERPT_LIMIT = 1200;
 function closingExcerpt(output: string): string {
 	// The excerpt is the child's own report tail; the full report stays inspectable.
@@ -129,7 +121,6 @@ function taskNotice(label: string, _handle: string, _runId: string, phase: strin
 interface AdmissionProgress {
 	handle: string;
 	runId: string;
-	/** Locked pre-admission facts; absent when this admission never reached its first mutation. */
 	before?: ManagedRecord;
 	retained: Array<{ rootId: string; source: string; ref: string; input: Awaited<ReturnType<typeof captureGitInput>> }>;
 }
@@ -163,7 +154,6 @@ export class ContinuationService {
 	private stopped = false;
 	private readonly sessionViewBuilder: SessionViewBuilder;
 	private readonly inactivity: AgentInactivityCheckpoints;
-	/** Set by registerContinuationTool; direct service callers run without a hub. */
 	peerHub: PeerHub | undefined;
 	constructor(dependencies: Partial<ContinuationDependencies> = {}) {
 		this.dependencies = { store: new ManagedSessionStore(getAgentDir()), loadConfig, runChild, repositoryHost: defaultRepositoryHost, now: monotonicNow, ...dependencies };
@@ -173,10 +163,8 @@ export class ContinuationService {
 	get busy(): boolean { return this.admission || this.supervisor?.hasActiveWork === true; }
 	get store(): ManagedSessionStore { return this.dependencies.store; }
 	ownerOf(ctx: ExtensionContext): Promise<CurrentOwner> { return this.owner(ctx); }
-	/** Cancel the live turn of one agent, whichever run started it. */
 	/** The episode a run carried for one agent, for notices acknowledged after a later turn began. */
 	episodeOf(runId: string, handle: string): number | undefined { return this.bindings.get(runId)?.records.find(item => item.handle === handle)?.episode; }
-	/** True while a supervised run still owns this agent's turn, including finalization after the child exits. */
 	agentLive(handle: string): boolean {
 		for (const [runId, binding] of this.bindings) {
 			if (!binding.records.some(item => item.handle === handle)) continue;
@@ -290,7 +278,6 @@ export class ContinuationService {
 			return { ...view, liveActivity: { runId, executionPhase: row.executionPhase, elapsedMs: row.elapsedMs, calls: row.calls.map(call => ({ ...call })), callsTruncated: row.callsTruncated } };
 		});
 	}
-	/** Current admission and live execution facts. Replay and idle candidates are not live work. */
 	executionFacts(sessionId: string, branchAnchor: string | null): ProducerFacts {
 		const executions: ExecutionFact[] = [];
 		if (this.admission) executions.push({ id: "admission", ...(this.admissionToolCallId ? { toolCallId: this.admissionToolCallId } : {}), phase: "preparing", status: "preparing", exitCode: null, summary: "", disposition: "pending" });
@@ -327,11 +314,9 @@ export class ContinuationService {
 		}
 		return { version: 1, producer: "agents", availability: this.stopped ? "unavailable" : "ready", sessionId, branchAnchor, generation: this.generation, executions };
 	}
-	/** Current scoped activity for request preparation, never a new authority or a wake per output. */
 	async liveContext(ctx: ExtensionContext): Promise<SessionView[]> {
 		return this.projectLiveSessions(await this.contextIndex(ctx)).filter(view => view.liveActivity?.calls.length);
 	}
-	/** Read-only session-wide view query; never mutates records or controls a child. */
 	async sessionView(request: SessionViewRequest, ctx: ExtensionContext): Promise<SessionViewReply> {
 		let owner: CurrentOwner | null = null; let reason: string | undefined;
 		if (ctx.isProjectTrusted()) {
@@ -361,7 +346,7 @@ export class ContinuationService {
 			telemetry.requestedTasks = request.tasks?.length ?? request.episodes?.length ?? null;
 			if (!ctx.isProjectTrusted()) throw new ManagedError("project_trust_required");
 			const owner = await this.owner(ctx);
-			try { const provenance = await this.dependencies.provenance?.observeExtension(); if (provenance?.available) telemetry.extensionEpoch = provenance.extensionEpoch; } catch { /* Optional. */ }
+			try { const provenance = await this.dependencies.provenance?.observeExtension(); if (provenance?.available) telemetry.extensionEpoch = provenance.extensionEpoch; } catch {}
 			let result = await this.action(request, owner, ctx, signal, onProgress, dispatchCallId, callIdentity, telemetry, options.initiator ?? { kind: "main" }, options.admitted, options.detach === true, options.authorize);
 			telemetry.durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
 			result = { ...result, sessions: this.projectLiveSessions(result.sessions), requestTelemetry: { ...telemetry, ...(result.kind === "submission" ? { launchedChildren: 0 } : {}) } };
@@ -414,7 +399,6 @@ export class ContinuationService {
 			if (request.action === "join") {
 				return this.observeRun(request.runId!, request, owner, signal);
 			}
-			// One run belongs to one call, so its labels are unambiguous; the handle still wins.
 			const target = request.taskId && !binding.records.some(record => record.handle === request.taskId)
 				? binding.records.find(record => record.task.id === request.taskId)?.handle ?? request.taskId
 				: request.taskId;
@@ -515,7 +499,6 @@ export class ContinuationService {
 				await this.constrainNestedAccess(graph.tasks);
 				const admission = await admitRepositoryTasks(owner.repo, graph.tasks, this.dependencies.repositoryHost);
 				if (!admission.ok) throw new ManagedError(admission.error.code);
-				const related = validateGraphRelationships(admission.tasks); if (!related.ok) throw new ManagedError(related.error.code);
 				tasks = admission.tasks;
 				// Resolve every requested route before creating any persistent task.
 				for (const task of tasks) {
@@ -526,7 +509,6 @@ export class ContinuationService {
 				if (!allocation.fresh) throw new ManagedError("request_outcome_unknown");
 				freshAllocation = true;
 				records = allocation.records;
-				// Scheduler and record identities use the generated handle; the label stays batch-local.
 				const handleByLabel = new Map(tasks.map((task, index) => [task.id, records[index]!.handle] as const));
 				tasks = tasks.map((task, index) => ({ ...task, id: records[index]!.handle, dependsOn: (task.dependsOn ?? []).map(label => handleByLabel.get(label)!) }));
 			} else {
@@ -552,7 +534,7 @@ export class ContinuationService {
 			routes = records.map(record => replays.get(record.handle)?.route ?? this.route(record.task, config, ctx, roleDefinitions.get(record.task.role)));
 			telemetry.replayedEpisodes = replays.size;
 			telemetry.admittedTasks = tasks.length;
-			try { const provenance = loaded.source ? await this.dependencies.provenance?.observeConfiguration(loaded.source) : undefined; if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; } } catch { /* Optional. */ }
+			try { const provenance = loaded.source ? await this.dependencies.provenance?.observeConfiguration(loaded.source) : undefined; if (provenance?.available) { telemetry.extensionEpoch = provenance.extensionEpoch; telemetry.configurationEpoch = provenance.configurationEpoch; } } catch {}
 			receipt = await this.supervisor.submit({ requestId: callIdentity, requestKey: digest,
 				prepare: async (preparationSignal, identity) => {
 					try {
@@ -612,7 +594,7 @@ export class ContinuationService {
 							if (current.episode === 1) current.assigner = initiator.kind === "main" ? "main" : initiator.name;
 							current.requests.push({ id: episodeIdentity(current.handle), fingerprint: request.episodes?.[index] ? fingerprint([request.episodes[index]!.expectedEpisode, request.episodes[index]!.message]) : digest, episode: current.episode, state: "running", runId: identity.runId, generation: identity.generation });
 							await store.save(current);
-							try { this.dependencies.peer?.turnStarted(current, identity.runId, initiator); } catch { /* Telemetry only. */ }
+							try { this.dependencies.peer?.turnStarted(current, identity.runId, initiator); } catch {}
 							records[index] = current; this.bindings.get(identity.runId)!.records[index] = current;
 							this.bindings.get(identity.runId)!.views.set(current.handle, store.view(current));
 						});
@@ -655,7 +637,6 @@ export class ContinuationService {
 			const binding = this.bindings.get(runId!); if (binding) binding.foreground = false;
 		}
 	}
-	/** Release observation for main-loop events without forwarding that signal to execution. */
 	private async observeRun(runId: string, request: SessionRequest, owner: CurrentOwner, signal?: AbortSignal): Promise<SessionActionResult> {
 		const window = this.dependencies.mainLoopYield?.open({ ignore: ref => ref.runId === runId });
 		let reason: YieldReason | undefined;
@@ -710,7 +691,6 @@ export class ContinuationService {
 		try { return await store.releaseReservation(owner, reservation); }
 		catch { return false; }
 	}
-	/** A child may request only what its own enclosing grants already cover; a main actor is unrestricted. */
 	private async constrainNestedAccess(tasks: readonly Pick<AgentTask, "id" | "access">[]): Promise<void> {
 		const enclosing = await this.dependencies.enclosingCapability?.();
 		if (!enclosing) return;
@@ -776,7 +756,6 @@ export class ContinuationService {
 	private async run(request: SessionRequest, owner: CurrentOwner, records: ManagedRecord[], tasks: NormalizedTask[], execution: ExecutionContext, telemetry: ManagedRequestTelemetry, ctx: ExtensionContext, replays: Map<string, SessionView>, callIdentity: string, onProgress?: (tasks: readonly TaskResult[], elapsedMs: number | null) => void): Promise<SessionActionResult> {
 		const clock = createRunClock(this.dependencies.now); const store = this.dependencies.store;
 		const binding = this.bindings.get(execution.runId)!;
-		// Readable labels stay batch-local; scheduler and result ids use the persistent handle.
 		const labelFor = new Map(records.map(record => [record.handle, record.task.id] as const));
 		const observer = ["tui", "rpc"].includes(ctx.mode) ? new ManagedObserver(execution.runId, owner, this.generation, records.map(record => ({ id: record.handle, role: record.task.role, episode: replays.get(record.handle)?.episode ?? record.episode, route: replays.get(record.handle)?.route ?? record.route!, replayed: replays.has(record.handle), label: record.task.id, objective: record.task.objective })), () => clock.elapsed(), snapshot => this.publishObserver(snapshot), () => ++this.observerRevision) : undefined;
 		if (observer) { this.observers.add(observer); observer.begin(); }
@@ -785,7 +764,7 @@ export class ContinuationService {
 				runId: execution.runId, clock, now: this.dependencies.now, signal: execution.signal,
 				maxConcurrency: HARD_LIMITS.maxTasks,
 				onControl: control => { binding.control = control; },
-				onUpdate: results => { observer?.update(results); try { if (binding.foreground) onProgress?.(results, clock.elapsed()); } catch { /* Display-only. */ } },
+				onUpdate: results => { observer?.update(results); try { if (binding.foreground) onProgress?.(results, clock.elapsed()); } catch {} },
 				execute: (task, predecessors, episodeSignal, lifecycle) => {
 					const index = tasks.findIndex(item => item.id === task.id); const record = records[index]!;
 					const replay = replays.get(record.handle);
@@ -834,7 +813,7 @@ export class ContinuationService {
 				if (observed.timing) for (const span of [...observed.timing.children, ...observed.timing.waits]) span.taskId = identities.get(span.taskId) ?? fingerprint(span.taskId);
 				binding.runObservation = { telemetry: observed, clockKey: clock.clockKey, originMs: clock.valid ? clock.started : null };
 				if (binding.foreground) this.dependencies.onRun?.(binding.runObservation);
-			} catch { /* Optional observation. */ }
+			} catch {}
 			observer?.finish(scheduled.status !== "succeeded", scheduled.status === "aborted");
 			return response;
 		} finally { this.inactivity.stop(execution.runId); if (observer) { observer.finish(true, execution.signal.aborted); this.observers.delete(observer); } }
@@ -843,7 +822,6 @@ export class ContinuationService {
 		const context: RouteContext = { ...(ctx.model ? { parentModel: ctx.model as NonNullable<RouteContext["parentModel"]> } : {}), ...(ctx.thinkingLevel ? { parentThinking: ctx.thinkingLevel } : {}), modelRegistry: ctx.modelRegistry as unknown as RouteContext["modelRegistry"] };
 		const result = resolveRoute(task.role, config, context, task, definition); if (!result.ok) throw new ManagedError(result.error.code); return result.route;
 	}
-	/** Packaged, user and trusted project role definitions, read at each admission and episode. */
 	async roleDefinitions(owner: Pick<CurrentOwner, "repo">, ctx: Pick<ExtensionContext, "isProjectTrusted">): Promise<Map<string, AgentRoleDefinition>> {
 		if (this.dependencies.loadRoleDefinitions) return this.dependencies.loadRoleDefinitions(owner.repo, ctx.isProjectTrusted());
 		try { return (await loadRoleDefinitions({ agentDir: this.dependencies.agentDir ?? getAgentDir(), projectRoot: owner.repo, trusted: ctx.isProjectTrusted() })).roles; }
@@ -862,7 +840,6 @@ export class ContinuationService {
 				signal.throwIfAborted();
 				if (Buffer.byteLength(message) + Buffer.byteLength(record.task.objective) > HARD_LIMITS.maxPromptBytes) throw new ManagedError("prompt_too_large");
 				const preparationStarted = this.dependencies.now();
-				// Shared writers edit the assigned checkout directly; only isolated roots get a private worktree.
 				await prepareManagedWorkspace(store, record);
 				const workspaceMs = Math.max(0, this.dependencies.now() - preparationStarted);
 				await store.writerPhase(handle, "not-started");
@@ -1038,7 +1015,6 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		if (ack?.version === 1 && ack.producer === "agents" && Array.isArray(ack.ids) && ack.ids.every(id => typeof id === "string")) { service.acknowledgeNotices(ack.ids); void hub?.noticesShown(ack.ids); }
 	});
 	pi.events.on(SESSION_VIEW_REQUEST_EVENT, (data: unknown) => {
-		// Display-only request/reply: malformed or foreign requests never affect execution.
 		const request = parseSessionViewRequest(data);
 		if (!request || !context || !["tui", "rpc"].includes(context.mode)) return;
 		const ctx = context;
@@ -1062,7 +1038,6 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		})();
 	});
 	pi.on("session_start", async (_event, ctx) => { context = ctx; await service.reset(); hub?.reset(); publishFacts(); });
-	// Results returned to the main agent count as shown once its next model request carries them.
 	pi.on("turn_start", () => { hub?.promoteShown("main"); });
 	pi.on("session_tree", async (_event, ctx) => { await service.reset(); hub?.reset(); context = ctx; publishFacts(); });
 	pi.on("agent_start", (_event, ctx) => { context = ctx; publishFacts(); });
@@ -1078,7 +1053,6 @@ export function registerContinuationTool(pi: ExtensionAPI, dependencies: Partial
 		const details = event.result.details as Pick<SessionActionResult, "sessions"> & { schemaVersion?: number } | undefined;
 		if (details?.schemaVersion === MANAGED_SESSION_VERSION && Array.isArray(details.sessions)) { service.acknowledge(details); publishFacts(); }
 	});
-	// Inside a managed child the guard owns these tools and forwards them to the invoking hub.
 	if (process.env[CHILD_MARKER_ENV] !== "1") for (const tool of peerToolDefinitions(async (op, args, signal, toolCallId, ctx) => {
 		context = ctx;
 		await hub!.start();

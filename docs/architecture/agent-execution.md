@@ -46,6 +46,8 @@ Agent messages carry sender attribution. Live messages use Pi custom messages; a
 
 ## Admission and observation
 
+Inferred from `ContinuationService` and the peer tool at `91fc7a2`: release the admission lock before waiting for a child result, so that accepting one run cannot block a nested admission needed to finish it. Expiry or yielding ends the wait without cancelling the run; aborting the foreground submission cancels it. Revisit the split if Pi owns both admission and observation.
+
 Replay identity comes from the host tool-call boundary where the engine admits work. Admission validates access, routes and bounds; known-unlaunched failure unwinds owned queued state and fresh reservations. Failed continuation restores prior idle state under the record lock, preserving same-episode apply or refresh already accepted. Failed ref disposal retains ownership for recovery. An I/O failure after partial restoration can leave queued metadata uncertain; reconcile the affected record instead of resetting storage. Title, episode and result do not create new authorization.
 
 The native launcher is checked before admission, using the current executable and existing CLI script. On Linux it can reuse the running executable inode through `/proc/<parent-pid>/exe` after a path replacement; an unavailable entry reports `launcher_unavailable` and a restart hint. Explicit custom executors own their invocation.

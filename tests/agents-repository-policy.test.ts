@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { HARD_LIMITS } from "../extensions/agents/contracts.ts";
-import { validateGraphRelationships, validateGraphStructure } from "../extensions/agents/graph.ts";
+import { validateGraphStructure } from "../extensions/agents/graph.ts";
 import {
 	admitRepositoryTasks,
 	canonicalizeExternalReadRoot,
