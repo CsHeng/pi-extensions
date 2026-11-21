@@ -1,6 +1,6 @@
 # Notices
 
-`extensions/notices/` is the sole owner of main-model execution notices for Async Bash jobs and Agents. Tasklist is a separate passive producer: task-only notices remain disabled, and its unfinished/blocked/cancelled data neither starts a turn nor blocks execution results. All three producers publish facts independently without importing or scheduling the consumer. Hiding Tasks, Jobs or Agents UI does not change delivery. Disabling Notices disables automatic result delivery, not the execution or data tools.
+`extensions/notices/` is the sole owner of main-model **execution notices** for Async Bash jobs and Agents. Agent-to-agent messages use a separate custom-message path that preserves agent origin, including when addressed to main. Tasklist is a passive producer: task-only notices remain disabled, and unfinished, blocked or cancelled tasks neither start a turn nor block execution results. The producers publish execution or task facts independently. UI visibility leaves delivery unchanged. Disabling Notices disables automatic execution-result delivery; execution, peer messages and explicit observation remain available.
 
 ## Contract
 
@@ -90,4 +90,4 @@ sequenceDiagram
     Note over N,M: No task-only continuation; wait for real input or a new result
 ```
 
-Print and JSON do not receive these wakes. Agent task notices carry phase and result status, available candidate ID and expected episode, changed-path count and a bounded closing report excerpt; paths are not enumerated. The full report remains available through inspect, and execution is not acceptance. Only the bounded completion notice and its references become native conversational history; Async Bash and Agent records remain the source execution evidence. There is no separate persisted notification queue. Private event/storage names are retained rather than migrating live histories. The inline Mermaid diagrams above are the product-owned diagram sources.
+Print and JSON do not receive execution-notice wakes. Main-initiated Agent turn notices carry the agent's name and role, phase and available result status, changed-path count when available, and a bounded closing excerpt. An isolated result can report a ready candidate; internal IDs and file paths remain in execution evidence. `list_agents` with the name reads the bounded full report. Peer-initiated results return to their initiator; the main agent can retrieve them through `list_agents`. Native conversation history retains the delivered notice, while Async Bash and Agent records own execution evidence. The consumer keeps no separate persisted queue. The inline Mermaid diagrams are the product-owned diagram sources.
