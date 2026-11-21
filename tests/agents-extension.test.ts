@@ -24,32 +24,6 @@ const fixtureRepo = await mkdtemp(join(tmpdir(), "agent-adapter-repo-"));
 await exec("git", ["init", "-q", fixtureRepo]);
 after(() => rm(fixtureRepo, { recursive: true, force: true }));
 
-/*
- * Old one-shot entry tests → managed-only owners
- *
- * PORT via this file (registered peer surface + ContinuationService/store fixtures):
- *   registration/status/guidance, trust-before-probe, parent/explicit/profile routes,
- *   user route-file immutability, cycle/prompt bounds before config, busy-batch,
- *   shutdown abort, canonical scope, path-admission redaction, external reads,
- *   worker external-root ban, progress without diagnostic leak, predecessor reports,
- *   repo-wide worker scope refusal, request duration spanning admission+child.
- *
- * RETIRED one-shot product (do not reintroduce):
- *   diagnostic store admission/limit abort,
- *   auto-convergence/worker_no_changes apply, writable-snapshot partial success,
- *   complete-prompt-after-alias-realpath, one-shot scheduler telemetry counters,
- *   blocked-task prelaunch route decoration, "Predecessor"-labeled prompts,
- *   agent_run_active, missing-path create-file worker scope.
- *
- * COVERED by existing managed tests (not deleted invariants):
- *   continue trust/native-leaf/abort/replay/blocked dependents → tests/agents-continuation.test.ts
- *   worker_no_changes snapshot failure → tests/agents-workspace.test.ts
- *   no parent write before apply / no candidate on empty worker diff → tests/agents-continuation.test.ts, tests/agents-candidates.test.ts
- *   writable_isolation_unavailable → tests/agents-workspace.test.ts
- *   diagnostic_session_limit → tests/agents-runner.test.ts
- *   managed storage/history bounds → tests/agents-managed-sessions.test.ts
- *   historical one-shot JSONL → tests/agents-evaluator.test.ts
- */
 
 interface Harness {
 	execute: ReturnType<typeof engineDriver>;
@@ -121,8 +95,6 @@ function successful(task: { id: string; role: TaskResult["role"] }): TaskResult 
 	};
 }
 
-// These engine tests exercise batching, foreground progress and replay, which are
-// internal operations rather than peer tool calls.
 function engineDriver(service: ContinuationService) {
 	return async (id: string, input: unknown, signal: AbortSignal | undefined,
 		onUpdate: ((update: { content: [{ text: string }] }) => void) | undefined, ctx: ReturnType<typeof context>) => {
@@ -524,7 +496,6 @@ test("a concurrent duplicate submission returns its receipt without launching an
 	const input = createInput("busy", [{ id: "scan", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }]);
 	const first = state.execute("first", input, undefined, undefined, context());
 	await childStarted;
-	// The same host tool call re-delivered must not launch a second child.
 	const second = detailsOf(await state.execute("first", input, undefined, undefined, context()));
 	assert.equal(second.status, "accepted");
 	assert.equal(second.kind, "submission");
@@ -587,7 +558,6 @@ test("session shutdown waits for the aborted run before a later create", async (
 	await shutdown;
 	const result = detailsOf(await execution);
 	assert.equal(shutdownSettled, true);
-	// Shutdown closes foreground observation immediately; execution teardown still settles before shutdown returns.
 	assert.equal(result.status, "accepted");
 	assert.deepEqual(result.wait, { status: "yielded", reason: "steer" });
 	const settled = detailsOf(await state.execute("inspect-shutdown", { action: "inspect", runId: result.runId }, undefined, undefined, context()));
@@ -777,7 +747,6 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	assert.equal(snapshots.at(-1)?.tasks[0]?.assistantTurns, 1);
 	assert.equal(snapshots.at(-1)?.tasks[0]?.headline, "scan");
 	const length = snapshots.length;
-	// Re-delivery of the same host tool call replays the accepted result instead of launching again.
 	const replay = await state.execute("call", input, undefined, undefined, ctx);
 	assert.equal(replay.details.requestTelemetry?.launchedChildren, 0);
 	assert.equal(snapshots.length, length);
@@ -792,7 +761,6 @@ test("managed TUI progress publishes route and actual launches; replay publishes
 	const three = await state.execute("three", { action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 2, message: "third scan" }] }, undefined, undefined, ctx);
 	assert.equal(three.details.status, "succeeded");
 	const mixedStart = snapshots.length;
-	// A new call is new work even when prose repeats; a re-delivered call is the replay.
 	const mixedInput = { action: "continue", mode: "foreground", episodes: [
 		{ handle, expectedEpisode: 3, message: "third scan" },
 		{ handle: second.details.sessions[0]!.handle, expectedEpisode: 1, message: "fresh review" },

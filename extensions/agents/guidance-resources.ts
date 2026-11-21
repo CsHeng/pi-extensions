@@ -43,7 +43,6 @@ function nativeSkills(cwd: string, agentDir: string, paths: string[]): Skill[] {
 	return loadSkills({ cwd, agentDir, includeDefaults: false, skillPaths: paths }).skills;
 }
 
-/** Discover native guidance without package installation or importing parent conversation state. */
 export async function prepareChildGuidance(sourceRoot: string, childRoot: string, inheritSkills: boolean, agentDir = getAgentDir(), homeDir = homedir(), parentSkills?: readonly Skill[], projectSkills?: readonly CapturedProjectSkill[]): Promise<ChildGuidance> {
 	const sourceContexts = loadProjectContextFiles({ cwd: sourceRoot, agentDir });
 	const childContexts = loadProjectContextFiles({ cwd: childRoot, agentDir }).filter(file => within(childRoot, file.path));
@@ -82,7 +81,6 @@ export async function prepareChildGuidance(sourceRoot: string, childRoot: string
 	return { contextFiles, skillPaths, readRoots, physicalRoots };
 }
 
-/** Combine one guidance result per source/prepared pair. Earlier pairs win name collisions. */
 export function mergeChildGuidance(parts: readonly ChildGuidance[]): ChildGuidance {
 	const contextFiles: ChildGuidance["contextFiles"] = [];
 	const seenFiles = new Set<string>();

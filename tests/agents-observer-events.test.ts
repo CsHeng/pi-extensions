@@ -108,7 +108,6 @@ test("older snapshot versions and rows missing current fields are rejected witho
 		assert.equal(parseObserverSnapshot(snapshot({ version })).ok, false);
 		assert.equal(parseObserverSnapshot(snapshot({ version, tasks: [withoutCurrentFields] })).ok, false);
 	}
-	// A current-version snapshot still requires the full current row shape.
 	assert.equal(parseObserverSnapshot(snapshot({ tasks: [withoutCurrentFields] })).ok, false);
 });
 

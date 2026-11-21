@@ -27,7 +27,6 @@ test("queued, preparing and running executions survive native main settlement", 
 		const state = evaluateExecutionQuiescence({ ...base, scope, facts: [fact(phase, "current")] });
 		assert.equal(state.state, "busy"); assert.equal(state.activeExecutions, 1);
 	}
-	// No notification consumer means no promise of an automatic result run.
 	assert.equal(evaluateExecutionQuiescence({ ...base, scope, facts: [fact("terminal", "current")] }).state, "quiescent");
 });
 

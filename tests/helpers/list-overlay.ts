@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import type { ExtensionContext, Theme, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 
-/** Exercise the actual list component while replacing only the host modal lifetime. */
 export function captureListOverlay(capture: (lines: string[]) => void): ExtensionContext["ui"]["custom"] {
 	return async (factory, options) => {
 		assert.equal(options?.overlay, true);

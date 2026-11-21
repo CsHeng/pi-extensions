@@ -1,7 +1,6 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
-/** Retained for dependency inventories and legacy managed-record validation. */
 export interface FileState {
 	kind: "file" | "symlink" | "directory" | "absent";
 	mode?: number;

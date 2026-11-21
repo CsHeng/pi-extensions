@@ -3,10 +3,6 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/**
- * Deterministic installed-host fixture: records each provider request and answers synthetically.
- * No network, no credentials, no renderer patch. Used only by the multi-skill mention host test.
- */
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";

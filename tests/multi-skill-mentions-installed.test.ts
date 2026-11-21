@@ -7,11 +7,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-/**
- * Installed-Pi evidence for multi-skill selection. A deterministic synthetic provider captures the
- * provider input, so this proves the authored extension -> native expansion/parse -> request path and
- * the TUI presentation without network, credentials or a live model.
- */
 const root = fileURLToPath(new URL("../", import.meta.url));
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;

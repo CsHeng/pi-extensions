@@ -39,7 +39,6 @@ test("native path/shell classification and read-only selection are shared", () =
 	assert.equal(isNativePathTool("fixture_custom"), false);
 	for (const tool of ["bash", "powershell"]) assert.equal(isNativeBashTool(tool), true, tool);
 	assert.equal(isNativeBashTool("read"), false);
-	// Read-only intent removes only the mutating builtins; a write grant adds no ceiling.
 	assert.deepEqual(readOnlyToolArgs(false), ["--exclude-tools", "edit,write"]);
 	assert.deepEqual(readOnlyToolArgs(true), []);
 });
@@ -78,7 +77,6 @@ test("an authorized missing file or directory is created without granting its si
 	assert.equal((await authorizePath(manifest, "write", join(outside, "secret"))).allowed, false);
 	await writeFile(join(base, "src", "new.ts"), "created");
 	assert.equal((await authorizePath(manifest, "read", join(base, "src", "new.ts"))).allowed, true);
-	// A persisted existing-parent anchor rejects a replacement directory at the same pathname.
 	await rename(join(base, "src"), join(base, "src-old"));
 	await mkdir(join(base, "src"));
 	const replaced = await authorizePath(manifest, "write", join(base, "src", "new.ts"));
@@ -103,11 +101,9 @@ test("a stable prepared parent allows an authorized writable leaf to be created,
 	assert.equal((await authorizePath(manifest, "write", a)).allowed, true);
 	await rm(a); await writeFile(a, "replaced");
 	assert.equal((await authorizePath(manifest, "write", a)).allowed, true, "an atomic same-path replacement is not an identity failure");
-	// A symlink at the writable leaf still cannot escape the stable parent.
 	await rm(a); await symlink(join(outside, "secret"), a);
 	assert.equal((await authorizePath(manifest, "write", a)).allowed, false);
 	assert.equal((await authorizePath(manifest, "read", a)).allowed, false);
-	// Replacing the stable parent itself is a capability change.
 	await rm(a);
 	await rename(prepared, join(parent, "moved")); await mkdir(prepared);
 	const replaced = await authorizePath(manifest, "write", a);

@@ -41,7 +41,6 @@ interface AssistantOptions {
 
 function assistant(input: number, cacheRead: number, options: AssistantOptions = {}) {
 	const cacheWrite = options.cacheWrite ?? 0;
-	// $3/M input, $0.30/M cache read, $3.75/M cache write, $15/M output.
 	const output = options.output ?? 0;
 	const cost = { input: input * 3e-6, output: output * 15e-6, cacheRead: cacheRead * 3e-7, cacheWrite: cacheWrite * 3.75e-6 };
 	return {
@@ -64,27 +63,20 @@ function timing(messageTimestamp: number, thinkingMs: number, ttftMs?: number) {
 	};
 }
 
-/** A session with cacheless turns, growth, noise, misses, a model switch, a reset and a cache warm. */
 function rebillSession() {
 	return [
-		// No cache activity yet: a cacheless provider never counts.
 		assistant(5_000, 0),
 		assistant(9_000, 0),
-		// Cache appears; growth only.
 		assistant(12_000, 0),
 		assistant(200, 11_904),
-		// Below the 1024-token noise floor, then a real miss.
 		assistant(1_500, 11_000),
 		assistant(9_000, 11_000),
 		// Model switch re-bills and counts, as in Pi; nothing was read, so the registry price applies.
 		assistant(20_000, 0, { model: "m2" }),
-		// Zero-usage message leaves the previous request in place.
 		assistant(0, 0),
 		assistant(500, 1_000),
-		// Compaction resets: the next prompt is new content.
 		{ type: "compaction", usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
 		assistant(30_000, 0, { cacheWrite: 6_000 }),
-		// Cache warming refreshes the previous request without being counted.
 		{ type: "usage", kind: "cache_warm", provider: "p", model: "m1", timestamp: "2026-01-01T00:00:00.000Z", usage: { input: 0, output: 0, cacheRead: 40_000, cacheWrite: 0, cost: { total: 0.012 } } },
 		assistant(40_000, 2_000),
 		// A second interaction starts here; its first request re-bills against earlier history.
@@ -102,7 +94,6 @@ test("re-bills match Pi's /session Cache Re-billed count, tokens and dollars", (
 	assert.equal(totals.rebillCount, pi.missCount);
 	assert.equal(totals.rebillTokens, pi.missedTokens);
 	assert.ok(Math.abs(totals.rebillCost - pi.missedCost) < 1e-12);
-	// The fixture exercises the registry price and a real dollar amount.
 	assert.ok(pi.missCount >= 4);
 	assert.ok(pi.missedCost > 0);
 	// Without the registry the read rate of a no-read miss is zero, so the amount differs.
@@ -124,7 +115,6 @@ test("a lane slice carries the same per-request re-bills as the session lane", (
 		cost += miss.missedCost;
 	}
 	const lane = collectLaneTotals(entries, { models, from: SECOND_INTERACTION });
-	// The interaction's first request re-bills against the session's preceding history.
 	assert.ok(misses.has((entries[SECOND_INTERACTION] as unknown as { message: never }).message));
 	assert.equal(lane.rebillCount, count);
 	assert.equal(lane.rebillTokens, tokens);
@@ -160,9 +150,7 @@ test("usage sums count requests, usage-bearing tool results and summaries; CH co
 	assert.equal(totals.input, 168);
 	assert.equal(totals.output, 33);
 	assert.equal(totals.cacheRead, 2_350);
-	// Pi cache_warm usage stays out of the dollar total.
 	assert.ok(Math.abs(totals.cost - (0.5 + 0.01 + 0.02 + 100 * 3e-6 + 20 * 15e-6 + 400 * 3e-7 + 50 * 3e-6 + 5 * 15e-6 + 950 * 3e-7)) < 1e-12);
-	// Prompt-token-weighted over assistant prompts: 1350 / 1500.
 	assert.equal(usageMetricFields(totals).find((field) => field.key === "cacheHit")?.text, "CH90.0%");
 });
 
@@ -186,7 +174,6 @@ test("speed counts eligible requests as a ratio of sums; timing needs a one-to-o
 	assert.equal(totals.thinkingMs, 1_500);
 	assert.equal(totals.ttftMs, 3_200);
 	assert.equal(totals.ttftCount, 2);
-	// Ineligible requests still contribute usage.
 	assert.equal(totals.output, 580);
 	assert.deepEqual(timingMetricFields(totals).map((field) => field.text), ["✻ 1s", "TTFT 1.6s", "40 tok/s"]);
 });
@@ -199,7 +186,6 @@ test("duplicate join keys and impossible TTFT leave timing unmatched without los
 		timing(204, 0), assistant(10, 0, { output: 10, durationMs: 1_000, timestamp: 204 }),
 	]);
 	assert.equal(totals.speedOutput, 50);
-	// Only the last two match; a TTFT longer than the request is not used.
 	assert.equal(totals.thinkingMs, 2_000);
 	assert.equal(totals.ttftCount, 0);
 	assert.equal(totals.output, 50);
@@ -221,16 +207,13 @@ test("the request lane is one assistant message joined to its already-appended t
 	assert.equal(lane.speedOutput, 241);
 	assert.equal(lane.speedMs, 13_400);
 	assert.deepEqual(timingMetricFields(lane).map((field) => field.text), ["✻ 1s", "TTFT 9.8s", "18 tok/s"]);
-	// Without timing the request lane still shows usage and speed.
 	assert.deepEqual(timingMetricFields(requestLaneTotals([], message)).map((field) => field.text), ["18 tok/s"]);
 });
 
 test("the request lane applies the same one-to-one join as the session lane", () => {
 	const message = assistant(10, 0, { output: 10, durationMs: 1_000, timestamp: 501 }).message;
 	const cases = [
-		// A second timing entry for the same timestamp.
 		[timing(501, 1_000, 500), timing(501, 1_000, 500)],
-		// An earlier assistant message already carries the timestamp.
 		[assistant(10, 0, { output: 10, durationMs: 1_000, timestamp: 501 }), timing(501, 1_000, 500)],
 	];
 	for (const entries of cases) {
@@ -257,10 +240,8 @@ test("formats every lane with one field order and format", () => {
 	});
 	assert.equal(usageMetricFields(totals).map((field) => field.text).join(" "), "↑204k ↓10k R1.1M W3.0k CH84.2% $3.591 RB14 90k $0.813");
 	assert.deepEqual(timingMetricFields(totals, { thinkingShareOfMs: 415_000 }).map((field) => field.text), ["✻ 19s (5%)", "TTFT 8.1s", "25 tok/s"]);
-	// Absent fields are omitted, not zero-filled.
 	assert.deepEqual(usageMetricFields(emptyLaneTotals()), []);
 	assert.deepEqual(timingMetricFields(emptyLaneTotals()), []);
-	// The live request counter keeps its value and marks it running.
 	assert.deepEqual(timingMetricFields(lane({ ttftMs: 3_240, ttftCount: 1 }), { ttftLive: true }).map((field) => field.text), ["TTFT 3.2s…"]);
 });
 

@@ -271,7 +271,6 @@ function parseActiveTools(value: unknown): string[] | undefined {
 	return tools;
 }
 
-/** Control and invisible separators that must become visible spaces in headlines. */
 const HEADLINE_SEPARATOR = /[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u00AD]+/g;
 
 export function observerHeadline(objective: string): string {
@@ -366,7 +365,6 @@ function snapshotVersion(value: unknown): ObserverSnapshotVersion | undefined {
 	return undefined;
 }
 
-/** Strict consumer-side validation of one current-version observer task row. */
 export function parseObserverTask(value: unknown): ObserverTask | undefined {
 	return parseTask(value);
 }

@@ -149,7 +149,7 @@ for (const compact of [false, true]) test(`resume deduplicates persisted complet
 	if (compact) await h.session.compact();
 	const countBefore = h.session.sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.customType === NOTICE_TYPE).length;
 	const recovered = publisher();
-	recovered.facts.executions = structuredClone(source.facts.executions); // A producer can still report pending after reload; history must deduplicate it.
+	recovered.facts.executions = structuredClone(source.facts.executions);
 	const next = await createHostHarness({ extensions: [notifications, recovered.extension], sessionManager: h.session.sessionManager, sessionStartReason: "resume" });
 	t.after(() => next.dispose());
 	assert.equal(next.faux.state.callCount, 0, "restoration does not create a completion wake");
@@ -221,7 +221,7 @@ test("tree navigation neither carries a sibling notice nor resends a restored br
 	const originalLeaf = h.session.sessionManager.getLeafId()!;
 	const user = h.session.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user")!;
 	const executions = structuredClone(source.facts.executions);
-	source.facts.executions = []; // Real producers expose no off-branch executions.
+	source.facts.executions = [];
 	await h.session.navigateTree(user.id, { summarize: false });
 	const requests: TranscriptContext[] = [];
 	h.faux.setResponses([ordinaryTool(), fauxAssistantMessage("other branch")].map(response => context => { requests.push(structuredClone(context)); return response; }));

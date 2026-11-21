@@ -1,4 +1,3 @@
-/** TUI-only read-only Jobs view. It does not start, cancel, renew, or wake. */
 import { randomUUID } from "node:crypto";
 import { openJobsInspection, type JobsInspectionHandle } from "./inspection.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

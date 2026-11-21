@@ -33,7 +33,6 @@ function projectedCalls(live: boolean, result: TaskResult): { calls: ObserverToo
 	return { calls: projected.calls, callsTruncated: projected.callsTruncated || result.activity?.callsTruncated === true };
 }
 
-/** Ephemeral projection only. Never reads native storage or controls a child. */
 export class ManagedObserver {
 	private revision = 0;
 	private phase: ObserverSnapshot["phase"] = "accepted";

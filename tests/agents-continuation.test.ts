@@ -156,7 +156,6 @@ test("one native child writes two repositories and applies one bundle", async (t
 test("typed subdelegation cannot widen enclosing grants while a contained task stays eligible", async (t) => {
 	const f = await serviceFixture(t);
 	const outside = join(f.base, "outside"); await mkdir(outside); await promisify(execFile)("git", ["init", "-q", outside]);
-	// The invoking child owns a write grant only inside f.repo.
 	const enclosing = { version: 5 as const, role: "worker" as const, cwd: f.repo, grants: [{ permission: "write" as const, path: f.repo }], roots: [] };
 	let launches = 0;
 	const service = new ContinuationService({ ...f.dependencies, enclosingCapability: async () => enclosing, runChild: async options => { launches++; return f.dependencies.runChild(options); } });
@@ -1002,7 +1001,6 @@ test("same-repository partial write and read grants bind the prepared read and i
 	const view = created.sessions[0]!;
 	assert.ok(view.candidate);
 	assert.equal(await readFile(join(await preparedSource(f.store, view.handle, f.repo), "candidate.txt"), "utf8"), "candidate-1");
-	// An authorized writable leaf can be deleted and recreated without invalidating the capability.
 	await rm(writeGrant.path);
 	assert.equal((await authorizePath(captured.capability, "write", writeGrant.path)).allowed, true);
 	await writeFile(writeGrant.path, "candidate-1");
@@ -1078,7 +1076,6 @@ test("a rejected admission on the reserve path leaves no handle, and the correct
 	let sessions = 0;
 	const store = Object.create(f.store) as typeof f.store;
 	const original = f.store.withSession.bind(f.store);
-	// The first record prepares its writable input; rejecting the second record fails the whole admission.
 	(store as any).withSession = async (...args: Parameters<typeof original>) => {
 		sessions += 1;
 		if (sessions === 2) throw new ManagedError("fixture_prepare_failure");
@@ -1098,12 +1095,10 @@ test("a rejected admission on the reserve path leaves no handle, and the correct
 	assert.deepEqual(await ownedRefs(f.repo, "refs/pi-extensions/agents"), [], "an unlaunched first record releases its prepared input ref");
 	assert.equal((await attachedWorktrees(f.repo)).length, 1, "an unlaunched admission creates no worktree");
 
-	// A corrected retry (a new host call) admits normally and launches one child per task.
 	const corrected = await service.execute(request, f.ctx, undefined, undefined, "call-corrected");
 	assert.equal(corrected.status, "succeeded", JSON.stringify(corrected.error ?? corrected.sessions.map(session => session.result?.error)));
 	assert.equal(corrected.sessions.length, 2);
 	assert.equal(f.launches(), 2);
-	// Re-delivering the accepted call replays instead of launching again.
 	const replay = await service.execute(request, f.ctx, undefined, undefined, "call-corrected");
 	assertReplay(replay, corrected);
 	assert.equal(f.launches(), 2);
@@ -1117,7 +1112,6 @@ test("a post-allocation admission failure releases the untouched reservation for
 	const owner = { repo: f.repo, parentSessionId: "parent", anchor: "anchor", branch: ["anchor"] };
 	const originalAllocate = f.store.allocate.bind(f.store);
 	let revoked = false;
-	// Revoke a read capability after the batch reservation exists but before preparation starts.
 	(store as any).allocate = async (...args: Parameters<typeof originalAllocate>) => {
 		const allocation = await originalAllocate(...args);
 		if (!revoked) { revoked = true; await rename(external, `${external}.revoked`); }
@@ -1135,8 +1129,6 @@ test("a post-allocation admission failure releases the untouched reservation for
 	assert.equal(f.launches(), 0);
 	assert.deepEqual(await ownedRefs(f.repo, "refs/pi-extensions/agents"), []);
 
-	// The same host call identity admits the same request once the capability is restored, instead of
-	// reporting an unknown outcome forever.
 	await rename(`${external}.revoked`, external);
 	const corrected = await service.execute(request, f.ctx, undefined, undefined, "call-stale-capability");
 	assert.equal(corrected.status, "succeeded", JSON.stringify(corrected.error ?? corrected.sessions.map(session => session.result?.error)));
@@ -1166,7 +1158,6 @@ test("a rejected continue preparation restores the earlier records instead of co
 	const prior = await Promise.all(handles.map(handle => f.store.load(handle, owner)));
 	assert.equal(f.launches(), 2);
 
-	// The first continuation prepares its next episode; rejecting the second one fails the whole request.
 	sessions = 0; failAt = 2;
 	const episodes = handles.map(handle => ({ handle, expectedEpisode: 1, message: "continue" }));
 	const rejected = await service.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, "call-continued");
@@ -1183,7 +1174,6 @@ test("a rejected continue preparation restores the earlier records instead of co
 		assert.equal(restored.result?.status, prior[index]!.result?.status, "the earlier episode outcome stays inspectable");
 	}
 
-	// The same records remain actionable: a later continuation runs once per record and replays inertly.
 	const accepted = await service.execute({ action: "continue", mode: "foreground" as const, episodes }, f.ctx, undefined, undefined, "call-retried");
 	assert.equal(accepted.status, "succeeded", JSON.stringify(accepted.error ?? accepted.sessions.map(session => session.result?.error)));
 	assert.equal(f.launches(), 4);
@@ -1291,7 +1281,6 @@ test("an input pin that cannot be discarded keeps durable ownership and stays re
 	assert.equal(f.launches(), 0);
 	assert.ok(pinnedRef !== undefined && pinned !== undefined);
 
-	// The reservation is retained because its owned pin is unresolved, and the record still names that pin.
 	const listed = await f.store.list(owner);
 	assert.equal(listed.length, 2, "a reservation with unresolved resource cleanup is not released");
 	const worker = listed.find(view => view.label === "write-first")!;
@@ -1302,7 +1291,6 @@ test("an input pin that cannot be discarded keeps durable ownership and stays re
 	assert.equal(owned.input?.commit, pinned, "the record keeps the pin it still owns");
 	assert.equal((await promisify(execFile)("git", ["-C", f.repo, "rev-parse", pinnedRef])).stdout.trim(), (await promisify(execFile)("git", ["-C", f.repo, "rev-parse", "HEAD"])).stdout.trim(), "foreign drift is preserved, not deleted");
 
-	// Resolving the drift lets ordinary managed cleanup finish and frees the records.
 	await promisify(execFile)("git", ["-C", f.repo, "update-ref", pinnedRef, pinned]);
 	for (const view of listed) {
 		const closed = await f.service.execute({ action: "close", handle: view.handle, expectedEpisode: 0, disposition: "discard" }, f.ctx);

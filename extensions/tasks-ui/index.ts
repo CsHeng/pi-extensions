@@ -1,4 +1,3 @@
-/** TUI-only read-only Tasks view. It does not validate, mutate, or remind. */
 import { randomUUID } from "node:crypto";
 import { openListOverlay } from "../shared/list-overlay.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

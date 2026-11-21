@@ -28,7 +28,6 @@ class ManualClock implements KeepaliveClock {
 	clearTimer(handle: unknown): void { this.timers.delete(handle as number); }
 	get pending(): number { return this.timers.size; }
 
-	/** Advance to `target`, firing due timers at their scheduled time. */
 	async advanceTo(target: number): Promise<void> {
 		for (;;) {
 			const due = [...this.timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];

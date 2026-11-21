@@ -58,7 +58,6 @@ function invokeHook(eventName: HookEvent, ctx: ExtensionContext, summary = "", d
 	});
 }
 
-/** Hosts whose main loop can be resumed by asynchronous result delivery. */
 const interactive = (ctx: ExtensionContext): boolean => ctx.mode === "tui" || ctx.mode === "rpc";
 
 export default function (pi: ExtensionAPI): void {

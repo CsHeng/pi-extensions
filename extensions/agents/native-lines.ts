@@ -1,7 +1,6 @@
 import type { FileHandle } from "node:fs/promises";
 import { MANAGED_LIMITS, ManagedError } from "./session-contracts.ts";
 
-/** Incremental native JSONL decoding: bounded line buffers, no cumulative history cutoff. */
 export async function* nativeLines(file: FileHandle, start = 0): AsyncGenerator<Record<string, unknown>> {
 	const chunk = Buffer.alloc(64 * 1024);
 	let pending = Buffer.alloc(0);

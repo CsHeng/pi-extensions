@@ -1,10 +1,3 @@
-/**
- * Opt-in local-source probe, NOT part of `bun run test` and NOT an installed-session audit.
- * Uses the real dependency host and its faux provider. Loads only CC's write leaf,
- * SoL's fusion/pack leaves, and a hash-pinned RTK adapter with pi.exec stubbed.
- * Arguments: --sol-root PATH --cc-root PATH --rtk-source PATH
- * No package discovery, inference, RTK binary, MCP, Bark, Herdr, or UI installation.
- */
 import assert from "node:assert/strict";
 import { Console } from "node:console";
 import { createHash } from "node:crypto";
@@ -59,8 +52,6 @@ try {
  console.error("injected private-path diagnostic fixture");
  assert.equal(diagnosticWrites, 1, "injected dependency diagnostic must reach the discard sink");
  receipts.push({ check: "dependency-diagnostic-redaction", passed: true, detail: { injectedWritesSuppressed: 1 } });
- // All imports which can discover config happen AFTER isolation. This is a
- // process-local environment, not a security sandbox for hostile source code.
  const path = process.env.PATH;
  for (const key of Object.keys(process.env)) delete process.env[key];
  if (path) process.env.PATH = path;
@@ -73,6 +64,8 @@ try {
  process.chdir(root);
  globalThis.fetch = async () => { throw new Error("network fetch forbidden in composition probe"); };
 
+ // All imports which can discover config happen AFTER isolation. This is a
+ // process-local environment, not a security sandbox for hostile source code.
  const { createJiti } = await import(pathToFileURL(hostRequire.resolve("jiti")).href);
  const jiti = createJiti(import.meta.url, {
   fsCache: false,
@@ -109,8 +102,6 @@ try {
   await assert.rejects(access(h.workDir), "harness workdir must be removed");
  };
  const ccFactory: ExtensionFactory = pi => { pi.on("session_start", () => { cc.installWriteOverride(pi); }); };
- // Mirrors the two actual session_start registrations without importing CC's
- // private TUI patches or SoL's disabled compaction/reducer provider branches.
  const solFactory: ExtensionFactory = pi => { pi.on("session_start", () => { fusion.createActionFusionExtension()(pi); }); };
 
  stage = "owner and schema";
@@ -180,8 +171,6 @@ try {
   projections.push(event.messages.filter(m => m.role === "toolResult").map(m => ({ name: m.toolName, body: text(m) })));
  }); };
  const packed = await open([solFactory, rtkStub, pack.createObservationPackExtension(), afterPack]);
- // Each successful fused result is >10KiB, below builtin truncation limits.
- // The marker in the middle must be absent from the placeholder but recalled.
  const large = `${"head fixture\n".repeat(650)}middle-evidence\n${"tail fixture\n".repeat(650)}`;
  await (await import("node:fs/promises")).writeFile(join(packed.workDir, "large.txt"), large);
  packed.faux.setResponses([
@@ -223,7 +212,6 @@ try {
  receipts.push({ check: "source-fingerprints", passed: true, detail: { host: hostManifest.version, cc: ccManifest.version, hashes } });
  assert.equal(diagnosticWrites, 1, "unexpected dependency diagnostics; raw text intentionally suppressed");
 } catch (error) {
- // Do not export source paths, config, prompts, or arbitrary third-party errors.
  receiptError({ status: "failed", stage, error: error instanceof assert.AssertionError ? "assertion" : "runtime" });
  process.exitCode = 1;
 } finally {

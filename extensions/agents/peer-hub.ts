@@ -97,7 +97,6 @@ export class PeerHub implements PeerBridge {
 	private exitCleanup: (() => void) | undefined;
 	constructor(private readonly deps: PeerHubDependencies) {}
 
-	// ---- Bridge hooks from the executor ----
 	openLink(record: ManagedRecord, capability: ChildCapabilityManifest): { binding: { socket: string; token: string }; close(): void } | undefined {
 		if (this.closed || !this.directory) return undefined;
 		const token = randomUUID();
@@ -147,7 +146,6 @@ export class PeerHub implements PeerBridge {
 		this.notify();
 	}
 
-	// ---- Tool execution ----
 	async execute(op: PeerOperation, args: Record<string, unknown>, caller: Caller, signal: AbortSignal | undefined, toolCallId: string): Promise<PeerToolOutcome> {
 		try {
 			const ctx = this.deps.context();
@@ -522,7 +520,6 @@ export class PeerHub implements PeerBridge {
 	}
 	private send(socket: Socket, frame: HubFrame): void { if (!socket.destroyed) socket.write(`${JSON.stringify(frame)}\n`); }
 
-	// ---- Socket server ----
 	async start(): Promise<void> {
 		if (this.serverReady) { await this.serverReady; return; }
 		this.serverReady = (async () => {
@@ -625,7 +622,6 @@ export class PeerHub implements PeerBridge {
 		this.server = undefined; this.serverReady = undefined; this.directory = undefined;
 		this.tokens.clear(); this.links.clear(); this.notify();
 	}
-	/** A new parent session starts with no names, links or shown results. */
 	reset(): void { this.returnedShown.clear(); this.wakeIds.clear(); this.writeGrants.clear(); this.expected.clear(); this.links.clear(); this.shown.clear(); this.names.clear(); this.namesOwner = undefined; this.tokens.clear(); }
 	/** The main agent received a notice for these turns. */
 	noticesShown(ids: readonly string[]): void {
@@ -637,7 +633,6 @@ export class PeerHub implements PeerBridge {
 		}
 	}
 
-	// ---- Permissions ----
 	private mayMessage(sender: ManagedRecord, target: ManagedRecord): boolean {
 		const may = sender.task.may ?? DEFAULT_CAPABILITIES;
 		if (target.assigner === sender.task.id) return true;
@@ -686,7 +681,6 @@ export class PeerHub implements PeerBridge {
 		}
 	}
 
-	// ---- Names, records and formatting ----
 	private async loadNames(owner: CurrentOwner): Promise<void> {
 		const key = `${owner.repo}\0${owner.parentSessionId}`;
 		if (this.namesOwner === key) return;

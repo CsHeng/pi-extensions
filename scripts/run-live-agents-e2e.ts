@@ -11,7 +11,6 @@ const TIMEOUT_MS = 20 * 60 * 1000;
 const KILL_GRACE_MS = 5_000;
 const PEER_TOOLS = ["invoke_agent", "message_agent", "list_agents", "wait_agents", "stop_agent", "release_agent", "agent_candidate"] as const;
 const SCHEMA_VERSION = 5;
-// Commands owned by three package extensions; the observer requires each from this package root.
 const REQUIRED_COMMANDS = ["skill-mentions", "fast-gpt", "agents"] as const;
 const ROLES = ["explorer", "reviewer", "worker"] as const;
 type Role = typeof ROLES[number];
@@ -42,7 +41,6 @@ interface SessionView {
 	candidate?: SessionCandidate;
 }
 
-/** Details of a peer tool result; engine requests add action, status, telemetry and full views. */
 interface PeerDetails {
 	schemaVersion?: unknown;
 	op?: unknown;
@@ -66,7 +64,6 @@ export interface LiveE2eSummary {
 	packageExtensions: 3;
 	agents: 3;
 	roles: ["explorer", "reviewer", "worker"];
-	/** Route provenance per role; model selectors stay out of the redacted summary. */
 	routeSources: Record<Role, string>;
 	profileMode: "role-default";
 	workerWorkspace: "isolated";
@@ -94,7 +91,6 @@ function parseEvents(stdout: string): JsonEvent[] {
 
 const isPeerTool = (name: unknown): boolean => typeof name === "string" && (PEER_TOOLS as readonly string[]).includes(name);
 
-/** Engine requests made by peer tools, once per invocation. */
 function collectRequests(events: readonly JsonEvent[]): Array<PeerDetails & { tool: string }> {
 	if (events.some((event) => event.type === "tool_execution_start" && event.toolName === "agent")) fail("retired_agent_tool_called");
 	if (!events.some((event) => event.type === "tool_execution_start" && isPeerTool(event.toolName))) fail("unexpected_agent_tool_call_count");
@@ -269,7 +265,6 @@ async function main(): Promise<void> {
 	}
 	const source = args.includes("--installed") ? "installed" as const : "temporary" as const;
 	const scriptPath = fileURLToPath(import.meta.url);
-	// The installed lane observes the package the local publisher installs; the temporary lane loads this checkout.
 	const packageRoot = source === "installed"
 		? await realpath(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "packages", "csheng-pi-extensions")).catch(() => fail("installed_package_missing"))
 		: resolve(dirname(scriptPath), "..");

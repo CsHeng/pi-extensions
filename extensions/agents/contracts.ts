@@ -68,10 +68,8 @@ export const STABLE_TASK_ERROR_CODES = [
 	"repository_root_unavailable",
 ] as const;
 export const CAPABILITY_RECOVERY_HINT = "Reading capability changed or became unavailable. Verify the intended roots and create a new session; continuing the same binding does not reauthorize replaced roots.";
-/** Current collaboration contract. Older envelopes are excluded, not interpreted. */
 export const COLLABORATION_CONTRACT_VERSION = 5 as const;
 export const CHILD_CAPABILITY_MANIFEST_VERSION = COLLABORATION_CONTRACT_VERSION;
-/** Packaged role names stay present; user and project definitions add others by name. */
 export type RoleName = (typeof ROLE_NAMES)[number] | (string & {});
 export const ROLE_NAME_PATTERN = "^[a-z][a-z0-9-]{0,31}$";
 const ROLE_NAME_RE = new RegExp(ROLE_NAME_PATTERN);
@@ -101,7 +99,6 @@ export type ChildActivityPhase = (typeof CHILD_ACTIVITY_PHASES)[number];
 export const CHILD_TOOL_CALL_STATUSES = ["running", "succeeded", "failed", "unknown"] as const;
 export type ChildToolCallStatus = (typeof CHILD_TOOL_CALL_STATUSES)[number];
 
-/** One child tool call observed from the live stream. Absent fields were not in the event. */
 export interface ChildToolCall {
 	id: string;
 	parentId?: string;
@@ -122,7 +119,6 @@ export interface ChildActivity {
 	responding?: boolean;
 	phase: ChildActivityPhase;
 	assistantTurns: number;
-	/** Usage lane of this episode's requests so far; absent on activity recorded before it existed. */
 	usage?: import("../shared/usage-metrics.ts").UsageLane;
 	activeTools: string[];
 	/** Bounded live calls. Missing means this snapshot has no call detail, not that no call ran. */
@@ -142,7 +138,6 @@ const RoleSchema = Type.String({ pattern: ROLE_NAME_PATTERN, description: "Role 
 export const WORKSPACE_MODES = ["shared", "isolated"] as const;
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
 export const AGENT_NAME_PATTERN = "^[a-z][a-z0-9-]{0,63}$";
-/** Whom an agent may message ("assigner", "peers" or agent names), whether it sees the roster, whether it may invoke agents. */
 export interface AgentCapabilities { message: string[]; roster: boolean; invoke: boolean }
 export const AgentCapabilitiesSchema = Type.Object({
 	message: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 32, description: "Whom the agent may message: \"assigner\", \"peers\" (agents with the same assigner) or agent names." }),
@@ -190,9 +185,7 @@ export const AgentTaskSchema = Type.Object(
 			description: "Exact ephemeral model selector supplied only for an explicit user model choice; it overrides default model routing for this task.",
 		})),
 		thinking: Type.Optional(ThinkingLevelSchema),
-		/** Internal: shared writes the checkout directly; isolated keeps a private worktree and a candidate. */
 		workspace: Type.Optional(StringEnum(WORKSPACE_MODES)),
-		/** Internal: granted per-agent capabilities, resolved at invocation. */
 		may: Type.Optional(AgentCapabilitiesSchema),
 	},
 	{ additionalProperties: false },
@@ -234,7 +227,6 @@ export const PROFILE_FALLBACKS = ["execution-role-default", "thinking-role-defau
 export type RouteSelectionSource = (typeof ROUTE_SELECTION_SOURCES)[number];
 export type ProfileFallback = (typeof PROFILE_FALLBACKS)[number];
 
-/** Schema-v2 attribution attached to every successfully selected task route. */
 export interface TaskRouteEvidenceV2 {
 	selectionSource: RouteSelectionSource;
 	modelOverrideRequested: boolean;
@@ -255,7 +247,6 @@ export interface EffectiveRoute {
 	thinkingProfileRequested?: ThinkingProfile;
 	thinkingProfileApplied: boolean;
 	profileFallbacks: ProfileFallback[];
-	/** Added by schema-v2 routing; optional until the route decision is made. */
 	selectionSource?: RouteSelectionSource;
 	modelOverrideRequested?: boolean;
 	thinkingOverrideRequested?: boolean;
@@ -301,9 +292,7 @@ export interface TaskResult {
 	telemetry?: TaskTelemetry;
 	route?: EffectiveRoute;
 	stopReason?: string;
-	/** Mechanical report completeness; absent in historical results. */
 	reportComplete?: boolean;
-	/** Managed worker tools recorded ready and drained for this native episode. */
 	workerToolsSettled?: boolean;
 	diagnosticSessionRef?: string;
 	activity?: ChildActivity;
@@ -408,7 +397,6 @@ export interface ChildCapabilityManifest {
 	cwd: string;
 	grants: CapabilityGrant[];
 	roots: CapabilityRoot[];
-	/** Granted capabilities; absent on records that predate them. */
 	may?: AgentCapabilities;
 	/** Shared writers record file-tool pre-images here for attribution and revert. */
 	sharedWrites?: string;

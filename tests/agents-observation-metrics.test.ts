@@ -157,7 +157,6 @@ test("per-root destination, recovery and release project truthfully while one lo
 		{ candidateId: "Candidate0", rootId: "RootOne", destination: "/redacted/one", status: "applied", recovery: "clear", release: "released" });
 	assert.deepEqual(metric.rootStatuses.find((root) => root.rootId === "RootTwo"),
 		{ candidateId: "Candidate0", rootId: "RootTwo", destination: "/redacted/two", status: "unknown", recovery: "required", release: "remaining" });
-	// A stable identity update replaces the same root rows and still counts the logical candidate once.
 	view.candidate.status = "applied";
 	for (const root of view.candidate.roots) { root.status = "applied"; root.appliedPaths = [...root.changedPaths]; }
 	view.release = { status: "complete", remaining: [] };
@@ -189,7 +188,6 @@ test("no-candidate owned roots and scratch-only cleanup stay separate from per-r
 	const f = observationFixture();
 	const view = f.body[2]!.message.details.sessions[0];
 	delete view.candidate;
-	// Managed view projection persisted even though no candidate was ever frozen.
 	view.roots = [
 		{ id: "rootone", destination: "/redacted/one", status: "not-applied", release: "released" },
 		{ id: "roottwo", destination: "/redacted/two", status: "not-applied", release: "released" },
@@ -201,7 +199,6 @@ test("no-candidate owned roots and scratch-only cleanup stay separate from per-r
 		[null, "rootone", "not-applied", "released"],
 		[null, "roottwo", "not-applied", "released"],
 	]);
-	// The scratch-only failure is aggregate, not repeated as a per-root failure.
 	assert.deepEqual(metric.releases, [{ candidateId: null, status: "partial", remaining: 1 }]);
 });
 

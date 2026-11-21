@@ -6,23 +6,18 @@ import { AGENT_EXECUTION_EVENT } from "../../../../extensions/shared/agent-execu
 import { PEER_TOOLS } from "../../../../extensions/agents/peer-protocol.ts";
 import { ROLE_NAME_PATTERN, type TimeSpan } from "../../../../extensions/agents/contracts.ts";
 
-/** Current public managed tool name, plus the retained historical name that carries the same schema. */
-/** Version-5 peer tools; the retired `agent` tool is a non-current envelope. */
 const MANAGED_TOOL_NAMES = new Set<string>([...PEER_TOOLS, "agent"]);
 const MANAGED_SCHEMA_VERSION = 5;
 
-/** Read-only, cumulative owned evidence. These are not bills per tool invocation. */
 export interface ObservationMetrics {
 	available: boolean;
 	parentDispositionScope: "explicit-entry-range" | "unavailable";
 	observedSessions: number;
 	observedEpisodes: number;
-	/** Unsupported envelope versions, excluded before payload interpretation; never mixed into current coverage. */
 	excludedRecords: number;
 	actions: Record<"create" | "continue" | "inspect" | "apply" | "close", number>;
 	outcomes: { executionSucceeded: number; reportComplete: number; candidatesApplied: number; parentAccepted: boolean | null; semanticRepairs: number | null; takeovers: number | null; acceptedDeliveryWallMs: number | null };
 	rootStatuses: Array<{ candidateId: string | null; rootId: string; destination: string; status: string; recovery: string; release: string }>;
-	/** Aggregate per-session release facts, kept separate from each root's own disposition. */
 	releases: Array<{ candidateId: string | null; status: string; remaining: number }>;
 	usage: { parent: ObservedUsage; children: ObservedUsage; total: ObservedUsage };
 	timing: Record<"workerEffortMs" | "workerOccupiedMs" | "parentWallMs" | "parentActiveMs" | "parentLocalToolMs" | "parentDelegationWaitMs" | "parentReasoningMs" | "parentCompactionMs" | "unattributedMs", number | null>;
@@ -69,7 +64,6 @@ function empty(): ObservationMetrics {
 	};
 }
 function parse(text: string): { header: RecordValue; body: RecordValue[]; positions: Map<string, number> } | undefined {
-	// Share the producer's bounded physical-native validator; no partial tail repair.
 	if (nativeLeaf(text) === undefined || !text) return undefined;
 	const [header, ...body] = text.trimEnd().split("\n").map((line) => JSON.parse(line) as RecordValue);
 	if (!header) return undefined;
@@ -175,8 +169,6 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 	const sessions = new Set<string>(); const episodes = new Map<string, { succeeded: boolean; complete: boolean }>(); const applied = new Set<string>(); const rootStatus = new Map<string, { candidateId: string | null; rootId: string; destination: string; status: string; recovery: string; release: string }>(); const releases = new Map<string, { candidateId: string | null; status: string; remaining: number }>();
 	let validTiming = true; let validWall = true; let validWorkers = true; let invalidEvidence = false;
 	const totals = { workerEffortMs: 0, workerOccupiedMs: 0, parentWallMs: 0, parentActiveMs: 0, parentLocalToolMs: 0, parentDelegationWaitMs: 0, parentReasoningMs: 0, parentCompactionMs: 0, unattributedMs: 0 };
-	// Async completions may arrive outside every parent interaction range. Their
-	// owner-tagged native observations remain owned usage, not receipt usage.
 	const eventIds = new Map<string, string>();
 	for (const entry of parsed.body) {
 		if (entry.type !== "custom" || entry.customType !== AGENT_EXECUTION_EVENT) continue;
@@ -199,8 +191,6 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 				const prior = episodeObservations.get(key);
 				if (prior?.available && observation.available && observationSignature(prior) !== observationSignature(observation)) invalidEvidence = true;
 				if (!prior?.available) episodeObservations.set(key, observation);
-				// Legacy interaction-local occupancy cannot describe cross-turn jobs.
-				// V3 queue/workspace/child/lifecycle timings are reported separately.
 				if (event.foreground !== true) validWorkers = false;
 			}
 		}
@@ -233,11 +223,8 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 		for (const item of scope) {
 			const message = object(item.message); const details = object(message?.details);
 			if (item.type !== "message" || message?.role !== "toolResult" || !details) continue;
-			// Shallow version cut before payload interpretation: explicitly versioned non-current tool envelopes
-			// are excluded from current evidence and reported separately, never treated as invalid.
 			const managedToolName = typeof message.toolName === "string" && MANAGED_TOOL_NAMES.has(message.toolName);
 			if (managedToolName && typeof details.schemaVersion === "number" && details.schemaVersion !== MANAGED_SCHEMA_VERSION) { result.excludedRecords++; continue; }
-			// Only an operation that made an engine request carries its action and views.
 			if (managedToolName && details.schemaVersion === MANAGED_SCHEMA_VERSION && typeof details.action === "string" && Object.hasOwn(result.actions, details.action) && Array.isArray(details.sessions) && details.sessions.length <= 10) {
 				result.actions[details.action as keyof typeof result.actions]++;
 				if (details.kind === "submission") continue;
@@ -323,7 +310,6 @@ export function extractObservationMetrics(text: string, disposition?: unknown): 
 				|| telemetry.launchedChildren !== runTiming.children.length || !finite(telemetry.runDurationMs)) { validWorkers = false; continue; }
 			for (const childValue of runTiming.children) {
 				const child = object(childValue); const duration = child ? spanDuration(child as unknown as TimeSpan) : null;
-				// Roles are open: any valid role name is a child span; the packaged worker role's spans count as worker effort.
 				if (!child || duration === null || typeof child.role !== "string" || !new RegExp(ROLE_NAME_PATTERN).test(child.role) || (child.endMs as number) > telemetry.runDurationMs) { validWorkers = false; continue; }
 				const startMs = run.originMs - timing.originMs + (child.startMs as number); const endMs = startMs + duration;
 				if (!finite(startMs) || !finite(endMs) || startMs < timing.boundary.startMs! || endMs > timing.boundary.endMs!) { validWorkers = false; continue; }

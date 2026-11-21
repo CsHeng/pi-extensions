@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Real CLI stimulus, synthetic provider only; no network, private API or UI patch. */
 export default function installedContinuation(pi: ExtensionAPI): void {
 	let calls = 0;
 	let settled = 0;

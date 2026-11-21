@@ -48,7 +48,6 @@ test("expanded rows keep title, counts, glyphs, ids, notes and priority without 
  const colored = taskRows(store.view(), 120, 12, tagged).join("\n");
  assert.match(colored, /\{success\}✓/); assert.match(colored, /\{accent\}Working/); assert.match(colored, /\{warning\}◐/);
  assert.ok(colored.includes("\x1b[9mCompleted task\x1b[29m"));
- // The list keeps no pause/resume control state: the same data renders one header and its items.
  assert.deepEqual(Object.keys(store.current()!).sort(), ["revision", "tasks", "title", "version"]);
  assert.deepEqual(taskRows(store.view(), 120, 12), taskRows(store.view(), 120, 12));
  assert.doesNotMatch(text, /paused|resumed|reason/);
@@ -64,7 +63,6 @@ test("expanded rows keep title, counts, glyphs, ids, notes and priority without 
  finished.mutate({ operation: "set", title: "Ship", tasks: [{ id: "a", title: "Completed task", status: "done" }] });
  assert.match(taskRows(finished.view(), 80, 4)[0]!, /\(1\/1 done\)$/);
  assert.doesNotMatch(taskRows(finished.view(), 80, 4)[0]!, /paused|resumed/);
- // Cancelling remaining work stays visible item data, not a list-level engine outcome.
  finished.mutate({ operation: "set", title: "Ship", tasks: [{ id: "a", title: "Completed task", status: "done" }, { id: "b", title: "Dropped method", status: "todo" }] });
  finished.mutate({ operation: "cancel" });
  const cancelled = taskRows(finished.view(), 80, 6);

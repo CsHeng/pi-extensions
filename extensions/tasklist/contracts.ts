@@ -1,4 +1,3 @@
-/** Passive Pi Tasklist. Item status records the main agent's judgment, never a proof obligation or execution gate. */
 import { Type, type Static } from "typebox";
 const text = (maxLength = 4000) => Type.String({ minLength: 1, maxLength });
 const status = Type.Union([Type.Literal("todo"), Type.Literal("doing"), Type.Literal("blocked"), Type.Literal("done"), Type.Literal("cancelled")]);
@@ -11,7 +10,6 @@ export const tasklistParameters = Type.Object({
 }, { additionalProperties: false });
 export type TasklistOperation = Static<typeof tasklistParameters>;
 
-/** Current written representation. Any other snapshot version is reported unsupported, never rewritten. */
 export const TASKLIST_STATE_VERSION = 6;
 export const tasklistStateSchema = Type.Object({
  version: Type.Literal(TASKLIST_STATE_VERSION), revision: Type.Integer({ minimum: 1 }), title: text(),

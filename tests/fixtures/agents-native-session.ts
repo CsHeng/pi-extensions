@@ -48,7 +48,6 @@ function workerCommand(input: string, count: number): string {
 	return `printf 'candidate-${count}' > candidate.txt`;
 }
 
-/** In-process synthetic provider: no sockets, credentials, or external requests. */
 export default function nativeSessionFixture(pi: ExtensionAPI): void {
 	let compactionTriggered = false;
 	pi.registerProvider("agent-fixture", {
@@ -62,8 +61,6 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 		streamSimple(model, context, options) {
 			const stream = createAssistantMessageEventStream();
 			queueMicrotask(async () => {
-				// The real managed context hook appends an ephemeral index after the
-				// request. It is context, not another scripted user/tool transition.
 				const last = context.messages.filter((item) => !(item.role === "user" && JSON.stringify(item.content).includes("Stored local-task index"))).at(-1);
 				let text = `users=${context.messages.filter((message) => message.role === "user").length}${last?.role === "toolResult" ? `;tool=${JSON.stringify(last.content)}` : ""}`;
 				if (process.env.PI_EXTENSIONS_NATIVE_CONTEXT_MODE) {
@@ -103,8 +100,6 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					message.content = [{ type: "text", text: JSON.stringify({ counts: parts.map(part => system.split(part).length - 1), native: system.includes("<tools>") && system.includes("<rules>") }) }];
 				}
 				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("catalog-child-fixture")) {
-					// First turn calls the ordinary configured custom tool; then report the
-					// request's effective tools and the observed tool result.
 					const results = context.messages.filter((item) => item.role === "toolResult");
 					if (results.length === 0) {
 						message.content = [{ type: "toolCall", id: "catalog-probe", name: "fixture_custom", arguments: {} }];
@@ -117,7 +112,6 @@ export default function nativeSessionFixture(pi: ExtensionAPI): void {
 					message.content = [{ type: "text", text: `probe=${results.map((item) => (item as { toolName?: string }).toolName ?? "?").join(",")};tools=${tools.join(",")}` }];
 				}
 				else if (text !== "SYNTHETIC_SUMMARY" && JSON.stringify(context.messages).includes("configured-write-fixture")) {
-					// Call the configured native `write` override and report which implementation ran.
 					const results = context.messages.filter((item) => item.role === "toolResult");
 					if (results.length === 0) {
 						message.content = [{ type: "toolCall", id: "configured-write", name: "write", arguments: { path: "candidate.txt", content: "configured", then_run: "printf configured-then-run" } }];

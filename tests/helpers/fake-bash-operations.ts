@@ -5,11 +5,8 @@ export interface FakeBashExecution {
 	cwd: string;
 	env: NodeJS.ProcessEnv | undefined;
 	aborted: boolean;
-	/** Deliver combined stdout/stderr data exactly as the native operations do. */
 	emit(text: string): void;
-	/** Settle the native operation promise with the command's exit code. */
 	close(exitCode: number | null): void;
-	/** Settle the native operation promise with a spawn/abort failure. */
 	fail(message: string): void;
 }
 

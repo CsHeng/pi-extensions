@@ -105,7 +105,6 @@ function readLeadingSelection(text: string, skillsByName: Map<string, SkillComma
 	return { selected, kinds, end };
 }
 
-/** Collect known `$name` mentions from ordinary text, leaving that text untouched. */
 function collectDollarMentions(text: string, skillsByName: Map<string, SkillCommand>, from = 0): SkillCommand[] {
 	const mentioned: SkillCommand[] = [];
 	for (const match of text.matchAll(DOLLAR_MENTION_PATTERN)) {

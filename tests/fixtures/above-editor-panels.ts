@@ -1,4 +1,3 @@
-/** Offline facts for the real-host above-editor interaction test; no model or execution work. */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

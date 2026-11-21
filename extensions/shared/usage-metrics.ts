@@ -47,7 +47,6 @@ export interface CacheReadPriceSource {
 	find(provider: string, modelId: string): { cost: { cacheRead: number } } | undefined;
 }
 
-/** Aggregate of one lane; a single request is a lane of one. */
 export interface LaneTotals {
 	input: number;
 	output: number;
@@ -70,7 +69,6 @@ export interface LaneTotals {
 	speedMs: number;
 }
 
-/** The usage half of a lane: what `usageMetricFields` renders, without timing. */
 export type UsageLane = Pick<LaneTotals,
 	"input" | "output" | "cacheRead" | "cacheWrite" | "cost"
 	| "promptTokens" | "promptCacheRead" | "rebillCount" | "rebillTokens" | "rebillCost">;
@@ -90,7 +88,6 @@ export function usageLaneOf(totals: UsageLane): UsageLane {
 	return lane;
 }
 
-/** The same `↑ ↓ R W CH $ RB` text the footer shows, for any usage lane. */
 export function formatUsageLane(totals: UsageLane): string {
 	return usageMetricFields(totals).map(field => field.text).join(" ");
 }
@@ -138,7 +135,6 @@ export function parseRequestTiming(data: unknown): RequestTimingData | undefined
 	};
 }
 
-/** The previous effective request in Pi's cache-miss scan. */
 export interface RebillBaseline {
 	promptTokens: number;
 	reportedCache: boolean;
@@ -149,12 +145,10 @@ export interface Rebill {
 	cost: number;
 }
 
-/** One assistant message's settled facts, before lane selection. */
 export interface RequestFact {
 	usage: Pick<LaneTotals, "input" | "output" | "cacheRead" | "cacheWrite" | "cost">;
 	/** Pi's per-request re-bill against the session's preceding history. */
 	rebill: Rebill | undefined;
-	/** Present when the request is eligible for speed metrics. */
 	speed: { output: number; durationMs: number } | undefined;
 	thinkingMs: number | undefined;
 	ttftMs: number | undefined;
@@ -230,7 +224,6 @@ function isAssistantEntry(entry: EntryLike): boolean {
 	return entry.type === "message" && entry.message?.role === "assistant";
 }
 
-/** Speed eligibility: completed output with a positive Pi request duration. */
 function speedOf(message: AssistantMessageLike): RequestFact["speed"] {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
 	const output = finiteOrZero(message.usage?.output);
@@ -383,8 +376,6 @@ export function requestLaneTotals(
 	return totals;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Formatting: one formatter for every lane. Lanes only choose separators and colors.
 
 export type MetricKey =
 	| "input" | "output" | "cacheRead" | "cacheWrite" | "cacheHit" | "cost" | "rebill"
@@ -393,11 +384,9 @@ export type MetricKey =
 export interface MetricField {
 	key: MetricKey;
 	text: string;
-	/** The `CH` percentage, for lanes that color it. */
 	percent?: number;
 }
 
-/** Compact wall duration: `0s`, `59s`, `1m12s`, `1h2m3s`. */
 export function formatDuration(durationMs: number): string {
 	const totalSeconds = Math.floor(Math.max(0, durationMs) / 1_000);
 	const hours = Math.floor(totalSeconds / 3_600);
@@ -414,7 +403,6 @@ export function formatThinkingDuration(durationMs: number): string {
 	return value > 0 && value < 1_000 ? "<1s" : formatDuration(value);
 }
 
-/** Latency with one decimal below ten seconds: `0.4s`, `9.8s`, `12s`, `1m5s`. */
 export function formatLatency(durationMs: number): string {
 	const value = Math.max(0, durationMs);
 	if (value < 9_950) return `${(value / 1_000).toFixed(1)}s`;
@@ -422,7 +410,6 @@ export function formatLatency(durationMs: number): string {
 	return formatDuration(value);
 }
 
-/** Output tokens per second of request duration, e.g. `25 tok/s` or `3.4 tok/s`. */
 export function formatTokenRate(outputTokens: number, durationMs: number): string {
 	if (!(outputTokens > 0) || !(durationMs > 0)) return "";
 	const rate = outputTokens / (durationMs / 1_000);
@@ -436,14 +423,12 @@ export function formatShare(partMs: number, totalMs: number): string {
 	return `${Math.min(100, Math.max(0, percent))}%`;
 }
 
-/** `RB<count> <tokens>`, then ` $<amount>` when the dollars reach the display floor. */
 export function formatRebill(count: number, tokens: number, cost: number): string {
 	if (!(count > 0)) return "";
 	const amount = cost >= DOLLAR_DISPLAY_FLOOR ? ` $${cost.toFixed(3)}` : "";
 	return `RB${count} ${formatTokens(tokens)}${amount}`;
 }
 
-/** `↑ ↓ R W CH $ RB`, each present only when it has something to say. */
 export function usageMetricFields(totals: UsageLane): MetricField[] {
 	const fields: MetricField[] = [];
 	if (totals.input > 0) fields.push({ key: "input", text: `↑${formatTokens(totals.input)}` });

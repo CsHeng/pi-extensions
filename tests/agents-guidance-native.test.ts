@@ -50,7 +50,6 @@ test("native append selection merges with child roles and survives session conti
 				prompt: "append-fixture", approveProject: true, diagnosticSession: { path: session, ref: "append-fixture", async removeUnused() {} }, invocation,
 				env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir, PI_EXTENSIONS_APPEND_EXPECT_PARTS: JSON.stringify([globalMarker, snapshotMarker, sourceMarker, role.systemPrompt, contextMarker]) }),
 			};
-			// A second episode restores the same native history without duplicating instructions.
 			for (let episode = 0; episode < (selection === "project" ? 2 : 1); episode++) {
 				const marker = worker && episode === 1 ? await newWriterMarker() : undefined;
 				const proof = marker ? { marker: { ...marker, phase: "launch-intent" as const }, path: join(scratch, "receipt"), episode: episode + 1 } : undefined;
@@ -176,7 +175,6 @@ test("an ordinary configured custom tool reaches an authorized native child; lab
 			env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir }),
 		});
 		assert.equal(result.status, "succeeded", `${roleName}: ${result.error?.code} ${result.stderr} ${result.output}`);
-		// The configured custom tool ran for the child and stayed in the request catalog.
 		assert.match(result.output, /probe=fixture_custom/);
 		assert.match(result.output, /tools=[^;]*fixture_custom/);
 		if (write) {
@@ -184,12 +182,10 @@ test("an ordinary configured custom tool reaches an authorized native child; lab
 			assert.match(result.output, /tools=[^;]*\bwrite\b/);
 			assert.equal(result.workerToolsSettled, true);
 		} else {
-			// Explicit read-only intent still removes the mutating builtins.
 			assert.doesNotMatch(result.output, /tools=[^;]*\bedit\b/);
 			assert.doesNotMatch(result.output, /tools=[^;]*\bwrite\b/);
 		}
 	}
-	// The same configured catalog reaches a main actor: the custom tool is active and callable there too.
 	const mainSession = join(base, "main.jsonl"); await (await open(mainSession, "wx", 0o600)).close();
 	const mainPending = promisify(execFile)(invocation.command, [...invocation.args, "--mode", "json", "-p", "--session", mainSession, "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve", "--model", "agent-fixture/fixture", "--thinking", "off", "--", "catalog-child-fixture"], {
 		cwd: child, timeout: 20000, maxBuffer: 4 * 1024 * 1024,
@@ -222,19 +218,15 @@ test("configured same-name native write override keeps ownership in a managed wo
 		env: syntheticSubprocessEnv(base, { PI_CODING_AGENT_DIR: agentDir }),
 	});
 	assert.equal(result.status, "succeeded", `${result.error?.code}: ${result.stderr} ${result.output}`);
-	// The configured implementation ran, not the worker wrapper.
 	assert.match(result.output, /override=configured-write-ok:[^"]*candidate\.txt:then-run/);
 	assert.doesNotMatch(result.output, /(?:tools=|,)invoke_agent(?:,|$)/, "a standalone managed child cannot delegate without a hub link");
 	assert.equal(result.workerToolsSettled, true);
 	assert.equal(await readFile(join(child, "candidate.txt"), "utf8"), "configured");
-	// Toolkit lifecycle evidence names only the tools this kit owns; `write` is opaque here.
 	const lifecycle = (await readFile(session, "utf8")).trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.customType === "agents.worker-lifecycle");
 	assert.ok(lifecycle.length >= 2, JSON.stringify(lifecycle));
 	assert.ok(lifecycle.some(entry => entry.data.phase === "stopped" && entry.data.recoverySafe === false), "opaque write cannot certify crash recovery");
 	assert.ok(lifecycle.every(entry => Array.isArray(entry.data.owned) && !entry.data.owned.includes("write")), JSON.stringify(lifecycle));
-	// The toolkit still owns every native name the configured catalog left to the builtins.
 	for (const name of ["read", "grep", "find", "ls", "edit", "bash", "git_read"]) assert.ok(lifecycle[0]!.data.owned.includes(name), `${name} missing from owned: ${JSON.stringify(lifecycle[0]!.data.owned)}`);
-	// Baseline: a main process without the worker kit resolves the same configured owner.
 	const mainSession = join(base, "main.jsonl"); await (await open(mainSession, "wx", 0o600)).close();
 	const mainPending = promisify(execFile)(invocation.command, [...invocation.args, "--mode", "json", "-p", "--session", mainSession, "--no-skills", "--no-context-files", "--no-prompt-templates", "--approve", "--model", "agent-fixture/fixture", "--thinking", "off", "--", "configured-write-fixture"], {
 		cwd: child, timeout: 20000, maxBuffer: 4 * 1024 * 1024,

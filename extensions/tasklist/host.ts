@@ -1,4 +1,3 @@
-/** Pi owns the loop. Tasklist records model-managed items and publishes facts; it never schedules or gates work. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { emptyProducerFacts, EXECUTION_FACTS_EVENT, EXECUTION_FACTS_REQUEST, type ProducerFacts, type ProducerFactsRequest, type TaskFacts } from "../shared/execution-facts.ts";
 import { createTasklistStore, type TasklistStore } from "./store.ts";
@@ -61,8 +60,6 @@ export default function tasklist(pi: ExtensionAPI): void {
 		bound = true;
 		sessionId = ctx.sessionManager.getSessionId();
 		branchAnchor = ctx.sessionManager.getLeafId();
-		// Restore current-version data without rewriting history; unsupported snapshots stay diagnostic.
-		// Only an explicit model edit appends a new snapshot.
 		store.replay(ctx.sessionManager.getBranch());
 		appendSnapshot();
 		tasksView.bind(ctx);

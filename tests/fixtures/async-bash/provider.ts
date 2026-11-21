@@ -2,10 +2,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/**
- * Synthetic provider for async-bash host checks. It records real model requests.
- * No network or live model call.
- */
 export default function asyncBashProvider(pi: ExtensionAPI): void {
 	let calls = 0;
 	let executionId = "";

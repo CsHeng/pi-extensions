@@ -54,7 +54,6 @@ test("tasklist facts are published passively with the list snapshot and no produ
  assert.equal(latest.tasks?.title, "Useful work");
  assert.deepEqual(latest.tasks?.tasks, [{ id: "t", title: "Implement", status: "blocked" }]);
  assert.equal(published.length >= 2, true, "publication does not depend on Agent, Bash or notification state");
- // The blocked, unfinished list published no wake and started no competing turn.
  await waitForTrace(trace, () => trace.entries.filter(entry => entry.event === "native:agent_settled").length === 1);
  await pause(100);
  assert.equal(h.faux.state.callCount, 3, "the blocked list starts no competing turn");
@@ -299,7 +298,6 @@ test("a final unrecovered provider error leaves unfinished items editable withou
  const inputs: TranscriptContext[] = [];
  h.faux.setResponses([capture(inputs, fauxAssistantMessage("Investigating"))]); await h.session.prompt("continue");
  assert.match(inputText(inputs[0]!), /\[todo\] Implement/);
- // A repeated settlement without a new state change must not append or mutate anything.
  await h.session.extensionRunner?.emit({ type: "agent_settled", aborted: false });
  assert.equal(snapshotEntries(h).length, 0);
  h.faux.setResponses([call({ operation: "update", tasks: [{ id: "t", status: "done" }] }), fauxAssistantMessage("Done")].map(response => capture(inputs, response)));

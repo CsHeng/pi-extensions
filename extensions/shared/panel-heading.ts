@@ -1,4 +1,3 @@
-/** Shared presentation for independently collapsible above-editor sections. */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export type PanelTone = "accent" | "warning" | "error" | "success" | "text" | "muted" | "dim";
@@ -13,7 +12,6 @@ export interface PanelHeadingContent {
 	title: string;
 	/** Optional owner text such as a list title. It shrinks first and drops when too little room remains. */
 	subtitle?: string;
-	/** Completed-of-total summary shown in parentheses, e.g. `3/7 done`. */
 	progress?: string;
 	/** Current active counts; zero counts are omitted by the owner. */
 	focus?: readonly string[];
@@ -30,7 +28,6 @@ const SEPARATOR = " · ";
 const SUBTITLE_MIN = 8;
 const plain: PanelTheme = { fg: (_color, text) => text };
 
-/** Accept a host theme only when it exposes `fg`; otherwise render plain text. */
 export function panelTheme(value: unknown): PanelTheme | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	return typeof (value as { fg?: unknown }).fg === "function" ? value as PanelTheme : undefined;

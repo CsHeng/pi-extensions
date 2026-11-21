@@ -361,7 +361,6 @@ function sessionReply(overrides: Partial<SessionViewReply> = {}): SessionViewRep
 const overlayModel = (session: SessionViewState, snapshotValue?: ObserverSnapshot): OverlaySnapshot =>
 	({ snapshot: snapshotValue, receivedAt: 0, session });
 
-/** Emit the pending request's reply through the fake event bus. */
 function answer(pi: FakePi, reply: SessionViewReply): void {
 	pi.events.emit(SESSION_VIEW_EVENT, reply);
 }
@@ -598,7 +597,6 @@ test("component renders pinned live rows and a collapsed history row at 80x24 wi
 	assert.match(text, /▸ 27 retained agents · H/);
 	assert.doesNotMatch(text, /batch/, "no batch title");
 	assert.doesNotMatch(text, /run [a-z0-9]/, "no run-prefix session title");
-	// History paging never scrolls the live area away.
 	overlay.handleInput("h");
 	const expanded = overlay.render(80, 40).join("\n");
 	assert.match(expanded, /history 1–20 of 27 · page 1\/2/);
@@ -695,7 +693,6 @@ test("themed overlay keeps scratch-only cleanup failure separate from fully rele
 	const reply = sessionReply({
 		history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [historyRow({
 			state: "closed", retained: true,
-			// A never-frozen candidate: no applied root, yet every owned root was released.
 			roots: [
 				{ id: "rootone", destination: "/work/alpha", status: "not-applied", release: "released" },
 				{ id: "roottwo", destination: "/work/beta", status: "not-applied", release: "released" },
@@ -752,7 +749,6 @@ test("tiny terminals keep live rows reachable through explicit live-only overflo
 	const overlay = new AgentsOverlay(
 		overlayModel({ kind: "ready", reply: sessionReply() }, snapshot({ tasks: liveTasks, requestedTasks: 6, admittedTasks: 6, launchedChildren: 6, activeChildren: 6 })),
 		{ terminal: { rows: 30 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
-	// Ten body rows plus the two frame rows.
 	const lines = overlay.render(80, 12).join("\n");
 	assert.match(lines, /live \d+–\d+\/6 · ↑↓ live/, "live overflow is explicit");
 	const before = overlay.render(80, 12);
@@ -773,13 +769,10 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	assert.equal(first.version, 5);
 	assert.equal(first.page, 0);
 	assert.match(first.requestId, /^[A-Za-z0-9]+$/);
-	// A late reply for an older request cannot replace the pending one.
 	answer(pi, sessionReply({ requestId: "ui-stale" }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /history loading/);
-	// A foreign owner reply with the right request id fails fast; it can never answer this scope.
 	answer(pi, sessionReply({ requestId: first.requestId, ownerSessionId: "another_session" }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /history unavailable \(owner_changed\)/);
-	// Enter retries through the core contract and the matching reply lands.
 	held.overlay?.handleInput("h");
 	const retry = lastRequest(pi);
 	const paged = { state: "ready" as const, pageSize: 20, page: 0, totalRows: 37, totalPages: 2, rows: Array.from({ length: 20 }, (_, index) => historyRow({ handle: `session_${String(index).padStart(8, "0")}-0000-4000-8000-${String(index).padStart(12, "0")}` })) };
@@ -790,7 +783,6 @@ test("registered consumer queries on open, correlates replies and ignores late o
 	assert.match(text, /Worker: Review [0-9a-f]{8}.*succeeded/);
 	held.overlay?.handleInput("h");
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /▸ 37 retained agents · H/);
-	// Page navigation requests the next page; an out-of-order older reply stays ignored.
 	held.overlay?.handleInput("h");
 	const second = lastRequest(pi);
 	assert.equal(second.page, 0, "no page change yet");
@@ -829,7 +821,6 @@ test("missing core replies surface a bounded unavailable state instead of loadin
 	assert.equal(audits.length, 1);
 	assert.equal(audits[0]!.data.source, "ui"); assert.equal(audits[0]!.data.state, "timeout");
 	assert.equal(audits[0]!.data.durationMs, 4_000);
-	// H retries through the core contract.
 	const before = requestCount(pi);
 	held.overlay?.handleInput("h");
 	assert.ok(requestCount(pi) > before, "H on unavailable history requeries");
@@ -923,19 +914,16 @@ test("changed events coalesce into one requery of the current page while the ove
 	held.overlay?.handleInput("\u001b[6~");
 	assert.equal(lastRequest(pi).page, 1);
 	const pageRequest = lastRequest(pi);
-	// Invalidation while a request is pending arms exactly one requery.
 	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
 	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
 	assert.equal(requestCount(pi), 2, "no immediate duplicate request while pending");
 	answer(pi, sessionReply({ requestId: pageRequest.requestId, history: { ...paged, page: 1, rows: paged.rows.slice(0, 17) } }));
 	assert.equal(requestCount(pi), 3, "the armed requery fires once after the pending reply");
 	assert.equal(lastRequest(pi).page, 1);
-	// The armed requery's own reply clears the pending state; then a change requeries immediately.
 	const requery = lastRequest(pi);
 	answer(pi, sessionReply({ requestId: requery.requestId, history: { ...paged, page: 1, rows: paged.rows.slice(0, 17) } }));
 	pi.events.emit(SESSION_VIEW_CHANGED_EVENT, {});
 	assert.equal(requestCount(pi), 4);
-	// A closed overlay never requeries.
 	const closeRequest = lastRequest(pi);
 	answer(pi, sessionReply({ requestId: closeRequest.requestId }));
 	await pi.handlers.get("session_shutdown")?.({});
@@ -960,7 +948,6 @@ test("live transitions move a handle between live and history without double cou
 	const liveText = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(liveText, /│ 1 live · 1 agent\b/);
 	assert.match(liveText, /Explorer: untitled task/);
-	// The live handle leaves the history section; settled work returns to it.
 	observer.childStopped("LiveHandle1");
 	observer.finish(false, false);
 	const settledText = held.overlay?.render(120).join("\n") ?? "";
@@ -1041,7 +1028,6 @@ test("missing heartbeats freeze elapsed time and label live status unknown", asy
 	const staleText = held.overlay?.render(120).join("\n") ?? "";
 	assert.match(staleText, /observation stale/);
 	assert.match(staleText, /4s/, "elapsed time freezes without heartbeats");
-	// A fresh observation revives the live label.
 	pi.events.emit(OBSERVER_EVENT, snapshot({ revision: 1, elapsedMs: 6_000, tasks: [task({ elapsedMs: 6_000 })] }));
 	assert.match(held.overlay?.render(120).join("\n") ?? "", /running/);
 });
@@ -1075,7 +1061,6 @@ test("session start and shutdown clear retained observations, the widget and pen
 	await pi.handlers.get("session_start")?.({}, openCtx);
 	await openWith(pi, openCtx);
 	const request = lastRequest(pi);
-	// A tree change mid-flight drops the pending request; its late reply cannot land.
 	await pi.handlers.get("session_tree")?.({}, context({ statuses, widgets }));
 	answer(pi, sessionReply({ requestId: request.requestId }));
 	assert.equal(requestCount(pi), 1);

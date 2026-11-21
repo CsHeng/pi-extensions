@@ -1,4 +1,3 @@
-/** Shared tree-row layout for the above-editor sections and their central lists. */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { PanelTheme, PanelTone } from "./panel-heading.ts";
 
@@ -11,7 +10,6 @@ export interface PanelRowSpec {
 	glyphTone: PanelTone;
 	primary: string;
 	primaryTone: PanelTone;
-	/** Applied to the clipped primary text after tone, e.g. a done task's strike-through. */
 	decorate?: (text: string) => string;
 	fields?: readonly string[];
 }
@@ -19,7 +17,6 @@ export interface PanelRowSpec {
 export interface PanelRowsOptions {
 	/** Per-field alignment; durations read best right-aligned. */
 	align?: ReadonlyArray<"left" | "right">;
-	/** Total rows available for items plus the overflow line. */
 	maxRows: number;
 	/** Number of items that exist beyond `specs`, e.g. unloaded history. */
 	hidden?: number;
@@ -28,7 +25,6 @@ export interface PanelRowsOptions {
 	 * command. `fixed` keeps an identity whole and lets trailing fields clip at the right edge.
 	 */
 	primary?: "flex" | "fixed";
-	/** Command shown on the overflow line. */
 	hint?: string;
 }
 

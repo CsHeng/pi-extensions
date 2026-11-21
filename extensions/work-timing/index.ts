@@ -34,7 +34,6 @@ const STATUS_UPDATE_INTERVAL_MS = 1_000;
 const OUTPUT_CHARS_PER_TOKEN = 4;
 /** A live tool field appears only after this much work, so quick reads never flash. */
 const TOOL_ELAPSED_MIN_MS = 2_000;
-/** The tool field's `⚙ ` prefix; the field survives narrow-width compaction. */
 const TOOL_FIELD_PREFIX = "⚙ ";
 /** Entry rows mirror the host Text component's one-column side padding. */
 const TEXT_PADDING_X = 1;
@@ -120,7 +119,6 @@ export function compactStatusLabel(status: string, width: number): string {
 	return kept.join(" • ");
 }
 
-/** A settled interaction reached quiescence; failed, interrupted and unavailable did not. */
 export type WorkTimingStatus = InteractionStatus;
 
 export interface WorkTimingEntryData {
@@ -139,13 +137,10 @@ interface WorkTimingDependencies {
 	now?: () => number;
 	setInterval?: (callback: () => void, intervalMs: number) => unknown;
 	clearInterval?: (handle: unknown) => void;
-	/** Reports the host render width in columns; defaults to pi-tui's terminal width source. */
 	columns?: () => number;
-	/** Subscribes a terminal-resize listener; the returned function unsubscribes. */
 	onResize?: (listener: () => void) => () => void;
 }
 
-/** The main loop's in-flight provider request. */
 interface RequestTiming {
 	/**
 	 * The request has started: `before_provider_request`, or the first assistant stream event on
@@ -158,11 +153,8 @@ interface RequestTiming {
 	firstOutputAt: number | undefined;
 	completedThinkingMs: number;
 	activeThinking: Map<number, number>;
-	/** Characters seen in streamed text, thinking, and tool-call deltas. */
 	deltaChars: number;
-	/** Characters in the current assistant message content, when the host exposes it. */
 	messageChars: number;
-	/** Output tokens a partial message already reports. */
 	providerOutputTokens: number;
 }
 
@@ -174,12 +166,10 @@ interface ActiveTool {
 	promptMs: number;
 }
 
-/** Every duration is sampled at the same instant as the request counters and rate. */
 interface ClockSample {
 	totalMs: number;
 	toolMs: number;
 	thinkingMs: number;
-	/** Running TTFT counter while the request waits for its first output. */
 	ttftWaitMs: number | undefined;
 }
 
@@ -194,7 +184,6 @@ interface TimingData {
 	request: RequestTiming | undefined;
 	/** The last settled request's values, shown while its tools run. */
 	settled: LaneTotals | undefined;
-	/** Tools executing right now, in start order. */
 	tools: ActiveTool[];
 	/** Last complete sample, before width compaction; resize reflows this without sampling. */
 	sampledStatus: string | undefined;
@@ -221,13 +210,11 @@ function isOutputSignal(type: unknown): boolean {
 	return type === "thinking_start" || type === "thinking_delta" || type === "text_delta" || type === "toolcall_delta";
 }
 
-/** Streamed deltas of every output kind, including tool-call arguments. */
 function streamedOutputChars(event: { type?: unknown; delta?: unknown }): number {
 	if (event.type !== "text_delta" && event.type !== "thinking_delta" && event.type !== "toolcall_delta") return 0;
 	return typeof event.delta === "string" ? event.delta.length : 0;
 }
 
-/** Output characters of a complete or partial assistant message, independent of stream deltas. */
 function messageOutputChars(message: unknown): number {
 	const content = (message as { content?: unknown } | undefined)?.content;
 	if (!Array.isArray(content)) return 0;
@@ -275,7 +262,6 @@ function thinkingAt(request: RequestTiming, at: number): number {
 	return total;
 }
 
-/** In-flight output estimate: provider-reported partial output or characters / 4. */
 function estimatedOutputTokens(request: RequestTiming): number {
 	const chars = Math.max(request.deltaChars, request.messageChars);
 	return Math.max(request.providerOutputTokens, Math.round(chars / OUTPUT_CHARS_PER_TOKEN));
@@ -305,7 +291,6 @@ function sessionEntries(ctx: ExtensionContext): readonly unknown[] {
 	return ctx.sessionManager.getEntries();
 }
 
-/** The lane's metric block: usage fields as one field, then each timing field. */
 function metricBlock(totals: LaneTotals, options?: TimingFormatOptions): string[] {
 	const usage = usageMetricFields(totals).map((field) => field.text).join(" ");
 	return [...(usage ? [usage] : []), ...timingMetricFields(totals, options).map((field) => field.text)];
@@ -341,7 +326,6 @@ export function createWorkTimingExtension(
 			intervalHandle = undefined;
 		};
 
-		/** The interaction ended; the boundary already released its span and observer. */
 		const finalize = ({ span: current, status, totalMs, humanWaitMs }: InteractionClose<TimingData>): void => {
 			stopInterval();
 			current.ctx.ui.setWorkingMessage();
@@ -403,7 +387,6 @@ export function createWorkTimingExtension(
 		const clockAt = (current: TimingSpan, at: number): ClockSample => {
 			const request = current.data.request;
 			return {
-				// Human wait is excluded: the span reports autonomous wall time.
 				totalMs: Math.max(0, at - current.startedAt - current.humanWaitMs),
 				toolMs: toolSnapshotAt(current, at).toolMs,
 				thinkingMs: request ? thinkingAt(request, at) : 0,
@@ -413,7 +396,6 @@ export function createWorkTimingExtension(
 			};
 		};
 
-		/** In-flight estimates of the request lane; settlement replaces them. */
 		const liveRequest = (request: RequestTiming, durations: ClockSample, at: number): { totals: LaneTotals; ttftLive: boolean } => {
 			const totals = emptyLaneTotals();
 			totals.output = estimatedOutputTokens(request);
@@ -512,7 +494,6 @@ export function createWorkTimingExtension(
 				const text = fields.join(" • ");
 				return {
 					render(width: number): string[] {
-						// Fold at field boundaries; a lone over-wide field falls back to word wrap.
 						const limit = Math.max(1, width - TEXT_PADDING_X * 2);
 						const rows = foldStatusLine(text, limit)
 							.split("\n")
@@ -538,7 +519,6 @@ export function createWorkTimingExtension(
 		pi.on("before_agent_start", (event, ctx) => {
 			if (ctx.mode !== "tui") return;
 			if (!unsubscribeResize) {
-				// Reflow the last published sample immediately, retaining its measurement instant.
 				unsubscribeResize = onResize(paint);
 			}
 			const at = now();
@@ -556,7 +536,6 @@ export function createWorkTimingExtension(
 			current.data.request = newRequest(undefined);
 		});
 
-		/** The next request started: its state replaces the settled values at the next sample. */
 		const beginRequest = (current: TimingSpan): void => {
 			const request = current.data.request;
 			if (!request || request.begun) return;
@@ -575,7 +554,6 @@ export function createWorkTimingExtension(
 		pi.on("before_provider_request", (_event, ctx) => {
 			const current = boundary.current;
 			if (ctx.mode !== "tui" || !current?.data.request) return;
-			// The main request is about to be sent; a retry restarts the live counter.
 			const at = now();
 			current.data.request = newRequest(at);
 			current.data.settled = undefined;
@@ -610,7 +588,6 @@ export function createWorkTimingExtension(
 				usageOutputTokens(event.message),
 				usageOutputTokens((assistantEvent as { partial?: unknown }).partial),
 			);
-			// The next clock sample publishes these facts together with every other field.
 		});
 
 		pi.on("message_end", (event, ctx) => {

@@ -136,7 +136,6 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 	return error instanceof Error && "code" in error;
 }
 
-/** Nearest component that exists; an authorized new path may have a missing tail. */
 async function nearestExisting(target: string): Promise<string> {
 	let current = target;
 	for (;;) {

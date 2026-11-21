@@ -72,7 +72,6 @@ export function evaluateExecutionQuiescence(input: {
 	};
 }
 
-/** Pull authoritative snapshots without adding a waiter, timer, prompt, or model turn. */
 export function readExecutionQuiescence(pi: ExtensionAPI, ctx: ExtensionContext, scope?: ExecutionScope): ExecutionQuiescence {
 	const facts: ProducerFacts[] = [];
 	let delivery: NoticeDeliverySnapshot | undefined;

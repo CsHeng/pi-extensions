@@ -93,7 +93,6 @@ test("a running agent takes a message in the same run; an idle agent is woken by
 	assert.match(f.results.filter(result => result.tool === "message_agent").at(-1)!.text, /was idle and starts a new turn/);
 	const secondWait = f.results.filter(result => result.tool === "wait_agents").at(-1)!;
 	assert.match(secondWait.text, /second turn read=1/, secondWait.text);
-	// In the woken child, the message is an attributed agent message; its only user input is the neutral host trigger.
 	const owner = await f.service.ownerOf(f.ctx());
 	const reader = await f.service.store.load((await f.service.store.list(owner)).find(view => view.label === "reader")!.handle, owner);
 	const native = (await readFile(f.service.store.nativePath(reader), "utf8")).trim().split("\n").map(line => JSON.parse(line) as { type: string; customType?: string; content?: unknown; message?: { role: string; content?: unknown } });
@@ -182,7 +181,6 @@ test("a reviewer's finding reaches the author by name, the woken turn reports to
 	assert.equal(authorRecord.task.access.length, 1, "a message claiming approval changes no access");
 	assert.equal(authorRecord.task.access[0]!.permission, "write"); assert.ok(authorRecord.roots.every(root => root.source.endsWith("/work")), JSON.stringify(authorRecord.roots.map(root => root.source)));
 	assert.equal(authorRecord.candidate, undefined, "a shared writer produces no candidate");
-	// The woken turn belongs to the reviewer: the main agent's notices treat it as observed.
 	const facts = f.service.executionFacts(f.ctx().sessionManager.getSessionId(), f.ctx().sessionManager.getLeafId());
 	const authorTurn = facts.executions.filter(item => item.id.endsWith(`:${authorRecord.handle}`) && item.phase === "terminal").at(-1)!;
 	assert.equal(authorTurn.disposition, "observed"); assert.equal(authorTurn.summary, "");

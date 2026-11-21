@@ -42,7 +42,6 @@ test("component integration: dirty input, two async writers, early apply, repair
 	const fastWorkspace = workspaces.get("fast")!;
 	assert.equal((await applyGitCandidate(fastWorkspace, fastCandidate)).status, "applied");
 	assert.equal(await readFile(join(f.repo, "slow.ts"), "utf8"), "base slow\n");
-	// A later episode reuses the same workspace after explicitly refreshing new integrated inputs.
 	const repair = await s.submit({ requestId: "repair", requestKey: "repair-fast", prepare: async () => fastWorkspace, execute: async (workspace, context) => context.runTask({ id: "fast-repair", role: "worker", resourceLocks: [workspace.id] }, async () => {
 		assert.equal((await refreshGitInputs(workspace)).status, "refreshed");
 		assert.equal(await readFile(join(workspace.path, "main-local.txt"), "utf8"), "parent progressed while children ran\n");

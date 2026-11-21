@@ -12,7 +12,6 @@ git -C "${work_root}" init -q
 skill_one_file="${work_root}/probe-alpha.md"
 skill_two_file="${work_root}/probe-beta.md"
 probe_extension="${work_root}/probe.ts"
-# Leading mixed selectors: the grouped envelope must name and load both skills once.
 prompt_text="\$probe-alpha /skill:probe-beta verify isolated expansion"
 
 cat >"${skill_one_file}" <<'EOF'
@@ -31,7 +30,6 @@ description: Isolated beta probe skill.
 Beta probe body.
 EOF
 
-# Counts only; this probe reports the grouped envelope shape, not prompt text.
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 

@@ -79,7 +79,6 @@ export default function metricLanesFixture(pi: ExtensionAPI): void {
 					usage: { input: first ? 1_000 : 200, output: 0, cacheRead: first ? 0 : 1_000, cacheWrite: 0, totalTokens: 0,
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 				stream.push({ type: "start", partial: message });
-				// Time to first output.
 				await new Promise((resolve) => setTimeout(resolve, 300));
 				if (first) {
 					message.content.push({ type: "thinking", thinking: "" });

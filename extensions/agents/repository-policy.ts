@@ -260,7 +260,6 @@ async function locateGrant(path: string, host: RepositoryHost): Promise<{ declar
 	}
 }
 
-/** Resolve one task's access grants into Git write roots and read evidence. Does not copy or mutate. */
 export async function resolveTaskRoots(task: NormalizedTask, host: RepositoryHost = defaultRepositoryHost): Promise<TaskRoot[]> {
 	const writeRoots = new Map<string, TaskRoot>();
 	const reads: TaskRoot[] = [];

@@ -1,4 +1,3 @@
-/** Sole owner of main-model Notices for Async Bash and Agents. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NOTICE_DELIVERY_CHANGED, NOTICE_DELIVERY_REQUEST, EXECUTION_FACTS_EVENT, NOTICE_ACK, NOTICE_TYPE, EXECUTION_FACTS_REQUEST, parseProducerFacts, type NoticeDeliveryRequest, type NoticeDeliverySnapshot, type ExecutionRef, type ProducerFacts, type NoticeAck, type ProducerFactsRequest } from "../shared/execution-facts.ts";
 import { registerSettlementBarrier, releaseModelWake, reserveModelWake } from "../shared/settlement.ts";

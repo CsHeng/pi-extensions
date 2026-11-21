@@ -25,7 +25,6 @@ test("installed Pi and CC: one working writer publishes complete one-second samp
 	// CC's optional working-message writer must not co-own this row.
 	await writeFile(join(agent, "pi-cc-extensions.json"), JSON.stringify({ enableWorkingMessage: false, showStartupHeader: false,
 		enableSessionReference: false, enableAgentAutocomplete: false, enableAgentSummary: false }));
-	// The same regression can exercise the published snapshot without copying user settings.
 	const packageRoot = process.env.PI_EXTENSIONS_UI_PACKAGE_ROOT ?? root;
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--no-approve",
 		"-e", join(packageRoot, "extensions/work-timing/index.ts"), "-e", cc, "-e", join(root, "tests/fixtures/work-timing-tui.ts"),
@@ -72,7 +71,6 @@ test("installed Pi and CC: one working writer publishes complete one-second samp
 	const frames = new Set([...plain.matchAll(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Working\.\.\./g)].map(match => match[1]));
 	assert.ok(frames.size > 1, "the native working spinner still animates independently of text publishing");
 	assert.ok(lines.some(line => / • ↑100 ↓48 CH0\.0% • ✻ [23]s • \d+ tok\/s$/.test(line.text)), "the settled request lane replaces the estimates; this fixture's immediate first output leaves no positive TTFT");
-	// The real bash tool runs `sleep 7`, so the live tool field must appear past its threshold and then vanish.
 	const toolLines = lines.filter(line => line.text.includes("⚙ "));
 	assert.ok(toolLines.length > 0, "the live tool timer must reach the real terminal while bash runs");
 	assert.ok(toolLines.some(line => line.text.includes("⚙ 2s ")), "the tool field appears on its two-second threshold");
@@ -93,7 +91,6 @@ for (const mode of ["timing-first", "notifications-first", "no-notifications"] a
 	const timing = join(root, "extensions/work-timing/index.ts");
 	const notifications = join(root, "extensions/notices/index.ts");
 	const observers = mode === "notifications-first" ? [notifications, timing] : mode === "timing-first" ? [timing, notifications] : [timing];
-	// Bark evaluates the same interaction boundary independently; a stub hook records its events.
 	await mkdir(join(base, ".local", "bin"), { recursive: true });
 	await writeFile(join(base, ".local", "bin", "agent-bark-hook"), "#!/bin/sh\nset -eu\ncat >> \"$HOME/bark-events.jsonl\"\nprintf '\\n' >> \"$HOME/bark-events.jsonl\"\n", { mode: 0o700 });
 	const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
@@ -114,13 +111,13 @@ for (const mode of ["timing-first", "notifications-first", "no-notifications"] a
 	child.stdout.on("data", capture); child.stderr.on("data", capture);
 	const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
 	let timedOut = false;
-	const timeout = setTimeout(() => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch { /* stopped */ } } }, 30_000);
+	const timeout = setTimeout(() => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch {  } } }, 30_000);
 	t.after(async () => {
 		clearTimeout(timeout);
 		if (child.exitCode === null && child.signalCode === null && child.pid) {
-			try { process.kill(-child.pid, "SIGTERM"); } catch { /* stopped */ }
+			try { process.kill(-child.pid, "SIGTERM"); } catch {  }
 			await Promise.race([exited.catch(() => {}), delay(500)]);
-			if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* stopped */ } }
+			if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch {  } }
 		}
 		await exited.catch(() => {});
 		await rm(base, { recursive: true, force: true });
@@ -180,11 +177,11 @@ test("installed Pi: request timing lands before the assistant message and footer
 	child.stdout.on("data", capture); child.stderr.on("data", capture);
 	const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
 	let timedOut = false;
-	const timeout = setTimeout(() => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch { /* stopped */ } } }, 30_000);
+	const timeout = setTimeout(() => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch {  } } }, 30_000);
 	t.after(async () => {
 		clearTimeout(timeout);
 		if (child.exitCode === null && child.signalCode === null && child.pid) {
-			try { process.kill(-child.pid, "SIGKILL"); } catch { /* stopped */ }
+			try { process.kill(-child.pid, "SIGKILL"); } catch {  }
 		}
 		await exited.catch(() => {});
 		await rm(base, { recursive: true, force: true });
@@ -212,7 +209,6 @@ test("installed Pi: request timing lands before the assistant message and footer
 	}
 	assert.ok(((proof.entries[assistants[0]!.index - 1]?.data as { thinkingMs: number }).thinkingMs) >= 400);
 
-	// Inside the window, the reader sees the timing entry without its assistant message, and the footer is unchanged.
 	const ends = proof.samples.filter(sample => sample.at === "message-end");
 	const starts = proof.samples.filter(sample => sample.at === "request-start");
 	const turnEnds = proof.samples.filter(sample => sample.at === "turn-end");
@@ -227,7 +223,6 @@ test("installed Pi: request timing lands before the assistant message and footer
 	// The one-second tool keeps this request settled long enough for the next sample to reach the row.
 	assert.match(turnEnds[0]!.working ?? "", / • ↑1\.0k ↓30 CH0\.0% • ✻ \S+ • TTFT \d\.\ds • \d+ tok\/s$/);
 
-	// Offline recomputation: footer and completion entry equal the shared aggregation of the persisted entries.
 	const session = collectLaneTotals(proof.entries);
 	const expected = [usageMetricFields(session).map(field => field.text).join(" "), timingMetricFields(session).map(field => field.text).join(" ")].join(" | ");
 	assert.equal(metricsOf(proof.finalFooter), expected);
@@ -236,7 +231,6 @@ test("installed Pi: request timing lands before the assistant message and footer
 	assert.equal(summary.version, 5);
 	assert.deepEqual(parseLaneTotals(summary.metrics), session, "one interaction covers the whole fresh session");
 
-	// Timing entries never reach the model.
 	assert.equal(proof.payloadLeak, false);
 	for (const roles of proof.contexts) assert.ok(roles.every(role => role !== "custom"));
 });

@@ -139,7 +139,6 @@ function historyItem(row: SessionViewHistoryRow, name: string): InspectionItem {
 			...(row.release ? [`cleanup=${row.release.status}${row.release.remaining ? ` remaining=${row.release.remaining}` : ""}`] : [])] };
 }
 
-/** Both list surfaces use the same row and detail. Their callers own ordering and the visible history page. */
 export function agentListSections(tasks: readonly ObserverTask[], history: readonly SessionViewHistoryRow[], stale = false) {
 	const observed = tasks.filter(task => !history.some(row => row.handle === task.id && (task.episode === null || row.episode > task.episode
 		|| (row.episode === task.episode && !unconfirmedState(row) && (stale || !isLiveTask(task))))));

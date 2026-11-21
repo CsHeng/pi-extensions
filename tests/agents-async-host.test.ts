@@ -61,11 +61,9 @@ test("terminal notices wait for the current result while a sibling can publish",
  const pending = facts().find(item => item.id === "run1:handle1")!;
  assert.equal(pending.phase, "running"); assert.equal(pending.status, "publishing"); assert.equal(pending.summary, "");
  assert.match(facts().find(item => item.id === "run1:handle2")!.summary, /sibling closing report/);
- // A delayed publication now supplies the current episode's terminal evidence.
  views.set("handle1", { handle: "handle1", episode: 2, result: { status: "succeeded", output: "current closing report", changedPaths: ["src/a.ts"] }, candidate: { id: "candidate2", changedPaths: ["src/a.ts"] } });
  const ready = facts().find(item => item.id === "run1:handle1")!;
  assert.equal(ready.phase, "terminal"); assert.match(ready.summary, /isolated candidate ready \(1 changed paths\)/); assert.match(ready.summary, /current closing report/); assert.ok(!ready.summary.includes("previous episode"));
- // A settled run with unavailable evidence must not remain permanently live.
  run.phase = "failed"; views.delete("handle1");
  const unavailable = facts().find(item => item.id === "run1:handle1")!;
  assert.equal(unavailable.phase, "terminal"); assert.match(unavailable.summary, /result unavailable/);

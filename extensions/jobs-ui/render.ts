@@ -1,4 +1,3 @@
-/** Read-only Jobs presentation on the shared panel heading and row grammar. */
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { panelHeading, type PanelTheme, type PanelTone } from "../shared/panel-heading.ts";
 import { formatPanelDuration } from "../shared/panel-rows.ts";
@@ -19,7 +18,6 @@ function clean(text: string): string {
 	return stripTerminalSequences(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, "").replace(/\s+/gu, " ").trim();
 }
 
-/** Compact clock. Unknown stays unknown; this is not a liveness or acceptance claim. */
 export const formatJobDuration = formatPanelDuration;
 
 /** Jobs keeps a small budget so a short terminal clips Jobs before the Tasks body. */
@@ -42,7 +40,6 @@ function runningDetail(record: JobsViewRecord, now: number): string {
 	return `output ${formatJobDuration(now - record.lastOutputAt)} ago`;
 }
 
-/** Glyph shape and tone carry the recorded terminal state; a non-zero exit stays on its own row. */
 function jobState(record: JobsViewRecord, now: number): { glyph: string; tone: PanelTone; detail: string } {
 	switch (record.status) {
 		case "running": return record.overdue

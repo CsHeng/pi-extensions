@@ -3,7 +3,6 @@ import { createAgentsExtension } from "../../extensions/agents/index.ts";
 import { defaultConfig } from "../../extensions/agents/config.ts";
 import { runChild } from "../../extensions/agents/runner.ts";
 
-/** The real parent registration and subprocess bridge, with only synthetic models. */
 export default function nativeParentFixture(pi: ExtensionAPI): void {
 	createAgentsExtension({
 		loadConfig: async () => ({ config: defaultConfig() }),

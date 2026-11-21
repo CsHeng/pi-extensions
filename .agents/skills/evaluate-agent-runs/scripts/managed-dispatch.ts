@@ -49,7 +49,6 @@ function group(rows: Array<{ action: string; status: string }>): Group[] {
 	return [...groups.values()].sort((a, b) => `${a.action}:${a.status}`.localeCompare(`${b.action}:${b.status}`));
 }
 type Request = { action: string; status: string; v3: boolean; telemetry: ManagedRequestTelemetry; code?: string; signature: string; conflict: boolean };
-/** Counts transport evidence only; never parses prompts or grants billing/acceptance. */
 export class ManagedDispatchCollector {
 	private asynchronous = new AsyncDispatchCollector();
 	private records = 0;
@@ -76,11 +75,7 @@ export class ManagedDispatchCollector {
 			const message = object(row?.message), details = object(message?.details);
 			const toolName = typeof message?.toolName === "string" ? message.toolName : "";
 			if (row?.type !== "message" || message?.role !== "toolResult" || (!peerTools.has(toolName) && toolName !== "agent")) continue;
-			// Shallow version cut before payload interpretation: explicitly versioned non-current envelopes
-			// (including the retired `agent` tool) are excluded, never interpreted as current; malformed
-			// versionless current records still fail validation.
 			if (toolName === "agent" || typeof details?.schemaVersion === "number" && details.schemaVersion !== SCHEMA_VERSION) { if (++this.records > 100000) throw new Error("too_many_runs"); this.unsupported++; continue; }
-			// A peer operation that made no engine request (list, wait, a message to a running agent) is not a dispatch record.
 			if (details && !Object.hasOwn(details, "action")) continue;
 			if (++this.records > 100000) throw new Error("too_many_runs");
 			const action = details?.action === null ? "invalid-request" : details?.action;

@@ -28,18 +28,15 @@ export interface ExecutionEvent {
 export interface ExecutionContext {
 	runId: string;
 	signal: AbortSignal;
-	/** Dependencies remain with the existing graph scheduler; this only leases shared capacity. */
 	runTask<T>(task: { id: string; role: ExecutionRole; resourceLocks?: readonly string[]; signal?: AbortSignal },  execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 export interface Submission<P, R> {
 	requestId: string;
-	/** The caller's existing canonical request identity; no new content-hash protocol is introduced. */
 	requestKey: string;
 	prepare(signal: AbortSignal, identity: { runId: string; generation: string }): Promise<P>;
 	execute(prepared: P, context: ExecutionContext): Promise<R>;
 }
 export interface SupervisorHooks {
-	/** Persists owner-tagged terminal facts, including cancellation during shutdown. Filter by owner before projecting to a current UI. */
 	onEvent?(event: ExecutionEvent): void | Promise<void>;
 	onWake?(events: readonly ExecutionEvent[]): void | Promise<void>;
 	onDeliveryError?(error: unknown): void;
@@ -50,7 +47,6 @@ export class SupervisorError extends Error {
 	constructor(code: string) { super(code); this.name = "SupervisorError"; this.code = code; }
 }
 interface Ticket { role: ExecutionRole; locks: string[]; signal: AbortSignal; resolve(release: () => void): void; reject(error: unknown): void; abort(): void }
-/** One shared capacity owner across submissions. No model loop, timer polling, or semantic DAG. */
 class Capacity {
 	private active = 0;
 	private byRole: Record<ExecutionRole, number> = {};
@@ -99,7 +95,6 @@ function errorFact(error: unknown): { name: string; message: string } {
 	return { name: error instanceof Error ? error.name : "Error", message: (error instanceof Error ? error.message : String(error)).slice(0, 2048) };
 }
 
-/** Session-local mechanical execution. Integrators persist outcomes before forwarding onWake to Pi. */
 export class SessionExecutionSupervisor {
 	private owner: ExecutionOwner;
 	private generation = mintProductId();
@@ -221,7 +216,6 @@ export class SessionExecutionSupervisor {
 	suppressWake(): void { this.wakeEnabled = false; this.notifications.clear(); }
 	allowWake(): void { if (!this.closed) this.wakeEnabled = true; }
 	private async event(entry: Entry, kind: ExecutionEvent["kind"], task?: TaskExecution): Promise<void> {
-		// Retention is distinct from re-entry: an old/cancelled owner still has a terminal outcome.
 		const event: ExecutionEvent = { version: 1, eventId: mintProductId(), kind, generation: entry.view.generation,
 			owner: structuredClone(entry.view.owner), runId: entry.view.runId,
 			...(task ? { task: structuredClone(task) } : { run: structuredClone(entry.view) }) };
@@ -249,7 +243,6 @@ export class SessionExecutionSupervisor {
 		this.requests.clear(); this.entries.clear(); this.wakeEnabled = true;
 		await Promise.allSettled(previous.map(entry => entry.completion));
 	}
-	/** Runner callbacks must honor cancellation / use their existing bounded process cleanup. */
 	async shutdown(): Promise<void> {
 		this.closed = true; this.suppressWake();
 		for (const entry of this.entries.values()) { if (!terminal(entry.view.phase)) { entry.cancelled = true; entry.controller.abort(); } }

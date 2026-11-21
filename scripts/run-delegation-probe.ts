@@ -1,12 +1,4 @@
 #!/usr/bin/env bun
-// Provider-gated measurement lane for the parent-visible agent surface.
-//
-// It runs headless `pi` against a throwaway project and one mock subagent tool
-// (scripts/fixtures/delegation-probe-extension.ts), then reports how often the
-// parent model called that tool. It measures a decision, not child quality, and
-// it is never a pass/fail gate. The dated conclusion is evaluation evidence for
-// $AGENT_ARCHITECTURE_DIR/docs/evaluations/pi-integration/; the raw JSON artifact stays
-// under $TMPDIR/extensions/ and is not committed.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -77,7 +69,6 @@ export function assertProbeAuthorized(env: Record<string, string | undefined>): 
 export type ProbeRole = "worker" | "explorer" | "reviewer" | "unknown";
 const emptyRoleTasks = (): Record<ProbeRole, number> => ({ worker: 0, explorer: 0, reviewer: 0, unknown: 0 });
 export interface ProbeEventCounts {
-	/** Requested roles, not admitted/executed workers or accepted implementation. */
 	roleTasks: Record<ProbeRole, number>;
 	workerTargets: { parent: number; explicit: number; invalid: number };
 	called: boolean;
@@ -90,7 +81,6 @@ export interface ProbeEventCounts {
 	settled: boolean;
 }
 
-/** Parses one `pi --mode json|rpc` event stream; both modes share the wire events. */
 export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
 	const counts: ProbeEventCounts = { roleTasks: emptyRoleTasks(), workerTargets: { parent: 0, explicit: 0, invalid: 0 }, called: false, callCount: 0, argErrors: 0, otherToolCalls: 0, turns: 0, stopReason: null, costUsd: 0, settled: false };
 	for (const line of lines) {
@@ -135,7 +125,6 @@ export function parseProbeEvents(lines: readonly string[]): ProbeEventCounts {
 	return counts;
 }
 
-/** Wilson score interval for a binomial rate; reported so small cells are not over-read. */
 export function wilsonInterval(successes: number, total: number, z = 1.96): { low: number; high: number } {
 	if (total === 0) return { low: 0, high: 0 };
 	const p = successes / total;
@@ -201,7 +190,6 @@ export async function writeProbeProject(root: string): Promise<void> {
 		"proj/src/export.py": "import json\n\n\ndef to_json(rows):\n    \"\"\"Serialize a list of (name, value) rows.\"\"\"\n    return json.dumps(rows, separators=(\",\", \":\"))\n",
 	};
 	for (const [relativePath, content] of Object.entries(files)) await writeFile(join(root, relativePath), content);
-	// A read-only copy of this repository supplies the multi-module survey target.
 	await cp(join(repositoryRoot, "extensions"), join(root, "repo", "extensions"), {
 		recursive: true,
 		filter: (source) => !source.includes("node_modules"),
@@ -211,7 +199,6 @@ export async function writeProbeProject(root: string): Promise<void> {
 	}
 }
 
-/** Each trial gets a private coordination checkout and two real sibling Git roots. */
 export async function writeProbeTrial(root: string): Promise<string> {
 	const parent = join(root, "parent"); await writeProbeProject(parent);
 	const implementations = { normalize: "export function normalize(text) { throw new Error('not implemented'); }\n", clamp: "export function clamp(value, min, max) { throw new Error('not implemented'); }\n" };
@@ -237,7 +224,6 @@ export interface ProbeRunOptions {
 	timeoutSeconds: number;
 }
 
-/** Preserve JSON events and UTF-8 split across process stdout chunks. */
 export function probeEventCollector() {
 	const decoder = new StringDecoder("utf8"), lines: string[] = []; let pending = "";
 	return {
@@ -267,7 +253,7 @@ export async function runProbeTrial(options: ProbeRunOptions): Promise<ProbeRunR
 		bytes += chunk.byteLength;
 		if (bytes > MAX_STDOUT_BYTES) return;
 		if (collector.push(chunk) && options.mode === "rpc") {
-			try { child.stdin?.end(); } catch { /* already closed */ }
+			try { child.stdin?.end(); } catch {}
 		}
 	};
 	child.stdout?.on("data", consume);
@@ -280,7 +266,6 @@ export async function runProbeTrial(options: ProbeRunOptions): Promise<ProbeRunR
 	}, options.timeoutSeconds * 1000);
 	if (options.mode === "rpc") {
 		child.stdin?.write(`${JSON.stringify({ id: "probe-1", type: "prompt", message: options.prompt.text })}\n`);
-		// Closing stdin is the protocol exit; a process that ignores it is bounded here.
 		setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 15_000).unref();
 	}
 	const exitCode = await new Promise<number | null>((resolveExit) => {

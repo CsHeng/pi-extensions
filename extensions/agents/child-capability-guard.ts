@@ -39,7 +39,6 @@ export default async function childCapabilityGuard(pi: ExtensionAPI): Promise<vo
 			recordFailure();
 			return { block: true, terminate: true, reason: fatalReason ?? "Child capability is unavailable." };
 		}
-		// The typed tool checks all repository/path/revision inputs itself on every execution.
 		const granted = new Set(toolsForAccess(loaded.manifest.grants.some(grant => grant.permission === "write")));
 		if (isNativeBashTool(event.toolName)) {
 			// A read or write grant keeps the cooperative host shell; it is not a path grant.

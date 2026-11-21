@@ -359,7 +359,6 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	});
 	const foreign = (await store.allocate({ repo: base, parentSessionId: "foreign-parent", anchor: "f", branch: ["f"] }, "foreign", [{ ...tasks[0]!, id: "f0" }])).records[0]!;
 	const otherRepo = (await store.allocate({ repo: join(base, "elsewhere"), parentSessionId: "parent", anchor: "f2", branch: ["f2"] }, "otherrepo", [{ ...tasks[0]!, id: "o0" }])).records[0]!;
-	// The active list keeps its exact branch-filtered open-session semantics before any corruption exists.
 	const active = (await store.list(owner)).map((view) => view.handle).sort();
 	const retained = [closed, legacy, runner, queued, idle, interrupted, unprovable, duplicate, failed, fresh, offBranch].map((record) => record.handle);
 	assert.deepEqual(active, retained.filter((handle) => handle !== closed.handle && handle !== legacy.handle && handle !== offBranch.handle).sort());
@@ -411,7 +410,6 @@ test("inventory enumerates retained closed, off-branch and legacy history withou
 	assert.equal(offView.onCurrentBranch, false); assert.equal(offView.latestOutcome, "aborted"); assert.equal(offView.acceptedEpisodes, 1); assert.equal(offView.reportComplete, true);
 	assert.equal(inventory.summary.acceptedEpisodes, null);
 	assert.deepEqual(inventory.summary.states, { idle: 6, queued: 1, running: 0, interrupted: 2, closed: 1 });
-	// The read widening never broadens the mutation predicate.
 	await assert.rejects(store.load(offBranch.handle, owner), /owner_mismatch/);
 	await assert.rejects(store.load(foreign.handle, owner), /owner_mismatch/);
 	await assert.rejects(store.withSession(offBranch.handle, owner, async () => {}), /owner_mismatch/);
@@ -481,12 +479,10 @@ test("a released admission reservation leaves no handle behind and can be retrie
 	await assert.rejects(lstat(store.nativePath(first.records[0]!)), { code: "ENOENT" });
 	assert.deepEqual(await store.list(owner), [], "no unusable handle stays reserved");
 	await assert.rejects(store.load(first.records[0]!.handle, owner));
-	// The same call identity now admits fresh work instead of reporting an unknown outcome.
 	const retried = await store.allocate(owner, "call-identity", tasks);
 	assert.equal(retried.fresh, true);
 	assert.equal(retried.records[0]!.task.id, tasks[0]!.id);
 
-	// A reservation that already accepted an episode is evidence, not a releasable placeholder.
 	const accepted = await store.allocate(owner, "accepted", tasks);
 	await store.withSession(accepted.records[0]!.handle, owner, async record => {
 		record.episode = 1; record.state = "idle"; record.requests.push({ id: fingerprint(["accepted", record.handle]), fingerprint: fingerprint(["episode"]), episode: 1, state: "complete" });

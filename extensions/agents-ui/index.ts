@@ -62,7 +62,6 @@ interface OwnerState {
 
 const REPAINT_MS = 250;
 const FALLBACK_TERMINAL_COLUMNS = 80;
-/** Bounded wait for the core session-view reply before the panel says unavailable. */
 export const CORE_VIEW_TIMEOUT_MS = 4_000;
 const CORE_VIEW_WATCH_MS = 250;
 
@@ -446,7 +445,6 @@ export function createAgentsUiExtension(
 					requestSessionView(0);
 				}
 			} catch {
-				/* Display-only observer. */
 			}
 		});
 
@@ -490,7 +488,6 @@ export function createAgentsUiExtension(
 					requestSessionView(sessionView.reply?.history.page ?? 0);
 				}
 			} catch {
-				/* Display-only consumer. */
 			}
 		});
 

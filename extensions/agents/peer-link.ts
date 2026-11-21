@@ -81,7 +81,6 @@ export function startPeerLink(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process
 		for (const entry of ctx.sessionManager.getEntries() as Array<{ type?: string; customType?: string; details?: { id?: unknown } }>) {
 			if (entry.type === "custom_message" && entry.customType === AGENT_MESSAGE_TYPE && typeof entry.details?.id === "string") held.add(entry.details.id);
 		}
-		// Attach only once this session's held messages are known.
 		attach();
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {

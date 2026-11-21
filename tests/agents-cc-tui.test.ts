@@ -52,7 +52,6 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	const waitFor = async (predicate: () => Promise<boolean> | boolean, label: string) => {
 		const deadline = Date.now() + 15_000;
 		while (Date.now() < deadline) { if (await predicate()) return; if (child.exitCode !== null) break; await delay(50); }
-		// Save bounded synthetic-only diagnostics outside the repository; never dump user state.
 		await writeFile(join(tmpdir(), `observer-cc-${mode}-failure.log`), output);
 		assert.fail(`CC ${mode}: ${label}; synthetic terminal log retained in tmp`);
 	};
@@ -76,7 +75,7 @@ for (const mode of ["on", "compact"]) test(`installed Pi and real CC ${mode}: fl
 	}, "retained detail omitted identity, route or usage");
 	assert.ok(output.includes("1 live"));
 	assert.equal(output.includes("CC_HIDDEN_LIVE_MARKER"), false, "CC must really replace/hide the partial tool card in this oracle");
-	child.stdin.write("\u001b\u0006"); // Alt+Ctrl+F toggles the observer closed.
+	child.stdin.write("\u001b\u0006");
 	await delay(200); child.stdin.write("/quit\r");
 	await waitFor(() => child.exitCode !== null, "host did not shut down after toggling the observer closed");
 	assert.equal(await exited, 0);

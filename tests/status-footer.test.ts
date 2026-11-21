@@ -156,7 +156,6 @@ const tui = {
 	requestRender: () => {},
 } as unknown as TUI;
 
-/** The real footer component over a live session entry list, rendered as Pi would. */
 async function installedFooter(entries: readonly unknown[], models?: CacheReadPriceSource): Promise<Component> {
 	const pi = new FakePi();
 	statusFooter(pi as unknown as ExtensionAPI);
@@ -190,7 +189,6 @@ test("the session lane shows the prompt-weighted mean CH and no separate latest-
 		footerAssistant({ input: 50, output: 5, cacheRead: 950, total: 0.02 }),
 	];
 	const line = stripAnsi(renderFooterLines({ ...baseRebillInput(), usage: collectLaneTotals(entries) }, 200, identityTheme)[0] ?? "");
-	// 1350 / 1500 over assistant prompts; the latest prompt's 95.0% belongs to the working row.
 	assert.ok(line.includes(" | ↑160 ↓29 R1.4k CH90.0% $0.130 | "), line);
 	assert.equal(line.includes("x\u0304"), false);
 });
@@ -206,7 +204,6 @@ function footerAssistant(usage: { input: number; output: number; cacheRead: numb
 }
 
 function rebillAssistant(input: number, cacheRead: number, cacheWrite = 0, model = "m1") {
-	// $3/M input, $0.30/M cache read, $3.75/M cache write.
 	const cost = { input: input * 3e-6, output: 0, cacheRead: cacheRead * 3e-7, cacheWrite: cacheWrite * 3.75e-6 };
 	return {
 		type: "message",
@@ -223,7 +220,6 @@ test("the installed footer's RB equals Pi's /session Cache Re-billed for the sam
 		rebillAssistant(12_000, 0),
 		rebillAssistant(200, 11_904),
 		rebillAssistant(9_000, 11_000),
-		// Model switch with nothing read: the registry cache-read price applies.
 		rebillAssistant(20_000, 0, 0, "m2"),
 		{ type: "compaction", usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
 		rebillAssistant(30_000, 0, 6_000),
@@ -268,7 +264,6 @@ test("renders RB after cost, then the session timing segment", () => {
 		stripAnsi(lines[0] ?? ""),
 	);
 
-	// Re-bill dollars below the display floor (subscription or unknown price) are omitted; tokens stay.
 	const subscription = renderFooterLines(
 		{
 			...baseRebillInput(),
@@ -292,7 +287,6 @@ test("footer metrics change only when the request's assistant message is persist
 	const footer = await installedFooter(entries);
 	const settled = stripAnsi(footer.render(240)[0] ?? "");
 	assert.ok(settled.includes(" | ↑1.0k ↓300 CH0.0% $0.010 | ✻ 2s TTFT 1.5s 30 tok/s | "), settled);
-	// work-timing appended its timing entry; Pi has not persisted the assistant message yet.
 	entries.push(timingEntry(12, 6_000, 4_500));
 	assert.equal(stripAnsi(footer.render(240)[0] ?? ""), settled);
 	entries.push(footerAssistant({ input: 1_000, output: 100, cacheRead: 1_000, total: 0.02 }, { timestamp: 12, durationMs: 10_000 }));
@@ -455,7 +449,6 @@ test("wraps field by field when a single line cannot fit", () => {
 	const wrapped = renderFooterLines(input, 100, identityTheme);
 	assert.equal(wrapped.length, 2);
 	const [row1 = "", row2 = ""] = wrapped.map((line) => stripAnsi(line));
-	// The session id flows up into row 1's remaining whitespace (flat greedy fill).
 	assert.equal(
 		row1,
 		"Grok 4.6 high (xai sub) | /workspace/project (main) | 01a08555-9ee8-72b3-9af1-481c7d4b58e1",
@@ -466,7 +459,6 @@ test("wraps field by field when a single line cannot fit", () => {
 	);
 	for (const line of wrapped) assert.ok(visibleWidth(line) <= 100);
 
-	// Below that fit, the uuid wraps to its own row and metrics follow on the next.
 	const shrunk = renderFooterLines(input, 88, identityTheme);
 	assert.equal(shrunk.length, 3);
 	for (const line of shrunk) assert.ok(visibleWidth(line) <= 88);
@@ -519,7 +511,6 @@ test("classifies coding-plan api-key providers as subscriptions", () => {
 	assert.equal(isUsingSubscription(ctx, { provider: "zai-coding-cn" } as ExtensionContext["model"]), true);
 	assert.equal(isUsingSubscription(ctx, { provider: "kimi-coding" } as ExtensionContext["model"]), true);
 	assert.equal(isUsingSubscription(ctx, { provider: "deepseek" } as ExtensionContext["model"]), false);
-	// OAuth providers keep the registry-flag path.
 	const oauthCtx = {
 		modelRegistry: {
 			isUsingOAuth: () => true,

@@ -31,7 +31,6 @@ test("field diagnostics distinguish missing, unexpected and invalid fields witho
 		for (const field of ["missingFields", "unexpectedFields", "invalidFields"] as const) assert.deepEqual(error[field], field === kind ? fields : undefined);
 		assert.doesNotMatch(JSON.stringify(error), /private-.*-value/);
 	}
-	// The failed join is repaired by removing taskId, not by replacing its value.
 	assert.deepEqual(parseSessionRequest({ action: "join", runId: "run" }), { action: "join", runId: "run" });
 	assert.equal(parseSessionRequest({ action: "cancel", runId: "run", taskId: "worker" }).taskId, "worker");
 });
@@ -48,7 +47,6 @@ test("the internal session engine parses strict disjoint action fields without c
 	assert.deepEqual(parseSessionRequest({ action: "inspect" }), { action: "inspect" });
 	assert.equal(parseSessionRequest({ action: "close", handle: "h", expectedEpisode: 1 }).disposition, undefined);
 	assert.throws(() => parseSessionRequest({ action: "create" }), /missing_create_fields/);
-	// A caller-invented replay token is never part of the operation shape.
 	assert.throws(() => parseSessionRequest({ action: "create", requestId: "r", tasks: [{ id: "a", role: "explorer", objective: "work", access: [{ permission: "read", scope: "/tmp/scope" }] }] }), /invalid_session_request/);
 	assert.throws(() => parseSessionRequest({ action: "continue", episodes: [{ handle: "h", expectedEpisode: 1, message: "go", requestId: "r" }] }), /invalid_session_request/);
 	assert.throws(() => parseSessionRequest({ action: "inspect", tasks: [] }), /invalid_session_request/);

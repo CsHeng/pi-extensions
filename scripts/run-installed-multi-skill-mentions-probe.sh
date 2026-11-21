@@ -28,7 +28,6 @@ description: Isolated beta probe skill.
 Beta probe body.
 EOF
 
-# Counts only; this probe reports the grouped envelope shape, not prompt text.
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 

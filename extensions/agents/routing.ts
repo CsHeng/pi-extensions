@@ -16,7 +16,6 @@ export interface RouteModel {
 	thinkingLevelMap?: Partial<Record<string, string | null>>;
 }
 
-/** Full public catalogue and authenticated availability, independent of the UI cycling subset. */
 export interface RouteRegistry {
 	getAll(): readonly RouteModel[];
 	getAvailable(): readonly RouteModel[];
@@ -39,7 +38,6 @@ export type RouteResolution =
 	| { ok: true; route: EffectiveRoute }
 	| { ok: false; error: TaskError };
 
-/** Share route selection with capacity admission, including for explicit model overrides. */
 export function resolveRoleRoute(
 	role: string,
 	config: EffectiveAgentConfig,

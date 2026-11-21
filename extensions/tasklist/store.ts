@@ -7,7 +7,6 @@ import { unfinished } from "./state.ts";
 
 export interface TasklistContext { signal?: AbortSignal }
 
-/** Private branch entry key. */
 export const TASKLIST_STORAGE_TYPE = "tasklist.state";
 
 const textValue = (value: unknown): string => value === undefined ? "unknown" : String(value).slice(0, 24);
@@ -17,7 +16,6 @@ function unsupported(schemaVersion: unknown, invalid = false): string {
   " and was left unchanged; no items were migrated, completed or removed. Use set to record the current task list.";
 }
 
-/** Read a current written snapshot. Never mutates the stored entry. */
 export function normalizeTasklistSnapshot(data: unknown): TasklistState | undefined {
  if (!data || typeof data !== "object") return undefined;
  const payload = data as { schemaVersion?: unknown; state?: unknown };
@@ -49,7 +47,6 @@ export function createTasklistStore(append: (type: string, data: unknown) => voi
      if (unavailable) return { ok: false, message: unavailable, view: view() };
      return { ok: true, view: view() };
     }
-    // Cancellation belongs to this invocation, not a previous provider/wake failure.
     if (ctx.signal?.aborted) return { ok: false, error: { code: "call_cancelled" as const },
      message: "This task list update was cancelled; no state changed. Retry only with an active invocation, not the same cancelled call. Tracking failure does not require repeating completed business work.", view: view() };
     let next: TasklistState;
@@ -96,7 +93,6 @@ export function createTasklistStore(append: (type: string, data: unknown) => voi
     } catch {
      state = undefined;
      const schemaVersion = (newest.data as { schemaVersion?: unknown } | undefined)?.schemaVersion;
-     // A known version with an unusable payload is invalid; anything else is simply unsupported.
      unavailable = unsupported(schemaVersion, schemaVersion === TASKLIST_STATE_VERSION);
     }
    }

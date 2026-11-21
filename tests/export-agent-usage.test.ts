@@ -70,7 +70,7 @@ test("legacy usage CLI defaults to dry-run, uses Pi project/timestamp names and 
 	const output = { type: "message", id: "abcd1002", parentId: "abcd1001", timestamp: later,
 		message: { role: "toolResult", content: "SYNTHETIC_SECRET", usage: { input: 900 } } };
 	const a = assistant("abcd1001", user.id, { ...recorded, privatePrompt: "SYNTHETIC_SECRET", cost: { ...recorded.cost, apiKey: "SYNTHETIC_SECRET" } });
-	const b = assistant("abcd1003", output.id); // A tool result between two kept entries disappears from the usage chain.
+	const b = assistant("abcd1003", output.id);
 	const first = await f.source({ handle: "currentPrivate", entries: [user, a, output, b] });
 	const oldest = await f.source({ handle: `session_${thirdId}`, source: "subagent-managed-sessions", version: 3, id: otherId, entries: [assistant("abcd2000")] });
 
@@ -120,7 +120,6 @@ test("independent requests with the same short native ID stay distinct even for 
 	assert.equal(result.status, 0); assert.equal(result.report.writtenRows, 2);
 	const rows = await Promise.all([childId, otherId].map(async id => JSON.parse((await readFile(f.target(id), "utf8")).split("\n")[1]!)));
 	assert.equal(new Set(rows.map(row => row.id)).size, 2); assert.ok(rows.every(row => row.nativeEntryId === "abcd1001"));
-	// A copied projection under a new header still claims the source entry and timestamp.
 	await rm(f.target(otherId));
 	await put(join(f.sessions, "--forked--", "copy.jsonl"), jsonl([header(thirdId), rows[1]]));
 	const again = f.run(true);

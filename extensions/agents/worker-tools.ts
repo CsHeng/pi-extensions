@@ -35,7 +35,6 @@ export interface CommandObservation {
 export interface WorkerToolsOptions {
 	cwd: string;
 	scratch: string;
-	/** Task environment, not an OS security boundary. Pi authentication stays with Pi. */
 	env?: NodeJS.ProcessEnv;
 	onCommand?: (value: CommandObservation & { toolCallId: string | null }) => void;
 }
@@ -120,7 +119,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 					throw error;
 				} finally {
 					observation.endMs = unsettled ? null : performance.now() - started;
-					try { options.onCommand?.({ ...observation, toolCallId: activeToolCallId }); } catch { /* Optional metadata. */ }
+					try { options.onCommand?.({ ...observation, toolCallId: activeToolCallId }); } catch {}
 				}
 			} },
 		}),
@@ -211,9 +210,9 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 async function requireExistingSearchTool(name: "rg" | "fd"): Promise<void> {
 	// Pi's documented managed-bin location takes priority over PATH, including
 	// its supported Debian fdfind spelling. Never call ensureTool to provision.
-	try { await access(join(getAgentDir(), "bin", name), constants.X_OK); return; } catch { /* try existing PATH binaries */ }
+	try { await access(join(getAgentDir(), "bin", name), constants.X_OK); return; } catch {}
 	for (const executable of name === "fd" ? ["fd", "fdfind"] : ["rg"]) {
-		try { await promisify(execFile)(executable, ["--version"], { timeout: 5_000 }); return; } catch { /* try the next supported spelling */ }
+		try { await promisify(execFile)(executable, ["--version"], { timeout: 5_000 }); return; } catch {}
 	}
 	throw new Error("worker_tool_unavailable");
 }
@@ -233,11 +232,9 @@ function configuredToolNames(pi: Pick<ExtensionAPI, "getAllTools">): ReadonlySet
 	return names;
 }
 
-/** Explicitly loaded only by a managed worker print process, never the parent. */
 export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<void> {
 	if (process.env[CHILD_MARKER_ENV] !== "1") return;
 	const loaded = await loadCapability();
-	// Messages from the invoking hub enter this run as custom messages; agent operations go back to it.
 	const link = startPeerLink(pi);
 	const may = loaded.manifest?.may ?? DEFAULT_CAPABILITIES;
 	const peerTools = link ? peerToolDefinitions(async (op, args, signal) => {
@@ -280,13 +277,12 @@ export default async function managedWorkerExtension(pi: ExtensionAPI): Promise<
 			// already existed as a builtin (grep/find/ls). Activate the owned tools explicitly.
 			pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ownedTools])]);
 			fatal = false;
-		} catch { /* The startup entry records unavailable state without a fallback. */ }
+		} catch {}
 	};
 	pi.on("before_agent_start", async event => {
 		if (!initialized) { initialized = true; await initialize(); }
 		marker("ready", !fatal);
 		if (!loaded.manifest) return;
-		// Preserve Pi's native append-file selection and system prompt construction.
 		event.systemPromptOptions.appendSystemPrompt = [event.systemPromptOptions.appendSystemPrompt, getManagedRole(loaded.manifest.role, loaded.manifest.grants.some(grant => grant.permission === "write"), loaded.manifest.rolePrompt).systemPrompt].filter(Boolean).join("\n\n");
 		if (loaded.manifest.guidance) event.systemPromptOptions.contextFiles = loaded.manifest.guidance.contextFiles;
 	});

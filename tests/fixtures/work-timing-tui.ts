@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Offline stimulus and writer trace for the real host; never uses provider I/O. */
 export default function workTimingTuiFixture(pi: ExtensionAPI): void {
 	const writes: Array<{ at: number; text: string | undefined }> = [];
 	let turn = 0;

@@ -20,11 +20,9 @@ import {
 	type EffectiveRoute,
 	type TaskResult,
 } from "./contracts.ts";
-/** Native history evidence supplied by the managed store; not a one-shot allocator. */
 export interface DiagnosticTaskSession {
 	path: string;
 	ref: string;
-	/** Validated by the managed store. A linked child owns its header-only starting point. */
 	ownerSessionId?: string;
 	removeUnused(): Promise<void>;
 }
@@ -84,7 +82,6 @@ export interface ChildRunOptions {
 	onActivity?(activity: Readonly<ChildActivity>): void;
 	onChildStarted?(): void;
 	onChildSettled?(): void;
-	/** Live message link to the invoking hub for this episode. */
 	link?: PeerLinkBinding;
 }
 
@@ -126,7 +123,6 @@ function childEnvironment(source: NodeJS.ProcessEnv, capabilityPath: string, man
 }
 
 export interface PiArgsOptions {
-	/** Absolute path to the prepared task prompt included as @file. */
 	taskPromptPath: string;
 	sessionPath: string;
 	guardExtensionPath: string;
@@ -136,15 +132,6 @@ export interface PiArgsOptions {
 	approveProject: boolean;
 }
 
-/**
- * Native print/JSON child arguments.
- *
- * The child is a normal Pi process: discovered/configured/built-in extensions and MCP
- * servers load, so the effective configured host catalog decides tool availability.
- * The explicit guard extension still loads and enforces the capability manifest. An
- * explicit read-only grant removes the mutating builtins from the declared catalog.
- * The selected model/thinking invocation is preserved and never rewritten.
- */
 export function buildPiArgs(options: PiArgsOptions): string[] {
 	const write = options.capability.grants.some((grant) => grant.permission === "write");
 	return [

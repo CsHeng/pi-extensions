@@ -4,7 +4,6 @@ import { PEER_TOOLS, PEER_TOOL_NAMES } from "./peer-protocol.ts";
 import { AGENT_EXECUTION_EVENT } from "../shared/agent-execution.ts";
 import type { ObserverTask } from "./observer-events.ts";
 
-/** Resolve only the selected handles under the current owner and branch. */
 export interface RecoveryDiscoverySource {
 	resolveRecoveryHandles(ctx: ExtensionContext, handles: readonly string[]): Promise<SessionView[]>;
 	liveObserverTasks(): ObserverTask[];
@@ -38,7 +37,6 @@ function hints(ctx: ExtensionContext, live: readonly ObserverTask[]): { handles:
 		if (message?.role === "toolResult" && PEER_TOOLS.includes(message.toolName)) {
 			if (typeof message.toolCallId === "string") receipts.add(message.toolCallId); else incomplete = true;
 			payload = message.details;
-			// A refused operation carries no agents.
 			if (payload?.schemaVersion === MANAGED_SESSION_VERSION && payload.error) continue;
 			if (payload?.schemaVersion !== MANAGED_SESSION_VERSION || !Array.isArray(payload.sessions)) { if (!message.isError) incomplete = true; continue; }
 		} else if (entry.type === "custom" && entry.customType === AGENT_EXECUTION_EVENT) {
@@ -65,7 +63,6 @@ function describe(view: SessionView, live: readonly ObserverTask[]): string {
 	return `- ${view.label ?? "unnamed agent"} (${view.role}): ${status}`;
 }
 
-/** Register inside registerContinuationTool after constructing its service. No wake or mutation is performed. */
 export function registerRecoveryDiscovery(pi: ExtensionAPI, service: RecoveryDiscoverySource): void {
 	let pending = false;
 	let source: "human" | "extension" | "mixed" | undefined;

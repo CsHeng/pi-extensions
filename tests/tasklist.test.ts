@@ -49,7 +49,6 @@ test("cancel edits item data only, keeps completed work and stays distinct from 
 	assert.equal(f.store.mutate({ operation: "cancel" }).ok, true);
 	assert.deepEqual(f.store.current()!.tasks.map(task => task.status), ["done", "cancelled"]);
 	assert.equal(taskSummary(f.store.current()!), "1 done · 1 cancelled");
-	// Nothing is runtime-controlled: cancelled items remain ordinary editable data.
 	assert.equal(f.store.mutate({ operation: "update", tasks: [{ id: "b", status: "todo" }] }).ok, true);
 	assert.equal(f.store.current()!.tasks[1]!.status, "todo");
 	const quiet = f.store.current()!.revision;

@@ -44,7 +44,6 @@ for (const installed of [false, true]) test(`native ${installed ? "installed" : 
 		assert.equal(result.entries.some((entry) => entry.customType === "agents.managed-session-index"), false);
 		if (mode === "reload") assert.equal(result.events.filter((event) => event.type === "agent_start").length, 1);
 		assert.equal(result.parsed.reportComplete, true, `${mode}: ${eventFacts(result.stdout)}`);
-		// No injected session index under any input, recovery or compaction phase.
 		assert.equal(result.parsed.output, "index=0;private=0", `${mode} ${result.stderr}`);
 		if (mode === "seed") visible = true;
 		if (mode === "manual") {
@@ -75,7 +74,6 @@ for (const installed of [false, true]) for (const compaction of ["threshold", "o
 	const f = await fixture(t, installed, true);
 	for (const phase of ["seed", "trigger", "reopen"]) {
 		const result = await f.run(phase === "seed" ? "seed" : "index", phase === "seed" ? "seed ".repeat(400) : "next", phase === "trigger" ? { PI_EXTENSIONS_NATIVE_COMPACTION_MODE: compaction } : {});
-		// Whatever the host does with a synthetic overflow turn, the extension never projects a session index.
 		assert.equal(result.parsed.output.includes("index=1"), false, `${phase} ${JSON.stringify(result.parsed).slice(0, 600)}`);
 		if (compaction === "threshold" || phase !== "trigger") {
 			assert.equal(result.parsed.reportComplete, true, `${phase} ${JSON.stringify(result.parsed).slice(0, 600)}`);

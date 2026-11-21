@@ -13,7 +13,6 @@ import { NOTICE_DELIVERY_CHANGED, NOTICE_DELIVERY_REQUEST, type NoticeDeliveryRe
 export type YieldReason = "steer" | "result";
 
 export interface YieldWindow {
-	/** Aborts once the main loop should regain control. */
 	readonly signal: AbortSignal;
 	readonly reason: YieldReason | undefined;
 	close(): void;
@@ -95,7 +94,6 @@ export function createMainLoopYield(pi: ExtensionAPI): MainLoopYield {
 	};
 }
 
-/** One model-facing sentence for a window that returned early. */
 export function yieldNote(reason: YieldReason | undefined): string | undefined {
 	if (reason === "steer") return "This call returned early because a user message is waiting; the execution continues.";
 	if (reason === "result") return "This call returned early because another execution notice is ready; the execution continues.";

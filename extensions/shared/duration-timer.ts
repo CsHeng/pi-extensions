@@ -60,7 +60,6 @@ export function durationMsFromSeconds(value: number | undefined, fallbackSeconds
 	return requireDurationMs(ms);
 }
 
-/** Absolute timestamp for a duration that must later be rendered as a Date. */
 export function timestampAfter(nowMs: number, durationMs: number): number {
 	const duration = requireDurationMs(durationMs);
 	if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {

@@ -5,7 +5,6 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Transcri
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { EXECUTION_FACTS_EVENT, NOTICE_ACK, NOTICE_TYPE, EXECUTION_FACTS_REQUEST, type ProducerFacts } from "../../../extensions/shared/execution-facts.ts";
 
-/** Installed CLI, local synthetic provider, native transcript/queues; no network or user state. */
 export default function notificationContinuity(pi: ExtensionAPI): void {
 	const resume = process.env.NOTIFICATION_FIXTURE_PHASE === "resume";
 	const facts: ProducerFacts = { version: 1, producer: "async-bash", availability: "ready", sessionId: null, branchAnchor: null, generation: "1", executions: [] };

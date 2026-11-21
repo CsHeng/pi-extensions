@@ -11,7 +11,6 @@ import { installedHostEnvironment } from "../scripts/installed-host-env.ts";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const hostEnv = installedHostEnvironment();
 
-/** Real installed Pi lifecycle: the parent's internal custom wake must not reach the hook. */
 test("installed Pi: only a user run reaches the Bark hook, not an internal custom wake", { timeout: 30_000 }, async (t) => {
 	if (spawnSync("pi", ["--version"], { env: hostEnv, encoding: "utf8", timeout: 5000 }).status !== 0) {
 		t.skip("requires installed Pi; no installation performed"); return;
@@ -75,7 +74,6 @@ printf '\\n' >> "$HOME/bark-events.jsonl"
 	}
 	assert.equal(exitCode, 0, "offline installed-host Bark fixture must settle and shut down cleanly");
 	assert.equal(extensionError, false);
-	// Both runs ran: the RPC user run and the idle custom-triggered wake.
 	assert.deepEqual(JSON.parse(await readFile(join(agent, "agent-bark-proof.json"), "utf8")), { calls: 2, settled: 2, starts: ["user", "custom"] });
 	const barkEvents = (await readFile(join(base, "bark-events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
 	assert.deepEqual(barkEvents.map(event => event.hook_event_name), ["UserPromptSubmit", "Stop"]);

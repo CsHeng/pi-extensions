@@ -7,7 +7,6 @@ import type { AgentCapabilities, WorkspaceMode } from "./contracts.ts";
 
 /** Environment variable carrying `{ socket, token }` for one child episode; removed from the child env after use. */
 export const PEER_LINK_ENV = "PI_EXTENSIONS_AGENT_LINK";
-/** Custom message type for agent messages and automatic turn receipts. */
 export const AGENT_MESSAGE_TYPE = "agents.message";
 export const PEER_MESSAGE_ENTRY = "agents.message";
 export const PEER_TURN_ENTRY = "agents.turn";
@@ -34,7 +33,6 @@ export const DEFAULT_CAPABILITIES: AgentCapabilities = Object.freeze({ message: 
 /** `wake` marks a turn started for waiting messages: it must not run without them. */
 export interface PeerLinkBinding { socket: string; token: string; wake?: boolean }
 
-/** Hub -> child frames. */
 export type HubFrame =
 	| { type: "welcome"; name: string }
 	/** Everything waiting when the link attached has been delivered; the turn's first model call may start. */
@@ -43,7 +41,6 @@ export type HubFrame =
 	| { type: "response"; id: string; ok: true; result: unknown }
 	| { type: "response"; id: string; ok: false; error: { code: string; detail?: string } };
 
-/** Child -> hub frames. */
 export type ChildFrame =
 	| { type: "hello"; token: string }
 	| { type: "accepted"; id: string }

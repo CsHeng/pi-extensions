@@ -127,7 +127,6 @@ test("Jobs inspection selects by identity and returns from detail", async () => 
 	records.unshift(saved);
 	component!.handleInput("\u001b");
 	assert.match(detail(), /› .*second/);
-	// If this exact record disappears between paint and Enter, do not open the replacement row.
 	records.shift(); component!.handleInput("\r");
 	assert.doesNotMatch(detail(), /Job detail|Command: first/);
 	records.unshift(saved);
@@ -231,7 +230,6 @@ test("inline detail resolves on close and lifecycle changes revoke old owned fac
 	assert.ok(redraws > beforeRedraw);
 	h.events.emit(JOBS_VIEW_RESET_EVENT, { version: 1, generation: "2", ownerSessionId: "session-a" });
 	await opened; assert.equal(finished, true);
-	// A new bound branch may show only its own reply; rebinding closes its old detail.
 	h.fire("session_start"); reply();
 	const branchDetail = contribution!.openItem!("owned") as Promise<void>;
 	leaf = "leaf-b"; h.fire("session_tree"); await branchDetail;
@@ -354,7 +352,6 @@ test("Bash jobs excludes foreground completions and keeps background work while 
 	assert.equal(formatJobDuration(230), "230ms");
 	const rendered = jobRows({ records: [record({ executionId: "exec_hidden-id", status: "exited", commandPreview: "mise exec -- " + "command ".repeat(30) })] }, 80, 4, 10_000).join("\n");
 	assert.match(rendered, /✓ mise exec/);
-	// The preview clips before the duration column, which stays visible.
 	assert.match(rendered.replace(/\u001b\[[0-9;]*m/g, ""), /… +\d+s$/);
 	assert.doesNotMatch(rendered, /hidden-id/);
 });
@@ -461,7 +458,7 @@ test("Job detail reads only the selected job's live output and retains the final
 		const view = await factory({ terminal: { rows: 36 }, requestRender() {} } as never, { fg: (_c: string, s: string) => s } as never, {} as never, () => {});
 		const screen = () => view.render(90).join("\n");
 		assert.doesNotMatch(screen(), /unselected output/);
-		view.handleInput!("\r"); // Running "second" sorts before the finished job.
+		view.handleInput!("\r");
 		assert.match(screen(), /Command: second/);
 		assert.match(screen(), /\(no output yet\)/);
 		const beforeOutput = latest;
@@ -653,7 +650,6 @@ test("collapsed and expanded rows keep exact facts and freeze terminal duration"
 	const folded = jobRows({ records }, 80, 4, now, undefined, { folded: true });
 	assert.equal(folded.length, 1);
 	assert.match(folded[0]!, /^▸ Jobs \(3\/4 done\) 1 running$/);
-	// Finished failures are row facts; the heading warns only about current conditions.
 	assert.doesNotMatch(folded[0]!, /failed|interrupted|!/);
 	const expanded = jobRows({ records }, 100, 8, now).join("\n");
 	assert.match(expanded, /◐ sleep 12m 3s/);

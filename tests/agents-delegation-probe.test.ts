@@ -29,11 +29,6 @@ import {
 	type ProbeRunResult,
 } from "../scripts/run-delegation-probe.ts";
 
-/*
- * The lane measures the parent's call decision with a mock executor; these
- * offline checks cover its wiring so a drifting fixture or prompt set fails
- * here instead of silently producing incomparable evidence.
- */
 
 test("probe variants reference the production parent-visible surface instead of copied text", () => {
 	const production = probeShapeDefinition("production");

@@ -57,7 +57,6 @@ export interface ConfigLoadResult {
 export interface ConfigSourceSnapshot {
 	packageBytes: Buffer;
 	userBytes?: Buffer;
-	/** Selected filename only, never raw routes or an agent-directory path. */
 	userFile?: typeof ROUTE_CONFIG_FILE;
 }
 

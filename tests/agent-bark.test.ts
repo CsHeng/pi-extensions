@@ -147,8 +147,6 @@ test("a completed user run does not leak eligibility into the next custom run", 
 	await state.settle();
 	assert.deepEqual((await state.hookEvents()).map(event => event.hook_event_name), ["UserPromptSubmit", "Stop"]);
 
-	// The next run is internal. Its start must reclassify the run, so neither its start
-	// nor its settlement may reuse the previous user run's eligibility.
 	state.entries.push({ type: "message", message: {
 		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "agent wake" }],
 	} });
@@ -162,8 +160,6 @@ test("an unsettled user run does not leak its eligibility into a later custom ru
 	await state.start();
 	assert.deepEqual((await state.hookEvents()).map(event => event.hook_event_name), ["UserPromptSubmit"]);
 
-	// The user run never settles (for example the session was interrupted). The next run is
-	// internal, and its start must reclassify before its settlement is considered.
 	state.entries.push({ type: "message", message: {
 		role: "assistant", stopReason: "stop", content: [{ type: "text", text: "agent wake" }],
 	} });
@@ -213,8 +209,6 @@ test("an absent user-owned notification hook does not fail the main agent", asyn
 	await state.settle();
 });
 
-// Interactive hosts: one notification per external interaction, at the same boundary that
-// ends work timing, never at an intermediate main-run settlement.
 interface Producer { facts: ProducerFacts[]; delivery: NoticeDeliverySnapshot }
 function installProducer(bus: FakeEvents, producer: Producer): Producer {
 	bus.on(EXECUTION_FACTS_REQUEST, raw => { for (const facts of producer.facts) (raw as { accept: (facts: ProducerFacts) => void }).accept(facts); });
@@ -250,14 +244,12 @@ for (const mode of ["tui", "rpc"] as const) {
 		await state.settle();
 		assert.deepEqual((await state.hookEvents()).map(event => event.hook_event_name), ["UserPromptSubmit"]);
 
-		// The job ends; its result is pending delivery, so the interaction is still open.
 		producer.facts = [shell("terminal")];
 		producer.delivery = delivery([{ producer: "async-bash", id: "exec-1", toolCallId: "call-bash" }]);
 		state.bus.emit(EXECUTION_FACTS_EVENT, {});
 		await drain();
 		assert.deepEqual((await state.hookEvents()).map(event => event.hook_event_name), ["UserPromptSubmit"]);
 
-		// The result wake is a custom run inside the same interaction.
 		await state.start(CUSTOM_START);
 		producer.delivery = delivery();
 		reply(state.entries, "All work finished.");

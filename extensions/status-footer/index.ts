@@ -41,7 +41,6 @@ export interface FooterRenderInput {
 	contextWindow: number;
 	contextPercent: number | null;
 	sessionId: string;
-	/** Session-lane aggregate over every session entry. */
 	usage: LaneTotals;
 }
 
@@ -168,7 +167,6 @@ function cacheHitColor(percent: number): string {
 	return "#ff5f5f";
 }
 
-/** Session-lane usage fields, colored per field; `RB` reproduces Pi's /session "Cache Re-billed". */
 function fieldColor(field: MetricField): string {
 	switch (field.key) {
 		case "input":
@@ -192,7 +190,6 @@ function formatUsageSegment(usage: LaneTotals): string {
 	return usageMetricFields(usage).map((field) => hexFg(fieldColor(field), field.text)).join(" ");
 }
 
-/** `✻ TTFT tok/s` over the session; absent fields (no timing entries, no eligible request) are omitted. */
 function formatTimingSegment(usage: LaneTotals, theme: ThemeLike): string {
 	const text = timingMetricFields(usage).map((field) => field.text).join(" ");
 	return text ? theme.fg("muted", text) : "";
@@ -291,9 +288,6 @@ export function renderFooterLines(
 		.join(sep);
 	if (visibleWidth(joined) <= width) return [joined];
 
-	// Too narrow for one line: wrap field by field — each field flows onto the
-	// next row only when it no longer fits the remaining whitespace; no field
-	// is ever dropped.
 	return packRows(segments, width, theme);
 }
 

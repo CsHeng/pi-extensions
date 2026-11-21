@@ -18,7 +18,6 @@ test("episode proof requires the exact marker, native identity, stopped lifecycl
   const binding = { path, marker, episode: 1 };
   const proof = await prepareChildReceipt(binding, native, 0);
   assert.equal(await childProofSettled(binding, native, async () => true), false);
-  // This process group is live; it cannot certify settlement.
   await saveChildReceipt(proof, process.pid);
   await writeFile(native, event("ready") + event("stopped"));
   // process.pid need not be a group leader; use a known absent group below.

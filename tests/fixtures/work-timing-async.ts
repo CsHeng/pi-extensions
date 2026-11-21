@@ -10,7 +10,6 @@ import { EXECUTION_FACTS_EVENT, type ProducerFacts } from "../../extensions/shar
 import { WORK_TIMING_ENTRY_TYPE } from "../../extensions/work-timing/index.ts";
 import { observeExecutionQuiescence, readExecutionQuiescence } from "../../extensions/shared/execution-quiescence.ts";
 
-/** Real host/producers and a deterministic provider; the injected child performs no model I/O. */
 export default function timingAsyncFixture(pi: ExtensionAPI): void {
 	const agentDir = process.env.PI_CODING_AGENT_DIR!;
 	const gate = join(agentDir, "release-bash");
@@ -87,7 +86,6 @@ export default function timingAsyncFixture(pi: ExtensionAPI): void {
 			later(() => writeFile(gate, "go"), 350);
 			if (!notifications) later(releaseAgent, 650);
 		} else if (counts.length === 2 && !agentDone) {
-			// The Bash result must reach the model while the sibling is still running.
 			later(releaseAgent, 250);
 		}
 		if (notifications && bashDone && agentDone && bashSeen && agentSeen) finish();

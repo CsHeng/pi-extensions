@@ -112,7 +112,6 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	void command.handler("list", ctx);
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(overlayFlag, true);
-	// Opening the session-scoped overlay queries retained history through the core contract.
 	const requests = events.emitted.filter((entry: { name: string }) => entry.name === SESSION_VIEW_REQUEST_EVENT).map((entry: { data: unknown }) => entry.data as { version: number; requestId: string; page: number });
 	assert.equal(requests.length, 1);
 	assert.equal(requests[0]!.version, 5);

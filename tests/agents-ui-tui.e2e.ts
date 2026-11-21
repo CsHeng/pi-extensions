@@ -20,7 +20,7 @@ async function host(t: test.TestContext, history: boolean, panels = false, tuiMo
 	try { await access("/usr/bin/script"); } catch { t.skip("requires util-linux script; no installation performed"); return; }
 	const installedDirs = (process.env.PATH ?? "").split(":").filter(entry => entry.length > 0 && !entry.includes("node_modules/.bin"));
 	let installedPi = false;
-	for (const dir of installedDirs) { try { await access(join(dir, "pi"), constants.X_OK); installedPi = true; break; } catch { /* next PATH entry */ } }
+	for (const dir of installedDirs) { try { await access(join(dir, "pi"), constants.X_OK); installedPi = true; break; } catch {} }
 	if (!installedPi) { t.skip("no installed pi outside node_modules/.bin"); return; }
 	const base = await mkdtemp(join(tmpdir(), "observer-host-"));
 	const agent = join(base, "agent");
@@ -130,7 +130,6 @@ test("installed Pi fullscreen: three bottom sections expand independently withou
 		const text = (await f.frame()).lines.join("\n");
 		return text.includes("Task inline detail") && text.includes("Job inline detail") && text.includes("Fix focus");
 	}, "all three inline detail groups must coexist in the same physical frame");
-	// A slash command must still reach the editor: no list/overlay may have taken input focus.
 	f.child.stdin.write("/panels-update\r");
 	await f.waitFor(async () => (await f.frame()).lines.join("\n").includes("Task inline updated"), "header interaction took editor focus or refresh lost inline detail");
 	await check();
@@ -238,7 +237,6 @@ test("installed Pi regular mode: inline inspection is reachable without mouse in
 	f.child.stdin.write("\r"); await waitForLine(/Second fixture evidence/);
 	f.child.stdin.write("\u001b"); await f.waitFor(async () => !(await f.frame()).lines.some(line => line.includes("Esc back")), "detail remained open");
 	await waitForLine(/›.*Second fixture/);
-	// A new editor input is not discarded while leaving the inline list.
 	f.child.stdin.write("/quit\r");
 	await f.waitFor(() => f.child.exitCode !== null, "regular mode did not return input to chat");
 	assert.equal(await f.exited, 0);

@@ -1,9 +1,7 @@
-/** Owner-scoped read-only Tasks snapshot. Queries never mutate, remind, wake, or enter model context. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TasklistState, TasklistTask } from "./contracts.ts";
 import type { TasklistStore } from "./store.ts";
 
-/** Bumped because the published state shape lost list-level control fields. */
 export const TASKS_VIEW_VERSION = 2;
 export const TASKS_VIEW_REQUEST_EVENT = "tasklist.tasks-view.request";
 export const TASKS_VIEW_EVENT = "tasklist.tasks-view";

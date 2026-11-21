@@ -26,7 +26,6 @@ function assistantMessage(timestamp: string, input: number, cacheRead: number, p
 	});
 }
 
-/** Six requests: one rewrite break, one two-request provider stall, one unrelated rebill. */
 function packSessionText(day = "2026-01-01"): string {
 	const rows = [
 		[`${day}T00:00:00.000Z`, 12000, 0],

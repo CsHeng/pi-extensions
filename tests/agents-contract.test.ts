@@ -83,7 +83,6 @@ test("task schema preserves old task shapes and accepts exact ephemeral override
 		executionProfile: "balanced",
 		thinkingProfile: "standard",
 	}), true);
-	// The managed tool schema keeps the same closed batch shape.
 	assert.equal(Check(AgentSessionToolSchema, { ...createRequest([valid]), model: "some-model" }), false);
 	assert.equal(Check(AgentTaskSchema, { ...valid, model: "provider/model" }), true);
 	assert.equal(Check(AgentTaskSchema, { ...valid, model: "" }), false);

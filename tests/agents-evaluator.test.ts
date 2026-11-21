@@ -38,7 +38,6 @@ test("exact-session CLI consumes explicit null disposition without leaking paths
 
 type Row = Record<string, unknown>;
 
-/** Physical native session framing; tool-result rows are appended with a valid identifier lineage. */
 function physicalSession(rows: Row[], owner = "owner"): string {
 	return [
 		{ type: "session", version: 3, id: owner },
@@ -46,7 +45,6 @@ function physicalSession(rows: Row[], owner = "owner"): string {
 	].map((row) => JSON.stringify(row)).join("\n") + "\n";
 }
 
-/** A current peer tool; only schemaVersion 5 is interpreted by the current-only reducers. */
 function managedRow(schemaVersion: number | undefined, details: Record<string, unknown>): Row {
 	return { type: "message", message: { role: "toolResult", toolName: "invoke_agent", content: [{ type: "text", text: "managed" }],
 		details: { ...(schemaVersion === undefined ? {} : { schemaVersion }), ...details } } };

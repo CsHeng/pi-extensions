@@ -3,7 +3,6 @@ import { join } from "node:path";
 
 const RUNTIME_KEYS = ["PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "ProgramFiles", "ProgramFiles(x86)"] as const;
 
-/** Minimal process environment for synthetic child fixtures under an owning cleanup root. */
 export function syntheticSubprocessEnv(fixtureRoot: string, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
 	const home = overrides.HOME ?? join(fixtureRoot, "home");
 	const tmp = overrides.TMPDIR ?? join(fixtureRoot, "tmp");

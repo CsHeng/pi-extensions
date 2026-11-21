@@ -4,15 +4,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
-/**
- * Read-only cost and prompt-cache evaluator for persisted Pi sessions.
- *
- * It reconstructs Pi's own cache-waste metric (`Cache re-billed`) from session
- * usage, groups misses by rewrite and cache-stall signatures without proving
- * their cause, and values avoided context replays at the price the
- * owning request would have paid. It never writes session, settings, ledger, or
- * configuration files.
- */
 
 export const REPORT_VERSION = 2;
 export const DEFAULT_WINDOW_HOURS = 72;
@@ -159,7 +150,6 @@ function parseLine(line: string): Record<string, unknown> | undefined {
 	}
 }
 
-/** All assistant usage; ledger numbering retains its non-empty-content convention. */
 export function parseSessionText(text: string): SessionCall[] {
 	const calls: SessionCall[] = [];
 	let ledgerRequest = 0;
@@ -199,7 +189,6 @@ export function parseSessionText(text: string): SessionCall[] {
 	return calls;
 }
 
-/** Observation-pack ledger events. Malformed tails are ignored, never repaired. */
 export function parseLedgerText(text: string): LedgerEvent[] {
 	const events: LedgerEvent[] = [];
 	for (const line of lines(text)) {
@@ -239,7 +228,6 @@ export function priceKey(provider: string, model: string): string {
 	return `${provider}\u0000${model}`;
 }
 
-/** Per-model prices derived only from Pi's own recorded cost fields. */
 export function priceTable(calls: readonly SessionCall[]): Map<string, ModelPrice> {
 	const inputs = new Map<string, number[]>();
 	const cacheReads = new Map<string, number[]>();
@@ -277,10 +265,6 @@ export interface SummarizeOptions {
 	readonly missMinTokens: number;
 }
 
-/**
- * Reproduces Pi 0.85.1's cache metric across all providers. The noise floor is
- * exclusive; compaction and branch summaries reset the previous prompt.
- */
 export function summarizeSession(
 	input: SessionCostInput,
 	prices: ReadonlyMap<string, ModelPrice>,
@@ -332,8 +316,6 @@ export function summarizeSession(
 	const ledgerCalls = new Map(input.calls.filter((call) => call.ledgerRequest !== null).map((call) => [call.ledgerRequest, call]));
 	for (const event of input.ledger) {
 		if (event.event !== PLACEHOLDER) continue;
-		// Only the first placeholder per observation is a rewrite break; later
-		// events merely re-report the same stable placeholder for that request.
 		if (event.id && !packs.has(event.id)) {
 			packs.add(event.id);
 			if (event.request !== null) packRequests.add(event.request);
@@ -452,7 +434,6 @@ function sessionIdOf(filePath: string): string {
 	return parts[parts.length - 1] ?? name;
 }
 
-/** The standard Pi sessions tree is the only discovery root; Agents live below each project's agents/ directory. */
 function* sessionFiles(directory: string): Generator<string> {
 	let entries: Dirent[];
 	try { entries = readdirSync(directory, { withFileTypes: true }); } catch { return; }
@@ -484,7 +465,6 @@ export function scanAgentDir(options: ScanOptions): SessionSource[] {
 	return sources.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
 }
 
-/** Resolve one explicit session id or file path, ignoring the window. */
 export function resolveSessionSource(agentDir: string, selector: string): SessionSource | undefined {
 	const root = join(agentDir, "sessions");
 	const file = selector.endsWith(".jsonl") && existsSync(selector) ? resolve(selector)

@@ -6,10 +6,8 @@ import { extractObservationMetrics, type ObservationMetrics } from "./observatio
 import { extractManagedDispatch, ManagedDispatchCollector, type ManagedDispatchMetrics } from "./managed-dispatch.ts";
 import { PEER_TOOLS } from "../../../../extensions/agents/peer-protocol.ts";
 
-/** Metric-artifact schema. Independent of the collaboration/managed envelope version (currently 5). */
 const OUTPUT_SCHEMA_VERSION = 5;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/;
-/** Registered peer tools: only their current schema is interpreted by the current-only reducers; the retired `agent` tool is excluded. */
 const MANAGED_TOOL_NAMES = new Set<string>([...PEER_TOOLS, "agent"]);
 const MANAGED_SCHEMA_VERSION = 5;
 const MAX_WALK_DEPTH = 8;
@@ -19,10 +17,6 @@ const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
 const MAX_REPORT_BYTES = 4 * 1024 * 1024;
 
-/**
- * Current-version-only metric document. Unsupported envelopes are counted as exclusions. Current evidence lives exclusively in
- * the native/managed `observations` and in `managedDispatch`.
- */
 export interface SessionMetrics {
 	schemaVersion: typeof OUTPUT_SCHEMA_VERSION;
 	observations: ObservationMetrics;
@@ -32,11 +26,8 @@ export interface SessionMetrics {
 		selectionMode: "exact-session" | "current-epoch";
 		scannedSessions: number;
 		matchedSessions: number;
-		/** Supported current managed tool-result envelopes, counted once each. */
 		selectedRuns: number;
-		/** Unsupported one-shot or non-current managed tool-result envelopes, excluded before interpretation. */
 		excludedRuns: number;
-		/** Current managed evidence whose explicit epoch provenance could not be assigned. */
 		unavailableProvenanceRuns: number;
 		planEligibility: "unavailable";
 	};
@@ -83,10 +74,6 @@ export async function resolveSessionPath(input: string, sessionsRoot = join(home
 	return matches[0] as string;
 }
 
-/**
- * Shallow tool-result classification. Only the tool name and the envelope's own version are read;
- * no task, route, usage, timing or prose field is ever interpreted here.
- */
 function scanEnvelopes(text: string): { selected: number; excluded: number } {
 	let selected = 0;
 	let excluded = 0;
@@ -210,7 +197,6 @@ async function walkSessionFiles(root: string, files: string[], depth: number, st
 		const info = await lstat(path);
 		if (info.isSymbolicLink()) throw new Error("symlink_rejected");
 		if (info.isDirectory()) {
-			// Dispatch envelopes belong to parent sessions. Native child archives and one-time usage imports are accounting inputs.
 			if (entry.name !== "agents" || !/^--.*--$/.test(basename(root))) await walkSessionFiles(path, files, depth + 1, stats);
 		}
 		else if (info.isFile() && entry.name.endsWith(".jsonl")) {
@@ -242,7 +228,6 @@ export async function extractCurrentEpochMetrics(sessionsRoot: string, manifestP
 	const dispatch = managed.result();
 	return {
 		schemaVersion: OUTPUT_SCHEMA_VERSION,
-		// Native observations require an exact-session input; the epoch projection stays dispatch-only.
 		observations: extractObservationMetrics(""),
 		managedDispatch: dispatch,
 		source: {

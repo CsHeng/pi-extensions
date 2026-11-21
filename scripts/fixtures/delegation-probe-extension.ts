@@ -1,7 +1,3 @@
-// Delegation probe fixture: registers exactly one mock subagent tool whose
-// parent-visible surface is selected by environment variables, and launches no
-// child process. It exists only for the provider-gated delegation probe lane
-// (scripts/run-delegation-probe.ts) and is not part of the shipped package.
 import { Type, type TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AGGRESSIVE_DELEGATION_GUIDANCE, BASE_DELEGATION_GUIDANCE } from "./delegation-probe-guidance.ts";
@@ -47,7 +43,6 @@ export function parseProbeGuidance(value: string | undefined): ProbeGuidance {
 	return guidance;
 }
 
-/** Mirrors the production level mapping: off injects nothing, balanced the base text, aggressive adds the trigger. */
 export function probeGuidanceLines(guidance: ProbeGuidance): string[] {
 	if (guidance === "off") return [];
 	return guidance === "aggressive" ? [BASE_DELEGATION_GUIDANCE, AGGRESSIVE_DELEGATION_GUIDANCE] : [BASE_DELEGATION_GUIDANCE];
@@ -71,10 +66,9 @@ export function probeShapeDefinition(shape: ProbeShape): ProbeShapeDefinition {
 	return { name: AGENT_SESSION_TOOL_NAME, description: AGENT_TOOL_DESCRIPTION, promptSnippet: AGENT_TOOL_PROMPT_SNIPPET, promptGuidelines: [...AGENT_TOOL_PROMPT_GUIDELINES], parameters: AgentSessionToolSchema };
 }
 
-/** Lifecycle operations never request new task roles, even with invalid stray tasks. */
 export function probeRequestedTasks(params: Record<string, unknown>): unknown[] {
 	if (params.action !== undefined) return params.action === "create" && Array.isArray(params.tasks) ? params.tasks : [];
-	return [params]; // Flat and external Agent reference shapes.
+	return [params];
 }
 
 const receipt = (text: string) => ({ content: [{ type: "text" as const, text }], details: { probeFixture: true } });
@@ -87,7 +81,7 @@ export default function delegationProbe(pi: ExtensionAPI): void {
 		...definition,
 		label: "Agent sessions",
 		async execute(_id: string, params: Record<string, unknown>) {
-			if (shape === "production") parseSessionRequest(params); // Mirror field validation, never execute a lifecycle action.
+			if (shape === "production") parseSessionRequest(params);
 			const roles = probeRequestedTasks(params).map(value => { const task = value && typeof value === "object" ? value as Record<string, unknown> : {}; return task.role ?? task.subagent_type ?? "unknown"; });
 			return receipt(`Probe fixture recorded the requested roles: ${JSON.stringify(roles)}. No child process was launched, no session or candidate exists, and no implementation was verified. This lane measures invocation decisions only; it provides no child report.`);
 		},

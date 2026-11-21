@@ -209,7 +209,6 @@ test("retained projection carries per-root destination, apply, recovery and rele
 		record.release = { status: "partial", remaining: ["roottwo"] };
 		await store.save(record);
 	});
-	// A record whose candidate was never frozen still reports every owned root's release fact.
 	const releaseOnly = (await allocateFixture(store, repo, "roots2")).records[0]!;
 	await store.withSession(releaseOnly.handle, owner, async record => {
 		record.state = "closed";
@@ -229,11 +228,9 @@ test("retained projection carries per-root destination, apply, recovery and rele
 	assert.deepEqual(rows.get(releaseOnly.handle)!.roots, [{ id: "rootthree", destination: bounded(repo), status: "not-applied", release: "released" }]);
 	assert.ok(rows.get(releaseOnly.handle)!.roots!.every(root => root.destination.length <= 128), "per-root destinations stay bounded");
 	assert.deepEqual(rows.get(releaseOnly.handle)!.release, { status: "complete", remaining: 0 });
-	// The ordinary tool-result session view carries the same owned-root mapping without a candidate.
 	const ordinary = await store.withSession(releaseOnly.handle, owner, async record => store.view(record));
 	assert.deepEqual(ordinary.roots, [{ id: "rootthree", destination: bounded(repo), status: "not-applied", release: "released" }]);
 	assert.deepEqual(ordinary.release, { status: "complete", remaining: [] });
-	// The strict reader rejects fabricated or unbounded per-root shapes.
 	const bogusStatus = structuredClone(reply);
 	bogusStatus.history.rows.find(row => row.handle === partial.handle)!.roots![1]!.status = "bogus";
 	assert.equal(parseSessionViewReply(bogusStatus).ok, false);
@@ -314,13 +311,13 @@ test("retained projection is cached; paging and re-render never rescan history o
 	assert.equal(counts.inventory, 1);
 	assert.equal(counts.recordedObservations, 1);
 	await builder.build({ version: 5, requestId: "ui-1", page: 1 }, view);
-	await builder.build({ version: 5, requestId: "ui-2", page: 0 }, view); // ordinary re-render/heartbeat
+	await builder.build({ version: 5, requestId: "ui-2", page: 0 }, view);
 	assert.equal(counts.inventory, 1, "cached pages do not rescan registries");
 	assert.equal(counts.recordedObservations, 1, "cached pages do not rescan observations");
-	builder.invalidate(); // lifecycle transition only
+	builder.invalidate();
 	await builder.build({ version: 5, requestId: "ui-3", page: 0 }, view);
 	assert.equal(counts.inventory, 2);
-	builder.reset(); // session/tree change drops the retained projection
+	builder.reset();
 	await builder.build({ version: 5, requestId: "ui-4", page: 0 }, view);
 	assert.equal(counts.inventory, 3);
 });
@@ -415,14 +412,12 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(row.latestOutcome, "succeeded");
 	assert.equal(row.acceptedEpisodes, 1);
 	assert.equal(row.recordedUsage.assistantTurns, 1);
-	// A stale persisted running state without a fresh core-owned observation is history, never live.
 	const stale = (await f.service.execute({ action: "create", mode: "foreground", tasks: [{ id: "taskb", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run2")).sessions[0]!.handle;
 	await f.store.withSession(stale, { repo: f.repo, parentSessionId: "parent-session", anchor: "anchor", branch: ["anchor"] }, async record => { record.state = "running"; await f.store.save(record); });
 	const reloaded = await new SessionViewBuilder({ store: f.store }).build({ version: 5, requestId: "ui-reload", page: 0 }, scope(ownerOf(f.repo)));
 	assert.equal(reloaded.live.length, 0);
 	assert.equal(reloaded.history.rows.find(entry => entry.handle === stale)!.state, "running");
 	assert.equal(reloaded.summary!.states.running, 1);
-	// Live work moves its handle out of history and settles back without double counting.
 	f.holdChild();
 	const asyncRun = await f.service.execute({ action: "create", tasks: [{ id: "taskc", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run3");
 	assert.equal(asyncRun.status, "accepted");
@@ -439,7 +434,6 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	reply = await query();
 	assert.ok(reply.history.rows.some(entry => entry.handle === liveHandle && entry.state === "idle"));
 	assert.equal(reply.summary!.liveAgents, 0);
-	// Continuation keeps one stable identity and accumulates recorded episodes exactly once.
 	const continued = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle, expectedEpisode: 1, message: "continue" }] }, ctx, undefined, undefined, "continue-next");
 	assert.equal(continued.status, "succeeded");
 	assert.equal(continued.sessions[0]!.handle, handle);
@@ -450,14 +444,12 @@ test("core lifecycle integrates inventory, invalidation, live/history transition
 	assert.equal(reply.summary!.agents, 3);
 	assert.equal(reply.usage!.assistantTurns, 4);
 	assert.equal(reply.usage!.usage.input, 20);
-	// Replay reuses committed evidence without rewriting or rescanning it.
 	const scans = f.counts.inventory;
 	const replay = await f.service.execute({ action: "create", mode: "foreground", tasks: [{ id: "task", role: "explorer", objective: "scan", access: [{ permission: "read", scope: "/tmp/scope" }] }] }, ctx, undefined, undefined, "run1");
 	assert.equal(replay.status, "succeeded");
 	reply = await query();
 	assert.equal(f.counts.inventory, scans, "replay is not an invalidation");
 	assert.equal(reply.summary!.agents, 3);
-	// Close and refresh invalidate the retained projection through the actual mutation paths.
 	await f.service.execute({ action: "close", handle: liveHandle, expectedEpisode: 1, disposition: "retain" }, ctx);
 	reply = await query();
 	assert.equal(reply.summary!.states.closed, 1);

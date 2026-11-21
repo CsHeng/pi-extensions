@@ -1,4 +1,3 @@
-/** Neutral execution facts. Producers and the consumer share this contract; neither imports the other's implementation. */
 
 export const EXECUTION_FACTS_EVENT = "notices.facts.v1";
 export const EXECUTION_FACTS_REQUEST = "notices.snapshot.v1";
@@ -15,7 +14,6 @@ export interface ExecutionFact {
 	id: string;
 	/** Host call that enrolled this execution; attribution only, never an authority token. */
 	toolCallId?: string;
-	/** Native Agent run grouping, when this producer has one. */
 	runId?: string;
 	phase: ExecutionFactPhase;
 	status: string;
@@ -44,7 +42,6 @@ export function checkpointNoticeId(executionId: string, checkpointId: string): s
 	return `${executionId}@${checkpointId}`;
 }
 
-/** Execution id behind a notice id, for acknowledgments that may name a checkpoint notice. */
 export function noticeExecutionId(noticeId: string): { executionId: string; checkpointId?: string } {
 	const at = noticeId.indexOf("@");
 	return at < 0 ? { executionId: noticeId } : { executionId: noticeId.slice(0, at), checkpointId: noticeId.slice(at + 1) };

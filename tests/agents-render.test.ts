@@ -327,7 +327,6 @@ test("managed content carries per-root recovery and session release, including r
 	const text = formatManagedResult(managed([withCandidate]));
 	assert.match(text, /release=partial remaining=roottwo/);
 	assert.match(text, /root=roottwo destination=\/work\/beta status=unknown recovery=required/);
-	// Release and owned roots survive when no candidate was frozen; neither is hidden inside the candidate branch.
 	const releaseOnly = sessionView(1, { release: { status: "complete", remaining: [] }, roots: [
 		{ id: "rootthree", destination: "/work/gamma", status: "not-applied", release: "released" },
 	] });

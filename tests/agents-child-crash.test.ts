@@ -67,7 +67,6 @@ test("crashed launch-intent writer is reconciled only after its receipted child 
   await assert.rejects(store.reconcile(record.handle, owner, 1));
   assert.equal((await store.load(record.handle, owner)).state, "running");
   process.kill(-child.pid!, "SIGKILL"); await childExit;
-  // A stopped lifecycle without explicit safe attestation must not release the writer.
   await writeFile(native, header + lifecycle("ready", null, "ready") + JSON.stringify({ type: "custom", id: "stopped", parentId: "ready", customType: "agents.worker-lifecycle", data: { phase: "stopped", ok: true, owned: ["write"] } }) + "\n");
   await assert.rejects(store.reconcile(record.handle, owner, 1));
   await writeFile(native, header + lifecycle("ready", null, "ready") + lifecycle("stopped", "ready", "stopped"));

@@ -2,7 +2,6 @@ import { collectNativeObservation } from "../../extensions/agents/observability.
 import type { ParentObservation } from "../../extensions/agents/observation-hooks.ts";
 import type { LocalTiming } from "../../extensions/agents/telemetry.ts";
 
-/** Frozen synthetic producer-shaped evidence; these durations/costs are not live measurements. */
 export function observationFixture() {
 	const usage = { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { total: 1 } };
 	const assistant = { role: "assistant", provider: "synthetic", model: "fixture", content: [], usage };

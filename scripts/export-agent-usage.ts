@@ -25,7 +25,6 @@ function matches(value: unknown, pattern: RegExp): value is string {
 	return typeof value === "string" && pattern.test(value);
 }
 function timestamp(value: unknown): value is string {
-	// Native Pi timestamps use a canonical ISO string, also used verbatim in the output filename.
 	if (!matches(value, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)) return false;
 	const time = Date.parse(value);
 	return Number.isFinite(time) && new Date(time).toISOString() === value;
@@ -58,7 +57,6 @@ async function directory(path: string, allowMissing = false): Promise<boolean> {
 class AbsentFile extends Error {}
 class InvalidNativeLine extends Error {}
 
-/** Read the physical file once, refusing links and any observed replacement or concurrent change. */
 async function* stableChunks(path: string, limit = Number.MAX_SAFE_INTEGER): AsyncGenerator<Buffer, void> {
 	if (!canonicalPath(path)) throw new Error("unsafe file path");
 	await directory(dirname(path));
@@ -121,7 +119,6 @@ async function readRegistry(path: string, handle: string) {
 	return { version: registry.version, owner: { repo: owner.repo, parentSessionId: owner.parentSessionId }, bound };
 }
 
-/** Native accounting locations only. Never read forwarded tool or custom-entry aggregates. */
 function usageSource(entry: Row): Row | undefined {
 	if (entry.type === "message") {
 		const message = record(entry.message);
@@ -163,7 +160,6 @@ function usageFields(value: unknown): { usage: UsageFields; partial: boolean } |
 
 function rowIdentity(entry: Row, destination = false): string {
 	let id = entry.id;
-	// Our published row IDs are unique across native sessions; copied rows still identify the original request.
 	if (destination && entry.nativeEntryId !== undefined) {
 		if (typeof id !== "string" || !UUID.test(id.slice(0, 36)) || !matches(entry.nativeEntryId, PI_ID)
 			|| id.slice(36) !== `_${entry.nativeEntryId}`) throw new Error("invalid projected usage identity");
@@ -188,7 +184,6 @@ async function project(header: Row, entries: AsyncIterable<Row>, owner: Row, ses
 		|| !matches(owner.parentSessionId, PI_ID) || owner.parentSessionId === header.id) throw new Error("invalid owner or native header");
 	const path = join(sessions, projectBucket(owner.repo), "agents", `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`);
 	if (!canonicalPath(path)) throw new Error("invalid export path");
-	// The parent is a native ID, not a native parentSession file pointer. This export is not a replay transcript.
 	// Local native readers require a nonempty cwd. This accounting-only file has no execution cwd; its containing bucket identifies the project.
 	const output = [JSON.stringify({ type: "session", version: 3, id: header.id, timestamp: header.timestamp, cwd: ".", parentSessionId: owner.parentSessionId })];
 	const seen = new Set<string>();
@@ -197,7 +192,6 @@ async function project(header: Row, entries: AsyncIterable<Row>, owner: Row, ses
 	let parentId: string | null = null;
 	let missingUsage = 0, partialUsage = 0, unattributedUsage = 0;
 	for await (const entry of entries) {
-		// Check framing and the shape of native IDs, not transcript lineage. Keep no index of non-accounting IDs.
 		if (typeof entry.type !== "string" || entry.type === "session" || !matches(entry.id, PI_ID)
 			|| (entry.parentId !== null && !matches(entry.parentId, PI_ID))) throw new Error("invalid native entry");
 		const source = usageSource(entry);
@@ -215,14 +209,14 @@ async function project(header: Row, entries: AsyncIterable<Row>, owner: Row, ses
 		if (source === entry) data.timestamp = Date.parse(entry.timestamp as string);
 		else if (count(source.timestamp) && source.timestamp <= 8.64e15) data.timestamp = source.timestamp;
 		data.usage = fields.usage;
-		// Link retained IDs only. With incomplete attribution an inert custom row preserves facts without
-		// letting a generic usage reader assign the charge to an adjacent assistant's model.
 		// Native entry IDs are session-local. Some readers deduplicate them across all Pi files.
 		const projectedId = `${header.id}_${entry.id}`;
 		const base = { id: projectedId, nativeEntryId: entry.id, parentId, timestamp: entry.timestamp };
 		if (data.provider && data.model) {
 			output.push(JSON.stringify({ type: "message", ...base, message: { role: "assistant", content: [], ...data } }));
 		} else {
+			// Link retained IDs only. With incomplete attribution an inert custom row preserves facts without
+			// letting a generic usage reader assign the charge to an adjacent assistant's model.
 			unattributedUsage++;
 			addRecordedTokens(unattributedTokens, fields.usage);
 			output.push(JSON.stringify({ type: "custom", ...base, customType: UNATTRIBUTED_USAGE, data }));
@@ -282,7 +276,6 @@ async function readSources(agentDir: string, sessions: string, report: Summary):
 					} else if (!nativeAbsent) report.emptyNativeFiles++;
 					const { version, owner, bound } = await readRegistry(registryPath, item.name);
 					if (nativeAbsent) {
-						// Recognize that the registry declares a binding; never follow or validate that archive path here.
 						if (!bound) throw new Error("missing private native file");
 						report.boundHandles++;
 						continue;
@@ -475,7 +468,6 @@ if (import.meta.main) {
 			console.log(JSON.stringify(report));
 			if (report.coverage !== "complete") process.exitCode = 1;
 		} catch {
-			// Never publish paths, parser diagnostics, or other raw input in the receipt.
 			console.error("Export failed before a complete receipt could be produced.");
 			process.exitCode = 1;
 		}

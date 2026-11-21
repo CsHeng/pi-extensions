@@ -9,7 +9,6 @@ export interface AsyncDispatchMetrics {
  launchedChildren: { known: number; unavailableTasks: number };
  timing: { preparationMs: number | null; queueMs: number | null; workspaceMs: number | null; childEffortMs: number | null; submissionToTerminalMs: number | null };
 }
-/** V3 receipts count admission only. Child execution is owned by persisted terminal facts. */
 export class AsyncDispatchCollector {
  private receipts = 0; private runs = new Set<string>(); private terminals = new Map<string, Record<string, unknown>>();
  private events = new Map<string, string>(); private tasks = new Map<string, { view: Record<string, unknown>; timing?: Record<string, unknown> }>();

@@ -84,7 +84,6 @@ export interface ManagedRecord {
 	reconciledEpisode?: number;
 	release?: { status: "pending" | "partial" | "complete"; remaining: string[] };
 	dispatch?: { runId: string; generation: string; toolCallId: string; taskId: string; initiator?: string };
-	/** Name of the agent that invoked this one, or "main" for the invoking model. */
 	assigner?: string;
 	requests: Array<{ id: string; fingerprint: string; episode: number; state: "running" | "complete" | "unknown"; result?: TaskResult; candidate?: CandidateRef; execution?: EpisodeExecution; error?: { code: string; detail?: string }; runId?: string; generation?: string }>;
 }
@@ -98,7 +97,6 @@ export function managedWriteRoots(record: ManagedRecord): ManagedRootState[] {
 export function isolatedWriteRoots(record: ManagedRecord): ManagedRootState[] {
 	return record.task.workspace === "shared" ? [] : managedWriteRoots(record);
 }
-/** Per-root owned-resource release fact, derived from that root's own state rather than the aggregate status. */
 function rootReleaseStatus(record: ManagedRecord, rootId: string): "pending" | "remaining" | "released" {
 	if (record.release === undefined) return "pending";
 	return record.release.remaining.includes(rootId) ? "remaining" : "released";
@@ -128,28 +126,23 @@ export interface SessionInventoryEntry {
 	/** Durable managed state; persisted running/queued is not proof that a child is currently alive. */
 	state: ManagedState;
 	episode: number;
-	/** Latest committed episode outcome; unknown without terminal evidence. */
 	latestOutcome: "succeeded" | "failed" | "blocked" | "aborted" | "unknown";
 	/** Distinct accepted episode identities; null when persistence cannot prove the count. */
 	acceptedEpisodes: number | null;
 	/** Retained ownership anchor for cheap per-query branch projection without rescanning storage. */
 	ownerAnchor: string | null;
-	/** False for retained records of the same session rooted at another branch anchor. */
 	onCurrentBranch: boolean;
-	/** Records older than the current managed version are limited history. */
 	legacy: boolean;
 	reportComplete: boolean;
 	retained: boolean;
 	roots?: OwnedRootOutcome[];
 	release?: { status: string; remaining: number };
-	/** Recorded episode observation references available for core aggregation. */
 	usageEvidence: { episodes: number[] };
 }
 
 export interface SessionInventory {
 	available: true;
 	entries: SessionInventoryEntry[];
-	/** False when retained records could not be scanned or validated. */
 	complete: boolean;
 	/** Generic completeness counts; unreadable contents and foreign owners stay unexposed. */
 	problems: { unreadableRecords: number };
@@ -173,7 +166,6 @@ export function fingerprint(value: unknown): string {
 }
 const productId = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9]+$" });
 const hostId = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" });
-/** Path-free classifier for a failure the extension could not type: an errno code or error name. */
 const causeSchema = Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_]{0,31}$" });
 const digestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const fileStateSchema = Type.Union([
@@ -356,7 +348,6 @@ export class ManagedSessionStore {
 		const bytes = Buffer.from(JSON.stringify(active.marker));
 		await active.handle.truncate(0); await active.handle.write(bytes, 0, bytes.length, 0); await active.handle.sync();
 	}
-	/** Recover only with affirmative owner and writer settlement evidence; ambiguous claims require offline remediation. */
 	async reconcile(handle: string, owner: CurrentOwner, expectedEpisode: number): Promise<ManagedRecord> {
 		const initial = await this.load(handle, owner);
 		if (initial.episode !== expectedEpisode) throw new ManagedError("stale_episode");
@@ -464,7 +455,6 @@ export class ManagedSessionStore {
 		} catch { /* Optional evidence unavailable; core state remains authoritative. */ }
 		return observation;
 	}
-	/** Read saved episode observations for core aggregation. Read-only, bounded, and never repairs storage. */
 	async recordedObservations(handle: string, episodes: readonly number[]): Promise<RecordedUsageEpisodes[]> {
 		const unique = [...new Set(episodes)].filter((episode) => Number.isSafeInteger(episode) && episode >= 1 && episode <= MANAGED_LIMITS.maxEpisodes).sort((left, right) => left - right);
 		const recorded: RecordedUsageEpisodes[] = [];
@@ -501,7 +491,6 @@ export class ManagedSessionStore {
 		}
 		return bound;
 	}
-	/** Read-only retained inventory across the owner's session, including closed and off-branch history. */
 	async inventory(owner: CurrentOwner): Promise<SessionInventoryResult> {
 		let names: string[];
 		try {
@@ -602,7 +591,6 @@ export class ManagedSessionStore {
 			await this.write(path, terminal);
 		});
 	}
-	/** Release an admission identity that never produced accepted work; non-pristine records stay inspectable. */
 	async releaseReservation(owner: CurrentOwner, requestId: string): Promise<boolean> {
 		await this.ensure(false);
 		return this.lock(this.root, async () => {

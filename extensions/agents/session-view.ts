@@ -18,7 +18,6 @@ export const SESSION_VIEW_EVENT = "agents.session-view";
 export const SESSION_VIEW_CHANGED_EVENT = "agents.session-view.changed";
 export const SESSION_VIEW_QUERY_EVENT = "agents.view-query";
 export const SESSION_VIEW_VERSION = COLLABORATION_CONTRACT_VERSION;
-/** Display delivery bounds; intentionally independent of open-session admission limits. */
 export const SESSION_VIEW_LIMITS = Object.freeze({ pageSize: 20, maxLiveRows: 16, maxRequestPage: 1_000_000, maxPayloadBytes: 256 * 1024 });
 
 export interface SessionViewLimits { pageSize: number; maxLiveRows: number; maxRequestPage: number; maxPayloadBytes: number }
@@ -50,7 +49,6 @@ export interface SessionViewSummary { agents: number; acceptedEpisodes: number |
 export interface SessionViewReply {
 	version: typeof SESSION_VIEW_VERSION;
 	requestId: string;
-	/** Core-derived correlation; the consumer drops replies from any other owner, session or request. */
 	ownerSessionId: string;
 	anchor: string | null;
 	generation: string;
@@ -68,7 +66,6 @@ export interface SessionViewScope {
 	anchor: string | null;
 	trusted: boolean;
 	owner: CurrentOwner | null;
-	/** Bounded reason when the trusted owner could not be derived. */
 	reason?: string;
 	live: readonly ObserverTask[];
 	generation: string;
@@ -150,7 +147,6 @@ export function parseRecordedUsageProjection(value: unknown): RecordedUsageProje
 		|| !nonNegativeInt(value.episodes.recorded) || !nonNegativeInt(value.episodes.missing) || !nonNegativeInt(value.episodes.orphaned)
 		|| typeof value.episodes.unprovable !== "boolean") return undefined;
 	if (value.reason !== undefined && !FAILURES.includes(value.reason as RecordedUsageFailure)) return undefined;
-	// Failure and unknown-aggregation shapes never smuggle a complete metric or a fabricated total.
 	if (value.status === "unavailable") {
 		if (value.assistantTurns !== null || METRIC_KEYS.some((field) => usage[field] !== null)) return undefined;
 		if (!METRIC_KEYS.every((field) => metrics[field] === "unavailable") || value.turnsCoverage !== "unavailable") return undefined;
@@ -267,7 +263,6 @@ export function parseSessionViewReply(value: unknown): { ok: true; value: Sessio
 		usage } };
 }
 
-/** Retained read-only projection of the session inventory plus recorded usage, with lifecycle invalidation. */
 export class SessionViewBuilder {
 	private revision = 0;
 	private cache: ProjectionCache | undefined;
@@ -276,11 +271,8 @@ export class SessionViewBuilder {
 	constructor(private readonly options: { store: ManagedSessionStore; limits?: Partial<SessionViewLimits> }) {
 		this.limits = { ...SESSION_VIEW_LIMITS, ...options.limits };
 	}
-	/** Lifecycle invalidation; coalesced into the next query's rebuild. */
 	invalidate(): void { this.revision++; }
-	/** Owner/session change: drop the retained projection entirely. */
 	reset(): void { this.invalidate(); this.cache = undefined; }
-	/** Explicit display failures retain correlation but expose no exception or storage contents. */
 	failure(request: SessionViewRequest, scope: Pick<SessionViewScope, "ownerSessionId" | "anchor" | "generation">, reason: string): SessionViewReply {
 		return { version: SESSION_VIEW_VERSION, requestId: request.requestId, ...scope, revision: this.revision,
 			inventory: { state: "unavailable", reason, complete: false, unreadableRecords: 0 }, summary: null, usage: null, live: [],
@@ -323,7 +315,6 @@ export class SessionViewBuilder {
 					if (this.revision === revision) this.cache = cache;
 				}
 				if (!cache.inventory.available) {
-					// Unusable storage is an explicit unavailable history, never an empty success.
 					inventory = { state: "unavailable", reason: cache.inventory.reason, complete: false, unreadableRecords: 0 };
 					historyReason = cache.inventory.reason;
 				} else {
@@ -339,7 +330,6 @@ export class SessionViewBuilder {
 					}));
 				}
 			} catch {
-				// An unexpected history failure stays visible; live rows and core execution continue independently.
 				inventory = { state: "unavailable", reason: "history_query_failed", complete: false, unreadableRecords: 0 };
 				historyReason = "history_query_failed";
 			}
@@ -354,7 +344,6 @@ export class SessionViewBuilder {
 				: { state: "unavailable", reason: historyReason, pageSize, page: 0, totalRows: 0, totalPages: 0, rows: [] },
 			usage };
 		if (Buffer.byteLength(JSON.stringify(reply), "utf8") > this.limits.maxPayloadBytes) {
-			// A page that cannot be delivered degrades visibly; it never pretends to be complete inventory.
 			reply = { ...reply, history: { ...reply.history, state: "unavailable", reason: "payload_limit", page: 0, rows: [] } };
 		}
 		if (Buffer.byteLength(JSON.stringify(reply), "utf8") > this.limits.maxPayloadBytes) {

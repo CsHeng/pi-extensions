@@ -447,7 +447,6 @@ test("boundNativeObservation fails closed past 64KiB without a truncated complet
 	assert.deepEqual(bounded.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
 });
 
-// Session-wide recorded usage projection over saved episode observations.
 const idleObservation = collectNativeObservation("", { startLeaf: null, endLeaf: null, launched: false });
 const recordedHandle = (handle: string, expectedEpisodes: number | null, episodes: Array<{ episode: number; observation: NativeObservation }>) =>
 	({ handle, expectedEpisodes, episodes });
@@ -505,7 +504,6 @@ test("recorded usage projection sums exact turns and tokens across handles beyon
 	const first = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1))), through("a1"));
 	const second = collectNativeObservation(jsonl(session("n1"), message("u1", null, "user"), assistant("a1", "u1", usage(10, 1)), message("u2", "a1", "user"), assistant("a2", "u2", usage(5, 0.5, { output: 2, totalTokens: 7 })), { type: "compaction", id: "c1", parentId: "a2", summary: "tail", firstKeptEntryId: "u2", usage: usage(1, 0.25, { output: 0, totalTokens: 1 }) }), through("c1", "a1"));
 	const other = collectNativeObservation(jsonl(session("n2"), message("v1", null, "user"), assistant("b1", "v1", usage(3, 2, { output: 4, totalTokens: 6 }))), through("b1"));
-	// More handles than the open-session admission limit; history size is not capped by it.
 	const inputs = [recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: second }]), recordedHandle("h2", 1, [{ episode: 1, observation: other }]),
 		...Array.from({ length: 10 }, (_, index) => recordedHandle(`idle-${index}`, 0, []))];
 	const result = projectRecordedUsage(inputs);
@@ -528,7 +526,6 @@ test("replayed overlap, duplicate sources and repartitioned inputs keep one bill
 	assert.equal(withOverlap.assistantTurns, without.assistantTurns);
 	assert.equal(withOverlap.conflicts, 0);
 	assert.deepEqual(withOverlap.usage, { input: 18, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 21, cost: 3.5 });
-	// Partitioning the same evidence never manufactures a new billing identity.
 	const partOne = projectRecordedUsage([recordedHandle("h1", 2, [{ episode: 1, observation: first }, { episode: 2, observation: reread }])]);
 	const partTwo = projectRecordedUsage([recordedHandle("h2", 1, [{ episode: 1, observation: other }])]);
 	const add = (left: ObservedUsage, right: ObservedUsage): ObservedUsage => ({ input: left.input! + right.input!, output: left.output! + right.output!, cacheRead: left.cacheRead! + right.cacheRead!, cacheWrite: left.cacheWrite! + right.cacheWrite!, totalTokens: left.totalTokens! + right.totalTokens!, cost: left.cost! + right.cost! });
@@ -561,13 +558,11 @@ test("missing observations keep the labeled known subtotal and never fabricate z
 	assert.equal(result.metrics.input, "incomplete");
 	assert.equal(result.metrics.cost, "incomplete");
 	assert.equal(result.turnsCoverage, "incomplete");
-	// No recorded evidence at all is unavailable, not a free zero total.
 	const none = projectRecordedUsage([recordedHandle("h2", 1, [])]);
 	assert.equal(none.status, "unavailable");
 	assert.deepEqual(none.usage, { input: null, output: null, cacheRead: null, cacheWrite: null, totalTokens: null, cost: null });
 	assert.equal(none.assistantTurns, null);
 	assert.deepEqual(none.episodes, { recorded: 0, missing: 1, orphaned: 0, unprovable: false });
-	// A degraded handle never hides a valid recorded row.
 	const mixed = projectRecordedUsage([recordedHandle("h1", 3, [{ episode: 1, observation: first }, { episode: 2, observation: second }]), recordedHandle("h2", 1, [])]);
 	assert.deepEqual(mixed.usage, { input: 15, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 17, cost: 1.5 });
 	assert.equal(mixed.assistantTurns, 2);

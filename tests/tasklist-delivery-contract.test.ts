@@ -4,7 +4,6 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHostHarness, createTrace, createTraceObserver, waitForTrace } from "./fixtures/host-fixture.ts";
 
-/** Characterization of an UNSATISFIED contract, not evidence that AC-04 is implemented. */
 test("Pi 1.2.0 loses source/receipt identity between mixed queued input and transformed native delivery", async (t) => {
 	const trace = createTrace();
 	const inputs: Array<{ source: string; text: string }> = [];

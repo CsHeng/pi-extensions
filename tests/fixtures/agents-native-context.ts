@@ -5,7 +5,6 @@ import { registerContinuationTool } from "../../extensions/agents/continuation.t
 import { PEER_TOOLS } from "../../extensions/agents/peer-protocol.ts";
 import { validateGraphStructure } from "../../extensions/agents/graph.ts";
 
-/** Native host-only fixture: metadata seeds and public compaction, never a child dispatch. */
 export default function nativeContextFixture(pi: ExtensionAPI): void {
 	const mode = process.env.PI_EXTENSIONS_NATIVE_CONTEXT_MODE;
 	const store = new ManagedSessionStore(getAgentDir());

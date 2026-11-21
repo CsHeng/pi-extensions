@@ -31,7 +31,6 @@ export const ROLES: Readonly<Record<RoleName, RoleDefinition>> = Object.freeze({
 	}),
 });
 
-/** Built-in fallback prompts; invoked agents normally receive their role definition's prompt from the host. */
 export function getRole(name: RoleName): RoleDefinition {
 	return (ROLES as Record<string, RoleDefinition>)[name] ?? { tools: READ_TOOLS, systemPrompt: COMMON_BOUNDARY };
 }

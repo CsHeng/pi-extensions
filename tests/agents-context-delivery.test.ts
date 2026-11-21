@@ -17,7 +17,6 @@ import { PEER_TOOLS, PEER_TOOL_NAMES } from "../extensions/agents/peer-protocol.
 
 const git = promisify(execFile);
 
-/** Captures the handlers the real extension registers, without a host loop or a child process. */
 function captureRegistration() {
 	const handlers = new Map<string, Array<(event: any, ctx?: any) => any>>();
 	const entries: Array<{ customType?: string }> = [];
@@ -59,7 +58,6 @@ test("the registered peer tools inject no managed session index and keep guidanc
 	const captured = captureRegistration();
 	const service = registerContinuationTool(captured.pi, f.dependencies);
 	t.after(() => service.shutdown());
-	// No context hook exists any more: nothing can append a per-turn session index or refresh bookkeeping.
 	assert.equal(captured.handlers.has("context"), false);
 	assert.equal(captured.handlers.has("context_with_system"), true, "live-activity cleanup stays registered");
 
@@ -72,7 +70,6 @@ test("the registered peer tools inject no managed session index and keep guidanc
 	assert.ok(Array.isArray(invoke.promptGuidelines) && invoke.promptGuidelines.length > 0);
 	assert.doesNotMatch(before, /requestId|expectedEpisode|replay token|managed session index|notices extension|notices\.[a-z]|notices-wait/i);
 
-	// Normal input, extension-origin input, settlement and compaction never produce index entries.
 	const settle = async (name: string, event: unknown = {}) => {
 		for (const handler of captured.handlers.get(name) ?? []) await handler(event, f.ctx);
 	};
@@ -98,7 +95,6 @@ test("a bare inspect recovers this session's Agents after resume and compaction 
 	assert.deepEqual([first!.label, second!.label].sort(), ["fix-parser-tests", "review-evidence"]);
 	assert.match(first!.handle, /^[a-f0-9]{32}$/, "the persistent handle is generated, not the label");
 
-	// A fresh service over the same store stands in for resume/compaction/reload.
 	const resumed = new ContinuationService(f.dependencies);
 	t.after(async () => { await resumed.shutdown(); });
 	const discovered = await resumed.execute({ action: "inspect" }, f.ctx);
@@ -110,12 +106,10 @@ test("a bare inspect recovers this session's Agents after resume and compaction 
 		assert.equal(view.result?.status, "succeeded");
 		assert.equal(view.reportComplete, true);
 	}
-	// The discovered handle and episode are sufficient for the next real action.
 	const single = await resumed.execute({ action: "inspect", handle: first!.handle }, f.ctx);
 	assert.equal(single.sessions.length, 1);
 	assert.equal(single.sessions[0]!.label, first!.label);
 	assert.equal((await resumed.execute({ action: "close", handle: first!.handle, expectedEpisode: single.sessions[0]!.episode, disposition: "discard" }, f.ctx)).status, "succeeded");
-	// Closed records leave discovery but current work stays listed.
 	const after = await resumed.execute({ action: "inspect" }, f.ctx);
 	assert.deepEqual(after.sessions.map(view => view.label), [second!.label]);
 });

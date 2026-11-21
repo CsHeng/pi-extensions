@@ -16,7 +16,6 @@ import { formatManagedContent } from "../extensions/agents/render.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discardGitWorkspace, discardGitInput, planGitApply } from "../extensions/agents/git-workspace.ts";
 const exec = promisify(execFile);
-/** A real store whose persistence can be interrupted deterministically at a chosen save. */
 class InterruptingStore extends ManagedSessionStore {
  private saves = 0;
  private interrupted = false;
@@ -58,8 +57,8 @@ async function multiSetup(t: test.TestContext, initial?: (repoA: string, repoB: 
  const store = new ManagedSessionStore(base); const record = (await store.allocate(owner, "create", admitted.tasks)).records[0]!;
  t.after(async () => {
   for (const root of record.roots) {
-   if (root.inputs?.gitWorkspace) { try { await discardGitWorkspace(root.inputs.gitWorkspace); } catch { /* best effort */ } }
-   if (root.inputRef && root.input) { try { await discardGitInput(root.source, root.inputRef, root.input); } catch { /* best effort */ } }
+   if (root.inputs?.gitWorkspace) { try { await discardGitWorkspace(root.inputs.gitWorkspace); } catch { } }
+   if (root.inputRef && root.input) { try { await discardGitInput(root.source, root.inputRef, root.input); } catch { } }
   }
   await rm(base, { recursive: true, force: true });
  });
@@ -307,7 +306,6 @@ test("a legacy journaled conflict attempt is re-planned instead of executing con
  const root = f.record.roots.find(item => item.permission === "write")!;
  const workspace = root.inputs!.gitWorkspace!;
  await writeFile(join(f.repo, "file"), "parent\n");
- // Reproduce an attempt persisted by an earlier build: a conflict tree with no applicable paths.
  const conflict = await planGitApply(workspace, candidate.roots[0]!.git!);
  assert.equal(conflict.status, "conflict");
  candidate.roots[0]!.attempt = { ...conflict.attempt, integrationRef: `refs/pi-extensions/agents/${workspace.id}/integration/legacy` };
@@ -398,7 +396,6 @@ test("a failed promotion checkpoint keeps a durable creation intent that a later
  const persistedWorkspace = persisted.roots.find(item => item.id === root.id)!.inputs!.gitWorkspace!;
  assert.equal(persistedWorkspace.pendingRefs?.[integration], expected, "the creation intent is durable");
  assert.ok(Object.keys(persistedWorkspace.ownedRefs).every(ref => !ref.includes("/integration/")), "promotion was not persisted as ordinary ownership");
- // Even with the created ref locked, a reload still inventories it and release can retry to completion.
  const lockPath = join(f.repo, ".git", `${integration}.lock`);
  await writeFile(lockPath, "locked\n");
  const reloaded = await f.store.load(f.record.handle, f.owner);

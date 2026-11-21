@@ -191,7 +191,6 @@ export async function applyCandidate(store: ManagedSessionStore, record: Managed
 			if (!binding || !workspace || !root.git || workspace.path !== rootPath(store, record, binding)) throw new ManagedError("candidate_mismatch");
 			const outside = (paths: readonly string[]) => paths.some((path) => !grantCovers(binding.paths, path));
 			if (root.attempt && applicableGitAttempt(root.attempt)) {
-				// Only a clean plan is journaled; a stored attempt is always an applicable merge result.
 				const observed = await reconcileGitAttempt(workspace.repo, root.attempt);
 				if (observed === "unknown") { root.status = "unknown"; sync(); await store.save(record); throw new ManagedError("candidate_apply_unknown"); }
 				if (observed === "applied") { root.status = "applied"; root.appliedPaths = [...root.attempt.paths]; sync(); await store.save(record); continue; }
@@ -203,7 +202,6 @@ export async function applyCandidate(store: ManagedSessionStore, record: Managed
 				// interruption can still release it and never treats a conflict as applicable.
 				const plan = await planGitApply(workspace, root.git, async () => { await store.save(record); });
 				if (plan.status === "conflict") {
-					// Never journal or execute conflict-marker trees as an applicable patch.
 					root.status = "conflict";
 					sync();
 					await store.save(record);
@@ -234,7 +232,6 @@ export async function applyCandidate(store: ManagedSessionStore, record: Managed
 	return candidate;
 }
 
-/** Release owned worktrees, refs and scratch. Applied parent changes and other owners stay untouched. */
 export async function releaseManagedResources(store: ManagedSessionStore, record: ManagedRecord): Promise<void> {
 	writable(record);
 	for (const root of record.roots) if (root.target) await validateRepositoryTarget(root.target);

@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 [[ $# -le 1 ]] || { printf 'Usage: %s [PACKAGE_ROOT]\n' "$0" >&2; exit 2; }
-# Default preserves the source-package probe; pass the actual snapshot for installation acceptance.
 repo_root=$(realpath -- "${1:-${script_dir}/..}")
 agent_root=$(mktemp -d)
 work_root=$(mktemp -d)
@@ -12,7 +11,6 @@ home_root=$(mktemp -d)
 cleanup() { rm -rf -- "${agent_root}" "${work_root}" "${session_root}" "${home_root}"; }
 trap cleanup EXIT
 
-# Bun can prepend the checkout's SDK binary; acceptance must exercise installed Pi.
 IFS=: read -r -a path_parts <<<"${PATH}"
 PATH=""
 for part in "${path_parts[@]}"; do
@@ -31,7 +29,6 @@ run_pi() {
 git -C "${work_root}" init -q
 jq -n --arg path "${repo_root}" '{packages:[$path]}' >"${agent_root}/settings.json"
 
-# Registration probe: reports whether the package loaded the Tasklist tool with its own source.
 probe_extension="${work_root}/probe.ts"
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -105,7 +102,6 @@ off_output=$(
 off_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-probe" and .data.tool == false and .data.source == false and .data.catalog == false and .data.todo == false)] | length' <<<"${off_output}")
 [[ ${off_count} -ge 1 ]]
 
-# Co-load probe: Tasklist alongside the managed executor, observer, footer, and timing extensions.
 coload_extension="${work_root}/coload-probe.ts"
 cat >"${coload_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -144,7 +140,6 @@ coload_output=$(
 coload_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-coload" and .data.tasklist == true and .data.managed == true and .data.agents == true and .data.ui == true)] | length' <<<"${coload_output}")
 [[ ${coload_count} -ge 1 ]]
 
-# Synthetic-provider lane: the real host executes one tasklist tool call and persists a snapshot.
 synthetic_extension="${work_root}/synthetic.ts"
 cat >"${synthetic_extension}" <<'EOF'
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";

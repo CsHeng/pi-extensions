@@ -14,7 +14,6 @@ interface Watch {
 	calls: string; checkpoint?: ExecutionCheckpoint; clearTimer?: () => void;
 }
 
-/** Session-owned attention checkpoints. Observation changes delivery, never execution. */
 export class AgentInactivityCheckpoints {
 	private readonly watches = new Map<string, Watch>();
 	constructor(private readonly now: () => number, private readonly publish: () => void, private readonly schedule: ScheduleCheckpoint = scheduleCheckpoint) {}

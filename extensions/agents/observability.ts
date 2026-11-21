@@ -209,7 +209,6 @@ export interface RecordedUsageProjection {
 const MAX_RECORDED_USAGE_ROWS = MANAGED_LIMITS.maxEntries;
 const USAGE_METRICS: readonly RecordedUsageMetric[] = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"];
 
-/** Cumulative recorded usage across many handles/episodes from saved episode observations only. */
 export function projectRecordedUsage(handles: readonly RecordedUsageHandleInput[]): RecordedUsageProjection {
 	const parsed = parseRecordedInputs(handles);
 	if (parsed === undefined) return unavailableProjection("invalid-input");

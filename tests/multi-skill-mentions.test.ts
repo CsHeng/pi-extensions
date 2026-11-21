@@ -129,7 +129,6 @@ test("leading dollar prefix expands once per skill with a clean user tail", asyn
 	assert.match(result.text, new RegExp(`## Skill: beta-skill\\nLocation: ${join(root, "beta-skill", "SKILL.md")}\\nReferences are relative to ${join(root, "beta-skill")}\\.`));
 	assert.equal(result.text.includes("$alpha-skill"), false, "consumed selectors must not remain in the user tail");
 
-	// Pi's native parser must accept the grouped envelope and split off only the user tail.
 	const parsed = parseSkillBlock(result.text);
 	assert.ok(parsed);
 	assert.equal(parsed.name, "alpha-skill, beta-skill");

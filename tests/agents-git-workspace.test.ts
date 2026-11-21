@@ -142,7 +142,6 @@ test("planning checkpoints the creation intent before the ref and promotes it at
 	assert.equal(Object.keys(w.pendingRefs ?? {}).length, 0);
 	assert.ok(Object.keys(w.ownedRefs).some(ref => ref.includes("/integration/")));
 
-	// An intent-checkpoint failure creates no ref and leaves no dangling intent.
 	const g = await fixture(t); const w2 = await g.worker(); await writeFile(join(w2.path, "main.txt"), "worker-2\n"); const candidate2 = await freezeGitCandidate(w2);
 	const before = Object.keys(w2.ownedRefs).length;
 	await assert.rejects(planGitApply(w2, candidate2, async () => { throw new Error("checkpoint failed"); }), /checkpoint failed/);
@@ -163,7 +162,6 @@ test("a failed promotion checkpoint keeps a durable creation intent that discard
 	assert.ok(ref, "the integration ref was created");
 	assert.equal(durable!.ownedRefs[ref!], undefined, "the durable record does not yet own the created ref");
 	assert.equal(durable!.pendingRefs?.[ref!], w.ownedRefs[ref!], "the durable record knows the ref only as a pending intent");
-	// Reload from the durable intent and discard: the pending ref is promoted and then released.
 	const reloaded = structuredClone(durable!);
 	await discardGitWorkspace(reloaded);
 	assert.equal(Object.keys(reloaded.ownedRefs).length, 0);

@@ -116,11 +116,9 @@ test("native child args keep the configured catalog and express read-only intent
 		approveProject: true,
 	};
 	const readOnly = buildPiArgs({ ...baseArgs, capability: { ...capability, grants: [{ permission: "read", path: process.cwd() }] } });
-	// No identity-based extension ban and no fixed builtin allowlist.
 	assert.equal(readOnly.includes("--no-extensions"), false);
 	assert.equal(readOnly.includes("--tools"), false);
 	assert.deepEqual(readOnly.slice(readOnly.indexOf("--exclude-tools"), readOnly.indexOf("--exclude-tools") + 2), ["--exclude-tools", "edit,write"]);
-	// The selected invocation model/thinking and the guard extension are preserved.
 	assert.equal(readOnly[readOnly.indexOf("--model") + 1], "synthetic/child");
 	assert.equal(readOnly[readOnly.indexOf("--thinking") + 1], "low");
 	assert.deepEqual(readOnly.slice(readOnly.indexOf("-e"), readOnly.indexOf("-e") + 2), ["-e", "/tmp/guard.ts"]);
@@ -129,7 +127,6 @@ test("native child args keep the configured catalog and express read-only intent
 	assert.equal(writable.includes("--exclude-tools"), false);
 	assert.equal(writable.includes("--tools"), false);
 	assert.equal(writable.includes("--no-extensions"), false);
-	// Purpose labels do not change the native invocation; capability grants do.
 	for (const label of ["explorer", "reviewer", "worker"] as const) {
 		const role = getRole(label);
 		assert.deepEqual(buildPiArgs({ ...baseArgs, capability: { ...capability, role: label, grants: [{ permission: "read", path: process.cwd() }] } }), readOnly);
@@ -189,8 +186,6 @@ test("runner passes an explicit isolated Pi invocation and cleans private files"
 	assert.ok(recorded.args.includes("--approve"));
 	assert.ok(recorded.args.includes("synthetic/child"));
 	assert.ok(recorded.args.includes("low"));
-	// The child is a normal Pi process: the effective configured catalog decides tools.
-	// No identity-based extension ban and no fixed role allowlist remain.
 	assert.equal(recorded.args.includes("--no-extensions"), false);
 	assert.equal(recorded.args.includes("--tools"), false);
 	assert.deepEqual(recorded.args.slice(recorded.args.indexOf("--exclude-tools"), recorded.args.indexOf("--exclude-tools") + 2), ["--exclude-tools", "edit,write"]);

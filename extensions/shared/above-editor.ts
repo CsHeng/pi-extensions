@@ -1,4 +1,3 @@
-/** Presentation-only above-editor composition. One native widget, fixed slot order, no business registry. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { InspectionFrame } from "./inspection-rows.ts";
@@ -11,7 +10,6 @@ export type AboveEditorSlot = (typeof ABOVE_EDITOR_SLOTS)[number];
 
 export interface AboveEditorContribution {
 	render(width: number, terminalRows: number, theme: unknown, selected?: string): string[] | InspectionFrame;
-	/** Resolve when the selected record's read-only detail closes. */
 	openItem?(key: string): void | Promise<void>;
 	/** Fullscreen header click. Must not take editor focus or mutate business state. */
 	activate?(): void;
@@ -131,7 +129,6 @@ export function createAboveEditor(): AboveEditorComposer {
 				}
 				const step = matchesKey(data, "down") ? 1 : matchesKey(data, "up") ? -1 : 0;
 				if (step) { selected.key = keys[Math.max(0, Math.min(keys.length - 1, index + step))]!; tui.requestRender(); return; }
-				// Typing or using an editor shortcut leaves the inline list without losing the input.
 				const editor = previous; release(); editor?.handleInput?.(data);
 			},
 			invalidate() {},
@@ -152,7 +149,7 @@ export function createAboveEditor(): AboveEditorComposer {
 			return true;
 		} catch {
 			release(); widget = undefined; host = undefined;
-			try { ctx.ui.setWidget(ABOVE_EDITOR_WIDGET_KEY, undefined); } catch { /* View only. */ }
+			try { ctx.ui.setWidget(ABOVE_EDITOR_WIDGET_KEY, undefined); } catch {  }
 			return false;
 		}
 	};

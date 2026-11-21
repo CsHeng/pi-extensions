@@ -10,7 +10,6 @@ export const MANAGED_SESSION_VERSION = COLLABORATION_CONTRACT_VERSION;
 export const MANAGED_LIMITS = Object.freeze({
 	maxSessions: 10, maxEpisodes: 256, maxRegistryBytes: 2 * 1024 * 1024,
 	maxWorkspaceBytes: 8 * 1024 * 1024 * 1024, maxNativeBytes: 32 * 1024 * 1024,
-	// Native JSONL parsing remains bounded independently of filesystem entries.
 	maxEntries: 100_000, maxNativeLineBytes: 1024 * 1024, maxCandidateBytes: 64 * 1024 * 1024,
 });
 // Legacy warning shape remains readable in historical responses; no current action estimates aggregate storage.
@@ -73,7 +72,6 @@ export class ManagedError extends Error implements ManagedErrorDiagnostics {
 }
 export function parseSessionRequest(raw: unknown): SessionRequest {
 	if (!Check(AgentSessionToolSchema, raw)) {
-		// Keep the rejection addressable: name the failing field, never echo the value.
 		const failing = Errors(AgentSessionToolSchema, raw)[0];
 		const params = failing?.params as { additionalProperties?: unknown; requiredProperties?: unknown } | undefined;
 		const named = failing?.keyword === "additionalProperties" && Array.isArray(params?.additionalProperties) ? params.additionalProperties[0]
@@ -118,14 +116,11 @@ export function parseSessionRequest(raw: unknown): SessionRequest {
 export interface SessionOwner {
 	repo: string;
 	parentSessionId: string;
-	/** Native parent entry on the creating branch; null represents its root. */
 	anchor: string | null;
 }
 export interface CurrentOwner extends SessionOwner {
 	branch: readonly string[];
-	/** Native session path from the trusted current Pi session manager, not a tool argument. */
 	parentSessionFile?: string;
-	/** Fallback project bucket for an in-memory parent or a custom parent session location. */
 	parentCwd?: string;
 }
 export type ManagedState = "idle" | "queued" | "running" | "interrupted" | "closed";
@@ -151,7 +146,6 @@ export function uncertainApply(candidate: CandidateRef | undefined): boolean {
 	const uncertain = (status: ApplyStatus) => status === "applying" || status === "partial" || status === "unknown";
 	return !!candidate && (uncertain(candidate.status) || candidate.roots.some(root => uncertain(root.status)));
 }
-/** Bounded per-root owned-resource outcome, independent of whether a candidate was frozen. */
 export interface OwnedRootOutcome {
 	id: string;
 	destination: string;
@@ -178,7 +172,6 @@ export interface ManagedRequestTelemetry {
 	replayedEpisodes: number;
 }
 export interface SessionView {
-	/** Readable task label from the accepted call; `handle` remains the persistent identity. */
 	label?: string;
 	/** Current owner/episode-scoped observation, not retained evidence or candidate readiness. */
 	liveActivity?: Pick<import("./observer-events.ts").ObserverTask, "executionPhase" | "elapsedMs" | "calls" | "callsTruncated"> & { runId: string };
@@ -193,8 +186,6 @@ export interface SessionView {
 	candidate?: CandidateRef;
 	retained?: boolean;
 	release?: { status: "pending" | "partial" | "complete"; remaining: string[] };
-	/** Per-root destination/apply/recovery/release projection; present once an explicit release exists
-	 * (candidate-only roots already travel inside `candidate`). */
 	roots?: OwnedRootOutcome[];
 	/** This request failed; result remains the latest committed episode evidence. */
 	requestError?: { code: string; detail?: string };
@@ -203,14 +194,12 @@ export interface SessionActionResult {
 	schemaVersion: typeof MANAGED_SESSION_VERSION;
 	action: SessionRequest["action"] | null;
 	requestTelemetry?: ManagedRequestTelemetry;
-	/** Legacy advisory on historical envelopes; current actions do not generate it. */
 	warnings?: ManagedStorageWarning[];
 	status: "accepted" | "succeeded" | "partial" | "failed" | "aborted";
 	kind?: "submission" | "execution";
 	runId?: string;
 	generation?: string;
 	cancelOutcome?: string;
-	/** Explicit recovery only. Changed paths include staged and untracked work within the grant. */
 	recoveryWorkspaces?: RecoveryWorkspace[];
 	/** Observation ended without cancelling or settling execution. */
 	wait?: { status: "expired"; waitSeconds: number } | { status: "yielded"; reason: import("../shared/main-loop-yield.ts").YieldReason };

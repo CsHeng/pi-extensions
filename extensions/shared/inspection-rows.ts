@@ -20,7 +20,6 @@ export interface InspectionFrame {
 	lines: string[];
 	/** Physical rows have keys only for actual items, never for headings or overflow hints. */
 	keys: (string | undefined)[];
-	/** Includes items outside the current inline window. */
 	items: string[];
 }
 

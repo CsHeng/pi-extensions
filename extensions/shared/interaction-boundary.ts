@@ -31,11 +31,8 @@ export interface InteractionSpan<T> {
 	executionKeys: Set<string>;
 	/** Native Agent runs explicitly adopted by a control or query receipt. */
 	runIds: Set<string>;
-	/** Start of the open extension UI prompt span, when the user is being asked. */
 	promptStartedAt: number | undefined;
-	/** When the open prompt's human wait was last attributed. */
 	promptSampledAt: number | undefined;
-	/** Whether related executions were progressing at the last prompt sample. */
 	promptBusy: boolean;
 	/** The host accepted a main run and has not settled it yet. */
 	runActive: boolean;
@@ -59,7 +56,6 @@ export interface InteractionBoundaryOptions<T> {
 	createData: (kind: InteractionKind, at: number) => T;
 	/** External input joined an extension-started run; derive the interaction's data from the cut. */
 	promoteData: (previous: T, at: number) => T;
-	/** A new interaction began, from a started run or a promoted one. */
 	onStart?: (span: InteractionSpan<T>) => void;
 	/** Called once per interaction; the span is already released. */
 	onClose: (close: InteractionClose<T>) => void;
@@ -67,7 +63,6 @@ export interface InteractionBoundaryOptions<T> {
 
 export type SettleOutcome = "none" | "released" | "closed" | "awaiting";
 
-/** Whether the latest assistant message on the branch ended with a provider/runtime error. */
 export function latestAssistantFailed(ctx: ExtensionContext): boolean {
 	try {
 		const entries = ctx.sessionManager.getBranch();
@@ -264,7 +259,6 @@ export function createInteractionBoundary<T>(options: InteractionBoundaryOptions
 			pendingInteractionStart = at;
 		},
 
-		/** Host `before_agent_start`; returns the span this main run belongs to. */
 		beforeAgentStart(messageType: unknown, ctx: ExtensionContext, at: number): InteractionSpan<T> {
 			let current = span;
 			if (!current) {
@@ -329,7 +323,6 @@ export function createInteractionBoundary<T>(options: InteractionBoundaryOptions
 			return Math.max(0, at - startedAt);
 		},
 
-		/** Refresh the open prompt's attribution, for example on a periodic clock tick. */
 		samplePrompt(at: number): void {
 			if (span) sampleHumanWait(span, at);
 		},

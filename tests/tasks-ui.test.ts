@@ -61,7 +61,6 @@ test("fold summary distinguishes done from cancelled and reports blocked items w
  await h.commands.get("tasks-ui")!("list", h.ctx);
  assert.match(h.selected.join("\n"), /Updated task/);
  assert.match(lines(h.widget).join("\n"), /Updated task/);
- // A blocked item is item data: it is reported, and no list-level pause/resume row can appear.
  store.mutate({ operation: "update", tasks: [{ id: "b", status: "blocked", note: "Need a decision" }] });
  await h.commands.get("tasks-ui")!("collapse", h.ctx);
  assert.match(lines(h.widget)[0]!, /! Tasks \(1\/2 done\) 1 blocked$/);

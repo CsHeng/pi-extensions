@@ -78,7 +78,6 @@ export function boundToolContent(content: string): string {
 export function formatProgress(results: readonly TaskResult[], elapsedMs: number | null = null): string {
 	const running = results.filter((result) => result.status === "running").length;
 	const finished = results.filter((result) => result.status !== "pending" && result.status !== "running").length;
-	// Human progress row: usage replaces request turns, which stay in records and inspect results.
 	const lines = [`Agents ${running}/${results.length} running, ${finished} finished · ${elapsedMs === null ? "unknown" : formatClock(elapsedMs)}`];
 	for (const result of results) {
 		if (result.status === "pending") continue;
@@ -188,7 +187,6 @@ function sessionPayload(session: SessionView, reportBudget: number | null, omitR
 		};
 	}
 	if (session.release) payload.release = { status: session.release.status, remaining: session.release.remaining.slice(0, 32).map(boundScalar) };
-	// Owned-root projection independent of candidate presence, including each root's own release fact.
 	if (session.roots) payload.roots = session.roots.slice(0, 32).map(root => ({ id: boundScalar(root.id), destination: boundScalar(root.destination), status: root.status,
 		recovery: root.recovery ?? "none", release: root.release }));
 	payload.nativeUsage = nativeUsageSummary(session.result);
@@ -230,7 +228,6 @@ function stringifyManaged(details: SessionActionResult, reportBudget: number | n
 }
 
 export function formatManagedContent(details: SessionActionResult): string {
-	// A control action returns one compact, deterministic acknowledgement; join, inspect and completion still carry the report.
 	const omitReport = details.action !== null && COMPACT_ACTIONS.has(details.action);
 	const skeleton = stringifyManaged(details, null, omitReport);
 	if (omitReport || utf8Bytes(skeleton) > DEFAULT_MAX_BYTES) return skeleton;
@@ -292,7 +289,6 @@ export function formatManagedResult(details: SessionActionResult, expanded = fal
 				parts.push(`root=${boundScalar(root.rootId)} destination=${boundScalar(root.destination)} status=${root.status}${recovery} changed=${root.changedPaths.length} applied=${root.appliedPaths.length}${release ? ` release=${release}` : ""}`);
 			}
 		} else if (session.roots) {
-			// No candidate was frozen: still surface each owned root's disposition.
 			for (const root of session.roots) {
 				const recovery = root.recovery === "required" ? " recovery=required" : "";
 				parts.push(`root=${boundScalar(root.id)} destination=${boundScalar(root.destination)} status=${root.status}${recovery} release=${root.release}`);

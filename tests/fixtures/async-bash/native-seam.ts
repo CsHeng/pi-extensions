@@ -2,13 +2,6 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createLocalBashOperations, VERSION, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/**
- * Installed-host seam check for the async-bash wrapper.
- *
- * It executes one command and one aborted command through the same exported
- * native operations the wrapper uses, then records the evidence. No model
- * request, network call, credential, or user agent state is involved.
- */
 export default function nativeBashSeamProbe(pi: ExtensionAPI): void {
 	pi.on("session_start", async () => {
 		const dir = process.env.PI_CODING_AGENT_DIR;

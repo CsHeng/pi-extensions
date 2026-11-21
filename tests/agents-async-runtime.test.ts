@@ -112,7 +112,6 @@ test("wake filtering fences observed episodes, late run aggregates, new episodes
  const second = await f.service.execute({ action: "continue", mode: "foreground", episodes: [{ handle: first.sessions[0]!.handle, expectedEpisode: 1, message: "continue" }] }, f.ctx);
  assert.equal(second.status, "succeeded"); const next = f.events.findLast(value => value.kind === "run-terminal")!;
  assert.equal((await f.service.unobservedWake([next], f.ctx)).length, 1); assert.deepEqual(await f.service.unobservedWake([event], f.ctx), []);
- // A delivered notice is also one-shot, but the result remains unapplied and inspectable.
  f.service.acknowledge(next); assert.deepEqual(await f.service.unobservedWake([next], f.ctx), []);
  const inspected = await f.service.execute({ action: "inspect", handle: first.sessions[0]!.handle }, f.ctx); assert.equal(inspected.sessions[0]!.episode, 2); assert.equal(inspected.sessions[0]!.reportComplete, true);
  const closed = await f.service.execute({ action: "close", handle: first.sessions[0]!.handle, expectedEpisode: 2, disposition: "discard" }, f.ctx); f.service.acknowledge(closed);
@@ -400,7 +399,6 @@ test("foreground create and continue yield their windows without cancelling owne
 	const created = (await first).details; assert.deepEqual(created.wait, { status: "yielded", reason: "steer" }); assert.equal(signal.aborted, false);
 	await h.emit("turn_start"); hold.release(); await f.service.execute({ action: "join", runId: created.runId }, f.ctx);
 	hold = gate(); started = gate();
-	// A notice already waiting when the foreground window opens yields immediately too.
 	h.notices([{ producer: "async-bash", id: "shell-job" }]);
 	const continued = (await h.call("continue", { action: "continue", mode: "foreground", waitSeconds: 1800, episodes: [{ handle: created.sessions[0]!.handle, expectedEpisode: 1, message: "next" }] }, f.ctx)).details;
 	await started.promise; assert.deepEqual(continued.wait, { status: "yielded", reason: "result" }); assert.equal(signal.aborted, false);
@@ -422,7 +420,6 @@ test("inactivity publishes once while idle, acknowledges exact notices, and re-a
 	for (const text of ["one", "10m", "bash running waiting for fixture", "still running; it is not killed", "keep waiting (wait_agents)", "stop_agent"]) assert.ok(first.summary.includes(text));
 	for (const internal of [receipt.runId!, receipt.sessions[0]!.handle]) assert.ok(!first.summary.includes(internal), "a checkpoint names the agent, not internal identities");
 	clock.advance(AGENT_INACTIVITY_CHECKPOINT_MS * 2); assert.equal(checkpoint()!.id, first.id); assert.equal(h.facts.length, count + 1); assert.equal(clock.timers.size, 0);
-	// A repeated old snapshot is not resumed activity.
 	child.onActivity?.(checkpointActivity(clock.now(), clock.now())); assert.equal(checkpoint()!.id, first.id);
 	h.events.emit(NOTICE_ACK, { version: 1, producer: "agents", ids: [checkpointNoticeId(id, "stale")] }); assert.equal(checkpoint()!.disposition, "pending");
 	h.events.emit(NOTICE_ACK, { version: 1, producer: "agents", ids: [checkpointNoticeId(id, first.id)] }); assert.equal(checkpoint()!.disposition, "observed");

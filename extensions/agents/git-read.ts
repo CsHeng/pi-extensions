@@ -43,7 +43,6 @@ function names(output: Buffer): string[] {
  requireRead(paths.every(safePath), "invalid_path"); return [...new Set(paths)];
 }
 
-/** Authorize a historical lexical path without requiring a now-deleted leaf to exist. */
 async function authorizeFile(cap: NormalizedChildCapability, repo: string, path: string): Promise<void> {
  requireRead(safePath(path), "invalid_path");
  const target = resolve(repo, path);
@@ -61,7 +60,6 @@ async function authorizeFile(cap: NormalizedChildCapability, repo: string, path:
  }
 }
 
-/** No external object stores, replacement history, or executable local configuration. */
 async function metadata(repo: string, git: (args: string[], allowed?: number[]) => Promise<Buffer>): Promise<void> {
  const directory = (await git(["rev-parse", "--absolute-git-dir"])).toString().trim();
  const common = await realpath(resolve(repo, (await git(["rev-parse", "--git-common-dir"])).toString().trim()));
@@ -163,7 +161,6 @@ export async function queryGitRead(manifest: NormalizedChildCapability, input: u
     return files;
    };
    const identity = async () => {
-    // No Git conversion in identity probes, and no reads through symlink leaves.
     const files = await inventory(); const hash = createHash("sha256"); let bytes = 0;
     hash.update(await git(["rev-parse", "--verify", "HEAD"], [0, 128]));
     hash.update(await git(["ls-files", "--stage", "-z", "--", ...paths]));

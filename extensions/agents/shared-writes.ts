@@ -18,7 +18,6 @@ type Row = { path: string; before: Before } | { path: string; after: string; mod
 const MANIFEST = "manifest.jsonl";
 export const MAX_REPORTED_PATHS = 64;
 
-/** Per-episode attribution record of a shared writer, inside the agent's private scratch. */
 export function sharedWritesDirectory(store: { path(handle: string): string }, record: { handle: string; episode: number }): string {
 	return join(store.path(record.handle), "scratch", "shared-writes", String(record.episode));
 }
@@ -33,7 +32,6 @@ function digestFile(path: string): string | undefined {
 	catch { return undefined; }
 }
 
-/** Child side: one recorder per episode directory. */
 export class SharedWriteRecorder {
 	private readonly seen = new Set<string>();
 	/** Digest each of this agent's writes left, to notice a change by someone else between two of its writes. */
@@ -42,7 +40,6 @@ export class SharedWriteRecorder {
 	private shell = false;
 	constructor(private readonly directory: string) { mkdirSync(join(directory, "blobs"), { recursive: true, mode: 0o700 }); }
 	private append(row: Row): void { appendFileSync(join(this.directory, MANIFEST), `${JSON.stringify(row)}\n`, { mode: 0o600 }); }
-	/** Call before a file tool writes an absolute path. */
 	beforeWrite(path: string): void {
 		if (this.seen.has(path)) {
 			if (this.left.get(path) !== digestFile(path) || this.modes.get(path) !== modeOf(path)) this.append({ path, ambiguous: true });
@@ -85,7 +82,6 @@ async function readRows(directory: string): Promise<Row[]> {
 	return rows;
 }
 
-/** Parent side: the files this episode's file tools wrote successfully, in first-write order. */
 export async function readSharedWrites(directory: string): Promise<SharedWriteSummary> {
 	const rows = await readRows(directory);
 	const paths: string[] = [];
@@ -95,9 +91,7 @@ export async function readSharedWrites(directory: string): Promise<SharedWriteSu
 
 export interface RevertOutcome {
 	reverted: string[];
-	/** Changed again by someone else, or not a regular file before: left in place for the assigner. */
 	kept: string[];
-	/** Shell commands ran, so some changes may be unattributed. */
 	shell: boolean;
 }
 

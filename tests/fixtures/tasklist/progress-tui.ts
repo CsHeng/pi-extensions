@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Synthetic provider drives the real tasklist tool and real installed TUI; no provider I/O. */
 export default function progressFixture(pi: ExtensionAPI): void {
  const dir = process.env.PI_CODING_AGENT_DIR!;
  const actions = [

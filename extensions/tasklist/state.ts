@@ -4,7 +4,6 @@ export const unfinished = (state: TasklistState) => state.tasks.filter(task => !
 
 const SUMMARY_ORDER: readonly TasklistTaskStatus[] = ["doing", "blocked", "todo", "done", "cancelled"];
 
-/** Derived item counts only. The list keeps no global engine state and this never changes item status. */
 export function taskSummary(state: TasklistState): string {
 	const counts = SUMMARY_ORDER
 		.map(status => [status, state.tasks.filter(task => task.status === status).length] as const)

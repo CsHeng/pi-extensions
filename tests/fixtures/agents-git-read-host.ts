@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { createAssistantMessageEventStream, type AssistantMessage, type ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Offline native-child transport stimulus; no semantic review or provider I/O. */
 export default async function gitReadFixture(pi: ExtensionAPI): Promise<void> {
  const actions = JSON.parse(await readFile(process.env.GIT_READ_FIXTURE_INPUTS!, "utf8")) as ToolCall["arguments"][];
  let turn = 0;

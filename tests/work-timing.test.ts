@@ -38,7 +38,6 @@ const ENTRY_RENDER_OPTIONS: EntryRenderOptions = { expanded: false, keyText: () 
 
 type Handler = (event: any, ctx: ExtensionContext) => Promise<unknown> | unknown;
 
-/** Notification facts are pulled through the host event bus; nothing reads another producer's module. */
 class FakeEvents {
 	private readonly listeners = new Map<string, Array<(data: unknown) => void>>();
 
@@ -56,14 +55,11 @@ class FakeEvents {
 	}
 }
 
-/** Entries of the most recently created fake session; contexts read the session they were created for. */
 let activeSession: unknown[] = [];
 
 class FakePi {
-	/** Completion entries only; request timing entries are kept separately. */
 	readonly entries: Array<{ customType: string; data: unknown }> = [];
 	readonly timings: unknown[] = [];
-	/** Every persisted session entry, in append order, as `sessionManager.getEntries()` reports it. */
 	readonly session: unknown[] = [];
 
 	constructor() {
@@ -202,7 +198,6 @@ interface ProducerState {
 	delivery: NoticeDeliverySnapshot;
 }
 
-/** Answers the neutral pull queries; it never starts work or a model turn. */
 function installProducer(pi: FakePi, state: ProducerState): ProducerState {
 	pi.events.on(EXECUTION_FACTS_REQUEST, (raw) => {
 		const request = raw as { accept: (facts: ProducerFacts) => void };
@@ -248,7 +243,6 @@ test("formats elapsed time with compact second, minute, and hour carry", () => {
 
 interface RequestScript {
 	start: number;
-	/** First output: a thinking start when `thinkingEnd` is given, otherwise a text delta. */
 	firstOutputAt?: number;
 	thinkingEnd?: number;
 	end: number;
@@ -416,7 +410,6 @@ test("the request lane samples live estimates and settled facts on the publishin
 		setInterval: (callback, intervalMs) => scheduler.setInterval(callback, intervalMs),
 		clearInterval: (handle) => scheduler.clearInterval(handle),
 	})(pi as unknown as ExtensionAPI);
-	// An earlier cached request: this request's miss re-bills against it.
 	pi.session.push({ type: "message", message: assistantMessage({ start: 0, end: 1, timestamp: 1, usage: { input: 1_000, output: 10, cacheRead: 70_000 } }) });
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
@@ -443,7 +436,6 @@ test("the request lane samples live estimates and settled facts on the publishin
 		assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "x".repeat(1_680) },
 	}, ctx);
 	scheduler.callback?.();
-	// Output estimated from characters; live tok/s divides by the time since the request start.
 	assert.equal(workingMessages.at(-1), "Working... 7s • ↓420 • ✻ 2s • TTFT 3.2s • 70 tok/s");
 
 	const script: RequestScript = {
@@ -585,7 +577,6 @@ test("an unobserved first output, error or abort settles usage without timing fi
 	now = 7_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
 	const metrics = entryData(pi).metrics;
-	// Every request contributes usage; only the first is speed-eligible, and none has a TTFT.
 	assert.equal(metrics.input, 300);
 	assert.equal(metrics.output, 40);
 	assert.equal(metrics.speedOutput, 20);
@@ -651,7 +642,6 @@ test("the interaction population starts at the external input, including a pre-r
 	assert.equal(metrics.output, 320);
 	assert.ok(Math.abs(metrics.cost - 0.6) < 1e-12);
 
-	// A later steering-only input or an extension-origin input never moves a later interaction's start.
 	await invoke(pi, "input", { type: "input", text: "auto", source: "extension" }, ctx);
 	pi.session.push({ type: "compaction", usage: { input: 7_000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 7 } } });
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
@@ -670,7 +660,6 @@ test("timing observation never changes the provider payload or model context", a
 	assert.equal(await invoke(pi, "before_provider_request", { type: "before_provider_request", payload }, ctx), undefined);
 	assert.deepEqual(payload, { messages: [{ role: "user", content: "go" }] });
 	for (const name of ["context", "context_with_system", "before_provider_headers"]) assert.equal(pi.handlers.has(name), false, name);
-	// The request entry is a custom entry, which Pi excludes from model context.
 	await endRequest(pi, ctx, () => {}, { start: 0, end: 1, timestamp: 5, usage: { input: 1, output: 1 } });
 	assert.equal((pi.session.at(-2) as { type: string }).type, "custom");
 });
@@ -709,7 +698,6 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	assert.equal(scheduler.callback, undefined, "the publishing clock pauses between native runs");
 	assert.equal(workingMessages.at(-1), undefined);
 
-	// The job is terminal, but its result has not been delivered yet: still no summary.
 	now = 40_000;
 	state.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0, disposition: "pending" }])];
 	state.delivery = deliveryFacts([{ producer: "async-bash", id: "exec-1", toolCallId: "call-bash" }]);
@@ -717,7 +705,6 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	await settle();
 	assert.equal(pi.entries.length, 0, "pending or reserved result delivery prolongs the interaction");
 
-	// The delivery wake starts a native run that is part of the same interaction.
 	now = 50_000;
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
 	assert.equal(scheduler.startCount, 2, "the result wake restarts exactly one publishing clock");
@@ -730,7 +717,6 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	assert.equal(pi.entries.length, 0, "a reserved delivery keeps the interaction open after its last run");
 	assert.equal(workingMessages.at(-1), undefined, "the native working row may stop while the span stays open");
 
-	// The cleared delivery invalidates the observation; quiescence finalizes the one summary.
 	state.delivery = deliveryFacts();
 	now = 62_000;
 	publish(pi);
@@ -742,10 +728,8 @@ test("keeps one interaction open across an idle gap and summarizes once at quies
 	assert.equal(data.totalMs, 62_000);
 	assert.equal(data.status, "settled");
 	assert.equal(data.humanWaitMs, 0);
-	// Both runs' requests belong to the interaction; the idle gap is work elapsed, not a second entry.
 	assert.equal(renderEntry(pi, data), "Worked for 1m2s • ↑1.6k ↓500 CH0.0% • ✻ 1s (2%) • TTFT 0.5s • 143 tok/s");
 
-	// A late notice for the already-finished job cannot resurrect the settled interaction.
 	now = 64_000;
 	publish(pi);
 	await settle();
@@ -757,7 +741,6 @@ test("compares producer registration order without changing the outcome", async 
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
-	// The consumer subscribes before the producer: a pull-based read must not depend on load order.
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
 		now: () => now,
@@ -797,7 +780,6 @@ test("ignores pre-existing and late unrelated work", async () => {
 	assert.equal(entryData(pi).status, "settled");
 	assert.equal(entryData(pi).totalMs, 10_000);
 
-	// Its terminal notice starts an automatic run, which has no human interaction to summarize.
 	state.facts = [bashFacts([{ id: "exec-old", toolCallId: "old-call", phase: "terminal", status: "exited", exitCode: 0 }])];
 	state.delivery = deliveryFacts();
 	now = 20_000;
@@ -872,14 +854,12 @@ test("deducts pure human wait but keeps time while an owned job is progressing",
 		result: { details: { executionId: "exec-1", status: "running" } },
 	}, ctx);
 
-	// The blocking prompt starts while the retained job progresses: that interval is autonomous.
 	now = 10_000;
 	await invoke(pi, "ui_prompt_start", { reason: "ui_prompt", kind: "confirm" }, ctx);
 	now = 20_000;
 	state.facts = [bashFacts([{ id: "exec-1", toolCallId: "call-bash", phase: "terminal", status: "exited", exitCode: 0 }])];
 	publish(pi);
 	await settle();
-	// From here nothing but the human is progressing, so the remainder of the prompt is pure wait.
 	now = 30_000;
 	await invoke(pi, "ui_prompt_end", {}, ctx);
 	now = 35_000;
@@ -971,7 +951,6 @@ test("promotion cuts the work clock at the input and counts the in-flight reques
 	})(pi as unknown as ExtensionAPI);
 	const setNow = (at: number) => { now = at; };
 
-	// Automatic work with no human boundary measures a run span only; this request settles before any input.
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
 	await runRequest(pi, ctx, setNow, { start: 100, firstOutputAt: 200, end: 400, timestamp: 1, usage: { input: 500, output: 50 } });
 	now = 500;
@@ -982,7 +961,6 @@ test("promotion cuts the work clock at the input and counts the in-flight reques
 	now = 1_500;
 	await invoke(pi, "message_update", { assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } }, ctx);
 
-	// A person steers that run mid-request. The request settles afterwards, so it belongs to the interaction.
 	now = 2_000;
 	await invoke(pi, "input", { type: "input", text: "steer", source: "interactive", streamingBehavior: "steer" }, ctx);
 	now = 2_100;
@@ -1093,7 +1071,6 @@ test("counts a blocking prompt inside a native tool as human wait unless owned w
 		toolName: "bash",
 		result: { details: { executionId: "exec-1", status: "running" } },
 	}, ctx);
-	// The tool itself blocks on the user, while the retained job keeps progressing.
 	now = 2_000;
 	await invoke(pi, "tool_execution_start", { toolCallId: "call-confirm", toolName: "ask" }, ctx);
 	now = 10_000;
@@ -1138,10 +1115,8 @@ test("does not bind stale human input to a later extension-triggered run", async
 		clearInterval: (handle) => scheduler.clearInterval(handle),
 	})(pi as unknown as ExtensionAPI);
 
-	// The host accepted this input but another extension handled it, so no run started for it.
 	await invoke(pi, "input", { type: "input", text: "handled", source: "interactive" }, ctx);
 	now = 100_000;
-	// A much later automatic prompt is not that human's interaction.
 	await invoke(pi, "input", { type: "input", text: "resume work", source: "extension" }, ctx);
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "resume work" }, ctx);
 	now = 101_000;
@@ -1150,7 +1125,6 @@ test("does not bind stale human input to a later extension-triggered run", async
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
 	assert.deepEqual(pi.entries, [], "an extension-triggered run never consumes stale human intent");
 
-	// The next real external input still starts its own interaction normally.
 	await beginInteraction(pi, ctx, "real question");
 	now = 107_000;
 	await invoke(pi, "agent_settled", { aborted: false }, ctx);
@@ -1241,7 +1215,6 @@ test("does not fabricate a summary for extension-origin runs", async () => {
 		clearInterval: (handle) => scheduler.clearInterval(handle),
 	})(pi as unknown as ExtensionAPI);
 
-	// An automatic custom run paints the live row but has no human interaction to summarize.
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "custom" }, ctx);
 	now = 1_000;
 	await invoke(pi, "turn_start", {}, ctx);
@@ -1252,7 +1225,6 @@ test("does not fabricate a summary for extension-origin runs", async () => {
 	assert.deepEqual(pi.entries, []);
 	assert.equal(workingMessages.at(-1), undefined);
 
-	// sendUserMessage-style continuation is still extension origin, not a new human interaction.
 	await invoke(pi, "input", { type: "input", text: "resume", source: "extension" }, ctx);
 	await invoke(pi, "before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "resume" }, ctx);
 	now = 4_000;
@@ -1267,7 +1239,6 @@ test("unavailable execution state is reported instead of claiming completion", a
 	const pi = new FakePi();
 	const workingMessages: Array<string | undefined> = [];
 	const ctx = context(workingMessages);
-	// A loaded producer that cannot answer its queries makes quiescence unverifiable.
 	installProducer(pi, { facts: [bashFacts([], "unavailable")], delivery: deliveryFacts() });
 	const scheduler = new FakeScheduler();
 	createWorkTimingExtension({
@@ -1345,7 +1316,6 @@ test("folds labels only at field boundaries", () => {
 test("compacts the working label to the single-line row", () => {
 	const label = "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120 • ✻ 4s • TTFT 3.2s • 25 tok/s";
 	assert.equal(compactStatusLabel(label, 80), label);
-	// Fields are omitted whole; a later field still fills in when an earlier one does not fit.
 	assert.equal(compactStatusLabel(label, 30), "Working... 2s • ✻ 4s");
 	assert.equal(compactStatusLabel(label, 40), "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120");
 	assert.equal(compactStatusLabel(label, 60), "Working... 2s • ↑12k ↓3.5k CH0.0% $0.120 • ✻ 4s • TTFT 3.2s");
@@ -1354,7 +1324,6 @@ test("compacts the working label to the single-line row", () => {
 test("keeps the live tool timer at narrow widths", () => {
 	const label = "Working... 47m29s • ⚙ 46m51s • ↑9.9k ↓20k CH0.0% • ✻ 4s • TTFT 1.2s • 217 tok/s";
 	assert.equal(compactStatusLabel(label, 200), label);
-	// The live tool timer is kept; metric fields are the optional ones.
 	assert.equal(compactStatusLabel(label, 30), "Working... 47m29s • ⚙ 46m51s");
 	assert.equal(compactStatusLabel(label, 45), "Working... 47m29s • ⚙ 46m51s • ✻ 4s");
 	assert.equal(compactStatusLabel(label, 60), "Working... 47m29s • ⚙ 46m51s • ↑9.9k ↓20k CH0.0% • ✻ 4s");
@@ -1397,7 +1366,6 @@ test("compacts the working label on narrow terminals and on resize", async () =>
 	scheduler.callback?.();
 	assert.equal(workingMessages.at(-1), "Working... 3s • ↓3.5k");
 
-	// A pending request transition and extra elapsed time must not leak through resize.
 	now = 3_500;
 	await invoke(pi, "before_provider_request", {}, ctx);
 	width = 120;
@@ -1465,11 +1433,9 @@ test("folds the settled entry at field boundaries and word-wraps lone over-wide 
 test("older entries render only what their stored fields support", () => {
 	const pi = new FakePi();
 	createWorkTimingExtension()(pi as unknown as ExtensionAPI);
-	// Forward-only: a version-4 entry keeps its head and wait; its old token fields are not interpreted.
 	assert.equal(
 		renderEntry(pi, { version: 4, totalMs: 9_000, humanWaitMs: 2_000, status: "interrupted", reasoningMs: 3_000, outputTokens: 100 }),
 		"Interrupted after 9s • waited 2s",
 	);
-	// Unknown payloads render a zero-duration head instead of throwing.
 	assert.equal(renderEntry(pi, { version: 99 }), "Worked for 0s");
 });

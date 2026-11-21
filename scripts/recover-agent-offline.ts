@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-/** Operator-only, offline recovery of one interrupted episode under operator-established writer quiescence. */
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
@@ -43,7 +42,6 @@ export async function remediate(input: RepairInput): Promise<string> {
  const markerText = markerBytes?.toString("utf8");
  const structured = markerText === undefined ? undefined : parseWriterMarker(markerText);
  if (structured && await writerRecoveryEvidence(structured) === "active") throw new Error("identified writer is still active");
- // A legacy token has no process identity. Only a quiescent operator may retire it.
  if (markerText && !structured && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(markerText)) throw new Error("unrecognized writer marker; inspect offline evidence");
  if ((await readdir(directory)).some(name => /^finalization_.*\.pending$/.test(name))) throw new Error("pending finalization");
  const registry = join(directory, "registry.json");
@@ -74,6 +72,7 @@ export async function remediate(input: RepairInput): Promise<string> {
    await store.save(record);
   }
   phase = "registry saved; marker removal may be partial";
+  // A legacy token has no process identity. Only a quiescent operator may retire it.
   if (markerBytes) await unlink(marker);
   if (hasClaim) await unlink(claim);
   await syncDirectory(directory);

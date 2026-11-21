@@ -11,7 +11,6 @@ trap cleanup EXIT
 
 git -C "${work_root}" init -q
 
-# Registration probe: reports whether the package loaded the tasklist tool with its own source.
 probe_extension="${work_root}/probe.ts"
 cat >"${probe_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -80,7 +79,6 @@ off_output=$(
 off_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-probe" and .data.tool == false and .data.source == false and .data.todo == false)] | length' <<<"${off_output}")
 [[ ${off_count} -ge 1 ]]
 
-# Co-load probe: Tasklist alongside the managed executor, observer, footer, and timing extensions.
 coload_extension="${work_root}/coload-probe.ts"
 cat >"${coload_extension}" <<'EOF'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -125,7 +123,6 @@ coload_output=$(
 coload_count=$(jq -s '[.[] | select(.type == "response" and .command == "get_entries" and .success == true) | .data.entries[]? | select(.type == "custom" and .customType == "tasklist-coload" and .data.tasklist == true and .data.managed == true and .data.agents == true and .data.ui == true)] | length' <<<"${coload_output}")
 [[ ${coload_count} -ge 1 ]]
 
-# Synthetic-provider lane: the real host executes one tasklist tool call and persists a snapshot.
 synthetic_extension="${work_root}/synthetic.ts"
 cat >"${synthetic_extension}" <<'EOF'
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";

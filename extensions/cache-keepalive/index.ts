@@ -53,7 +53,6 @@ interface Run {
 	deadlineAt: number;
 	timer?: unknown;
 	controller?: AbortController | undefined;
-	/** Cost of this idle period's successful refreshes, shown as one cumulative notice. */
 	warmedCost: number;
 }
 
@@ -131,7 +130,6 @@ function streamingMode(pi: ExtensionAPI): boolean {
 	return (pi.getSettings() as { cacheWarming?: unknown }).cacheWarming === "streaming";
 }
 
-/** Pi's cache-warming notice amount: at least three decimals, up to six. */
 export function formatWarmedCost(total: number): string {
 	return total.toFixed(6).replace(/(\.\d{3}\d*?)0+$/, "$1");
 }

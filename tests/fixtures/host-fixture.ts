@@ -15,7 +15,6 @@ import {
 
 export type HostMode = "tui" | "rpc" | "json" | "print";
 
-/** Bounded, redacted lifecycle trace shared by fixture extensions and the harness. */
 export interface TraceEntry {
 	at: number;
 	event: string;
@@ -38,7 +37,6 @@ export function createTrace(): Trace {
 	};
 }
 
-/** Wait until the trace contains a matching entry, or reject on timeout. */
 export async function waitForTrace(trace: Trace, predicate: (entry: TraceEntry) => boolean, timeoutMs = 5000): Promise<TraceEntry> {
 	const existing = trace.entries.find(predicate);
 	if (existing) return existing;
@@ -59,10 +57,6 @@ export async function waitForTrace(trace: Trace, predicate: (entry: TraceEntry) 
 	});
 }
 
-/**
- * Records the host lifecycle events the conformance suite asserts on. Place it in the
- * extension factory list wherever the test needs its handler order.
- */
 export function createTraceObserver(trace: Trace): ExtensionFactory {
 	return (pi) => {
 		pi.on("input", (event) =>
@@ -112,21 +106,14 @@ export interface HostHarnessOptions {
 	mode?: HostMode;
 	/** Bind the real public command wait as Pi CLI modes do. False characterizes an unbound SDK host. */
 	commandWait?: boolean;
-	/** Shared trace; defaults to a fresh one. */
 	trace?: Trace;
 	/** Extension factories in load order; settlement handlers run in this order. */
 	extensions?: ExtensionFactory[];
-	/** Explicit package files, including a real installed snapshot, loaded by the public host loader. */
 	extensionPaths?: string[];
-	/** Prompt template name -> body, loaded as `/name`. */
 	templates?: Record<string, string>;
-	/** Use a real session file in a disposable directory instead of an in-memory session. */
 	realSessionFile?: boolean;
-	/** Reuse an existing session manager (for example a fork) instead of creating a new session. */
 	sessionManager?: SessionManager;
-	/** Explicit session_start reason for recovery scenarios (default "startup"). */
 	sessionStartReason?: "startup" | "reload" | "new" | "resume" | "fork";
-	/** Project trust as reported to extensions. Default true for fixture work. */
 	trusted?: boolean;
 	settings?: Record<string, unknown>;
 	tokensPerSecond?: number;
@@ -148,10 +135,6 @@ const DEFAULT_SETTINGS = {
 	compaction: { enabled: false },
 };
 
-/**
- * Runs the actual installed dependency host (`@earendil-works/pi-coding-agent`) with the
- * official faux provider: real lifecycle, real tools, real session manager, no inference.
- */
 export async function createHostHarness(options: HostHarnessOptions = {}): Promise<HostHarness> {
 	const base = await mkdtemp(join(tmpdir(), "tasklist-host-"));
 	const agentDir = join(base, "agent");

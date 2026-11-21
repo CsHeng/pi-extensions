@@ -197,7 +197,6 @@ export class AgentsOverlay {
 	}
 }
 
-/** Scroll just enough to keep the actual selected item in this single-line section. */
 function windowStart(offset: number, items: InspectionItem[], count: number, selected?: string): number {
 	const at = items.findIndex(item => item.key === selected);
 	if (at >= 0 && count > 0) offset = Math.min(at, Math.max(offset, at - count + 1));

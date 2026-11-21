@@ -7,7 +7,6 @@ export async function syncDirectory(path: string): Promise<void> {
 	try { await dir.sync(); } finally { await dir.close(); }
 }
 
-/** Verify a physical, user-owned directory. Return its mode so callers can account for an already private ancestor. */
 export async function privateDirectory(directory: string, create: boolean, forbiddenMode: 0o077 | 0o022 | 0 = 0o077): Promise<number> {
 	let created = false;
 	if (create) {

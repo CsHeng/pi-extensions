@@ -351,7 +351,7 @@ export class JsonlProtocolParser {
 				...(described.deadlineMs !== undefined ? { deadlineMs: described.deadlineMs } : {}),
 				...(observed ? { tail: observed.tail, truncated: observed.truncated, outputMs: observed.outputMs } : {}),
 			});
-		} catch { /* Optional output projection. */ }
+		} catch {  }
 	}
 
 	private finishObservedCall(id: string, event: Record<string, unknown>): void {
@@ -373,7 +373,7 @@ export class JsonlProtocolParser {
 			};
 			this.calls.delete(id);
 			this.finished = [finished, ...this.finished.filter((item) => item.id !== id)].slice(0, HARD_LIMITS.maxObservedCalls);
-		} catch { /* Optional terminal projection. */ }
+		} catch {  }
 	}
 
 	private projectedCalls(): { calls: ChildToolCall[]; callsTruncated: boolean } {

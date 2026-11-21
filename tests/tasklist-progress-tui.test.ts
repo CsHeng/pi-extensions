@@ -18,7 +18,6 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real tasklis
  const agent = join(base, "agent"); await mkdir(agent);
  await writeFile(join(base, "a"), "fixture a"); await writeFile(join(base, "b"), "fixture b");
  await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [], theme, compaction: { enabled: false } }));
- // An explicit alternate source root supports an actual copied-snapshot verification lane.
  const implementation = process.env.PI_EXTENSIONS_TASKLIST_PROBE_ROOT ?? root;
  // Tasks observation refuses an untrusted project. --approve trusts this disposable fixture so the renderer oracle still runs.
  const args = ["pi", "--no-extensions", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-session", "--approve",
@@ -33,9 +32,9 @@ for (const theme of ["dark", "light"]) test(`installed Pi ${theme}: real tasklis
  const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
  t.after(async () => {
   if (child.exitCode === null && child.signalCode === null && child.pid) {
-   try { process.kill(-child.pid, "SIGTERM"); } catch { /* already stopped */ }
+   try { process.kill(-child.pid, "SIGTERM"); } catch {}
    await Promise.race([exited.catch(() => {}), delay(500)]);
-   if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already stopped */ } }
+   if (child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
    await exited.catch(() => {});
   }
   await rm(base, { recursive: true, force: true });
