@@ -21,7 +21,7 @@ A refresh calls `ctx.modelRegistry.streamSimple` with `maxRetries: 0`, the sessi
 
 ## Records
 
-Each refresh appends one context-free custom entry, `cache-keepalive.refresh` (version 1). It holds provider, model, `outcome` (`warmed` or `error`), the response `usage` with cost, and the expected saving, or a bounded error text. Extensions cannot append Pi `usage` entries, so refresh cost appears in neither Pi's session totals nor the footer; these entries are the audit record. With `showCacheMissNotices: true` each successful refresh shows `Cache kept warm: $…` with the cumulative cost of the current idle period, in Pi's `Cache warmed` precision. Pi updates an info status line in place while it is still the last chat line, so consecutive refreshes read as one line.
+Each refresh appends one context-free custom entry, `cache-keepalive.refresh` (version 1). It holds provider, model, `outcome` (`warmed` or `error`), the response `usage` with cost, and the expected saving, or a bounded error text. Extensions cannot append Pi `usage` entries, so refresh cost appears in neither Pi's session totals nor the footer; these entries are the audit record. With Pi's `notices.cacheWarming` enabled (`/settings` → Notices), each successful refresh shows `Cache kept warm: $…` with the cumulative cost of the current idle period, in Pi's `Cache warmed` precision. Pi updates an info status line in place while it is still the last chat line, so consecutive refreshes read as one line.
 
 ## Limits And Removal
 

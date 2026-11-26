@@ -270,14 +270,20 @@ test("input during an in-flight refresh aborts it without recording", async () =
 	assert.equal(h.clock.pending, 0);
 });
 
-test("notices follow Pi's showCacheMissNotices setting and accumulate per idle period", async () => {
-	const quiet = harness();
-	await settleAfterRequest(quiet);
-	await quiet.clock.advanceTo(270_000);
-	assert.deepEqual(quiet.notices, []);
+test("warming notices are off by default and independent of cache miss notices", async () => {
+	for (const notices of [undefined, { cacheMisses: true, cacheWarming: false }]) {
+		const h = harness();
+		h.pi.settings = { cacheWarming: "streaming", notices };
+		await settleAfterRequest(h);
+		await h.clock.advanceTo(270_000);
+		assert.equal(h.pi.entries[0]?.data.outcome, "warmed");
+		assert.deepEqual(h.notices, []);
+	}
+});
 
+test("warming notices accumulate per idle period even when cache miss notices are off", async () => {
 	const loud = harness();
-	loud.pi.settings = { cacheWarming: "streaming", showCacheMissNotices: true };
+	loud.pi.settings = { cacheWarming: "streaming", notices: { cacheMisses: false, cacheWarming: true } };
 	await settleAfterRequest(loud);
 	await loud.clock.advanceTo(540_000);
 	assert.deepEqual(loud.notices, ["Cache kept warm: $0.100", "Cache kept warm: $0.200"], "one cumulative amount, as Pi's Cache warmed line");

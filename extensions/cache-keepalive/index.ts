@@ -134,10 +134,6 @@ export function formatWarmedCost(total: number): string {
 	return total.toFixed(6).replace(/(\.\d{3}\d*?)0+$/, "$1");
 }
 
-function showNotices(pi: ExtensionAPI): boolean {
-	return (pi.getSettings() as { showCacheMissNotices?: unknown }).showCacheMissNotices === true;
-}
-
 // Only the payload is sent; this context exists so the provider can build a request to replace.
 function placeholderContext(): Context {
 	return { systemPrompt: "", messages: [{ role: "user", content: ".", timestamp: Date.now() }] } as Context;
@@ -228,7 +224,9 @@ export function createCacheKeepalive(clock: KeepaliveClock = realClock): (pi: Ex
 			record(current, { outcome: "warmed", usage: message.usage, expectedSavings: economics.expectedSavings });
 			current.warmedCost += message.usage.cost.total;
 			// Pi updates a still-last status line in place, so consecutive refreshes read as one cumulative line.
-			if (showNotices(pi)) current.ctx.ui.notify(`Cache kept warm: $${formatWarmedCost(current.warmedCost)}`, "info");
+			if (pi.getSettings().notices?.cacheWarming === true) {
+				current.ctx.ui.notify(`Cache kept warm: $${formatWarmedCost(current.warmedCost)}`, "info");
+			}
 			schedule(current, startedAt + current.delayMs);
 		}
 
