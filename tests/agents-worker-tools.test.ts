@@ -138,3 +138,15 @@ test("command timeouts do not poison later tasks and native truncated output is 
 	await worker.shutdown();
 	await assert.rejects(access(fullOutputPath));
 });
+
+test("detached new-session descendants holding stdout open are swept before unsettling worker tools", async (t) => {
+	if (process.platform !== "linux") return;
+	const { execute, worker } = await setup(t);
+	const detached = `${quote(process.execPath)} -e "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'inherit' }).unref(); console.log('shell-done');"`;
+	const result = await execute("bash", { command: detached });
+	assert.match(JSON.stringify(result.content), /shell-done/);
+	await worker.drain();
+	const next = await execute("bash", { command: "printf still-usable" });
+	assert.match(JSON.stringify(next.content), /still-usable/);
+	await worker.shutdown();
+});

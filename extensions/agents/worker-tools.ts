@@ -2,7 +2,7 @@ import { commandCorrelationKey } from "./command-correlation.ts";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, copyFile, realpath, rm } from "node:fs/promises";
+import { access, chmod, copyFile, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -39,6 +39,27 @@ export interface WorkerToolsOptions {
 	onCommand?: (value: CommandObservation & { toolCallId: string | null }) => void;
 }
 
+const WORKER_COMMAND_TOKEN_ENV = "PI_EXTENSIONS_WORKER_CMD_ID";
+
+async function killTaggedDescendants(token: string): Promise<void> {
+	if (process.platform !== "linux" || typeof process.getuid !== "function") return;
+	const needle = Buffer.from(`${WORKER_COMMAND_TOKEN_ENV}=${token}\0`, "utf8");
+	const myUid = process.getuid();
+	let entries: string[];
+	try { entries = await readdir("/proc"); } catch { return; }
+	for (const name of entries) {
+		if (!/^\d+$/.test(name)) continue;
+		const pid = Number(name);
+		if (pid === process.pid) continue;
+		try {
+			const info = await stat(`/proc/${name}`);
+			if (info.uid !== myUid) continue;
+			const environ = await readFile(`/proc/${name}/environ`);
+			if (environ.includes(needle)) process.kill(pid, "SIGKILL");
+		} catch { /* Process exited or unreadable. */ }
+	}
+}
+
 /** Trusted host tools. Queueing and candidate ownership do not sandbox bash. */
 export async function createWorkerTools(options: WorkerToolsOptions) {
 	const cwd = await realpath(options.cwd);
@@ -57,10 +78,12 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 		if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > 2_147_483_647)) return Promise.reject(new Error("Invalid timeout"));
 		execution.signal?.throwIfAborted();
 		return new Promise((resolve, reject) => {
-			const child = spawn("bash", ["-c", command], { cwd: directory, env: execution.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+			const commandToken = randomUUID();
+			const child = spawn("bash", ["-c", command], { cwd: directory, env: { ...execution.env, [WORKER_COMMAND_TOKEN_ENV]: commandToken }, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 			let error: Error | undefined;
 			let timedOut = false;
 			let closeTimer: NodeJS.Timeout | undefined;
+			let sweepTimer: NodeJS.Timeout | undefined;
 			const stop = () => {
 				if (!child.pid) return;
 				try { process.kill(-child.pid, "SIGKILL"); }
@@ -72,8 +95,9 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 			child.once("error", (caught) => { error = caught; });
 			child.once("exit", () => {
 				// Shell exit is not process-group settlement: stop ordinary background
-				// descendants before permitting the next tool or candidate freeze.
+				// descendants, then sweep detached same-command descendants holding pipes open.
 				stop();
+				sweepTimer = setTimeout(() => { void killTaggedDescendants(commandToken); }, Math.min(250, Math.floor(HARD_LIMITS.killGraceMs / 4)));
 				closeTimer = setTimeout(() => {
 					unsettled = true;
 					child.stdout.destroy(); child.stderr.destroy();
@@ -82,6 +106,7 @@ export async function createWorkerTools(options: WorkerToolsOptions) {
 			});
 			child.once("close", (code) => {
 				if (timeoutTimer) clearTimeout(timeoutTimer);
+				if (sweepTimer) clearTimeout(sweepTimer);
 				if (closeTimer) clearTimeout(closeTimer);
 				execution.signal?.removeEventListener("abort", stop);
 				if (error) reject(error);

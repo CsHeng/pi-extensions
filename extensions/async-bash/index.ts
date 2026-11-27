@@ -37,7 +37,7 @@ const parameters = Type.Object({
 	background: Type.Optional(Type.Boolean({ description: "Return as soon as the execution is running. The process keeps going." })),
 	deadlineSeconds: Type.Optional(Type.Number({ description: "Checkpoint in seconds for a new run (omitted: 600), or the next checkpoint for renew. At the checkpoint the process keeps running and the session sends one notice so you can renew, cancel or leave it running." })),
 	waitSeconds: Type.Optional(Type.Number({ description: "How long wait may hold this call; omitted uses 180 seconds and explicit finite values are honored. The call also returns at the execution's checkpoint, or when a user steering message or another execution's notice is waiting. Returning never cancels or renews the execution." })),
-	foregroundSeconds: Type.Optional(Type.Number({ description: "How long a non-background run may hold this call before returning status=running while the execution continues. Omitted uses 2 seconds; explicit finite values are honored. The call returns earlier when a user steering message or another execution's notice is waiting." })),
+	foregroundSeconds: Type.Optional(Type.Number({ description: "How long a non-background run may hold this call before returning status=running while the execution continues. Omitted uses 2 seconds; explicit finite values are honored. Pass a larger foregroundSeconds (for example 15–60) when the next step directly depends on a short command's output and no independent work is ready, so it settles in one turn. The call still returns earlier when a user steering message or another execution's notice is waiting." })),
 });
 
 const outputSchema = Type.Object({

@@ -65,9 +65,10 @@ export const PEER_TOOL_SURFACE: readonly Surface[] = [
 		guidelines: [
 			"An invoke returns once the agent is admitted; its turn result returns to whoever started that turn. While agents run, do other ready work or end the turn; their results reach you as notices.",
 			"Name the peers and what each owns in each prompt when agents share a checkout, and say what goes to a peer and what comes back to you.",
+			"Use message_agent to \"main\" for blockers, scope or authority decisions, or urgent cross-agent contract changes; deliver ordinary progress and consolidated review findings in the final turn report. Keep peer messages substantive and end exchanges once both sides have the facts they need.",
 		] },
 	{ op: "message", name: PEER_TOOL_NAMES.message, label: "Message agent", parameters: MessageAgentSchema,
-		description: "Send a message to an agent by name, or to \"main\". A running agent reads it at its next model call after its current tool calls; an idle agent starts a new turn with it, and that turn's result returns to you. The recipient sees your name and role." },
+		description: "Send a message to an agent by name, or to \"main\". A running agent reads it at its next model call after its current tool calls; an idle agent starts a new turn with it, and that turn's result returns to you. The recipient sees your name and role. Send mid-turn messages to \"main\" only for blockers, decisions, or urgent cross-agent discoveries; keep routine progress and batched findings for the final turn report." },
 	{ op: "list", name: PEER_TOOL_NAMES.list, label: "List agents", parameters: ListAgentsSchema,
 		description: "List agents with name, role, state, workspace, assigner and latest result summary. With a name, return that agent's latest full report when you invoked it (the main agent may read any)." },
 	{ op: "wait", name: PEER_TOOL_NAMES.wait, label: "Wait for agents", parameters: WaitAgentsSchema,
