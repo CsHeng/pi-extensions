@@ -154,7 +154,15 @@ export class AgentsOverlay {
 		this.closeRange = closeMarkerColumns(width);
 		if (this.detailKey) {
 			const item = this.detailItem(this.detailKey), usage = this.model.session.reply?.usage;
-			const detail = item && usage ? { ...item, detail: () => [...item.detail(), `Session recorded usage: ${formatAgentUsage(usage)}`] } : item;
+			const detail = item && usage ? {
+				...item,
+				detail: () => {
+					const body = item.detail();
+					const sessionLine = `Session recorded usage: ${formatAgentUsage(usage)}`;
+					const usageIndex = body.findIndex(line => line.startsWith("Usage:"));
+					return usageIndex >= 0 ? [...body.slice(0, usageIndex + 1), sessionLine, ...body.slice(usageIndex + 1)] : [...body, sessionLine];
+				},
+			} : item;
 			return this.detailPage.render("Agent detail", detail, textWidth, viewport, theme).map((line, i) => i === 0 ? panelTitleRow(line, width) : fillPanelRow(line, width));
 		}
 		const sections = this.sections();
@@ -171,7 +179,9 @@ export class AgentsOverlay {
 		const rule = () => add(fg("borderMuted", "─".repeat(textWidth)));
 		if (viewport < 6) { const selected = all.find(item => item.key === this.selectedKey); if (selected) draw(selected); return lines; }
 		if (viewport >= 10) rule();
-		add(fg("accent", `${stale ? "?" : this.model.snapshot ? observed.length : reply?.summary?.liveAgents ?? "?"} live`) + fg("dim", ` · ${reply?.summary?.agents ?? "?"} agent${reply?.summary?.agents === 1 ? "" : "s"}`));
+		const sessionUsage = reply?.usage && reply.usage.status !== "unavailable" ? formatAgentUsage(reply.usage) : undefined;
+		add(fg("accent", `${stale ? "?" : this.model.snapshot ? observed.length : reply?.summary?.liveAgents ?? "?"} live`)
+			+ fg("dim", ` · ${reply?.summary?.agents ?? "?"} agent${reply?.summary?.agents === 1 ? "" : "s"}${sessionUsage && sessionUsage !== "no usage" ? ` · ${sessionUsage}` : ""}`));
 		if (session.kind === "unavailable" && reply?.history.state === "ready") add(fg("warning", `⚠ history unavailable (${session.reason ?? "unknown"}) · cached`));
 		else if (reply?.inventory.state === "ready" && !reply.inventory.complete) add(fg("warning", "⚠ history partial"));
 		else if (!reply && this.model.snapshot) add(fg("dim", "limited live observation"));

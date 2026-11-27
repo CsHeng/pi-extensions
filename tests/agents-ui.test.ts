@@ -64,8 +64,41 @@ test("activity-first rows expose only evidenced current activity and frozen outc
 	const detail = overlay.render(180, 40).join("\n");
 	assert.match(detail, /Agent live-handle ep0/);
 	assert.match(detail, /private-provider.*model.*high/);
-	assert.match(detail, /Usage:/);
+	assert.match(detail, /Usage:.*turns: 2/);
+	assert.match(detail, /Session recorded usage:.*\$1\.250/);
 	assert.match(detail, /private-call-id/);
+});
+
+test("list rows and detail surface token usage, cost, turns, and top-of-detail session totals", () => {
+	const liveUsage = { input: 12_500, output: 1_800, cacheRead: 50_000, cacheWrite: 0, cost: 0.42, promptTokens: 62_500, promptCacheRead: 50_000, rebillCount: 0, rebillTokens: 0, rebillCost: 0 };
+	const calls = Array.from({ length: 12 }, (_, index) => ({
+		id: `call-${index}`, parentId: null, tool: "bash", summary: `cmd ${index}`,
+		startedMs: index + 1, updatedMs: index + 2, outputMs: null, status: "running" as const,
+		deadlineMs: null, tail: `tail line ${index}`, truncated: false,
+	}));
+	const live = task({ id: "costly-live", label: "Implement feature", role: "worker", assistantTurns: 9, usage: liveUsage, activeTools: ["bash"], calls });
+	const row = historyRow({ handle: "costly-hist", label: "Review diff", elapsedMs: 5000 });
+	const reply = sessionReply({ history: { state: "ready", pageSize: 20, page: 0, totalRows: 1, totalPages: 1, rows: [row] } });
+	const inlineWide = formatAgentsInspection({ counts: { running: 1, queued: 0, agents: 2 }, tasks: [live], history: [row] }, 180, 6, undefined).lines.join("\n");
+	assert.match(inlineWide, /Implement feature.*↑13k ↓1\.8k.*\$0\.420/);
+	assert.match(inlineWide, /Review diff.*↑100 ↓20.*\$0\.500/);
+	const inlineNarrow = formatAgentsInspection({ counts: { running: 1, queued: 0, agents: 2 }, tasks: [live], history: [row] }, 44, 6, undefined).lines;
+	assert.ok(inlineNarrow.every(line => visibleWidth(line) <= 44));
+	const overlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: [live] })), { terminal: { rows: 16 }, requestRender() {} } as TUI, () => {}, { now: () => 0 });
+	overlay.handleInput("h");
+	const central = overlay.render(180, 24).join("\n");
+	assert.match(central, /1 live · 1 agent · ↑12k ↓2\.0k.*\$1\.250/);
+	assert.match(central, /Implement feature.*\$0\.420/);
+	assert.match(central, /Review diff.*\$0\.500/);
+	overlay.handleInput("enter");
+	const firstPageDetail = overlay.render(140, 12).join("\n");
+	assert.match(firstPageDetail, /Usage: ↑13k ↓1\.8k.*\$0\.420 · turns: 9/);
+	assert.match(firstPageDetail, /Session recorded usage: ↑12k ↓2\.0k.*\$1\.250/, "session totals stay visible at the top of detail before long call lists");
+	const staleOverlay = new AgentsOverlay(overlayModel({ kind: "ready", reply }, snapshot({ tasks: [live] })), { terminal: { rows: 16 }, requestRender() {} } as TUI, () => {}, { now: () => OBSERVER_STALE_MS + 1 });
+	staleOverlay.handleInput("enter");
+	const staleDetail = staleOverlay.render(140, 12).join("\n");
+	assert.match(staleDetail, /Live observation stale · record unavailable/);
+	assert.match(staleDetail, /Usage: ↑13k ↓1\.8k.*\$0\.420 · turns: 9/);
 });
 
 test("clock advances only during measured child execution; a proposal or finished call is not current work", () => {

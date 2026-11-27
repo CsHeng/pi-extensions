@@ -12,6 +12,8 @@ export interface InspectionItem {
 	nameSuffix?: string;
 	activity: string;
 	meta?: string;
+	/** Secondary dim metadata (such as token usage and cost), dropped before `meta` on narrow rows. */
+	usage?: string;
 	tail: string;
 	detail(): string[];
 }
@@ -47,12 +49,14 @@ export function inspectionRow(item: InspectionItem, width: number, theme: PanelT
 	room = Math.max(0, room);
 	const meta = item.meta && visibleWidth(item.meta) + sep.length + minName + minAction <= room ? item.meta : "";
 	if (meta) room -= visibleWidth(meta) + sep.length;
+	const usage = item.usage && visibleWidth(item.usage) + sep.length + nameWidth + minAction <= room ? item.usage : "";
+	if (usage) room -= visibleWidth(usage) + sep.length;
 	const nameBudget = Math.min(nameWidth, room, Math.max(suffixWidth, Math.min(room - minAction, Math.max(minName, room - activityWidth, Math.ceil(room / 2)))));
 	const nameText = nameWidth > nameBudget && item.compactName && width < 64 ? item.compactName : item.name;
 	const namePart = clip(nameText, nameBudget - (suffix ? suffixWidth + 1 : 0));
 	const name = suffix ? (namePart ? namePart + " " : "") + clip(suffix, nameBudget) : namePart;
 	const activity = clip(item.activity, room - visibleWidth(name));
-	const fields = [name && theme.fg("text", name), meta && theme.fg("dim", meta), activity && theme.fg("muted", activity), tail && theme.fg(item.tone, tail)].filter(Boolean);
+	const fields = [name && theme.fg("text", name), meta && theme.fg("dim", meta), usage && theme.fg("dim", usage), activity && theme.fg("muted", activity), tail && theme.fg(item.tone, tail)].filter(Boolean);
 	return truncateToWidth(prefix + (fields.length ? " " + fields.join(theme.fg("dim", sep)) : ""), width);
 }
 

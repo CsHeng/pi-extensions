@@ -131,8 +131,10 @@ test("UI consumer projects observer snapshots through the registered overlay wit
 	assert.match(text, /1 live/);
 	assert.match(wide, /Explorer.*Bounded facts/);
 	assert.match(wide, /gpt-4\.1.*medium/);
+	assert.match(wide, /↑2\.0k ↓500 R18k CH90\.0% \$0\.040 RB1 1\.5k \$0\.002/);
+	assert.match(wide, /1 live · 2 agents · ↑10 ↓3 \$0\.200/);
 	assert.match(wide, /read · README\.md/);
-	assert.doesNotMatch(wide, /ep0|recorded ↑|RB1|\$0\.040/);
+	assert.doesNotMatch(wide, /ep0|recorded ↑/);
 	overlay?.handleInput("h");
 	const history = overlay?.render(80).join("\n") ?? "";
 	assert.match(history, /Reviewer.*Review findings/);

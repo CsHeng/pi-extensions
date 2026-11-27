@@ -111,14 +111,23 @@ export function formatAgentUsage(usage: RecordedUsageProjection | null | undefin
 	return text + (usage.status === "incomplete" ? " (partial)" : "");
 }
 
+function rowAgentUsage(usage: RecordedUsageProjection | null | undefined): string | undefined {
+	if (!usage || usage.status === "unavailable") return undefined;
+	const text = formatAgentUsage(usage);
+	return text === "no usage" || text === "usage unavailable" ? undefined : text;
+}
+
 function observedItem(task: ObserverTask, name: string, stale: boolean): InspectionItem {
 	const lost = stale && isLiveTask(task);
+	const usageText = formatUsageLane(task.usage);
 	return { key: agentItemKey(task.id, task.episode), ...stateGlyph(lost ? "unknown" : task.status), name,
-		activity: lost ? "observation stale" : currentAction(task), meta: routeText(task.route), tail: task.elapsedMs === null ? "" : formatDuration(task.elapsedMs),
-		detail: () => lost ? [`Agent ${task.id} ep${task.episode ?? "?"}`, "Live observation stale · record unavailable"]
+		activity: lost ? "observation stale" : currentAction(task), meta: routeText(task.route),
+		...(usageText ? { usage: usageText } : {}), tail: task.elapsedMs === null ? "" : formatDuration(task.elapsedMs),
+		detail: () => lost ? [`Agent ${task.id} ep${task.episode ?? "?"}`, "Live observation stale · record unavailable",
+			`Route: ${routeText(task.route, true)}`, `Usage: ${usageText || "unavailable"} · turns: ${task.assistantTurns}`]
 			: [`Agent ${task.id} ep${task.episode ?? "?"}`, `${name} · ${currentAction(task)} · ${formatDuration(task.elapsedMs)}`,
 			`Assignment: ${displayText(task.headline) || "unavailable"}`, `Route: ${routeText(task.route, true)}`,
-			`Usage: ${formatUsageLane(task.usage) || "unavailable"}`, ...task.calls.flatMap(call => [callText(call),
+			`Usage: ${usageText || "unavailable"} · turns: ${task.assistantTurns}`, ...task.calls.flatMap(call => [callText(call),
 				`Timing: started ${call.startedMs ?? "?"} · updated ${call.updatedMs ?? "?"} · output ${call.outputMs ?? "?"} · deadline ${call.deadlineMs ?? "?"}`,
 				...(call.tail ? [`Output tail${call.truncated ? " (truncated)" : ""}: ${call.tail}`] : [])]),
 			...(task.callsTruncated ? ["Additional calls omitted"] : [])] };
@@ -130,9 +139,12 @@ function historyItem(row: SessionViewHistoryRow, name: string): InspectionItem {
 	const unconfirmed = unconfirmedState(row);
 	const outcome = unconfirmed ? "unconfirmed" : row.latestOutcome === "unknown" && row.state === "interrupted" ? "interrupted" : row.latestOutcome;
 	const tail = [!row.onCurrentBranch && "off-branch", row.legacy && "legacy", row.elapsedMs !== undefined && formatDuration(row.elapsedMs)].filter(Boolean).join(" · ");
-	return { key: agentItemKey(row.handle, row.episode), ...stateGlyph(outcome), name, activity: outcome, meta: routeText(row.route), tail,
+	const rowUsage = rowAgentUsage(row.recordedUsage);
+	const turnsSuffix = row.recordedUsage?.assistantTurns != null ? ` · turns: ${row.recordedUsage.assistantTurns}` : "";
+	return { key: agentItemKey(row.handle, row.episode), ...stateGlyph(outcome), name, activity: outcome, meta: routeText(row.route),
+		...(rowUsage ? { usage: rowUsage } : {}), tail,
 		detail: () => [`Agent ${row.handle} ep${row.episode}`, name, `State: ${row.state}${unconfirmed ? "?" : ""} · outcome: ${row.latestOutcome}${!row.onCurrentBranch ? " · off-branch" : ""}${row.legacy ? " · legacy" : ""}`,
-			`Elapsed: ${formatDuration(row.elapsedMs ?? null)}`, `Route: ${routeText(row.route, true)}`, `Usage: ${formatAgentUsage(row.recordedUsage)} (agent history)`,
+			`Elapsed: ${formatDuration(row.elapsedMs ?? null)}`, `Route: ${routeText(row.route, true)}`, `Usage: ${formatAgentUsage(row.recordedUsage)} (agent history)${turnsSuffix}`,
 			...(unconfirmed && row.onCurrentBranch ? ["Activity unconfirmed. Ask the main agent to reconcile this handle and episode."] : []),
 			`Accepted episodes: ${row.acceptedEpisodes ?? "unknown"} · report ${row.reportComplete ? "complete" : "incomplete"} · retained ${row.retained ? "yes" : "no"}`,
 			`Candidate roots: ${row.roots?.length ?? "unavailable"}`, ...(row.roots ?? []).map(root => `${root.id.slice(0, 8)} ${root.status}${root.recovery === "required" ? "!" : ""}/${root.release} ${root.destination}`),
